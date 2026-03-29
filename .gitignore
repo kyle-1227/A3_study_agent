@@ -6,6 +6,7 @@
 
 # python
 __pycache__/
+*.pyc
 .venv/
 venv/
 env/
@@ -41,7 +42,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-frontend/%TEMP%/
+frontend/dist/
 
 # local binary tools
 jaeger*
@@ -49,3 +50,6 @@ jaeger*
 
 # agentic coding prompts design(Local design)
 context_prompts/
+
+# Claude Code local config
+CLAUDE.md

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -24,15 +25,10 @@ from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
 
-# Module-level reference set during lifespan
-graph = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage async resources: tracing, PostgreSQL checkpointer, graph."""
-    global graph
-
     setup_tracing()
 
     async with AsyncExitStack() as stack:
@@ -56,7 +52,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("DB_URI not set, running without persistent state")
 
-        graph = get_compiled_graph(checkpointer=checkpointer)
+        app.state.graph = get_compiled_graph(checkpointer=checkpointer)
         yield
 
     shutdown_tracing()
@@ -70,7 +66,7 @@ FastAPIInstrumentor.instrument_app(app)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,6 +91,7 @@ GRAPH_NODES = {
 
 async def generate_sse(
     query: str,
+    graph,
     thread_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream LangGraph events as Server-Sent Events (SSE).
@@ -108,6 +105,7 @@ async def generate_sse(
 
     Args:
         query: The user-provided string to be processed by the graph.
+        graph: The compiled LangGraph instance from app.state.
         thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
     """
     config = make_thread_config(thread_id)
@@ -185,9 +183,9 @@ async def generate_sse(
 
 
 @app.post("/stream")
-async def stream_endpoint(request: ChatRequest):
+async def stream_endpoint(chat: ChatRequest, request: Request):
     return StreamingResponse(
-        generate_sse(request.query, thread_id=request.thread_id),
+        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id),
         media_type="text/event-stream",
     )
 

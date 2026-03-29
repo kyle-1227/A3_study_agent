@@ -153,14 +153,13 @@ class TestSSEWithConfig:
         # astream_events must return an async iterable (not a coroutine)
         mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
 
-        with patch("app.graph", mock_graph):
-            async for _ in generate_sse("hello", thread_id="test-thread"):
-                pass
+        async for _ in generate_sse("hello", mock_graph, thread_id="test-thread"):
+            pass
 
-            call_args = mock_graph.astream_events.call_args
-            config = call_args.kwargs.get("config")
-            assert config is not None
-            assert config["configurable"]["thread_id"] == "test-thread"
+        call_args = mock_graph.astream_events.call_args
+        config = call_args.kwargs.get("config")
+        assert config is not None
+        assert config["configurable"]["thread_id"] == "test-thread"
 
     @pytest.mark.anyio
     async def test_generate_sse_auto_generates_thread_id(self):
@@ -170,13 +169,12 @@ class TestSSEWithConfig:
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
 
-        with patch("app.graph", mock_graph):
-            async for _ in generate_sse("hello"):
-                pass
+        async for _ in generate_sse("hello", mock_graph):
+            pass
 
-            call_args = mock_graph.astream_events.call_args
-            config = call_args.kwargs.get("config")
-            assert config is not None
-            thread_id = config["configurable"]["thread_id"]
-            # Should be a valid UUID
-            uuid.UUID(thread_id)
+        call_args = mock_graph.astream_events.call_args
+        config = call_args.kwargs.get("config")
+        assert config is not None
+        thread_id = config["configurable"]["thread_id"]
+        # Should be a valid UUID
+        uuid.UUID(thread_id)

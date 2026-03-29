@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -98,9 +98,8 @@ class TestSSENodeLifecycle:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hello"):
-                collected.append(sse)
+        async for sse in generate_sse("hello", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 1
         data = json.loads(collected[0].removeprefix("data: ").strip())
@@ -118,9 +117,8 @@ class TestSSENodeLifecycle:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hello"):
-                collected.append(sse)
+        async for sse in generate_sse("hello", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 1
         data = json.loads(collected[0].removeprefix("data: ").strip())
@@ -145,9 +143,8 @@ class TestSSENodeLifecycle:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hello"):
-                collected.append(sse)
+        async for sse in generate_sse("hello", mock_graph):
+            collected.append(sse)
 
         assert collected == []
 
@@ -170,9 +167,8 @@ class TestSSENodeLifecycle:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hello"):
-                collected.append(sse)
+        async for sse in generate_sse("hello", mock_graph):
+            collected.append(sse)
 
         assert collected == []
 
@@ -196,9 +192,8 @@ class TestSSETokenStreamingPreserved:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hi"):
-                collected.append(sse)
+        async for sse in generate_sse("hi", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 1
         data = json.loads(collected[0].removeprefix("data: ").strip())
@@ -216,9 +211,8 @@ class TestSSETokenStreamingPreserved:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hi"):
-                collected.append(sse)
+        async for sse in generate_sse("hi", mock_graph):
+            collected.append(sse)
 
         assert collected == []
 
@@ -234,9 +228,8 @@ class TestSSETokenStreamingPreserved:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("hi"):
-                collected.append(sse)
+        async for sse in generate_sse("hi", mock_graph):
+            collected.append(sse)
 
         assert collected == []
 
@@ -270,9 +263,8 @@ class TestSSEMixedEventOrdering:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("What is calculus?"):
-                collected.append(sse)
+        async for sse in generate_sse("What is calculus?", mock_graph):
+            collected.append(sse)
 
         # Sub-chain event should be dropped → 8 events minus 1 = 7
         # node_start(supervisor), node_end(supervisor),
@@ -317,9 +309,8 @@ class TestSSEMixedEventOrdering:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("I'm stressed"):
-                collected.append(sse)
+        async for sse in generate_sse("I'm stressed", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 5
         payloads = [
@@ -360,9 +351,8 @@ class TestSSEAllGraphNodes:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 1
         data = json.loads(collected[0].removeprefix("data: ").strip())
@@ -382,9 +372,8 @@ class TestSSEAllGraphNodes:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 2
         data = json.loads(collected[1].removeprefix("data: ").strip())
@@ -413,9 +402,8 @@ class TestSSENodeTiming:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         end_data = json.loads(collected[1].removeprefix("data: ").strip())
         assert end_data["duration_ms"] is not None
@@ -433,9 +421,8 @@ class TestSSENodeTiming:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         data = json.loads(collected[0].removeprefix("data: ").strip())
         assert data["duration_ms"] is None
@@ -460,9 +447,8 @@ class TestSSEErrorCapture:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         data = json.loads(collected[1].removeprefix("data: ").strip())
         assert data["error"] is None
@@ -485,9 +471,8 @@ class TestSSEErrorCapture:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         data = json.loads(collected[1].removeprefix("data: ").strip())
         assert data["error"] == "TimeoutError: request timed out"
@@ -540,9 +525,8 @@ class TestSSEUsageEvents:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         assert len(collected) == 1
         data = json.loads(collected[0].removeprefix("data: ").strip())
@@ -566,9 +550,8 @@ class TestSSEUsageEvents:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         assert collected == []
 
@@ -589,9 +572,8 @@ class TestSSEUsageEvents:
         )
 
         collected = []
-        with patch("app.graph", mock_graph):
-            async for sse in generate_sse("q"):
-                collected.append(sse)
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
 
         payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
         types = [p["type"] for p in payloads]
