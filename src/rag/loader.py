@@ -51,11 +51,21 @@ def load_documents(
     data_dir: str | Path,
     subject: str,
     doc_type: str = "exam",
+    splitter=None,
 ) -> list[Document]:
     """Load all supported files under *data_dir* and split into chunks.
 
     Each chunk carries metadata ``{subject, source_file, year, doc_type}``.
+
+    Parameters
+    ----------
+    splitter : optional
+        A text splitter with a ``create_documents(texts, metadatas)`` method.
+        When *None* (default), the built-in ``RecursiveCharacterTextSplitter``
+        is used.  Pass a ``SectionAwareSplitter`` for exam papers.
     """
+    active_splitter = splitter if splitter is not None else _splitter
+
     data_dir = Path(data_dir)
     if not data_dir.is_dir():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
@@ -78,7 +88,7 @@ def load_documents(
             "doc_type": doc_type,
         }
 
-        chunks = _splitter.create_documents(
+        chunks = active_splitter.create_documents(
             texts=[raw_text],
             metadatas=[metadata],
         )
