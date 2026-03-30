@@ -35,3 +35,6 @@ class TutorState(TypedDict):
     hallucination_detected: bool                            # Hallucination flag
     rewritten_query: str                                    # Rewritten query on retry
     hallucination_reason: str                               # Reason from hallucination eval
+    emotional_intel: str                                    # Emotional state summary (gather_intel)
+    resource_intel: str                                     # Resource intel summary (gather_intel)
+    intel_summary: str                                      # Combined intel for adversarial planner

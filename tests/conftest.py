@@ -54,6 +54,9 @@ def sample_state(human_msg):
         "hallucination_detected": False,
         "rewritten_query": "",
         "hallucination_reason": "",
+        "emotional_intel": "",
+        "resource_intel": "",
+        "intel_summary": "",
     }
 
 

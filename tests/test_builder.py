@@ -28,7 +28,8 @@ class TestBuildGraph:
             "evaluate_hallucination",
             "rewrite_query",
             "search_policy",
-            "generate_plan",
+            "gather_intel",
+            "plan_adversarial",
             "emotional_response",
             "handle_unknown",
         }

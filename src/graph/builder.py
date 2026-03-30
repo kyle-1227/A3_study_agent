@@ -14,7 +14,7 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
-from src.graph.planner import generate_plan, search_policy
+from src.graph.planner import gather_intel, plan_adversarial_node, search_policy
 from src.graph.state import TutorState
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
@@ -36,9 +36,10 @@ def build_graph() -> StateGraph:
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
 
-    # SubGraph B — Planner (search first, then single-call plan)
+    # SubGraph B — Planner (gather intel → adversarial planning SubGraph)
     graph.add_node("search_policy", search_policy)
-    graph.add_node("generate_plan", generate_plan)
+    graph.add_node("gather_intel", gather_intel)
+    graph.add_node("plan_adversarial", plan_adversarial_node)
 
     # Emotional
     graph.add_node("emotional_response", emotional_response)
@@ -81,9 +82,10 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("rewrite_query", "academic_router")
 
-    # Planner flow (search → generate in 2 steps)
-    graph.add_edge("search_policy", "generate_plan")
-    graph.add_edge("generate_plan", END)
+    # Planner flow: search_policy + gather_intel (parallel) → plan_adversarial → END
+    graph.add_edge("search_policy", "gather_intel")
+    graph.add_edge("gather_intel", "plan_adversarial")
+    graph.add_edge("plan_adversarial", END)
 
     # Emotional — direct to END
     graph.add_edge("emotional_response", END)
