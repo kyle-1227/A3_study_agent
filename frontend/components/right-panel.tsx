@@ -26,6 +26,7 @@ interface RightPanelProps {
   logs: LogEntry[]
   nodeEvents: NodeEvent[]
   tokenUsage: { input: number; output: number; total: number }
+  isInterrupted?: boolean
 }
 
 // ── Human-readable node labels ─────────────────────────────────────
@@ -38,13 +39,16 @@ const NODE_LABELS: Record<string, string> = {
   generate_answer: "回答生成",
   evaluate_hallucination: "幻觉评估",
   search_policy: "政策搜索",
+  gather_intel: "情报收集",
+  plan_adversarial: "对抗式计划",
   generate_plan: "计划生成",
+  handle_unknown: "未知意图",
   emotional_response: "情绪支持",
 }
 
 // ── Main component ─────────────────────────────────────────────────
 
-export function RightPanel({ logs, nodeEvents, tokenUsage }: RightPanelProps) {
+export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(true)
   const [viewTab, setViewTab] = useState<"trail" | "graph">("trail")
   const logsEndRef = useRef<HTMLDivElement>(null)
@@ -139,6 +143,19 @@ export function RightPanel({ logs, nodeEvents, tokenUsage }: RightPanelProps) {
               )}
             </ScrollArea>
           </div>
+
+          {/* HIL Interrupt Status */}
+          {isInterrupted && (
+            <div className="px-4 py-2 pl-12 border-b border-[#E8A87C] bg-[#FFF9E6]">
+              <p className="text-xs font-medium text-[#5C3D2E] flex items-center gap-1.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
+                </span>
+                等待用户审批
+              </p>
+            </div>
+          )}
 
           {/* Token Usage Counter */}
           {tokenUsage.total > 0 && (
