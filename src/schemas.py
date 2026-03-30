@@ -10,3 +10,10 @@ class ChatRequest(BaseModel):
 
     query: str
     thread_id: str | None = None
+
+
+class ResumeRequest(BaseModel):
+    """Resume a graph interrupted by Human-in-the-loop."""
+
+    thread_id: str
+    edited_plan: str

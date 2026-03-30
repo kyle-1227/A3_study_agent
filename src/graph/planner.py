@@ -20,6 +20,7 @@ import os
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.types import interrupt
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
@@ -233,7 +234,14 @@ async def plan_adversarial_node(state: TutorState) -> dict:
     result = await sub_graph.ainvoke(sub_input)
 
     plan_text = result.get("draft", "")
+
+    # HIL: pause for human review. interrupt() returns the user's edited plan
+    # when resumed via Command(resume=edited_plan), or the original draft
+    # on first invocation (before resume).
+    edited_plan = interrupt(plan_text)
+
+    final_plan = edited_plan if isinstance(edited_plan, str) and edited_plan else plan_text
     return {
-        "plan": plan_text,
-        "messages": [AIMessage(content=plan_text)],
+        "plan": final_plan,
+        "messages": [AIMessage(content=final_plan)],
     }

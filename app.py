@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -15,12 +16,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 
 load_dotenv(Path(__file__).parent / ".env")
 
 from src.database.checkpointer import get_db_uri, make_thread_config
 from src.graph.builder import get_compiled_graph
-from src.schemas import ChatRequest
+from src.schemas import ChatRequest, ResumeRequest
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
@@ -73,7 +75,7 @@ app.add_middleware(
 )
 
 
-ALLOWED_NODES = {"generate_answer", "generate_plan", "emotional_response"}
+ALLOWED_NODES = {"generate_answer", "plan_adversarial", "emotional_response"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -84,35 +86,27 @@ GRAPH_NODES = {
     "generate_answer",
     "evaluate_hallucination",
     "search_policy",
-    "generate_plan",
+    "gather_intel",
+    "plan_adversarial",
     "emotional_response",
+    "handle_unknown",
 }
 
 
-async def generate_sse(
-    query: str,
+async def _stream_graph_events(
     graph,
-    thread_id: str | None = None,
+    input_data,
+    config: dict,
+    thread_id: str,
 ) -> AsyncGenerator[str, None]:
-    """Stream LangGraph events as Server-Sent Events (SSE).
+    """Shared SSE event streaming logic for /stream and /resume.
 
-    Yields two SSE payload types:
-
-    * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
-      — emitted when a graph node begins or finishes execution.
-    * ``{"type": "token", "content": "<text>"}``
-      — emitted for each streamed token from an allowed LLM node.
-
-    Args:
-        query: The user-provided string to be processed by the graph.
-        graph: The compiled LangGraph instance from app.state.
-        thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
+    Processes astream_events and yields SSE payloads for node lifecycle,
+    token streaming, usage, and interrupt events.
     """
-    config = make_thread_config(thread_id)
-    state_input = {"messages": [HumanMessage(content=query)]}
     node_start_times: dict[str, float] = {}
 
-    async for event in graph.astream_events(state_input, config=config, version="v2"):
+    async for event in graph.astream_events(input_data, config=config, version="v2"):
         event_type = event["event"]
 
         # ── Node lifecycle events ──────────────────────────────────────
@@ -181,11 +175,86 @@ async def generate_sse(
                 )
                 yield f"data: {payload}\n\n"
 
+    # ── Check for interrupt after stream completes ─────────────────
+    state_snapshot = await graph.aget_state(config)
+    if state_snapshot.next:
+        for task in state_snapshot.tasks:
+            if hasattr(task, "interrupts") and task.interrupts:
+                draft = task.interrupts[0].value
+                payload = json.dumps(
+                    {"type": "interrupt", "draft": draft, "thread_id": thread_id},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n"
+                return
+
+
+async def generate_sse(
+    query: str,
+    graph,
+    thread_id: str | None = None,
+) -> AsyncGenerator[str, None]:
+    """Stream LangGraph events as Server-Sent Events (SSE).
+
+    Yields SSE payload types:
+
+    * ``{"type": "thread_id", "thread_id": "..."}``
+      — emitted once at stream start so frontend can use it for /resume.
+    * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
+      — emitted when a graph node begins or finishes execution.
+    * ``{"type": "token", "content": "<text>"}``
+      — emitted for each streamed token from an allowed LLM node.
+    * ``{"type": "interrupt", "draft": "...", "thread_id": "..."}``
+      — emitted when the graph pauses for human review (HIL).
+
+    Args:
+        query: The user-provided string to be processed by the graph.
+        graph: The compiled LangGraph instance from app.state.
+        thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
+    """
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = make_thread_config(thread_id)
+    state_input = {"messages": [HumanMessage(content=query)]}
+
+    # Emit thread_id so frontend can use it for /resume
+    yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+
+    async for chunk in _stream_graph_events(graph, state_input, config, thread_id):
+        yield chunk
+
+
+async def generate_resume_sse(
+    edited_plan: str,
+    graph,
+    thread_id: str,
+) -> AsyncGenerator[str, None]:
+    """Resume an interrupted graph and stream remaining events as SSE.
+
+    Args:
+        edited_plan: The user-edited plan text to resume with.
+        graph: The compiled LangGraph instance from app.state.
+        thread_id: Session ID identifying the interrupted graph state.
+    """
+    config = make_thread_config(thread_id)
+    resume_input = Command(resume=edited_plan)
+
+    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id):
+        yield chunk
+
 
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
     return StreamingResponse(
         generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/resume")
+async def resume_endpoint(req: ResumeRequest, request: Request):
+    return StreamingResponse(
+        generate_resume_sse(req.edited_plan, request.app.state.graph, req.thread_id),
         media_type="text/event-stream",
     )
 

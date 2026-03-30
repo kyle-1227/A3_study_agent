@@ -43,6 +43,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 frontend/dist/
+frontend/%TEMP%/
 
 # local binary tools
 jaeger*
