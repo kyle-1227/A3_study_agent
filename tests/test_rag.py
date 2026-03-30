@@ -209,28 +209,193 @@ class TestBM25Search:
         tokenized = [jieba.lcut(t) for t in corpus_texts]
         corpus = [{"content": t, "source": "test.pdf", "metadata": {}} for t in corpus_texts]
 
-        old_idx, old_corpus = ret._bm25_index, ret._bm25_corpus
+        mock_vs = MagicMock()
+        mock_vs._collection.count.return_value = 3
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
         try:
+            ret._vectorstore = mock_vs
             ret._bm25_index = BM25Okapi(tokenized)
             ret._bm25_corpus = corpus
+            ret._bm25_doc_count = 3
             results = ret._bm25_search("判别式", top_k=2)
             assert len(results) >= 1
             assert results[0]["content"] == "判别式的计算方法"
         finally:
-            ret._bm25_index, ret._bm25_corpus = old_idx, old_corpus
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
 
     def test_bm25_search_empty_index(self):
         """BM25 search with no index returns empty list."""
         import src.rag.retriever as ret
 
-        old_idx, old_corpus = ret._bm25_index, ret._bm25_corpus
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
         try:
             ret._bm25_index = None
             ret._bm25_corpus = []
+            ret._bm25_doc_count = 0
             results = ret._bm25_search("test")
             assert results == []
         finally:
-            ret._bm25_index, ret._bm25_corpus = old_idx, old_corpus
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
+
+# ===========================================================================
+# TestBM25Invalidation — auto-rebuild when ChromaDB doc count changes
+# ===========================================================================
+
+class TestBM25Invalidation:
+
+    def test_stores_doc_count_at_build_time(self):
+        """After building BM25, _bm25_doc_count reflects ChromaDB size."""
+        import src.rag.retriever as ret
+
+        mock_vs = MagicMock()
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {
+            "documents": ["doc1", "doc2"],
+            "metadatas": [{"source_file": "a.pdf"}, {"source_file": "b.pdf"}],
+        }
+        mock_vs._collection = mock_collection
+        mock_collection.count.return_value = 2
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            ret._bm25_index = None
+            ret._bm25_corpus = []
+            ret._bm25_doc_count = 0
+            idx, corpus = ret._build_bm25_index()
+            assert ret._bm25_doc_count == 2
+            assert len(corpus) == 2
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
+    def test_rebuilds_when_doc_count_changes(self):
+        """_get_bm25() rebuilds the index when ChromaDB count differs from cached count."""
+        import src.rag.retriever as ret
+
+        build_call_count = 0
+        original_build = ret._build_bm25_index
+
+        def counting_build():
+            nonlocal build_call_count
+            build_call_count += 1
+            return original_build()
+
+        mock_vs = MagicMock()
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {
+            "documents": ["doc1", "doc2", "doc3"],
+            "metadatas": [{}, {}, {}],
+        }
+        mock_collection.count.return_value = 3
+        mock_vs._collection = mock_collection
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            # Simulate stale state: index exists but count is outdated
+            ret._bm25_index = MagicMock()  # non-None = index exists
+            ret._bm25_corpus = [{"content": "old"}]
+            ret._bm25_doc_count = 1  # stale count (was 1, now 3)
+
+            with patch.object(ret, "_build_bm25_index", side_effect=counting_build):
+                ret._get_bm25()
+
+            assert build_call_count == 1, "Expected BM25 rebuild due to doc count mismatch"
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
+    def test_skips_rebuild_when_count_matches(self):
+        """_get_bm25() does NOT rebuild when counts match."""
+        import src.rag.retriever as ret
+
+        mock_vs = MagicMock()
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 2
+        mock_vs._collection = mock_collection
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            ret._bm25_index = MagicMock()  # non-None = index exists
+            ret._bm25_corpus = [{"content": "a"}, {"content": "b"}]
+            ret._bm25_doc_count = 2  # matches
+
+            with patch.object(ret, "_build_bm25_index") as mock_build:
+                ret._get_bm25()
+
+            mock_build.assert_not_called()
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
+    def test_force_rebuild_ignores_count(self):
+        """_get_bm25(force_rebuild=True) rebuilds even when counts match."""
+        import src.rag.retriever as ret
+
+        mock_vs = MagicMock()
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 2
+        mock_collection.get.return_value = {
+            "documents": ["doc1", "doc2"],
+            "metadatas": [{}, {}],
+        }
+        mock_vs._collection = mock_collection
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            ret._bm25_index = MagicMock()
+            ret._bm25_corpus = [{"content": "a"}, {"content": "b"}]
+            ret._bm25_doc_count = 2  # matches — but force should still rebuild
+
+            ret._get_bm25(force_rebuild=True)
+
+            # After force rebuild, doc count should still be 2
+            assert ret._bm25_doc_count == 2
+            assert len(ret._bm25_corpus) == 2
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
+    def test_first_call_builds_index(self):
+        """When no index exists (None), _get_bm25 builds it."""
+        import src.rag.retriever as ret
+
+        mock_vs = MagicMock()
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 1
+        mock_collection.get.return_value = {
+            "documents": ["single doc"],
+            "metadatas": [{}],
+        }
+        mock_vs._collection = mock_collection
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            ret._bm25_index = None
+            ret._bm25_corpus = []
+            ret._bm25_doc_count = 0
+
+            idx, corpus = ret._get_bm25()
+
+            assert idx is not None
+            assert len(corpus) == 1
+            assert ret._bm25_doc_count == 1
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
 
 
 # ===========================================================================
