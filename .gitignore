@@ -45,9 +45,10 @@ pnpm-debug.log*
 frontend/dist/
 frontend/%TEMP%/
 
-# local binary tools
+# some local tools
 jaeger*
 *-windows-amd64/
+local_tools/cloc-2.08.exe
 
 # agentic coding prompts design(Local design)
 context_prompts/
