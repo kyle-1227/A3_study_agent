@@ -50,12 +50,5 @@ jaeger*
 *-windows-amd64/
 local_tools/cloc-2.08.exe
 
-# some agentic coding draft (for now, and it'll be cleaned in next commits in v0.3.0)
-agents_context/backend/
-agents_context/frontend/
-agents_context/global/
-agents_context/CLAUDE.backend.md
-agents_context/CLAUDE.frontend.md
-
 # Claude Code local config
 CLAUDE.md
