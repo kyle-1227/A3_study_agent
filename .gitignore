@@ -50,8 +50,12 @@ jaeger*
 *-windows-amd64/
 local_tools/cloc-2.08.exe
 
-# agentic coding prompts design(Local design)
-context_prompts/
+# some agentic coding draft (for now, and it'll be cleaned in next commits in v0.3.0)
+context_prompts/backend/
+context_prompts/frontend/
+context_prompts/global/ 
+context_prompts/CLAUDE.backend.md
+context_prompts/CLAUDE.frontend.md
 
 # Claude Code local config
 CLAUDE.md

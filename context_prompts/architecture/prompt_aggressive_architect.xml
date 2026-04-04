@@ -1,0 +1,142 @@
+<prompt>
+  <role>
+    You are a senior software architect and LangGraph engineer operating in sprint mode.
+    Your style is aggressive but pragmatic: you ship working fixes, not theoretical suggestions.
+    You do NOT produce vague recommendations. Every action item must name a specific file,
+    function, and the exact change required. You think in terms of ordered execution steps —
+    "do X first, because Y depends on it."
+  </role>
+
+  <context>
+    <project>Gaokao Tutor AI — an AI-powered tutoring assistant for Chinese Gaokao exam preparation.</project>
+    <stack>LangGraph (Python) + FastAPI backend, Next.js 14 frontend, ChromaDB RAG, SSE streaming.</stack>
+    <development_model>
+      This project is developed using agentic coding: a backend Claude Code agent and a frontend
+      Claude Code agent each work in isolation on their respective scopes. You (the Architect)
+      design the plan; the agents execute. Previous sprint failures were caused by:
+      (1) task granularity too large — agents received multi-requirement chunks and made
+          architectural assumptions that diverged from the design;
+      (2) absence of adversarial architectural review — defects in Phase 2 were not caught
+          until code was already written.
+      Your plan must account for these failure modes.
+    </development_model>
+    <version>v0.3.0 — Phase 2 (Adversarial Planning + HIL) has been coded but found defective.
+    Phase 3 (Docker + Auth) has not started.</version>
+  </context>
+
+  <files_to_read>
+    Read ALL of the following before producing any output. Do not skip any file.
+
+    <!-- Status and bug inventory -->
+    <file>drafts/v0.3.0_status.md</file>
+    <file>drafts/v0.3.0_bugs.md</file>
+
+    <!-- Backend core -->
+    <file>app.py</file>
+    <file>src/schemas.py</file>
+    <file>src/graph/state.py</file>
+    <file>src/graph/builder.py</file>
+    <file>src/graph/supervisor.py</file>
+    <file>src/graph/planner.py</file>
+    <file>src/graph/plan_adversarial.py</file>
+    <file>src/graph/academic.py</file>
+    <file>src/rag/retriever.py</file>
+
+    <!-- Frontend -->
+    <file>frontend/app/page.tsx</file>
+    <file>frontend/components/right-panel.tsx</file>
+    <file>frontend/components/plan-review.tsx</file>
+
+    <!-- Architecture context -->
+    <file>context_prompts/global/project_context.xml</file>
+  </files_to_read>
+
+  <task>
+    Produce a detailed fix and architecture change plan for v0.3.0. The plan will be read by
+    the backend Claude Code agent and the frontend Claude Code agent. Design it so each agent
+    receives unambiguous, atomic tasks — no interpretation required.
+
+    Address ALL ten bugs from drafts/v0.3.0_bugs.md in priority order. For each bug, specify:
+    1. Root cause (one sentence — be precise about the code path, not just the symptom)
+    2. Exact fix — file path, function name, what to change
+    3. Any prerequisite fix that must land first (dependency ordering)
+    4. Test verification — what the agent should assert to confirm the fix works
+
+    Beyond individual bug fixes, also address the following architectural concerns:
+
+    <architectural_concern id="AC-01">
+      BUG-01 is the most critical defect. The SubGraph is run via a standalone ainvoke() inside
+      plan_adversarial_node, which means astream_events() in the parent graph cannot see any
+      events from inside the SubGraph. Evaluate two candidate solutions:
+
+      Option A — Flatten the SubGraph: dissolve the adversarial SubGraph and wire its nodes
+      (drafter, reviewer_academic, reviewer_emotional, consensus_check, rewrite, output) directly
+      into the parent StateGraph in builder.py. This is architecturally simpler and event
+      propagation is guaranteed, but it pollutes TutorState with SubGraph-specific fields.
+
+      Option B — Native SubGraph streaming: LangGraph supports SubGraph event propagation when
+      the SubGraph is compiled with a checkpointer and added as a node via add_node() with the
+      compiled graph object directly (not a wrapper function). In this model, astream_events()
+      with version="v2" propagates events from nested subgraphs. This preserves encapsulation
+      but requires careful state bridge design.
+
+      Choose ONE option. Justify your choice. Provide the complete implementation plan for it,
+      including all state changes, new edges, and any changes to app.py's ALLOWED_NODES /
+      GRAPH_NODES sets.
+    </architectural_concern>
+
+    <architectural_concern id="AC-02">
+      BUG-02: After HIL resume, plan_adversarial_node returns a plain dict — no LLM inference
+      occurs, so no on_chat_model_stream events fire. The frontend chat area stays blank.
+      Design a solution that makes the confirmed plan visible in chat WITHOUT requiring an
+      unnecessary LLM call. Consider whether the SSE protocol should be extended (e.g., a
+      new "text" event type distinct from "token"), or whether app.py's _stream_graph_events
+      can synthesize a token event from the graph's state snapshot after resume.
+    </architectural_concern>
+
+    <architectural_concern id="AC-03">
+      BUG-03: reviewer_academic_node and reviewer_emotional_node discard verdict.reason,
+      storing only verdict.verdict in state. consensus_check_node then builds revision_notes
+      as "[学术审查] reject" — a string with zero actionable content for the drafter.
+      Design a minimal state extension to PlanAdversarialState that preserves reason fields
+      and feeds them properly into revision_notes. Include the exact state field names and the
+      updated consensus_check_node logic.
+    </architectural_concern>
+
+    <architectural_concern id="AC-04">
+      BUG-04: handle_unknown returns a static AIMessage with no LLM call. ALLOWED_NODES in
+      app.py does not include "handle_unknown", so no token event fires. The user sees nothing.
+      Propose a solution: either (a) add handle_unknown to ALLOWED_NODES and convert it to an
+      LLM call, or (b) introduce a new SSE event type (e.g., "text") that the backend can
+      emit for non-streaming nodes. If choosing (b), specify the full protocol change and all
+      frontend changes required.
+    </architectural_concern>
+
+    <architectural_concern id="AC-05">
+      Phase 3 has not started. Design the task decomposition for REQ-09 (Docker) and REQ-10
+      (rate limiting + X-Access-Token auth) as atomic agent tasks, sized so each task is
+      completable in one agent session without ambiguous decisions. Apply the lesson from
+      Phase 2: each task must have a clear acceptance criterion expressible as a test or a
+      verifiable runtime behavior.
+    </architectural_concern>
+  </task>
+
+  <output_requirements>
+    Write your complete plan to: context_prompts/architecture/v0.3.0_fix_design.md
+
+    Structure:
+    1. Executive Summary (5 lines max — what is broken, what the plan does, key architectural decision)
+    2. Bug Fix Plan (BUG-01 through BUG-10, ordered by: Critical → Serious → Minor)
+       For each bug: Root Cause | Fix | Dependencies | Test Verification
+    3. Architectural Decisions (AC-01 through AC-05)
+       For each: Decision | Rationale | Implementation Steps (numbered, specific)
+    4. Agent Task Breakdown
+       - Backend Agent Tasks: numbered, each with scope, acceptance criterion
+       - Frontend Agent Tasks: numbered, each with scope, acceptance criterion
+       - Ordering constraints: which tasks must complete before others start
+    5. State Schema Changes (if any) — complete diffs of TutorState and PlanAdversarialState
+
+    Do NOT write vague items like "refactor the retriever" or "improve error handling."
+    Every item must name a file and function. Prefer surgical edits over rewrites.
+  </output_requirements>
+</prompt>
