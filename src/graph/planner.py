@@ -19,8 +19,7 @@ import logging
 import os
 from datetime import datetime
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.types import interrupt
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
@@ -62,46 +61,6 @@ async def search_policy(state: TutorState) -> dict:
             span.set_attribute("search.timed_out", False)
 
     return {"search_results": search_results}
-
-
-# ── Node 2: generate complete plan ────────────────────────────────
-
-@traced_node
-async def generate_plan(state: TutorState) -> dict:
-    """Produce a complete study plan from user request + policy context in one LLM call."""
-    llm = get_node_llm("planner")
-
-    last_msg = state["messages"][-1]
-    user_request = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
-
-    search_results = state.get("search_results", [])
-    policy_info = "\n\n".join(
-        f"- {r.get('title', '无标题')}: {r.get('content', '')}"
-        for r in search_results
-    ) if search_results else "未获取到最新政策信息，请基于通用经验给出建议。"
-
-    prompt = load_prompt("planner_generate").format(
-        user_request=user_request,
-        policy_info=policy_info,
-    )
-
-    temperature = get_setting("planner.temperature", 0.7)
-    fallback = get_fallback_llm(temperature=temperature)
-    messages = [
-        SystemMessage(content=load_prompt("planner_system")),
-        HumanMessage(content=prompt),
-    ]
-
-    with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        node_name="generate_plan",
-        temperature=temperature,
-    ) as span:
-        response = await async_invoke_with_fallback(
-            llm, messages, fallback=fallback, span=span,
-        )
-
-    return {"messages": [AIMessage(content=response.content)]}
 
 
 # ── Node: gather_intel (Phase2a — parallel fan-out) ──────────────
@@ -153,7 +112,7 @@ async def _gather_resource_intel(state: TutorState) -> str:
 
     async def _rag():
         try:
-            result = retrieve(query=query, subject=subj)
+            result = await asyncio.to_thread(retrieve, query=query, subject=subj)
             docs = result.get("docs", [])
             if not docs:
                 return ""
@@ -201,47 +160,13 @@ async def gather_intel(state: TutorState) -> dict:
         "emotional_intel": emotional_intel,
         "resource_intel": resource_intel,
         "intel_summary": intel_summary,
-    }
-
-
-# ── Node: plan_adversarial_node (Phase2b — SubGraph wrapper) ─────
-
-@traced_node
-async def plan_adversarial_node(state: TutorState) -> dict:
-    """Invoke the adversarial planning SubGraph and return the final plan.
-
-    Bridges TutorState → PlanAdversarialState → TutorState.
-    """
-    from src.graph.plan_adversarial import PlanAdversarialState, build_adversarial_subgraph
-
-    user_request = _last_human_query(state)
-    intel_summary = state.get("intel_summary", "")
-    max_rounds = get_setting("planner.adversarial_max_rounds", 3)
-
-    sub_input: PlanAdversarialState = {
-        "intel_summary": intel_summary,
-        "user_request": user_request,
+        # Initialize adversarial planning state
+        "adv_round": 0,
         "draft": "",
         "academic_verdict": "",
+        "academic_reason": "",
         "emotional_verdict": "",
-        "round": 0,
-        "max_rounds": max_rounds,
+        "emotional_reason": "",
         "consensus": False,
         "revision_notes": "",
-    }
-
-    sub_graph = build_adversarial_subgraph()
-    result = await sub_graph.ainvoke(sub_input)
-
-    plan_text = result.get("draft", "")
-
-    # HIL: pause for human review. interrupt() returns the user's edited plan
-    # when resumed via Command(resume=edited_plan), or the original draft
-    # on first invocation (before resume).
-    edited_plan = interrupt(plan_text)
-
-    final_plan = edited_plan if isinstance(edited_plan, str) and edited_plan else plan_text
-    return {
-        "plan": final_plan,
-        "messages": [AIMessage(content=final_plan)],
     }

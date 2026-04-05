@@ -104,7 +104,7 @@ async def rag_retrieve(state: TutorState) -> dict:
     subj = subject if subject != "other" else None
 
     with traced_retrieval(query=query, subject=subj) as span:
-        result = retrieve(query=query, subject=subj)
+        result = await asyncio.to_thread(retrieve, query=query, subject=subj)
         span.set_attribute("rag.doc_count", len(result.get("docs", [])))
         span.set_attribute("rag.is_hit", result.get("is_hit", False))
         if result.get("docs"):
