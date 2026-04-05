@@ -67,6 +67,15 @@ class TestGatherIntel:
         assert len(result["emotional_intel"]) > 0
         assert len(result["resource_intel"]) > 0
         assert len(result["intel_summary"]) > 0
+        # Adversarial init fields (AC-01 Step 3)
+        assert result["adv_round"] == 0
+        assert result["draft"] == ""
+        assert result["academic_verdict"] == ""
+        assert result["academic_reason"] == ""
+        assert result["emotional_verdict"] == ""
+        assert result["emotional_reason"] == ""
+        assert result["consensus"] is False
+        assert result["revision_notes"] == ""
 
     @patch("src.graph.planner.retrieve")
     @patch("src.graph.planner.web_search_fn")
@@ -108,6 +117,9 @@ class TestGatherIntel:
         result = await gather_intel(state)
 
         assert "焦虑" in result["emotional_intel"]
+        # Adversarial init fields
+        assert result["adv_round"] == 0
+        assert result["consensus"] is False
 
     @patch("src.graph.planner.retrieve")
     @patch("src.graph.planner.web_search_fn")
@@ -152,6 +164,10 @@ class TestGatherIntel:
 
         assert "导数" in result["resource_intel"]
         assert "2026" in result["resource_intel"]
+        # Adversarial init fields
+        assert result["adv_round"] == 0
+        assert result["draft"] == ""
+        assert result["consensus"] is False
 
     @patch("src.graph.planner.retrieve", side_effect=Exception("chromadb down"))
     @patch("src.graph.planner.web_search_fn", side_effect=Exception("network error"))
@@ -188,6 +204,9 @@ class TestGatherIntel:
         assert "emotional_intel" in result
         assert "resource_intel" in result
         assert "intel_summary" in result
+        # Adversarial init fields
+        assert result["adv_round"] == 0
+        assert result["consensus"] is False
 
     @patch("src.graph.planner.retrieve")
     @patch("src.graph.planner.web_search_fn")
@@ -228,3 +247,6 @@ class TestGatherIntel:
 
         assert "emotional_intel" in result
         assert "intel_summary" in result
+        # Adversarial init fields
+        assert result["adv_round"] == 0
+        assert result["consensus"] is False

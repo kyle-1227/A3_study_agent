@@ -287,63 +287,6 @@ class TestGenerateAnswerFallback:
 
 
 # ===========================================================================
-# TestGeneratePlanFallback — planner node
-# ===========================================================================
-
-class TestGeneratePlanFallback:
-    """Test that generate_plan falls back on primary LLM failure."""
-
-    @patch("src.graph.planner.get_fallback_llm")
-    @patch("src.graph.planner.get_node_llm")
-    async def test_uses_fallback_on_primary_timeout(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
-    ):
-        primary = MagicMock()
-        primary.ainvoke = AsyncMock(side_effect=TimeoutError("primary timed out"))
-        mock_get_llm.return_value = primary
-
-        fallback = MagicMock()
-        fallback.ainvoke = AsyncMock(return_value=mock_llm_response("fallback plan"))
-        mock_get_fallback.return_value = fallback
-
-        state = {
-            "messages": [HumanMessage(content="帮我制定复习计划")],
-            "search_results": [],
-        }
-
-        from src.graph.planner import generate_plan
-
-        result = await generate_plan(state)
-
-        assert "fallback plan" in result["messages"][0].content
-        fallback.ainvoke.assert_called_once()
-
-    @patch("src.graph.planner.get_fallback_llm")
-    @patch("src.graph.planner.get_node_llm")
-    async def test_returns_primary_when_healthy(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
-    ):
-        primary = MagicMock()
-        primary.ainvoke = AsyncMock(return_value=mock_llm_response("primary plan"))
-        mock_get_llm.return_value = primary
-
-        fallback = MagicMock()
-        mock_get_fallback.return_value = fallback
-
-        state = {
-            "messages": [HumanMessage(content="帮我做计划")],
-            "search_results": [],
-        }
-
-        from src.graph.planner import generate_plan
-
-        result = await generate_plan(state)
-
-        assert "primary plan" in result["messages"][0].content
-        fallback.ainvoke.assert_not_called()
-
-
-# ===========================================================================
 # TestEmotionalResponseFallback — emotional node
 # ===========================================================================
 

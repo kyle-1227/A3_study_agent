@@ -51,11 +51,11 @@ def _make_mock_graph(events=None):
 
 
 def _parse_payloads(collected):
-    """Parse SSE lines into JSON payloads, skipping the leading thread_id event."""
+    """Parse SSE lines into JSON payloads, skipping thread_id and done events."""
     all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
-    # First payload is always thread_id; return the rest
+    # First payload is always thread_id; filter it and the trailing done event
     assert all_payloads[0]["type"] == "thread_id"
-    return all_payloads[1:]
+    return [p for p in all_payloads[1:] if p.get("type") != "done"]
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +318,20 @@ class TestSSEAllGraphNodes:
 
     ALL_NODES = [
         "supervisor",
+        "academic_router",
         "rag_retrieve",
         "web_search",
         "generate_answer",
+        "evaluate_hallucination",
+        "rewrite_query",
         "search_policy",
         "gather_intel",
-        "plan_adversarial",
+        "drafter",
+        "reviewer_academic",
+        "reviewer_emotional",
+        "consensus_check",
+        "adv_rewrite",
+        "plan_output",
         "emotional_response",
         "handle_unknown",
     ]
@@ -534,3 +542,124 @@ class TestSSEUsageEvents:
         payloads = _parse_payloads(collected)
         types = [p["type"] for p in payloads]
         assert types == ["node_event", "token", "usage", "node_event"]
+
+
+# ---------------------------------------------------------------------------
+# TestSSETextEvent — "text" SSE event for non-streaming nodes (AC-02)
+# ---------------------------------------------------------------------------
+
+class TestSSETextEvent:
+    """Tests that TEXT_EMIT_NODES produce a 'text' SSE event on chain end."""
+
+    @pytest.mark.anyio
+    async def test_text_event_emitted_for_plan_output(self):
+        """on_chain_end for plan_output with AIMessage → text SSE event."""
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        end_event = {
+            "event": "on_chain_end",
+            "name": "plan_output",
+            "metadata": {"langgraph_node": "plan_output"},
+            "data": {"output": {"messages": [AIMessage(content="## 最终计划")]}},
+        }
+        mock_graph = _make_mock_graph([_node_start("plan_output"), end_event])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        text_events = [p for p in all_payloads if p.get("type") == "text"]
+        assert len(text_events) == 1
+        assert text_events[0]["content"] == "## 最终计划"
+        assert text_events[0]["node"] == "plan_output"
+
+    @pytest.mark.anyio
+    async def test_text_event_emitted_for_handle_unknown(self):
+        """on_chain_end for handle_unknown with AIMessage → text SSE event."""
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        end_event = {
+            "event": "on_chain_end",
+            "name": "handle_unknown",
+            "metadata": {"langgraph_node": "handle_unknown"},
+            "data": {"output": {"messages": [AIMessage(content="我不太理解您的问题")]}},
+        }
+        mock_graph = _make_mock_graph([_node_start("handle_unknown"), end_event])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        text_events = [p for p in all_payloads if p.get("type") == "text"]
+        assert len(text_events) == 1
+        assert text_events[0]["content"] == "我不太理解您的问题"
+
+    @pytest.mark.anyio
+    async def test_no_text_event_for_non_text_emit_node(self):
+        """on_chain_end for a node NOT in TEXT_EMIT_NODES → no text event."""
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        end_event = {
+            "event": "on_chain_end",
+            "name": "generate_answer",
+            "metadata": {"langgraph_node": "generate_answer"},
+            "data": {"output": {"messages": [AIMessage(content="some answer")]}},
+        }
+        mock_graph = _make_mock_graph([_node_start("generate_answer"), end_event])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        text_events = [p for p in all_payloads if p.get("type") == "text"]
+        assert len(text_events) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestSSEDoneEvent — "done" SSE event at stream completion (BUG-09)
+# ---------------------------------------------------------------------------
+
+class TestSSEDoneEvent:
+    """Tests that the last SSE event after normal completion is 'done'."""
+
+    @pytest.mark.anyio
+    async def test_done_event_emitted_on_normal_completion(self):
+        """After normal stream completion, the last event should be 'done'."""
+        from app import generate_sse
+
+        mock_graph = _make_mock_graph([_node_start("supervisor"), _node_end("supervisor")])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        assert all_payloads[-1] == {"type": "done"}
+
+    @pytest.mark.anyio
+    async def test_no_done_event_on_interrupt(self):
+        """When graph is interrupted, no 'done' event should be emitted."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+
+        interrupt_obj = SimpleNamespace(value="## 计划草稿")
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=("plan_output",), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        done_events = [p for p in all_payloads if p.get("type") == "done"]
+        assert len(done_events) == 0

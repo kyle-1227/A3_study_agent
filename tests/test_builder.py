@@ -29,7 +29,12 @@ class TestBuildGraph:
             "rewrite_query",
             "search_policy",
             "gather_intel",
-            "plan_adversarial",
+            "drafter",
+            "reviewer_academic",
+            "reviewer_emotional",
+            "consensus_check",
+            "adv_rewrite",
+            "plan_output",
             "emotional_response",
             "handle_unknown",
         }

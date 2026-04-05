@@ -93,3 +93,33 @@ class TestEnvExample:
     def test_allowed_origins_in_env_example(self):
         content = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
         assert "ALLOWED_ORIGINS" in content
+
+
+class TestInputValidation:
+    """Verify Pydantic max_length constraints on request schemas (SEC-01)."""
+
+    def test_chat_request_rejects_oversized_query(self):
+        from pydantic import ValidationError
+        from src.schemas import ChatRequest
+
+        with pytest.raises(ValidationError):
+            ChatRequest(query="x" * 5000)
+
+    def test_chat_request_accepts_normal_query(self):
+        from src.schemas import ChatRequest
+
+        req = ChatRequest(query="正常长度的问题")
+        assert req.query == "正常长度的问题"
+
+    def test_resume_request_rejects_oversized_plan(self):
+        from pydantic import ValidationError
+        from src.schemas import ResumeRequest
+
+        with pytest.raises(ValidationError):
+            ResumeRequest(thread_id="t-1", edited_plan="x" * 20000)
+
+    def test_resume_request_accepts_normal_plan(self):
+        from src.schemas import ResumeRequest
+
+        req = ResumeRequest(thread_id="t-1", edited_plan="## 正常计划")
+        assert req.edited_plan == "## 正常计划"

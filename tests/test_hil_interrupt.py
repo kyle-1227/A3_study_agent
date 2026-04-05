@@ -44,68 +44,113 @@ class AsyncIteratorMock:
 # ---------------------------------------------------------------------------
 
 
-class TestPlanAdversarialNodeInterrupt:
-    """Test that plan_adversarial_node calls interrupt() and uses resumed value."""
+class TestPlanOutputNodeInterrupt:
+    """Test that plan_output_node calls interrupt() and uses resumed value."""
 
-    @patch("src.graph.plan_adversarial.build_adversarial_subgraph")
-    @patch("src.graph.planner.interrupt")
-    async def test_calls_interrupt_with_draft(self, mock_interrupt, mock_build):
-        """After SubGraph produces a draft, interrupt() is called with it."""
+    @patch("src.graph.plan_adversarial.interrupt")
+    async def test_calls_interrupt_with_draft(self, mock_interrupt):
+        """plan_output_node calls interrupt() with the draft text."""
         mock_interrupt.return_value = "用户编辑后的计划"
 
-        mock_sub = MagicMock()
-        mock_sub.ainvoke = AsyncMock(return_value={"draft": "## 原始计划"})
-        mock_build.return_value = mock_sub
-
-        from src.graph.planner import plan_adversarial_node
+        from src.graph.plan_adversarial import plan_output_node
 
         state = {
             "messages": [HumanMessage(content="帮我做复习计划")],
+            "intent": "planning",
+            "subject": "math",
+            "keypoints": [],
+            "context": [],
+            "search_results": [],
+            "plan": "",
+            "retry_count": 0,
+            "hallucination_detected": False,
+            "rewritten_query": "",
+            "hallucination_reason": "",
+            "emotional_intel": "",
+            "resource_intel": "",
             "intel_summary": "情报摘要",
+            "draft": "## 原始计划",
+            "academic_verdict": "approve",
+            "academic_reason": "",
+            "emotional_verdict": "approve",
+            "emotional_reason": "",
+            "adv_round": 1,
+            "consensus": True,
+            "revision_notes": "",
         }
-        result = await plan_adversarial_node(state)
+        result = await plan_output_node(state)
 
         mock_interrupt.assert_called_once_with("## 原始计划")
 
-    @patch("src.graph.plan_adversarial.build_adversarial_subgraph")
-    @patch("src.graph.planner.interrupt")
-    async def test_uses_resumed_plan(self, mock_interrupt, mock_build):
+    @patch("src.graph.plan_adversarial.interrupt")
+    async def test_uses_resumed_plan(self, mock_interrupt):
         """When interrupt() returns user's edited plan, node uses it."""
         edited_plan = "## 用户修改后的计划\n- 周一：数学（减轻强度）"
         mock_interrupt.return_value = edited_plan
 
-        mock_sub = MagicMock()
-        mock_sub.ainvoke = AsyncMock(return_value={"draft": "## 原始计划"})
-        mock_build.return_value = mock_sub
-
-        from src.graph.planner import plan_adversarial_node
+        from src.graph.plan_adversarial import plan_output_node
 
         state = {
             "messages": [HumanMessage(content="帮我做复习计划")],
+            "intent": "planning",
+            "subject": "math",
+            "keypoints": [],
+            "context": [],
+            "search_results": [],
+            "plan": "",
+            "retry_count": 0,
+            "hallucination_detected": False,
+            "rewritten_query": "",
+            "hallucination_reason": "",
+            "emotional_intel": "",
+            "resource_intel": "",
             "intel_summary": "情报摘要",
+            "draft": "## 原始计划",
+            "academic_verdict": "approve",
+            "academic_reason": "",
+            "emotional_verdict": "approve",
+            "emotional_reason": "",
+            "adv_round": 1,
+            "consensus": True,
+            "revision_notes": "",
         }
-        result = await plan_adversarial_node(state)
+        result = await plan_output_node(state)
 
         assert result["plan"] == edited_plan
         assert result["messages"][0].content == edited_plan
 
-    @patch("src.graph.plan_adversarial.build_adversarial_subgraph")
-    @patch("src.graph.planner.interrupt")
-    async def test_falls_back_to_original_when_resume_empty(self, mock_interrupt, mock_build):
+    @patch("src.graph.plan_adversarial.interrupt")
+    async def test_falls_back_to_original_when_resume_empty(self, mock_interrupt):
         """If interrupt() returns empty/None, use original draft."""
         mock_interrupt.return_value = None
 
-        mock_sub = MagicMock()
-        mock_sub.ainvoke = AsyncMock(return_value={"draft": "## 原始计划"})
-        mock_build.return_value = mock_sub
-
-        from src.graph.planner import plan_adversarial_node
+        from src.graph.plan_adversarial import plan_output_node
 
         state = {
             "messages": [HumanMessage(content="帮我做复习计划")],
+            "intent": "planning",
+            "subject": "math",
+            "keypoints": [],
+            "context": [],
+            "search_results": [],
+            "plan": "",
+            "retry_count": 0,
+            "hallucination_detected": False,
+            "rewritten_query": "",
+            "hallucination_reason": "",
+            "emotional_intel": "",
+            "resource_intel": "",
             "intel_summary": "情报摘要",
+            "draft": "## 原始计划",
+            "academic_verdict": "approve",
+            "academic_reason": "",
+            "emotional_verdict": "approve",
+            "emotional_reason": "",
+            "adv_round": 1,
+            "consensus": True,
+            "revision_notes": "",
         }
-        result = await plan_adversarial_node(state)
+        result = await plan_output_node(state)
 
         assert result["plan"] == "## 原始计划"
 
@@ -282,7 +327,7 @@ class TestResumeSSE:
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(
             return_value=AsyncIteratorMock([
-                _node_event("plan_adversarial", "end"),
+                _node_event("plan_output", "end"),
             ]),
         )
         mock_graph.aget_state = AsyncMock(
