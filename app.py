@@ -68,14 +68,17 @@ FastAPIInstrumentor.instrument_app(app)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=[o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-ALLOWED_NODES = {"generate_answer", "plan_adversarial", "emotional_response"}
+ALLOWED_NODES = {"generate_answer", "drafter", "emotional_response"}
+
+# Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
+TEXT_EMIT_NODES = {"plan_output", "handle_unknown"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -85,9 +88,15 @@ GRAPH_NODES = {
     "web_search",
     "generate_answer",
     "evaluate_hallucination",
+    "rewrite_query",
     "search_policy",
     "gather_intel",
-    "plan_adversarial",
+    "drafter",
+    "reviewer_academic",
+    "reviewer_emotional",
+    "consensus_check",
+    "adv_rewrite",
+    "plan_output",
     "emotional_response",
     "handle_unknown",
 }
@@ -106,74 +115,95 @@ async def _stream_graph_events(
     """
     node_start_times: dict[str, float] = {}
 
-    async for event in graph.astream_events(input_data, config=config, version="v2"):
-        event_type = event["event"]
+    try:
+        async for event in graph.astream_events(input_data, config=config, version="v2"):
+            event_type = event["event"]
 
-        # ── Node lifecycle events ──────────────────────────────────────
-        if event_type in ("on_chain_start", "on_chain_end"):
-            node_name = event.get("name")
-            meta_node = event.get("metadata", {}).get("langgraph_node")
-            # Only emit for top-level graph nodes (name matches metadata),
-            # not for internal sub-chains (RunnableSequence, etc.).
-            if node_name and node_name == meta_node and node_name in GRAPH_NODES:
-                if event_type == "on_chain_start":
-                    node_start_times[node_name] = time.monotonic()
-                    payload = json.dumps(
-                        {"type": "node_event", "status": "start", "node": node_name},
-                        ensure_ascii=False,
-                    )
-                else:
-                    duration_ms = None
-                    start_t = node_start_times.pop(node_name, None)
-                    if start_t is not None:
-                        duration_ms = round((time.monotonic() - start_t) * 1000)
+            # ── Node lifecycle events ──────────────────────────────────────
+            if event_type in ("on_chain_start", "on_chain_end"):
+                node_name = event.get("name")
+                meta_node = event.get("metadata", {}).get("langgraph_node")
+                # Only emit for top-level graph nodes (name matches metadata),
+                # not for internal sub-chains (RunnableSequence, etc.).
+                if node_name and node_name == meta_node and node_name in GRAPH_NODES:
+                    if event_type == "on_chain_start":
+                        node_start_times[node_name] = time.monotonic()
+                        payload = json.dumps(
+                            {"type": "node_event", "status": "start", "node": node_name},
+                            ensure_ascii=False,
+                        )
+                    else:
+                        duration_ms = None
+                        start_t = node_start_times.pop(node_name, None)
+                        if start_t is not None:
+                            duration_ms = round((time.monotonic() - start_t) * 1000)
 
-                    error = None
-                    output = event.get("data", {}).get("output")
-                    if isinstance(output, dict) and output.get("error"):
-                        error = str(output["error"])
+                        error = None
+                        output = event.get("data", {}).get("output")
+                        if isinstance(output, dict) and output.get("error"):
+                            error = str(output["error"])
 
+                        payload = json.dumps(
+                            {
+                                "type": "node_event",
+                                "status": "end",
+                                "node": node_name,
+                                "duration_ms": duration_ms,
+                                "error": error,
+                            },
+                            ensure_ascii=False,
+                        )
+                    yield f"data: {payload}\n\n"
+
+                    # Emit "text" for non-streaming nodes (AC-02)
+                    if event_type == "on_chain_end" and node_name in TEXT_EMIT_NODES:
+                        output = event.get("data", {}).get("output")
+                        if isinstance(output, dict):
+                            for msg in output.get("messages", []):
+                                if hasattr(msg, "content") and msg.content:
+                                    text_payload = json.dumps(
+                                        {"type": "text", "content": msg.content, "node": node_name},
+                                        ensure_ascii=False,
+                                    )
+                                    yield f"data: {text_payload}\n\n"
+
+            # ── Token streaming ────────────────────────────────────────────
+            elif event_type == "on_chat_model_stream":
+                node_name = event.get("metadata", {}).get("langgraph_node")
+                if node_name in ALLOWED_NODES:
+                    chunk = event["data"]["chunk"]
+                    if chunk.content:
+                        payload = json.dumps(
+                            {"type": "token", "content": chunk.content},
+                            ensure_ascii=False,
+                        )
+                        yield f"data: {payload}\n\n"
+
+            # ── Token usage events ─────────────────────────────────────────
+            elif event_type == "on_chat_model_end":
+                node_name = event.get("metadata", {}).get("langgraph_node")
+                output = event.get("data", {}).get("output")
+                usage = getattr(output, "usage_metadata", None)
+                if usage and node_name:
                     payload = json.dumps(
                         {
-                            "type": "node_event",
-                            "status": "end",
+                            "type": "usage",
                             "node": node_name,
-                            "duration_ms": duration_ms,
-                            "error": error,
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
                         },
                         ensure_ascii=False,
                     )
-                yield f"data: {payload}\n\n"
-
-        # ── Token streaming ────────────────────────────────────────────
-        elif event_type == "on_chat_model_stream":
-            node_name = event.get("metadata", {}).get("langgraph_node")
-            if node_name in ALLOWED_NODES:
-                chunk = event["data"]["chunk"]
-                if chunk.content:
-                    payload = json.dumps(
-                        {"type": "token", "content": chunk.content},
-                        ensure_ascii=False,
-                    )
                     yield f"data: {payload}\n\n"
-
-        # ── Token usage events ─────────────────────────────────────────
-        elif event_type == "on_chat_model_end":
-            node_name = event.get("metadata", {}).get("langgraph_node")
-            output = event.get("data", {}).get("output")
-            usage = getattr(output, "usage_metadata", None)
-            if usage and node_name:
-                payload = json.dumps(
-                    {
-                        "type": "usage",
-                        "node": node_name,
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
-                    },
-                    ensure_ascii=False,
-                )
-                yield f"data: {payload}\n\n"
+    except Exception as e:
+        logger.exception("Unhandled error in graph streaming")
+        error_payload = json.dumps(
+            {"type": "error", "message": str(e)},
+            ensure_ascii=False,
+        )
+        yield f"data: {error_payload}\n\n"
+        return
 
     # ── Check for interrupt after stream completes ─────────────────
     state_snapshot = await graph.aget_state(config)
@@ -187,6 +217,8 @@ async def _stream_graph_events(
                 )
                 yield f"data: {payload}\n\n"
                 return
+
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
 
 async def generate_sse(
