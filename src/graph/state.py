@@ -24,17 +24,26 @@ def context_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
 
 
 class TutorState(TypedDict):
-    messages: Annotated[list, add_messages]                 # Chat history
-    intent: Literal["academic", "planning", "emotional"]    # User intent
-    subject: str                                            # The topic being discussed
-    keypoints: list[str]                                    # Key points
-    context: Annotated[list[dict], context_reducer]         # Merged retrieval context (fan-in)
-    search_results: list[dict]                              # Planner search results
-    plan: str                                               # Generated plans
-    retry_count: int                                        # Hallucination retry counter
-    hallucination_detected: bool                            # Hallucination flag
-    rewritten_query: str                                    # Rewritten query on retry
-    hallucination_reason: str                               # Reason from hallucination eval
-    emotional_intel: str                                    # Emotional state summary (gather_intel)
-    resource_intel: str                                     # Resource intel summary (gather_intel)
-    intel_summary: str                                      # Combined intel for adversarial planner
+    messages: Annotated[list, add_messages]                             # Chat history
+    intent: Literal["academic", "planning", "emotional", "unknown"]    # User intent
+    subject: str                                                        # The topic being discussed
+    keypoints: list[str]                                                # Key points
+    context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
+    search_results: list[dict]                                          # Planner search results
+    plan: str                                                           # Generated plans
+    retry_count: int                                                    # Hallucination retry counter
+    hallucination_detected: bool                                        # Hallucination flag
+    rewritten_query: str                                                # Rewritten query on retry
+    hallucination_reason: str                                           # Reason from hallucination eval
+    emotional_intel: str                                                # Emotional state summary (gather_intel)
+    resource_intel: str                                                 # Resource intel summary (gather_intel)
+    intel_summary: str                                                  # Combined intel for adversarial planner
+    # ── Adversarial planning (flattened SubGraph — AC-01) ────────────
+    draft: str                                                          # Current plan draft text
+    academic_verdict: str                                               # "approve" / "reject"
+    academic_reason: str                                                # Reviewer reasoning
+    emotional_verdict: str                                              # "approve" / "reject"
+    emotional_reason: str                                               # Reviewer reasoning
+    adv_round: int                                                      # Current review round
+    consensus: bool                                                     # Both reviewers approved?
+    revision_notes: str                                                 # Combined feedback for drafter

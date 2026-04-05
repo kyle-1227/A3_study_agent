@@ -14,7 +14,16 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
-from src.graph.planner import gather_intel, plan_adversarial_node, search_policy
+from src.graph.plan_adversarial import (
+    adv_rewrite_node,
+    consensus_check_node,
+    drafter_node,
+    plan_output_node,
+    reviewer_academic_node,
+    reviewer_emotional_node,
+    should_output_or_revise,
+)
+from src.graph.planner import gather_intel, search_policy
 from src.graph.state import TutorState
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
@@ -36,10 +45,15 @@ def build_graph() -> StateGraph:
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
 
-    # SubGraph B — Planner (gather intel → adversarial planning SubGraph)
+    # Planner (gather intel → flattened adversarial planning)
     graph.add_node("search_policy", search_policy)
     graph.add_node("gather_intel", gather_intel)
-    graph.add_node("plan_adversarial", plan_adversarial_node)
+    graph.add_node("drafter", drafter_node)
+    graph.add_node("reviewer_academic", reviewer_academic_node)
+    graph.add_node("reviewer_emotional", reviewer_emotional_node)
+    graph.add_node("consensus_check", consensus_check_node)
+    graph.add_node("adv_rewrite", adv_rewrite_node)
+    graph.add_node("plan_output", plan_output_node)
 
     # Emotional
     graph.add_node("emotional_response", emotional_response)
@@ -82,10 +96,23 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("rewrite_query", "academic_router")
 
-    # Planner flow: search_policy + gather_intel (parallel) → plan_adversarial → END
+    # Planner flow: search_policy → gather_intel → adversarial loop → plan_output → END
     graph.add_edge("search_policy", "gather_intel")
-    graph.add_edge("gather_intel", "plan_adversarial")
-    graph.add_edge("plan_adversarial", END)
+    graph.add_edge("gather_intel", "drafter")
+    graph.add_edge("drafter", "reviewer_academic")
+    graph.add_edge("drafter", "reviewer_emotional")
+    graph.add_edge("reviewer_academic", "consensus_check")
+    graph.add_edge("reviewer_emotional", "consensus_check")
+    graph.add_conditional_edges(
+        "consensus_check",
+        should_output_or_revise,
+        {
+            "output": "plan_output",
+            "revise": "adv_rewrite",
+        },
+    )
+    graph.add_edge("adv_rewrite", "drafter")
+    graph.add_edge("plan_output", END)
 
     # Emotional — direct to END
     graph.add_edge("emotional_response", END)
