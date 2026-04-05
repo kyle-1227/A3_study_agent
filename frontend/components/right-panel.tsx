@@ -38,12 +38,17 @@ const NODE_LABELS: Record<string, string> = {
   web_search: "网络搜索",
   generate_answer: "回答生成",
   evaluate_hallucination: "幻觉评估",
+  rewrite_query: "查询改写",
   search_policy: "政策搜索",
   gather_intel: "情报收集",
-  plan_adversarial: "对抗式计划",
-  generate_plan: "计划生成",
-  handle_unknown: "未知意图",
+  drafter: "计划起草",
+  reviewer_academic: "学术审查",
+  reviewer_emotional: "情绪审查",
+  consensus_check: "共识检查",
+  adv_rewrite: "计划修订",
+  plan_output: "计划输出",
   emotional_response: "情绪支持",
+  handle_unknown: "未知意图",
 }
 
 // ── Main component ─────────────────────────────────────────────────
@@ -204,8 +209,8 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
 
 // ── Graph DAG View ────────────────────────────────────────────────
 
-const DAG_W = 252
-const DAG_H = 272
+const DAG_W = 310
+const DAG_H = 370
 const N_W = 56
 const N_H = 26
 
@@ -216,15 +221,23 @@ interface DagNodeDef {
 }
 
 const DAG_NODE_DEFS: DagNodeDef[] = [
-  { id: "supervisor", cx: 126, cy: 16 },
-  { id: "academic_router", cx: 56, cy: 64 },
-  { id: "search_policy", cx: 156, cy: 64 },
-  { id: "emotional_response", cx: 222, cy: 64 },
-  { id: "rag_retrieve", cx: 28, cy: 116 },
-  { id: "web_search", cx: 84, cy: 116 },
-  { id: "generate_plan", cx: 156, cy: 116 },
-  { id: "generate_answer", cx: 56, cy: 168 },
-  { id: "evaluate_hallucination", cx: 56, cy: 220 },
+  { id: "supervisor",             cx: 155, cy: 20 },
+  { id: "academic_router",        cx: 50,  cy: 68 },
+  { id: "search_policy",          cx: 140, cy: 68 },
+  { id: "emotional_response",     cx: 222, cy: 68 },
+  { id: "handle_unknown",         cx: 280, cy: 68 },
+  { id: "rag_retrieve",           cx: 26,  cy: 118 },
+  { id: "web_search",             cx: 82,  cy: 118 },
+  { id: "gather_intel",           cx: 140, cy: 118 },
+  { id: "generate_answer",        cx: 50,  cy: 168 },
+  { id: "drafter",                cx: 140, cy: 168 },
+  { id: "evaluate_hallucination", cx: 50,  cy: 218 },
+  { id: "reviewer_academic",      cx: 112, cy: 218 },
+  { id: "reviewer_emotional",     cx: 170, cy: 218 },
+  { id: "rewrite_query",          cx: 50,  cy: 268 },
+  { id: "consensus_check",        cx: 140, cy: 268 },
+  { id: "adv_rewrite",            cx: 112, cy: 318 },
+  { id: "plan_output",            cx: 170, cy: 318 },
 ]
 
 interface DagEdgeDef {
@@ -234,16 +247,29 @@ interface DagEdgeDef {
 }
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
+  // Supervisor routing
   { from: "supervisor", to: "academic_router" },
   { from: "supervisor", to: "search_policy" },
   { from: "supervisor", to: "emotional_response" },
+  { from: "supervisor", to: "handle_unknown" },
+  // Academic branch
   { from: "academic_router", to: "rag_retrieve" },
   { from: "academic_router", to: "web_search" },
   { from: "rag_retrieve", to: "generate_answer" },
   { from: "web_search", to: "generate_answer" },
   { from: "generate_answer", to: "evaluate_hallucination" },
-  { from: "search_policy", to: "generate_plan" },
-  { from: "evaluate_hallucination", to: "academic_router", retry: true },
+  { from: "evaluate_hallucination", to: "rewrite_query" },
+  { from: "rewrite_query", to: "academic_router", retry: true },
+  // Planning branch
+  { from: "search_policy", to: "gather_intel" },
+  { from: "gather_intel", to: "drafter" },
+  { from: "drafter", to: "reviewer_academic" },
+  { from: "drafter", to: "reviewer_emotional" },
+  { from: "reviewer_academic", to: "consensus_check" },
+  { from: "reviewer_emotional", to: "consensus_check" },
+  { from: "consensus_check", to: "adv_rewrite" },
+  { from: "consensus_check", to: "plan_output" },
+  { from: "adv_rewrite", to: "drafter", retry: true },
 ]
 
 const nodePos = (id: string) => DAG_NODE_DEFS.find((n) => n.id === id)!
@@ -268,7 +294,8 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
   }
 
   // Retry is active when academic_router appears more than once
-  const retryActive = nodeEvents.filter((e) => e.node === "academic_router").length > 1
+  const academicRetryActive = nodeEvents.filter((e) => e.node === "academic_router").length > 1
+  const advRetryActive = nodeEvents.filter((e) => e.node === "drafter").length > 1
 
   const edgeLine = (from: DagNodeDef, to: DagNodeDef, active: boolean) => (
     <line
@@ -343,21 +370,33 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
           )
         })}
 
-        {/* Retry edge — dashed curve from eval left side back up to academic left side */}
+        {/* Academic retry — rewrite_query back to academic_router */}
         <path
-          d={`M ${56 - N_W / 2} ${220} C 4 170, 4 115, ${56 - N_W / 2} ${64}`}
+          d={`M ${50 - N_W / 2} ${268} C 0 200, 0 136, ${50 - N_W / 2} ${68}`}
           fill="none"
-          stroke={retryActive ? "#D97B6C" : "#7A9E7E"}
-          strokeWidth={retryActive ? 1.5 : 1}
+          stroke={academicRetryActive ? "#D97B6C" : "#7A9E7E"}
+          strokeWidth={academicRetryActive ? 1.5 : 1}
           strokeDasharray="4 2"
           markerEnd="url(#dag-arrow)"
-          opacity={retryActive ? 0.8 : 0.3}
+          opacity={academicRetryActive ? 0.8 : 0.3}
+        />
+
+        {/* Adversarial retry — adv_rewrite back to drafter */}
+        <path
+          d={`M ${112 - N_W / 2} ${318} C 72 270, 72 218, ${140 - N_W / 2} ${168}`}
+          fill="none"
+          stroke={advRetryActive ? "#D97B6C" : "#7A9E7E"}
+          strokeWidth={advRetryActive ? 1.5 : 1}
+          strokeDasharray="4 2"
+          markerEnd="url(#dag-arrow)"
+          opacity={advRetryActive ? 0.8 : 0.3}
         />
 
         {/* END edges */}
-        {endEdge(222, 64 + N_H / 2, 222, 108, nodeStates.get("emotional_response")?.state === "done")}
-        {endEdge(156, 116 + N_H / 2, 156, 160, nodeStates.get("generate_plan")?.state === "done")}
-        {endEdge(56 + N_W / 2, 220, 126, 252, nodeStates.get("evaluate_hallucination")?.state === "done")}
+        {endEdge(222, 68 + N_H / 2, 222, 104, nodeStates.get("emotional_response")?.state === "done")}
+        {endEdge(280, 68 + N_H / 2, 280, 104, nodeStates.get("handle_unknown")?.state === "done")}
+        {endEdge(50 + N_W / 2, 218, 86, 248, nodeStates.get("evaluate_hallucination")?.state === "done")}
+        {endEdge(170, 318 + N_H / 2, 170, 352, nodeStates.get("plan_output")?.state === "done")}
       </svg>
 
       {/* Node layer */}
@@ -395,27 +434,39 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
       {/* END markers */}
       <span
         className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 213, top: 110 }}
+        style={{ left: 214, top: 106 }}
       >
         END
       </span>
       <span
         className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 147, top: 162 }}
+        style={{ left: 272, top: 106 }}
       >
         END
       </span>
       <span
         className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 118, top: 252 }}
+        style={{ left: 78, top: 252 }}
+      >
+        END
+      </span>
+      <span
+        className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
+        style={{ left: 162, top: 354 }}
       >
         END
       </span>
 
-      {/* Retry label */}
+      {/* Retry labels */}
       <span
         className="absolute text-[7px] italic text-[#D97B6C]/60"
-        style={{ left: 0, top: 138 }}
+        style={{ left: 0, top: 168 }}
+      >
+        retry
+      </span>
+      <span
+        className="absolute text-[7px] italic text-[#D97B6C]/60"
+        style={{ left: 60, top: 243 }}
       >
         retry
       </span>

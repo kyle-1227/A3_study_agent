@@ -95,6 +95,27 @@ export default function Home() {
       return
     }
 
+    if (data.type === "text") {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === asstId ? { ...msg, content: data.content } : msg
+        )
+      )
+      return
+    }
+
+    if (data.type === "done") {
+      return
+    }
+
+    if (data.type === "error") {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: `[ERROR] Server: ${data.message}`, ts: timestamp() },
+      ])
+      return
+    }
+
     if (data.type === "node_event") {
       const node: string = data.node
       const status: "start" | "end" = data.status
