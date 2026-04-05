@@ -1,14 +1,11 @@
-"""Adversarial Planning SubGraph (REQ-07).
+"""Adversarial Planning Nodes (flattened into parent graph — AC-01).
 
 Drafter → [Reviewer Academic ∥ Reviewer Emotional] → Consensus Check → (loop/output)
 
-The SubGraph runs an adversarial review loop: a drafter produces a study plan,
+The adversarial review loop: a drafter produces a study plan,
 two parallel reviewers (academic quality + emotional wellbeing) evaluate it,
 and a consensus check decides whether to accept or request revisions.
-A safety valve (max_rounds) forces output after N iterations.
-
-ADR-001: SubGraph encapsulation with independent state.
-ADR-002: Reviewer verdicts via with_structured_output() + Pydantic.
+A safety valve (max_rounds from config) forces output after N iterations.
 """
 
 from __future__ import annotations
@@ -17,33 +14,21 @@ import logging
 import os
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import END, StateGraph
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.types import interrupt
 from pydantic import BaseModel
-from typing_extensions import TypedDict
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
+from src.graph.state import TutorState
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# State & models
+# Models
 # ---------------------------------------------------------------------------
-
-
-class PlanAdversarialState(TypedDict):
-    intel_summary: str
-    user_request: str
-    draft: str
-    academic_verdict: str
-    emotional_verdict: str
-    round: int
-    max_rounds: int
-    consensus: bool
-    revision_notes: str
 
 
 class ReviewVerdict(BaseModel):
@@ -52,18 +37,31 @@ class ReviewVerdict(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _last_human_query(state: TutorState) -> str:
+    """Extract the last HumanMessage content from state messages."""
+    for msg in reversed(state.get("messages", [])):
+        if isinstance(msg, HumanMessage):
+            return msg.content
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
 
 
 @traced_node
-async def drafter_node(state: PlanAdversarialState) -> dict[str, Any]:
+async def drafter_node(state: TutorState) -> dict[str, Any]:
     """Draft or rewrite a study plan based on intel and any revision notes."""
     llm = get_node_llm("planner")
     temperature = get_setting("planner.temperature", 0.7)
     fallback = get_fallback_llm(temperature=temperature)
 
-    user_request = state.get("user_request", "")
+    user_request = _last_human_query(state)
     intel_summary = state.get("intel_summary", "")
     revision_notes = state.get("revision_notes", "")
 
@@ -98,12 +96,12 @@ async def drafter_node(state: PlanAdversarialState) -> dict[str, Any]:
 
     return {
         "draft": response.content,
-        "round": state.get("round", 0) + 1,
+        "adv_round": state.get("adv_round", 0) + 1,
     }
 
 
 async def _run_reviewer(
-    state: PlanAdversarialState,
+    state: TutorState,
     *,
     system_prompt_name: str,
     node_name: str,
@@ -142,32 +140,32 @@ async def _run_reviewer(
 
 
 @traced_node
-async def reviewer_academic_node(state: PlanAdversarialState) -> dict[str, Any]:
+async def reviewer_academic_node(state: TutorState) -> dict[str, Any]:
     """Academic quality reviewer."""
     verdict = await _run_reviewer(
         state,
         system_prompt_name="plan_reviewer_academic_system",
         node_name="reviewer_academic",
     )
-    return {"academic_verdict": verdict.verdict}
+    return {"academic_verdict": verdict.verdict, "academic_reason": verdict.reason}
 
 
 @traced_node
-async def reviewer_emotional_node(state: PlanAdversarialState) -> dict[str, Any]:
+async def reviewer_emotional_node(state: TutorState) -> dict[str, Any]:
     """Emotional wellbeing reviewer."""
     verdict = await _run_reviewer(
         state,
         system_prompt_name="plan_reviewer_emotional_system",
         node_name="reviewer_emotional",
     )
-    return {"emotional_verdict": verdict.verdict}
+    return {"emotional_verdict": verdict.verdict, "emotional_reason": verdict.reason}
 
 
 @traced_node
-async def consensus_check_node(state: PlanAdversarialState) -> dict[str, Any]:
+async def consensus_check_node(state: TutorState) -> dict[str, Any]:
     """Check if both reviewers approved, or force output at max_rounds."""
-    current_round = state.get("round", 0)
-    max_rounds = state.get("max_rounds", 3)
+    current_round = state.get("adv_round", 0)
+    max_rounds = get_setting("planner.adversarial_max_rounds", 3)
     academic = state.get("academic_verdict", "")
     emotional = state.get("emotional_verdict", "")
 
@@ -185,12 +183,14 @@ async def consensus_check_node(state: PlanAdversarialState) -> dict[str, Any]:
     if both_approve:
         return {"consensus": True, "revision_notes": ""}
 
-    # Collect rejection reasons for revision
+    # Collect rejection reasons for revision (AC-03)
     notes_parts: list[str] = []
     if academic == "reject":
-        notes_parts.append(f"[学术审查] {academic}")
+        reason = state.get("academic_reason", "未提供原因")
+        notes_parts.append(f"[学术审查] {reason}")
     if emotional == "reject":
-        notes_parts.append(f"[情绪审查] {emotional}")
+        reason = state.get("emotional_reason", "未提供原因")
+        notes_parts.append(f"[情绪审查] {reason}")
 
     return {
         "consensus": False,
@@ -199,18 +199,34 @@ async def consensus_check_node(state: PlanAdversarialState) -> dict[str, Any]:
 
 
 @traced_node
-async def rewrite_node(state: PlanAdversarialState) -> dict[str, Any]:
+async def adv_rewrite_node(state: TutorState) -> dict[str, Any]:
     """Reset verdicts before sending back to drafter for revision."""
     return {
         "academic_verdict": "",
+        "academic_reason": "",
         "emotional_verdict": "",
+        "emotional_reason": "",
     }
 
 
 @traced_node
-async def output_node(state: PlanAdversarialState) -> dict[str, Any]:
-    """Final output node — returns the approved draft."""
-    return {"draft": state.get("draft", "")}
+async def plan_output_node(state: TutorState) -> dict:
+    """Final plan output — interrupt for HIL review if checkpointer available."""
+    plan_text = state.get("draft", "")
+
+    # HIL: pause for human review. Skip if running without checkpointer (stateless mode).
+    try:
+        edited_plan = interrupt(plan_text)
+    except ValueError:
+        # No checkpointer — skip HIL, use draft as-is
+        logger.warning("interrupt() failed (no checkpointer?), skipping HIL review")
+        edited_plan = plan_text
+
+    final_plan = edited_plan if isinstance(edited_plan, str) and edited_plan else plan_text
+    return {
+        "plan": final_plan,
+        "messages": [AIMessage(content=final_plan)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -218,59 +234,8 @@ async def output_node(state: PlanAdversarialState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _should_output_or_revise(state: PlanAdversarialState) -> str:
+def should_output_or_revise(state: TutorState) -> str:
     """Conditional edge after consensus_check: output or revise."""
     if state.get("consensus", False):
         return "output"
     return "revise"
-
-
-# ---------------------------------------------------------------------------
-# SubGraph construction
-# ---------------------------------------------------------------------------
-
-
-def build_adversarial_subgraph():
-    """Build and compile the adversarial planning SubGraph.
-
-    Flow: drafter → [reviewer_academic ∥ reviewer_emotional] →
-          consensus_check → output | rewrite → drafter (loop)
-    """
-    builder = StateGraph(PlanAdversarialState)
-
-    # Nodes
-    builder.add_node("drafter", drafter_node)
-    builder.add_node("reviewer_academic", reviewer_academic_node)
-    builder.add_node("reviewer_emotional", reviewer_emotional_node)
-    builder.add_node("consensus_check", consensus_check_node)
-    builder.add_node("rewrite", rewrite_node)
-    builder.add_node("output", output_node)
-
-    # Entry
-    builder.set_entry_point("drafter")
-
-    # Drafter → parallel reviewers (fan-out)
-    builder.add_edge("drafter", "reviewer_academic")
-    builder.add_edge("drafter", "reviewer_emotional")
-
-    # Reviewers → consensus_check (fan-in)
-    builder.add_edge("reviewer_academic", "consensus_check")
-    builder.add_edge("reviewer_emotional", "consensus_check")
-
-    # Consensus → output or revise
-    builder.add_conditional_edges(
-        "consensus_check",
-        _should_output_or_revise,
-        {
-            "output": "output",
-            "revise": "rewrite",
-        },
-    )
-
-    # Rewrite → drafter (loop back)
-    builder.add_edge("rewrite", "drafter")
-
-    # Output → END
-    builder.add_edge("output", END)
-
-    return builder.compile()
