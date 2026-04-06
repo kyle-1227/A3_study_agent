@@ -5,12 +5,20 @@
   <a href="docs/architecture/v0.3.0/diagram_design.md">Architecture Diagrams</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
-
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.0-orange" alt="version" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="license" />
+  <img src="https://img.shields.io/badge/version-v0.3.0-orange?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python" />
+  <a href="https://github.com/langchain-ai/langgraph">
+    <img src="https://img.shields.io/badge/langgraph-v1.1.1-7C3AED?style=flat-square&logo=diagram-next&logoColor=white" alt="langgraph" />
+  </a>
+  <a href="https://github.com/chipfighter/gaokao_tutor/actions">
+    <img src="https://github.com/chipfighter/gaokao_tutor/actions/workflows/ci.yml/badge.svg" alt="CI Status" />
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
+  </a>
 </p>
+
 
 A production-oriented, multi-agent conversational AI for Chinese Gaokao preparation. Built on **LangGraph** (stateful orchestration), **FastAPI** (SSE streaming), and **Next.js** (reactive frontend). A lightweight Qwen2.5-7B supervisor routes queries to three specialized agents — subject tutor, study planner, and emotional support — each backed by a fully observable, fault-tolerant pipeline.
 
@@ -56,32 +64,51 @@ A production-oriented, multi-agent conversational AI for Chinese Gaokao preparat
 
 ## Architecture
 
-```text
-User ──► Next.js (SSE) ──► FastAPI /stream ──► LangGraph StateGraph
-                                                       │
-                    ┌──────────────────────────────────┼───────────────────────┐
-                    ▼                                  ▼                       ▼
-              [academic]                          [planning]             [emotional]
-            ┌──────┴──────┐                           │                       │
-            ▼             ▼                           ▼                       ▼
-     rag_retrieve    web_search              search_policy        emotional_response
-     (ChromaDB       (DuckDuckGo)                  │
-      +BM25+Rerank)       │                        ▼
-            └──────┬──────┘                  gather_intel
-                   ▼                               │
-             generate_answer                      ▼
-                   │                           drafter ◄── adv_rewrite (loop)
-                   ▼                          ┌───┴───┐
-        evaluate_hallucination         reviewer_academic  reviewer_emotional
-              ┌────┴────┐                    └───┬───┘
-           [retry]    [end]             consensus_check
-              │                                  │
-         rewrite_query                      plan_output ─── interrupt (HIL)
-              │                              ┌───┴───┐
-         academic_router (loop)       [confirm→END] [feedback→feedback_router]
-                                                       ├─ tweak → plan_tweak ─┐
-                                                       └─ rewrite → drafter   │
-                                                             plan_output ◄────┘
+```mermaid
+graph TD
+  START([User Input]) --> supervisor[Intent Classification]
+
+  supervisor -->|academic| academic_router[Academic Router]
+  supervisor -->|planning| search_policy[Policy Search]
+  supervisor -->|emotional| emotional_response[Emotional Support]
+  supervisor -->|unknown| handle_unknown[Unknown Intent]
+
+  %% Academic branch
+  academic_router --> rag_retrieve[RAG Retrieval]
+  academic_router --> web_search[Web Search]
+  rag_retrieve --> generate_answer[Generate Answer]
+  web_search --> generate_answer
+  generate_answer --> evaluate_hallucination[Hallucination Eval]
+  evaluate_hallucination -->|Pass| END_A([End])
+  evaluate_hallucination -->|Retry| rewrite_query[Query Rewrite]
+  rewrite_query --> academic_router
+
+  %% Planning branch
+  search_policy --> gather_intel[Intel Gathering]
+  gather_intel --> drafter[Plan Drafter]
+  drafter --> reviewer_academic[Academic Reviewer]
+  drafter --> reviewer_emotional[Emotional Reviewer]
+  reviewer_academic --> consensus_check[Consensus Check]
+  reviewer_emotional --> consensus_check
+  consensus_check -->|Pass| plan_output[Plan Output + HIL]
+  consensus_check -->|Reject| adv_rewrite[Plan Revision]
+  adv_rewrite --> drafter
+
+  %% HIL feedback loop
+  plan_output -->|Confirm| END_P([End])
+  plan_output -->|Feedback| feedback_router[Feedback Classification]
+  feedback_router -->|Tweak| plan_tweak[Plan Fine-tuning]
+  feedback_router -->|Rewrite| drafter
+  plan_tweak --> plan_output
+
+  %% Terminal nodes
+  emotional_response --> END_E([End])
+  handle_unknown --> END_U([End])
+
+  %% Styling
+  style plan_output fill:#FFF9E6,stroke:#E8A87C
+  style feedback_router fill:#E8F4FD,stroke:#4A90D9
+  style plan_tweak fill:#E8F4FD,stroke:#4A90D9
 ```
 
 Cross-cutting: `@traced_node` on every node → OpenTelemetry → Jaeger UI / SQLite.
@@ -247,4 +274,4 @@ cd frontend && npm run build
 
 ## License
 
-MIT
+[MIT](./LICENSE)

@@ -1,16 +1,25 @@
 # 高考辅导 AI
 
 <p align="center">
-  <a href="README_en.md">English README</a> ·
-  <a href="docs/architecture/v0.3.0/diagram_design.md">架构图</a> ·
-  <a href="CHANGELOG.md">更新日志</a>
+  <a href="README_en.md">English_README</a> ·
+  <a href="docs/architecture/v0.3.0/diagram_design.md">Architecture Diagrams</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.0-orange" alt="version" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="license" />
+  <img src="https://img.shields.io/badge/version-v0.3.0-orange?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python" />
+  <a href="https://github.com/langchain-ai/langgraph">
+    <img src="https://img.shields.io/badge/langgraph-v1.1.1-7C3AED?style=flat-square&logo=diagram-next&logoColor=white" alt="langgraph" />
+  </a>
+  <a href="https://github.com/chipfighter/gaokao_tutor/actions">
+    <img src="https://github.com/chipfighter/gaokao_tutor/actions/workflows/ci.yml/badge.svg" alt="CI Status" />
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
+  </a>
 </p>
+
 
 一个面向生产场景的高考备考多智能体对话 AI 系统，基于 **LangGraph**（有状态编排）、**FastAPI**（SSE 流式传输）和 **Next.js**（响应式前端）构建。轻量级 Qwen2.5-7B 路由 Agent 将用户问题分发给三个专项 Agent：学科辅导、学习规划和情绪疏导，每个分支都具备完整的可观测性和容错机制。
 
@@ -59,32 +68,51 @@
 
 ## 系统架构
 
-```text
-用户 ──► Next.js (SSE) ──► FastAPI /stream ──► LangGraph StateGraph
-                                                       │
-                    ┌──────────────────────────────────┼───────────────────────┐
-                    ▼                                  ▼                       ▼
-               [学科辅导]                          [学习规划]              [情绪支持]
-             ┌──────┴──────┐                          │                       │
-             ▼             ▼                          ▼                       ▼
-      rag_retrieve    web_search              search_policy        emotional_response
-      (向量+BM25       (DuckDuckGo)                  │
-       +Reranker)          │                         ▼
-             └──────┬──────┘                   gather_intel
-                    ▼                                │
-              generate_answer                       ▼
-                    │                            drafter ◄── adv_rewrite (循环)
-                    ▼                           ┌───┴───┐
-         evaluate_hallucination          reviewer_academic  reviewer_emotional
-               ┌────┴────┐                     └───┬───┘
-            [重试]      [结束]              consensus_check
-               │                                   │
-          rewrite_query                       plan_output ─── interrupt (HIL)
-               │                               ┌───┴───┐
-          academic_router (循环)         [确认→END] [反馈→feedback_router]
-                                                        ├─ tweak → plan_tweak ─┐
-                                                        └─ rewrite → drafter   │
-                                                              plan_output ◄────┘
+```mermaid
+graph TD
+  START([用户输入]) --> supervisor[意图分类]
+
+  supervisor -->|academic| academic_router[学术路由]
+  supervisor -->|planning| search_policy[政策搜索]
+  supervisor -->|emotional| emotional_response[情绪支持]
+  supervisor -->|unknown| handle_unknown[未知意图]
+
+  %% Academic branch
+  academic_router --> rag_retrieve[RAG 检索]
+  academic_router --> web_search[网络搜索]
+  rag_retrieve --> generate_answer[回答生成]
+  web_search --> generate_answer
+  generate_answer --> evaluate_hallucination[幻觉评估]
+  evaluate_hallucination -->|通过| END_A([结束])
+  evaluate_hallucination -->|重试| rewrite_query[查询改写]
+  rewrite_query --> academic_router
+
+  %% Planning branch
+  search_policy --> gather_intel[情报收集]
+  gather_intel --> drafter[计划起草]
+  drafter --> reviewer_academic[学术审查]
+  drafter --> reviewer_emotional[情绪审查]
+  reviewer_academic --> consensus_check[共识检查]
+  reviewer_emotional --> consensus_check
+  consensus_check -->|通过| plan_output[计划输出 + HIL]
+  consensus_check -->|打回| adv_rewrite[计划修订]
+  adv_rewrite --> drafter
+
+  %% HIL feedback loop
+  plan_output -->|确认| END_P([结束])
+  plan_output -->|反馈| feedback_router[反馈分类]
+  feedback_router -->|微调| plan_tweak[计划微调]
+  feedback_router -->|重写| drafter
+  plan_tweak --> plan_output
+
+  %% Terminal nodes
+  emotional_response --> END_E([结束])
+  handle_unknown --> END_U([结束])
+
+  %% Styling
+  style plan_output fill:#FFF9E6,stroke:#E8A87C
+  style feedback_router fill:#E8F4FD,stroke:#4A90D9
+  style plan_tweak fill:#E8F4FD,stroke:#4A90D9
 ```
 
 横切关注点：所有节点上的 `@traced_node` → OpenTelemetry → Jaeger UI / SQLite
@@ -250,4 +278,4 @@ cd frontend && npm run build
 
 ## 许可证
 
-MIT
+[MIT](./LICENSE)
