@@ -115,14 +115,15 @@ async def _run_reviewer(
     """Shared logic for academic and emotional reviewers."""
     reviewer_temp = get_setting("planner.reviewer_temperature", 0.0)
     llm = get_node_llm("planner", temperature=reviewer_temp)
-    structured_primary = llm.with_structured_output(ReviewVerdict)
+    structured_primary = llm.with_structured_output(ReviewVerdict, method="json_mode")
 
     fallback_llm = get_fallback_llm(temperature=reviewer_temp)
-    structured_fallback = fallback_llm.with_structured_output(ReviewVerdict)
+    structured_fallback = fallback_llm.with_structured_output(ReviewVerdict, method="json_mode")
 
     review_prompt = (
         f"## 学习计划\n\n{state.get('draft', '')}\n\n"
-        f"## 学生情况\n\n{state.get('intel_summary', '')}"
+        f"## 学生情况\n\n{state.get('intel_summary', '')}\n\n"
+        f"请以 json 格式返回你的审查结论。"
     )
     messages = [
         SystemMessage(content=load_prompt(system_prompt_name)),
@@ -252,7 +253,7 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
     Also updates hil_summary: compresses old summary + new feedback into one string.
     """
     llm = get_node_llm("supervisor")
-    structured_llm = llm.with_structured_output(FeedbackClassification)
+    structured_llm = llm.with_structured_output(FeedbackClassification, method="json_mode")
 
     feedback = state.get("hil_feedback", "")
     draft = state.get("draft", "")
@@ -265,7 +266,8 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
         f"## 学生反馈\n{feedback}\n\n"
         f"判断这个反馈需要的修改程度：\n"
         f"- tweak: 只需要局部微调（如调整某天科目、修改时间、增删某个小项）\n"
-        f"- rewrite: 需要重新规划（如整体思路不对、完全不符合需求、需要换方向）"
+        f"- rewrite: 需要重新规划（如整体思路不对、完全不符合需求、需要换方向）\n\n"
+        f"请以 json 格式返回你的分类结果。"
     )
 
     try:

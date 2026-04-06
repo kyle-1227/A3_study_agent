@@ -1,10 +1,22 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
+import {
+  ReactFlow,
+  MiniMap,
+  Background,
+  Handle,
+  type Node as RFNode,
+  type Edge as RFEdge,
+  type NodeProps,
+  Position,
+} from "@xyflow/react"
+import "@xyflow/react/dist/style.css"
+import dagre from "@dagrejs/dagre"
 
 // ── Exported types consumed by page.tsx ────────────────────────────
 
@@ -47,6 +59,8 @@ const NODE_LABELS: Record<string, string> = {
   consensus_check: "共识检查",
   adv_rewrite: "计划修订",
   plan_output: "计划输出",
+  feedback_router: "反馈分类",
+  plan_tweak: "计划微调",
   emotional_response: "情绪支持",
   handle_unknown: "未知意图",
 }
@@ -142,7 +156,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                   )}
                 </div>
               ) : (
-                <div className="bg-[#F5F3E8] rounded-lg p-3">
+                <div className="bg-[#F5F3E8] rounded-lg" style={{ height: 420 }}>
                   <GraphDAGView nodeEvents={nodeEvents} />
                 </div>
               )}
@@ -207,44 +221,35 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
   )
 }
 
-// ── Graph DAG View ────────────────────────────────────────────────
-
-const DAG_W = 310
-const DAG_H = 370
-const N_W = 56
-const N_H = 26
-
-interface DagNodeDef {
-  id: string
-  cx: number
-  cy: number
-}
-
-const DAG_NODE_DEFS: DagNodeDef[] = [
-  { id: "supervisor",             cx: 155, cy: 20 },
-  { id: "academic_router",        cx: 50,  cy: 68 },
-  { id: "search_policy",          cx: 140, cy: 68 },
-  { id: "emotional_response",     cx: 222, cy: 68 },
-  { id: "handle_unknown",         cx: 280, cy: 68 },
-  { id: "rag_retrieve",           cx: 26,  cy: 118 },
-  { id: "web_search",             cx: 82,  cy: 118 },
-  { id: "gather_intel",           cx: 140, cy: 118 },
-  { id: "generate_answer",        cx: 50,  cy: 168 },
-  { id: "drafter",                cx: 140, cy: 168 },
-  { id: "evaluate_hallucination", cx: 50,  cy: 218 },
-  { id: "reviewer_academic",      cx: 112, cy: 218 },
-  { id: "reviewer_emotional",     cx: 170, cy: 218 },
-  { id: "rewrite_query",          cx: 50,  cy: 268 },
-  { id: "consensus_check",        cx: 140, cy: 268 },
-  { id: "adv_rewrite",            cx: 112, cy: 318 },
-  { id: "plan_output",            cx: 170, cy: 318 },
-]
+// ── Graph DAG View (React Flow + dagre auto-layout) ──────────────
 
 interface DagEdgeDef {
   from: string
   to: string
   retry?: boolean
 }
+
+const DAG_NODE_IDS = [
+  "supervisor",
+  "academic_router",
+  "search_policy",
+  "emotional_response",
+  "handle_unknown",
+  "rag_retrieve",
+  "web_search",
+  "gather_intel",
+  "generate_answer",
+  "drafter",
+  "evaluate_hallucination",
+  "reviewer_academic",
+  "reviewer_emotional",
+  "rewrite_query",
+  "consensus_check",
+  "adv_rewrite",
+  "plan_output",
+  "feedback_router",
+  "plan_tweak",
+]
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
   // Supervisor routing
@@ -270,206 +275,152 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "consensus_check", to: "adv_rewrite" },
   { from: "consensus_check", to: "plan_output" },
   { from: "adv_rewrite", to: "drafter", retry: true },
+  // Feedback loop
+  { from: "plan_output", to: "feedback_router" },
+  { from: "feedback_router", to: "plan_tweak" },
+  { from: "feedback_router", to: "drafter", retry: true },
+  { from: "plan_tweak", to: "plan_output" },
 ]
 
-const nodePos = (id: string) => DAG_NODE_DEFS.find((n) => n.id === id)!
+const NODE_WIDTH = 90
+const NODE_HEIGHT = 36
 
-function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
-  // Derive node states from the latest event per node
-  const nodeStates = new Map<
-    string,
-    { state: "idle" | "running" | "done"; durationMs?: number }
-  >()
-  for (const def of DAG_NODE_DEFS) {
-    let found: NodeEvent | undefined
-    for (let i = nodeEvents.length - 1; i >= 0; i--) {
-      if (nodeEvents[i].node === def.id) {
-        found = nodeEvents[i]
-        break
-      }
-    }
-    if (!found) nodeStates.set(def.id, { state: "idle" })
-    else if (found.status === "running") nodeStates.set(def.id, { state: "running" })
-    else nodeStates.set(def.id, { state: "done", durationMs: found.durationMs })
+function buildLayoutedElements(
+  nodeStates: Map<string, { state: "idle" | "running" | "done"; durationMs?: number }>,
+): { nodes: RFNode[]; edges: RFEdge[] } {
+  const g = new dagre.graphlib.Graph()
+  g.setDefaultEdgeLabel(() => ({}))
+  g.setGraph({ rankdir: "TB", nodesep: 30, ranksep: 40, marginx: 10, marginy: 10 })
+
+  for (const id of DAG_NODE_IDS) {
+    g.setNode(id, { width: NODE_WIDTH, height: NODE_HEIGHT })
+  }
+  for (const edge of DAG_EDGE_DEFS) {
+    g.setEdge(edge.from, edge.to)
   }
 
-  // Retry is active when academic_router appears more than once
-  const academicRetryActive = nodeEvents.filter((e) => e.node === "academic_router").length > 1
-  const advRetryActive = nodeEvents.filter((e) => e.node === "drafter").length > 1
+  dagre.layout(g)
 
-  const edgeLine = (from: DagNodeDef, to: DagNodeDef, active: boolean) => (
-    <line
-      x1={from.cx}
-      y1={from.cy + N_H / 2}
-      x2={to.cx}
-      y2={to.cy - N_H / 2}
-      stroke={active ? "#3D5A40" : "#7A9E7E"}
-      strokeWidth={active ? 1.5 : 1}
-      strokeDasharray={active ? "none" : "4 2"}
-      markerEnd={active ? "url(#dag-arrow-active)" : "url(#dag-arrow)"}
-      opacity={active ? 1 : 0.4}
-    />
+  const nodes: RFNode[] = DAG_NODE_IDS.map((id) => {
+    const pos = g.node(id)
+    const ns = nodeStates.get(id) ?? { state: "idle" as const }
+    return {
+      id,
+      type: "dagNode",
+      position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2 },
+      data: { label: NODE_LABELS[id] || id, state: ns.state, durationMs: ns.durationMs },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+    }
+  })
+
+  const edges: RFEdge[] = DAG_EDGE_DEFS.map((edge) => {
+    const targetState = nodeStates.get(edge.to)?.state
+    const active = targetState === "running" || targetState === "done"
+    return {
+      id: `${edge.from}-${edge.to}`,
+      source: edge.from,
+      target: edge.to,
+      type: "smoothstep",
+      style: {
+        stroke: edge.retry ? (active ? "#D97B6C" : "#7A9E7E") : (active ? "#3D5A40" : "#7A9E7E"),
+        strokeWidth: active ? 1.5 : 1,
+        strokeDasharray: edge.retry ? "5 3" : (active ? "none" : "4 2"),
+        opacity: active ? 1 : 0.4,
+      },
+      animated: edge.retry && active,
+      label: edge.retry ? "retry" : undefined,
+      labelStyle: edge.retry ? { fontSize: 8, fill: "#D97B6C" } : undefined,
+    }
+  })
+
+  return { nodes, edges }
+}
+
+function DagNodeComponent({ data }: NodeProps) {
+  const { label, state, durationMs } = data as {
+    label: string
+    state: "idle" | "running" | "done"
+    durationMs?: number
+  }
+  return (
+    <>
+      <Handle type="target" position={Position.Top} className="!w-1 !h-1 !min-w-0 !min-h-0 !bg-transparent !border-0" />
+      <div
+        className={cn(
+          "rounded border text-center flex flex-col items-center justify-center px-1",
+          "transition-all duration-300",
+          state === "idle" &&
+            "border-dashed border-[#7A9E7E]/50 bg-white/80 text-muted-foreground",
+          state === "running" &&
+            "border-[#E8A87C] bg-[#FFCC99] text-[#5C3D2E] font-semibold animate-pulse",
+          state === "done" &&
+            "border-[#3D5A40] bg-[#3D5A40]/10 text-[#3D5A40]"
+        )}
+        style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
+      >
+        <span className="text-[9px] leading-tight truncate w-full">{label}</span>
+        {state === "done" && durationMs != null && (
+          <span className="text-[7px] opacity-60 leading-none">{durationMs}ms</span>
+        )}
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!w-1 !h-1 !min-w-0 !min-h-0 !bg-transparent !border-0" />
+    </>
   )
+}
 
-  const endEdge = (x1: number, y1: number, x2: number, y2: number, active: boolean) => (
-    <line
-      x1={x1}
-      y1={y1}
-      x2={x2}
-      y2={y2}
-      stroke={active ? "#3D5A40" : "#7A9E7E"}
-      strokeWidth={1}
-      strokeDasharray={active ? "none" : "4 2"}
-      opacity={active ? 0.7 : 0.3}
-    />
+const rfNodeTypes = { dagNode: DagNodeComponent }
+
+function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
+  const nodeStates = useMemo(() => {
+    const states = new Map<string, { state: "idle" | "running" | "done"; durationMs?: number }>()
+    for (const id of DAG_NODE_IDS) {
+      let found: NodeEvent | undefined
+      for (let i = nodeEvents.length - 1; i >= 0; i--) {
+        if (nodeEvents[i].node === id) {
+          found = nodeEvents[i]
+          break
+        }
+      }
+      if (!found) states.set(id, { state: "idle" })
+      else if (found.status === "running") states.set(id, { state: "running" })
+      else states.set(id, { state: "done", durationMs: found.durationMs })
+    }
+    return states
+  }, [nodeEvents])
+
+  const { nodes, edges } = useMemo(
+    () => buildLayoutedElements(nodeStates),
+    [nodeStates],
   )
 
   return (
-    <div className="relative" style={{ width: DAG_W, height: DAG_H }}>
-      {/* SVG edge layer */}
-      <svg
-        className="absolute inset-0 pointer-events-none"
-        width={DAG_W}
-        height={DAG_H}
+    <div style={{ width: "100%", height: 420 }}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={rfNodeTypes}
+        fitView
+        fitViewOptions={{ padding: 0.15 }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        proOptions={{ hideAttribution: true }}
+        minZoom={0.3}
+        maxZoom={2}
       >
-        <defs>
-          <marker
-            id="dag-arrow"
-            viewBox="0 0 6 6"
-            refX="6"
-            refY="3"
-            markerWidth="5"
-            markerHeight="5"
-            orient="auto"
-          >
-            <path d="M0,0 L6,3 L0,6 Z" fill="#7A9E7E" />
-          </marker>
-          <marker
-            id="dag-arrow-active"
-            viewBox="0 0 6 6"
-            refX="6"
-            refY="3"
-            markerWidth="5"
-            markerHeight="5"
-            orient="auto"
-          >
-            <path d="M0,0 L6,3 L0,6 Z" fill="#3D5A40" />
-          </marker>
-        </defs>
-
-        {/* Normal edges */}
-        {DAG_EDGE_DEFS.filter((e) => !e.retry).map((edge) => {
-          const from = nodePos(edge.from)
-          const to = nodePos(edge.to)
-          const targetState = nodeStates.get(edge.to)?.state
-          const active = targetState === "running" || targetState === "done"
-          return (
-            <g key={`${edge.from}-${edge.to}`}>
-              {edgeLine(from, to, active)}
-            </g>
-          )
-        })}
-
-        {/* Academic retry — rewrite_query back to academic_router */}
-        <path
-          d={`M ${50 - N_W / 2} ${268} C 0 200, 0 136, ${50 - N_W / 2} ${68}`}
-          fill="none"
-          stroke={academicRetryActive ? "#D97B6C" : "#7A9E7E"}
-          strokeWidth={academicRetryActive ? 1.5 : 1}
-          strokeDasharray="4 2"
-          markerEnd="url(#dag-arrow)"
-          opacity={academicRetryActive ? 0.8 : 0.3}
+        <MiniMap
+          nodeStrokeWidth={1}
+          nodeColor={(n) => {
+            const s = (n.data as any)?.state
+            if (s === "running") return "#FFCC99"
+            if (s === "done") return "#3D5A40"
+            return "#E8E5D8"
+          }}
+          style={{ height: 60, width: 80 }}
         />
-
-        {/* Adversarial retry — adv_rewrite back to drafter */}
-        <path
-          d={`M ${112 - N_W / 2} ${318} C 72 270, 72 218, ${140 - N_W / 2} ${168}`}
-          fill="none"
-          stroke={advRetryActive ? "#D97B6C" : "#7A9E7E"}
-          strokeWidth={advRetryActive ? 1.5 : 1}
-          strokeDasharray="4 2"
-          markerEnd="url(#dag-arrow)"
-          opacity={advRetryActive ? 0.8 : 0.3}
-        />
-
-        {/* END edges */}
-        {endEdge(222, 68 + N_H / 2, 222, 104, nodeStates.get("emotional_response")?.state === "done")}
-        {endEdge(280, 68 + N_H / 2, 280, 104, nodeStates.get("handle_unknown")?.state === "done")}
-        {endEdge(50 + N_W / 2, 218, 86, 248, nodeStates.get("evaluate_hallucination")?.state === "done")}
-        {endEdge(170, 318 + N_H / 2, 170, 352, nodeStates.get("plan_output")?.state === "done")}
-      </svg>
-
-      {/* Node layer */}
-      {DAG_NODE_DEFS.map((def) => {
-        const { state, durationMs } = nodeStates.get(def.id)!
-        const label = NODE_LABELS[def.id] || def.id
-        return (
-          <div
-            key={def.id}
-            className={cn(
-              "absolute rounded border text-center flex flex-col items-center justify-center",
-              "transition-all duration-300",
-              state === "idle" &&
-                "border-dashed border-[#7A9E7E]/50 bg-white/50 text-muted-foreground",
-              state === "running" &&
-                "border-[#E8A87C] bg-[#FFCC99] text-[#5C3D2E] font-semibold animate-pulse",
-              state === "done" &&
-                "border-[#3D5A40] bg-[#3D5A40]/10 text-[#3D5A40]"
-            )}
-            style={{
-              left: def.cx - N_W / 2,
-              top: def.cy - N_H / 2,
-              width: N_W,
-              height: N_H,
-            }}
-          >
-            <span className="text-[8px] leading-tight">{label}</span>
-            {state === "done" && durationMs != null && (
-              <span className="text-[7px] opacity-60 leading-none">{durationMs}ms</span>
-            )}
-          </div>
-        )
-      })}
-
-      {/* END markers */}
-      <span
-        className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 214, top: 106 }}
-      >
-        END
-      </span>
-      <span
-        className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 272, top: 106 }}
-      >
-        END
-      </span>
-      <span
-        className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 78, top: 252 }}
-      >
-        END
-      </span>
-      <span
-        className="absolute text-[8px] font-bold text-[#7A9E7E]/60"
-        style={{ left: 162, top: 354 }}
-      >
-        END
-      </span>
-
-      {/* Retry labels */}
-      <span
-        className="absolute text-[7px] italic text-[#D97B6C]/60"
-        style={{ left: 0, top: 168 }}
-      >
-        retry
-      </span>
-      <span
-        className="absolute text-[7px] italic text-[#D97B6C]/60"
-        style={{ left: 60, top: 243 }}
-      >
-        retry
-      </span>
+        <Background gap={16} size={0.5} color="#7A9E7E" />
+      </ReactFlow>
     </div>
   )
 }

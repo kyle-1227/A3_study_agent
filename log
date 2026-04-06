@@ -1,0 +1,203 @@
+(gaokao_tutor) PS D:\Study\wjj_projects\other_projects\gaokao_tutor> python app.py
+D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\jieba\_compat.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+INFO:     Will watch for changes in these directories: ['D:\\Study\\wjj_projects\\other_projects\\gaokao_tutor']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [30896] using WatchFiles
+D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\jieba\_compat.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+INFO:     Started server process [13768]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:3446 - "OPTIONS /stream HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3446 - "POST /stream HTTP/1.1" 200 OK
+D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\pydantic\main.py:464: UserWarning: Pydantic serializer warnings:
+  PydanticSerializationUnexpectedValue(Expected `none` - serialized value may not be as expected [field_name='parsed', input_value=SupervisorOutput(intent='...划'], confidence=0.9), input_type=SupervisorOutput])
+  return self.__pydantic_serializer__.to_python(
+Web search failed in gather_intel
+Traceback (most recent call last):
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_community\utilities\duckduckgo_search.py", line 49, in validate_environment
+    from ddgs import DDGS  # noqa: F401
+    ^^^^^^^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'ddgs'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\graph\planner.py", line 127, in _web
+    results = await asyncio.wait_for(
+              ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\asyncio\tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\tools\search_tool.py", line 40, in search
+    tool = get_search_tool()
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\tools\search_tool.py", line 19, in get_search_tool
+    _search_tool = DuckDuckGoSearchResults(
+        max_results=3,
+        output_format="list",
+    )
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\tools\base.py", line 551, in __init__
+    super().__init__(**kwargs)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\load\serializable.py", line 118, in __init__
+    super().__init__(*args, **kwargs)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_community\utilities\duckduckgo_search.py", line 51, in validate_environment
+    raise ImportError(
+    ...<2 lines>...
+    )
+ImportError: Could not import ddgs python package. Please install it with `pip install -U ddgs`.
+D:\Study\wjj_projects\other_projects\gaokao_tutor\src\rag\indexer.py:124: LangChainDeprecationWarning: The class `Chroma` was deprecated in LangChain 0.2.9 and will be removed in 1.0. An updated version of the class exists in the `langchain-chroma package and should be used instead. To use it run `pip install -U `langchain-chroma` and import as `from `langchain_chroma import Chroma``.
+  return Chroma(
+D:\Study\wjj_projects\other_projects\gaokao_tutor\src\rag\retriever.py:209: UserWarning: Relevance scores must be between 0 and 1, got [(Document(metadata={'subject': 'chinese', 'doc_type': 'exam', 'year': '2025', 'source_file': '2025年高考语文试卷（全国Ⅱ卷）.txt'}, page_content='一个是卖火纸筒子的。这人姓王，名太，他祖代是三牌楼卖菜的，到他父亲手里穷了，把菜园都卖掉了。他自小儿最喜下围棋 ，后来父亲死了，他无以为生，每日到虎踞关一带卖火纸筒过活。\n那一日，妙意庵做会。那庵临着乌龙潭，正是初夏的天气，一潭簇新的荷叶，亭亭浮在水上。这庵里曲曲折折，也有许多亭榭，那些游人都进来顽耍。王太走将进来，各处转了一会，走到柳阴树下，一个石台，两边四条石凳，三四个大老官簇拥着两个人在那里下棋。一个穿宝蓝的道：“我们这位马先生前日在扬州盐台那里，下的是一百一十两的彩，他前后共赢了二千多银子。”【写妙意庵之清新景色，正为烘托大老官之庸俗谈吐。】一个穿玉色的少年道：“我们这马先生是天下的大国手，只有这卞先生受两子还可以敌得来。只是我们要学到卞先生的地步，也就着实费力了。”王太就挨着身子上前去偷看。小厮们看见他穿的褴褛，推推搡搡，不许他上前。底下坐的主人道：“你这样一个人，也晓得看棋？”王太道：“我也略晓得些。”撑着看了一会，嘻嘻的笑。\n那姓马的道：“你这人会笑，难道下得过我们？”王太道：“ 也勉强将就。”主人道：“你是何等之人，好同马先生下棋！”姓卞的道：“他既大胆，就叫他出个丑何妨！才晓得我们老爷们下棋，【姓卞的所说“我们老爷们”即姓马的所说“我们”。“我们”虽含蓄，却已将两种身份划清；只因王太不买账，姓卞的方说清“我们老爷们”。】不是他插得嘴的！”王太也不推辞，摆起子来，就请那姓马的动着。旁边人都觉得好笑。那姓马的同他下了几着，觉得他出手不同。下了半盘，站起身来道：“我这棋输了半子了。”那些人都不晓得。姓卞的道：“论这局面，却是马先生略负了些。”众人大惊，就要拉着王太吃酒。王太大笑道：“天下那里还有个快活似杀矢棋的事！我杀过矢棋，心里快活极了，那里还吃的下酒！”说毕，哈哈大笑，头也 不回，就去了。'), 0.4162713321864845), (Document(metadata={'doc_type': 'exam', 'year': '2024', 'source_file': '2024年高考语文试卷（新课标Ⅱ卷）.txt', 'subject': 'chinese'}, page_content='一个声音从遥远的太空传来，那是阿姆斯特朗从月球发出的声音：“这里是静海基地，‘鹰’着陆成功。”他异常平静，地球上的人们却爆发出欢呼的声音。随后，阿姆斯特朗和奥尔德林沿着舷梯爬下登月舱。\n陌生、寂静、壮丽的月球从此有了生命。\n \n（摘编自布莱恩·弗洛卡《登月》，袁玮译）\n材料二：\n今年6月，联合国外层空间事务办公室举行会议，中国科学家介绍了“嫦娥四号”探月任务，表示将于2018年底前将中继卫星发射至月球背面上空一 个引力稳定的位置，即地-月L2点，这颗中继卫星将执行为期三年的任务。新华社的报道没有透露“嫦娥四号”发射的具体时间，只是说将在2020年之前发射。自1976年苏联的“月球24号”抵达月球之后，中国的“嫦娥三号”首次 于2013年在月球实现软着陆。它搭载的“玉兔一号”月球车共有6个轮子，在任务结束前共行驶了约114米。中国科学家在《科学》杂志上发表的研究结果显示，“玉兔一号”的探地雷达探测到其着陆点下方有9个明显不同的地下 层，表明该地区有着复杂的地质史，这与“阿波罗号”宇航员探索地区的情况有所不同。根据今年6月在联合国会议上发布的信息，“嫦娥四号”任务的主要工程目标包括进行月球背面着陆和深空数据中继。中国方面已邀请国际 社会围绕“嫦娥四号”探月任务建立合作关系。\n（摘译自斯蒂芬·克拉克《中国计划在2020年前登上月球背面》，2015年9月22日，英国“当今天文学”网）\n材料三：\n从古至今，人类举头望月，传颂动人神话，谱写优美诗篇，却很少有人意识到，亿万年来，月亮的“图案”从未变化。月球绕地球一圈的公转周期完全等于月球自转周期，所以人们只能看到它固定朝向地球的一面，我们把月球背向地球的一面称为“月背”。2019年1月11日，在北京航 天飞行控制中心大厅里，科技人员见证了“嫦娥四号”和“玉兔二号”顺利完成“两器互拍”，这标志着“嫦娥四号”任务取得圆满成功，我国成为世界上首个成功实施在月球背面软着陆并巡视探测的国家。人类开启了探索月球背面的新纪元！'), 0.3813812016116507), (Document(metadata={'subject': 'chinese', 'year': '2024', 'source_file': '2024年高考语文试卷（新课标Ⅰ卷）.txt', 'doc_type': 'exam'}, page_content='那头小母牛还小，吃奶的时候还要哼哼唧唧地叫，长得憨厚天真，我很喜欢。主人是个中年男人，说：回去调教半年，就能干活。他给小牛结了一个简单的辔头，缰绳递给我们，我们就把牛牵出了门。\n小牛屁颠屁颠地跟着我们走，出了村才感觉不对，开始茫然地叫，表情如同迷途的小孩。一路仄着身子走，拧巴着被牵到我家。这一路走得我兴奋又纠结，想牵不敢，摸它一下，摸完了赶紧撤，怕它踢。当然后来我知道，再没有比水牛更温驯的动物了。\n我经历了把一头小牛训练成壮劳力的全过程。换辔头，套车，驾辕，用声音和缰绳指挥行止，扎鼻眼，犁地，耙地。几年以后，我基本上成了老把式，可以一个人铡草、套车、驾辕，运送满满一车的粮食走在窄路上。我知道它回头看我是什么意思，知道它抬尾巴摇屁股想干什么。当然，这对我来说是副产品，我想说的还是放牛。\n在当时，放牛部分地满足了我的少年英雄梦，让一个必须规整地生活的少年有了一个旁逸斜出的机会。就算现在，我也不认为整天和一头牛走在野地里是件苦叽叽的事，相反，我以为那是我少年时代最快乐的生活之一。\n放牛都在夏天，放了暑假我才有时间。三伏天的午后太阳高悬，蚂蚁都被晒蒙了，晕晕乎乎爬出的全是曲线；如果要去远处找水草丰茂的地方，那我就得早早地从午睡中爬起来，戴上草帽出门。我直犯困，遇到树荫就不想再动，尤其经过河边，看那些戏水的同伴，你真觉得放牛实在是个负担。让人烦的还有一个，大雨天。这不是放牛的好时候，但牛出不去你得出去，割草，干不干活你都得让它每天吃饱；家里自也备了干草，只是大夏天的芳草萋萋，你不让它吃新鲜的，不人道也不牛道。还是得穿雨衣戴斗笠挎篮子割草去。漫天雨雾，汤汤水水的野地里就你一个人，蹲在草丛里形同消失，像我这种动不动就悲观的人，常常会觉得自己被这个世界遗弃了，那感觉也不太好。'), 0.3733318278956461), (Document(metadata={'subject': 'chinese', 'doc_type': 'exam', 'source_file': '2025年高考语文试卷（全国Ⅱ卷）.txt', 'year': '2025'}, page_content='一个是做裁缝的。这人姓荆，名元，五十多岁，在三山街开着一个裁缝铺。每日替人家做了生活，余下来工夫就弹琴写字，也极喜欢做诗。朋友们和他相与的问他道：“你既要做雅人，为甚么还要做你这贵行？何不同些学校里人相与相与？”他道：“我也不是要做雅人，也只为性情相近，故此时常学学。至于我们这个贱行，是祖、父遗留下来的，难道读书识字，做 了裁缝就玷污了不成？况且那些学校中的朋友，他们另有一番见识，怎肯和我们相与？而今每日寻得六七分银子，吃饱了饭，要弹琴，要写字，诸事都由得我；又不贪图人的富贵，又不伺候人的颜色，天不收，地不管，倒不快活？”朋友们听了他这一番话，也就不和他亲热。\n一日，荆元吃过了饭，思量没事，一径踱到清凉山来。这清凉山是城西极幽静的所在。他有一个老朋友，姓于，住在山背后。那于老者也不读书，也不做生意，养了五个 儿子，最长的四十多岁，小儿子也有二十多岁。老者督率着他五个儿子灌园。那园却有二三百亩大，中间空隙之地，种了许多花卉，堆着几块石头。老者就在那旁边盖了几间茅草房，手植的几树梧桐，长到三四十围大。老者看看儿子灌了园，也就到茅斋生起火来，煨好了茶，吃着，看那园中的新绿。这日，荆元步了进来，于老者迎着道：“好些时不见老哥来，生意忙的紧？”荆元道：“正是。今日才打发清楚些，特来看看老爹。”于老者道：“恰 好烹了一壶现成茶，请用杯。”斟了送过来。荆元接了，坐着吃，道：“这茶，色、香、味都好，老爹却是那里取来的这样好水？”于老者道：“我们城西不比你城南，到处井泉都是吃得的。”荆元道：“古人动说桃源避世，我想起来，那里要甚么桃源！只如老爹这样清闲自在，住在这样城市山林的所在，就是现在的活神仙了！”于老者道：“只是我老拙一样事也不会做，怎的如老哥会弹一曲琴，也觉得消遣些。近来想是一发弹的好了，可好几时请教一回？”荆元道：“这也容易。老爹不厌污耳，明日我把琴来请教。”说了一会，辞别回来。\n次日，荆元自己抱了琴，来到园里，于老者已焚下一炉好香，在那里等候。彼此见了，又说了几句话。于老者替荆元把琴安放在石 凳上。荆元席地坐下，于老者也坐在旁边。荆元慢慢的和了弦，弹起来，铿铿锵锵，声振林木，那些鸟雀闻之，都栖息枝间窃听。弹了一会，忽作变徵之音，凄清宛转。于老者听到深微之处，不觉凄然泪下。自此，他两人常常往来。当下也就别过了。'), 0.024739121372104655), (Document(metadata={'doc_type': 'exam', 'subject': 'chinese', 'source_file': '2025年高考语文试卷（全国Ⅰ卷）.txt', 'year': '2025'}, page_content='2025年普通高等学校招生全国统一考试\n语文试题\n本试卷共9页，共150分。考试时长150分钟。\n注意事项：\n1．答题前，考生务必将自己的姓名、准考证号填写在答题卡上。\n2．回答选择题时，选出每小题答案后，用 铅笔把答题卡上对应题目的答案标号涂黑。如需改动，用橡皮擦干净后，再选涂其他答案标号。回答非选择题时，将案写在答题卡上。写在本试卷上无效。\n3．考试结束后，监考员将试卷、答题卡一并交回。'), 0.02245240195929754), (Document(metadata={'subject': 'chinese', 'source_file': '2025年高考语文试卷（全国Ⅱ卷）.txt', 'year': '2025', 'doc_type': 'exam'}, page_content='18. 将下列语句填入文中括号内，最恰当的一项是（   ）\nA. 语言是社会的产物\tB. 语言是交流的工具\nC. 语言是传情达意的\tD. 语言是不断演变的\n19. 下列选项中加点的词语感情色彩都发生了变化，其中与文中“势利眼”的变化不同的一项是（   ）\nA. 要 把这个雄心壮志牢固地树立起来，扭着不放，“顽固”一点，毫不动摇。\nB. 鲁迅毫不惮于他的战斗文字为当时的“正人君子”之流所深恶痛疾。\nC. 教育工作者和家长要积极引导孩子们“异想天开”，大胆创新。\nD. 我们在 工作中就是要“斤斤计较”，千方百计地保障群众的利益。\n20. 请在文中横线处填入恰当的关联词语。\n21. 文中有多处错别字，请找出两处含错别字的词语并改正。\n22. 有些成语在使用过程中，意义会发生变化。比如“ 空穴来风”，原本比喻消息和传说不是完全没有原因的，现在多用来指消息和传说毫无根据。请根据文中语言学家的观点对这种现象加以解释，并再举出一个类似的成语，说明其意义的变化。\n三、写作（60分）\n23. 阅读 下面的材料，根据要求写作。\n“昨夜闲潭梦落花”“我欲因之梦吴越”“铁马冰河入梦来”……梦往往以一种独特的方式呈现我们的感受和期冀，为我们打开更浩瀚的天空。我们也常常向别人讲述自己的梦，用文字记录自己的梦，以行动实现自己的梦。\n如果有一天，我们能够将梦赠予他人……\n以上材料引发了你怎样的联想和思考？请写一篇文章。\n要求：选准角度，确定立意，明确文体，自拟标题；不要套作，不得抄袭；不得泄露个人信息；不少于800字'), -0.04706393562499489), (Document(metadata={'source_file': '2024年高考语文试卷（新课标Ⅱ卷）.txt', 'doc_type': 'exam', 'year': '2024', 'subject': 'chinese'}, page_content='20. 文中画波浪 线的句子有语病。请进行修改，使语言表达准确流畅，逻辑严密，可少量增删词语，不得改变原意。\n21. 请在文中横线处补写恰当的语句，使整段文字语意完整连贯，内容贴切，逻辑严密，每处不超过10个字。\n22. 下列句子中的“相信”与文中加点的“相信”，意义和用法相同的一项是（   ）\nA. 身处困境他却并不消沉，相信自己能拼出一个光明的未来。\nB. 我满心欢喜地迎接他回来，相信现在的他一定和从前不同。\nC. 看到气势磅礴的壶口瀑布，相信每一位游客都会激动不已。\nD. 翠翠还是不离开码头，相信祖父会来找她，同她一起回家。\n四、写作（60分）\n23. 阅读下面的材料，根据要求写作。\n本试卷现代文阅读I提到，长久以来，人们只能看到月球固定朝向地球的一面，“嫦娥四号”探月任务揭开了月背的神秘面纱；随着“天问一号”飞离地球，航天人的目光又投向遥远的深空……\n正如人类的太空之旅，我们每个人也都在不断抵达未知之境。\n这引发了你怎样的联想与思考？请写一篇文章。\n要求：选准角度，确定立意，明确文体，自拟标题；不要套作，不得抄袭；不得泄露个人信息；不少于800字。'), -0.06067450170831501), (Document(metadata={'subject': 'chinese', 'year': '2024', 'source_file': '2024年高考语文试卷（新课标Ⅰ卷）.txt', 'doc_type': 'exam'}, page_content='B. 作为一个曾经的“老把式”，“我”却认为驭牛的诸般本领都只是“副产品”，只有放牛那种“旁逸斜出”的生活才是“我”最想谈论的。\nC. 大雨天里为牛割草的情形，让“我”意识到自己是一个“悲观”之人，可见放牛生活对“我”思想意识的养成有着至关重要的意义。\nD. 文中记述“我”在乱坟岗子里看武侠小说，是有意以环境的阴森怪异来映衬看武侠的乐趣，也凸显出“尘嚣皆忘”的读书境界。\n7. 关于文中锯木厂这个段落，下列说法不正确的一项是（   ）\nA. 买牛让“我”格外激动，因此买牛那天的相关情景在“我”的记忆里依然生动鲜活。\nB. 两里外邻村路边的锯木厂，对那时的“我”来说，俨然一个陌生而刺激的新天地。\nC. 这个段落看似闲笔，实则以先抑后扬的手法来突出下文“我”的“兴奋又纠结”。\nD. 这段文字里弥漫着热、声、光影、气味，营造出记忆中少年旧事那独特的气息。\n8. 文章为何说“放牛给了我一个几近完美的少年时代”？\n9. 文末画线的句子表明，作者不愿在回忆往事时为放牛“赋予意义”。你认为本文是否做到了这一点？请简要说明。\n二、古代诗文阅读（35分）\n（一）文言文阅读（本题共5小题，22分）\n阅读下面的文言文，完成下面小题。\n材料一：'), -0.06540152364990282), (Document(metadata={'doc_type': 'exam', 'source_file': '2024年高考语文试卷（新课标Ⅱ卷）.txt', 'year': '2024', 'subject': 'chinese'}, page_content='C. 端午节的前一天，叶桃把陈千里买的橘红糕扔到一边，半天不理他，反映出她斗争经验不足，关键时刻不能很好地控制情绪。\nD. “现在她可以说了”而“从前没有告诉他”，表明叶桃与恋人相处时也严格遵守地下工作的保密纪律。\n7. 下列对文本艺术特色的分析鉴赏，不正确的一项是（   ）\nA. 写叶桃和陈千里在梅花山背诵诗句，既表现出两人的精神风采，也点出时代氛围。\nB. 选择壮汉、狼狗、枪支、秘密文件、警示牌、惨叫等来写瞻园，凸显其阴森残酷。\nC. 描写机要室另两个女人微笑以及门房笑的细节，用以反衬一种紧张诡异的气氛。\nD. 文本记叙叶桃和陈千里在上海与南京的 经历，将个人爱情与革命斗争交融在一起。\n8. 文中画线处说“在他们两个人当中，叶桃总是先离去的那一个”，又说“她从来没有真正离开过他”，请谈谈你的理解。\n9. 文本中频频出现“一年以后”“现在想来”“他知道这情 况时”之类标示时间线索的语句，产生了怎样的叙述效果？请简要分析。\n二、古代诗文阅读（35分）\n（一）文言文阅读（本题共5小题，20分）\n阅读下面的文言文，完成下面小题。\n材料一：\n文侯受子夏经艺，客段干木①，过其闾，未尝不轼也。秦尝欲伐魏，或曰：“魏君贤人是礼国人称仁上下和合未可图也。”文侯由此得誉于诸侯。\n（节选自《史记·魏世家》）\n材料二：\n上欲废太子，立戚夫人子赵王如意。吕后恐，乃使建成侯吕泽劫留侯，强要曰：“为我画计。”留侯曰：“顾上有不能致者，天下有四人。今公诚能无爱金玉璧帛，令太子为书，卑辞安车，因使辩士固请，宜来。上知此四人贤，则一助也。”汉十二年，上从击破布军归，疾益甚，愈欲易太子。及燕，置酒，太子侍。四人从太子，年皆八十有余，须眉皓白，衣冠甚伟。上怪之，问曰：“彼何为者？”四人前对，各言名姓。上乃大惊，曰：“吾求公数岁，公辟逃我，今公何自从吾儿游乎？”四人皆曰：“陛下轻士善 骂，臣等义不受辱，故恐而亡匿。窃闻太子为人仁孝，恭敬爱士，天下莫不延颈欲为太子死者，故臣等来耳。”上曰：“烦公幸卒调护太子。”四人为寿已毕，趋去。上起去，罢酒。竟不易太子者，留侯本招此四人之力也。\n （节选自《史记·留侯世家》）\n材料三：'), -0.06781156474145278), (Document(metadata={'subject': 'chinese', 'source_file': '2025年高考语文试卷（全国Ⅰ卷）.txt', 'doc_type': 'exam', 'year': '2025'}, page_content='D. 写船拢岸时，方宝庆赶着孩子们“扑通扑通地跳进水里”洗澡，一定程度上舒缓了前文营造的沉重压抑的氛围。\n8. 文本一画线段落写江轮穿过巫峡，意蕴丰富，请简要分析。\n9. 文本二提出：“有了操作 的经验与热情，而后才能认识时代一部分的真情真意。”请谈谈文本一的创作是如何体现作者这一认知的。\n（三）阅读Ⅲ（本题共5小题，22分）\n阅读下面的文言文，完成下面小题。\n材料一：\n郑伯如晋，子大叔相，见 范献子[注]。献子曰：“若王室何？”对曰：“老夫其国家不能恤，敢及王室？抑人亦有言曰：‘嫠不恤其纬，而忧宗周之陨，为将及焉。’今王室实蠢蠢焉，吾小国惧矣，然大国之忧也，吾侪何知焉？吾子其早图之。”\n（节选自《左传·昭公二十四年》）\n材料二：\n漆室女者，鲁漆室邑之女也。当穆公时，君老，太子幼。女倚柱而啸，旁人闻之，莫不为之惨者。其邻人妇从之游，谓曰：“何啸之悲也？”漆室女曰：“吾忧鲁君老，太子幼。”邻妇 笑曰：“此乃鲁大夫之忧，妇人何与焉！”漆室女曰：“不然，非子所知也。昔晋客舍吾家，系马园中。马佚驰走，践吾葵，使我终岁不食葵。邻人女奔，随人亡，其家倩吾兄行追之。逢霖水出，溺流而死，令吾终身无兄。今 鲁君老悖，太子少愚，愚伪日起。夫鲁国有患者君臣父子皆被其辱祸及众庶妇人独安所避乎！吾甚忧之。”\n（节选自刘向《列女传》卷三）\n材料三：\n鲁监门之女婴相从绩，中夜而泣涕，其偶曰：“何谓而泣也？”婴曰：“吾闻卫世子不肖，所以泣也。”其偶曰：“卫世子不肖，诸侯之忧也，子曷为泣也？”婴曰：“吾闻之异乎子之言也。昔者宋之桓司马得罪于宋君，出于鲁，其马佚而 吾园，而食吾园之葵。是岁，吾闻园人亡利之半。越王勾践 起兵而攻吴，诸侯畏其威，鲁往献女，吾姊与焉，兄往视之，道畏而死。越兵威者，吴也；兄死者，我也。今卫世子甚不肖，好兵，吾男弟三人，能无忧乎？”\n（节选自韩婴《韩诗外传》卷二）\n材料四：'), -0.07511064026026637)]
+  results = vectorstore.similarity_search_with_relevance_scores(
+Building prefix dict from the default dictionary ...
+Loading model from cache C:\Users\WJJ\AppData\Local\Temp\jieba.cache
+Loading model cost 0.682 seconds.
+Prefix dict has been built successfully.
+Reviewer reviewer_emotional failed, defaulting to approve
+Traceback (most recent call last):
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\graph\plan_adversarial.py", line 138, in _run_reviewer
+    verdict = await async_invoke_with_fallback(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\graph\llm.py", line 165, in async_invoke_with_fallback
+    response = await primary.ainvoke(messages)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\runnables\base.py", line 3197, in ainvoke
+    input_ = await coro_with_context(part(), context, create_task=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\runnables\base.py", line 5708, in ainvoke
+    return await self.bound.ainvoke(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 425, in ainvoke
+    llm_result = await self.agenerate_prompt(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1134, in agenerate_prompt
+    return await self.agenerate(
+           ^^^^^^^^^^^^^^^^^^^^^
+        prompt_messages, stop=stop, callbacks=callbacks, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1092, in agenerate
+    raise exceptions[0]
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1318, in _agenerate_with_cache
+    async for chunk in self._astream(messages, stop=stop, **kwargs):
+    ...<21 lines>...
+        yielded = True
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 3194, in _astream
+    async for chunk in super()._astream(*args, **kwargs):
+        yield chunk
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 1696, in _astream
+    _handle_openai_bad_request(e)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 1673, in _astream
+    async with context_manager as response:
+               ^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\lib\streaming\chat\_completions.py", line 272, in __aenter__
+    raw_stream = await self.__api_request
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\resources\chat\completions\completions.py", line 2714, in create
+    return await self._post(
+           ^^^^^^^^^^^^^^^^^
+    ...<49 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\_base_client.py", line 1884, in post
+    return await self.request(cast_to, opts, stream=stream, stream_cls=stream_cls)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\_base_client.py", line 1669, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.BadRequestError: Error code: 400 - {'error': {'message': "Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'.", 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_request_error'}}
+Reviewer reviewer_academic failed, defaulting to approve
+Traceback (most recent call last):
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\graph\plan_adversarial.py", line 138, in _run_reviewer
+    verdict = await async_invoke_with_fallback(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "D:\Study\wjj_projects\other_projects\gaokao_tutor\src\graph\llm.py", line 165, in async_invoke_with_fallback
+    response = await primary.ainvoke(messages)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\runnables\base.py", line 3197, in ainvoke
+    input_ = await coro_with_context(part(), context, create_task=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\runnables\base.py", line 5708, in ainvoke
+    return await self.bound.ainvoke(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 425, in ainvoke
+    llm_result = await self.agenerate_prompt(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1134, in agenerate_prompt
+    return await self.agenerate(
+           ^^^^^^^^^^^^^^^^^^^^^
+        prompt_messages, stop=stop, callbacks=callbacks, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1092, in agenerate
+    raise exceptions[0]
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1318, in _agenerate_with_cache
+    async for chunk in self._astream(messages, stop=stop, **kwargs):
+    ...<21 lines>...
+        yielded = True
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 3194, in _astream
+    async for chunk in super()._astream(*args, **kwargs):
+        yield chunk
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 1696, in _astream
+    _handle_openai_bad_request(e)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\langchain_openai\chat_models\base.py", line 1673, in _astream
+    async with context_manager as response:
+               ^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\lib\streaming\chat\_completions.py", line 272, in __aenter__
+    raw_stream = await self.__api_request
+                 ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\resources\chat\completions\completions.py", line 2714, in create
+    return await self._post(
+           ^^^^^^^^^^^^^^^^^
+    ...<49 lines>...
+    )
+    ^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\_base_client.py", line 1884, in post
+    return await self.request(cast_to, opts, stream=stream, stream_cls=stream_cls)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\gaokao_tutor\Lib\site-packages\openai\_base_client.py", line 1669, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.BadRequestError: Error code: 400 - {'error': {'message': "Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'.", 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_request_error'}}
+INFO:     127.0.0.1:4305 - "OPTIONS /resume HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4305 - "POST /resume HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [13768]
+INFO:     Stopping reloader process [30896]

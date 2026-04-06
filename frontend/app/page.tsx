@@ -337,6 +337,60 @@ export default function Home() {
     }
   }, [fetchWithErrorHandling, consumeSSEStream])
 
+  const handleFeedback = useCallback(async (feedback: string) => {
+    const threadId = threadIdRef.current
+    if (!threadId) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: "[ERROR] No thread_id — cannot send feedback", ts: timestamp() },
+      ])
+      return
+    }
+
+    setIsResuming(true)
+    setLogs((prev) => [
+      ...prev,
+      { type: "info", message: `[INFO] Sending feedback: ${feedback.slice(0, 40)}...`, ts: timestamp() },
+    ])
+
+    try {
+      const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ thread_id: threadId, feedback }),
+      })
+
+      if (!body) return
+
+      // Hide PlanReview while system processes feedback
+      setIsInterrupted(false)
+      setInterruptDraft("")
+
+      // Create new assistant message placeholder for the revised plan streaming
+      const newAsstId = (Date.now() + 1).toString()
+      assistantMessageIdRef.current = newAsstId
+      setMessages((prev) => [
+        ...prev,
+        { id: newAsstId, role: "assistant", content: "" },
+      ])
+
+      await consumeSSEStream(body)
+
+      setLogs((prev) => [
+        ...prev,
+        { type: "info", message: "[INFO] Feedback revision complete.", ts: timestamp() },
+      ])
+    } catch (error: any) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: `[ERROR] Feedback failed: ${error.message}`, ts: timestamp() },
+      ])
+    } finally {
+      setIsResuming(false)
+      setIsLoading(false)
+    }
+  }, [fetchWithErrorHandling, consumeSSEStream])
+
   return (
     <div className="flex h-screen overflow-hidden">
       <LeftSidebar
@@ -355,6 +409,7 @@ export default function Home() {
           <PlanReview
             draft={interruptDraft}
             onConfirm={handleResume}
+            onFeedback={handleFeedback}
             isSubmitting={isResuming}
           />
         )}
