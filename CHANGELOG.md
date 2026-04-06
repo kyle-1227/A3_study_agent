@@ -5,6 +5,65 @@
 
 ---
 
+## [0.3.0] — 2026-04-06
+
+### 新增
+
+**对抗式计划生成 (AC-01)**
+- 学习计划子图扁平化为父图，6 个新节点：`drafter`、`reviewer_academic`、`reviewer_emotional`、`consensus_check`、`adv_rewrite`、`plan_output`
+- 两个独立审查员（学术质量 + 情绪关怀）并行评审，全票通过才放行
+- 安全阀：超过 `adversarial_max_rounds`（默认 3）强制输出
+
+**人工介入计划审批 (HIL)**
+- `plan_output_node` 调用 LangGraph `interrupt()` 暂停执行，将草稿推送前端
+- 新增 `/resume` 端点：接收用户确认或反馈，通过 `Command(resume=...)` 恢复图执行
+- PostgreSQL Checkpointer 保证中断/恢复期间状态持久化
+
+**反馈路由器**
+- `feedback_router` 节点：Qwen2.5-7B 快速分类用户反馈为"微调"或"重写"
+- `plan_tweak` 节点：单次 LLM 调用局部修改草稿（跳过审查循环）
+- 重写路径：清空对抗状态，从头执行完整起草/审查循环
+- `hil_summary`：单字段压缩摘要，每轮覆写防止上下文膨胀
+- `TutorState` 新增 4 个字段：`hil_action`、`hil_feedback`、`hil_summary`、`feedback_route`
+
+**SSE 事件扩展 (AC-02)**
+- 新增 `text` SSE 事件：非流式节点（`plan_output`、`handle_unknown`）的完整输出
+- 新增 `done` SSE 事件：流完成标记
+- 新增 `error` SSE 事件：未处理异常的优雅降级
+
+**前端增强**
+- `PlanReview` 组件：支持直接编辑 + 自然语言反馈输入 + 一键 Markdown 导出
+- 交互式 DAG 视图：React Flow (`@xyflow/react`) + dagre 自动布局，支持拖拽/缩放
+- 19 个节点的实时状态显示（idle → running → done）
+
+**安全 & 校验**
+- `ChatRequest.query` max_length=4096，`ResumeRequest.edited_plan` max_length=16384
+- CORS 源地址去空格处理
+
+**部署**
+- 新增 `dockerfile`：多阶段构建（Node.js 前端 + Python 后端）
+- 新增 `docker-compose.yml`：一键部署后端 + PostgreSQL + Jaeger（可选）
+- 新增 `.env.example`：完整环境变量模板
+- `next.config.mjs` 启用 `output: "standalone"` 优化 Docker 镜像
+
+### 变更
+
+- `TutorState` 从 14 字段扩展至 26 字段（8 个对抗循环 + 4 个 HIL 反馈）
+- 图节点数从 11 增至 19
+- `intent` Literal 新增 `"unknown"` 选项
+- `pyproject.toml` build-backend 修正为 `setuptools.build_meta`
+- `retrieve()` 调用全部包装在 `asyncio.to_thread()` 中，避免阻塞事件循环
+- 删除废弃的 `generate_plan` 函数和 `PlanAdversarialState` 类
+
+### 修复
+
+- 审查员反馈丢失：`revision_notes` 现包含审查原因而非仅 "reject"
+- `handle_unknown` 回复不可见：通过 `text` SSE 事件解决
+- SSE `done` 事件缺失
+- 输入长度无限制
+
+---
+
 ## [0.2.1] — 2026-03-24
 
 ### 文档
