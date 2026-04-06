@@ -36,6 +36,12 @@ class ReviewVerdict(BaseModel):
     reason: str
 
 
+class FeedbackClassification(BaseModel):
+    """Classify user feedback on a study plan."""
+    route: Literal["tweak", "rewrite"]
+    reason: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -216,21 +222,133 @@ async def plan_output_node(state: TutorState) -> dict:
 
     # HIL: pause for human review. Skip if running without checkpointer (stateless mode).
     try:
-        edited_plan = interrupt(plan_text)
+        user_response = interrupt(plan_text)
     except ValueError:
         # No checkpointer — skip HIL, use draft as-is
         logger.warning("interrupt() failed (no checkpointer?), skipping HIL review")
-        edited_plan = plan_text
+        user_response = plan_text
 
-    final_plan = edited_plan if isinstance(edited_plan, str) and edited_plan else plan_text
+    # ── User provided feedback (dict) → route to feedback_router ──
+    if isinstance(user_response, dict) and user_response.get("action") == "feedback":
+        return {
+            "hil_action": "feedback",
+            "hil_feedback": user_response.get("text", ""),
+        }
+
+    # ── User confirmed (string) → finalize ──
+    final_plan = user_response if isinstance(user_response, str) and user_response else plan_text
     return {
         "plan": final_plan,
         "messages": [AIMessage(content=final_plan)],
+        "hil_action": "confirm",
     }
 
 
+@traced_node
+async def feedback_router(state: TutorState) -> dict[str, Any]:
+    """Classify user's HIL feedback as 'tweak' (minor edit) or 'rewrite' (full redo).
+
+    Uses the supervisor's fast model for quick classification.
+    Also updates hil_summary: compresses old summary + new feedback into one string.
+    """
+    llm = get_node_llm("supervisor")
+    structured_llm = llm.with_structured_output(FeedbackClassification)
+
+    feedback = state.get("hil_feedback", "")
+    draft = state.get("draft", "")
+    old_summary = state.get("hil_summary", "")
+
+    # ── Step 1: Classify feedback ──
+    classify_prompt = (
+        f"学生对以下学习计划提出了修改意见。\n\n"
+        f"## 当前计划（前500字）\n{draft[:500]}\n\n"
+        f"## 学生反馈\n{feedback}\n\n"
+        f"判断这个反馈需要的修改程度：\n"
+        f"- tweak: 只需要局部微调（如调整某天科目、修改时间、增删某个小项）\n"
+        f"- rewrite: 需要重新规划（如整体思路不对、完全不符合需求、需要换方向）"
+    )
+
+    try:
+        result = await structured_llm.ainvoke([
+            SystemMessage(content="你是一个学习计划修改分类器。根据学生反馈判断需要微调还是重写。"),
+            HumanMessage(content=classify_prompt),
+        ])
+        route = result.route
+    except Exception:
+        logger.warning("Feedback classification failed, defaulting to tweak")
+        route = "tweak"
+
+    # ── Step 2: Compress summary (overwrite, not append) ──
+    if old_summary:
+        new_summary = f"历史修改摘要: {old_summary[:200]}\n最新反馈: {feedback[:500]}"
+    else:
+        new_summary = f"用户反馈: {feedback[:500]}"
+
+    if route == "rewrite":
+        # REWRITE: Clear adversarial state, treat feedback as fresh direction
+        return {
+            "feedback_route": "rewrite",
+            "hil_summary": new_summary,
+            "revision_notes": feedback,
+            "adv_round": 0,
+            "draft": "",
+            "academic_verdict": "",
+            "academic_reason": "",
+            "emotional_verdict": "",
+            "emotional_reason": "",
+            "consensus": False,
+        }
+    else:
+        # TWEAK: Keep draft intact, pass feedback to plan_tweak
+        return {
+            "feedback_route": "tweak",
+            "hil_summary": new_summary,
+        }
+
+
+@traced_node
+async def plan_tweak_node(state: TutorState) -> dict[str, Any]:
+    """Make a targeted edit to the plan based on user feedback.
+
+    Single LLM call — no reviewer loop needed for minor edits.
+    """
+    llm = get_node_llm("planner")
+    temperature = get_setting("planner.temperature", 0.7)
+    fallback = get_fallback_llm(temperature=temperature)
+
+    draft = state.get("draft", "")
+    feedback = state.get("hil_feedback", "")
+    summary = state.get("hil_summary", "")
+
+    prompt = (
+        f"请根据学生的反馈对以下学习计划进行**局部微调**。\n"
+        f"只修改学生提到的部分，保持其他内容不变。\n\n"
+        f"## 当前计划\n{draft}\n\n"
+        f"## 学生反馈\n{feedback}\n\n"
+    )
+    if summary:
+        prompt += f"## 修改历史摘要\n{summary}\n\n"
+    prompt += "请输出修改后的完整计划："
+
+    messages = [
+        SystemMessage(content=load_prompt("plan_drafter_system")),
+        HumanMessage(content=prompt),
+    ]
+
+    with traced_llm_call(
+        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        node_name="plan_tweak",
+        temperature=temperature,
+    ) as span:
+        response = await async_invoke_with_fallback(
+            llm, messages, fallback=fallback, span=span,
+        )
+
+    return {"draft": response.content}
+
+
 # ---------------------------------------------------------------------------
-# Routing function
+# Routing functions
 # ---------------------------------------------------------------------------
 
 
@@ -239,3 +357,13 @@ def should_output_or_revise(state: TutorState) -> str:
     if state.get("consensus", False):
         return "output"
     return "revise"
+
+
+def route_after_hil(state: TutorState) -> str:
+    """Conditional edge after plan_output: confirm → end, feedback → feedback_router."""
+    return "feedback" if state.get("hil_action") == "feedback" else "end"
+
+
+def route_feedback(state: TutorState) -> str:
+    """Conditional edge after feedback_router: tweak or rewrite."""
+    return state.get("feedback_route", "tweak")

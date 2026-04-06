@@ -18,9 +18,13 @@ from src.graph.plan_adversarial import (
     adv_rewrite_node,
     consensus_check_node,
     drafter_node,
+    feedback_router,
     plan_output_node,
+    plan_tweak_node,
     reviewer_academic_node,
     reviewer_emotional_node,
+    route_after_hil,
+    route_feedback,
     should_output_or_revise,
 )
 from src.graph.planner import gather_intel, search_policy
@@ -54,6 +58,8 @@ def build_graph() -> StateGraph:
     graph.add_node("consensus_check", consensus_check_node)
     graph.add_node("adv_rewrite", adv_rewrite_node)
     graph.add_node("plan_output", plan_output_node)
+    graph.add_node("feedback_router", feedback_router)
+    graph.add_node("plan_tweak", plan_tweak_node)
 
     # Emotional
     graph.add_node("emotional_response", emotional_response)
@@ -112,7 +118,17 @@ def build_graph() -> StateGraph:
         },
     )
     graph.add_edge("adv_rewrite", "drafter")
-    graph.add_edge("plan_output", END)
+    graph.add_conditional_edges(
+        "plan_output",
+        route_after_hil,
+        {"end": END, "feedback": "feedback_router"},
+    )
+    graph.add_conditional_edges(
+        "feedback_router",
+        route_feedback,
+        {"tweak": "plan_tweak", "rewrite": "drafter"},
+    )
+    graph.add_edge("plan_tweak", "plan_output")
 
     # Emotional — direct to END
     graph.add_edge("emotional_response", END)

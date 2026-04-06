@@ -335,7 +335,7 @@ class TestResumeSSE:
         )
 
         collected = []
-        async for sse in generate_resume_sse("修改后计划", mock_graph, "t-42"):
+        async for sse in generate_resume_sse("修改后计划", None, mock_graph, "t-42"):
             collected.append(sse)
 
         # Should have at least the node_end event
@@ -345,7 +345,7 @@ class TestResumeSSE:
 
     @pytest.mark.anyio
     async def test_resume_uses_command(self):
-        """Verify graph.astream_events is called with Command(resume=...)."""
+        """Verify graph.astream_events is called with Command(resume=...) for confirm."""
         from app import generate_resume_sse
         from langgraph.types import Command
 
@@ -357,13 +357,57 @@ class TestResumeSSE:
             return_value=SimpleNamespace(next=(), tasks=[]),
         )
 
-        async for _ in generate_resume_sse("edited", mock_graph, "t-1"):
+        async for _ in generate_resume_sse("edited", None, mock_graph, "t-1"):
             pass
 
         call_args = mock_graph.astream_events.call_args
         first_arg = call_args[0][0]
         assert isinstance(first_arg, Command)
         assert first_arg.resume == "edited"
+
+    @pytest.mark.anyio
+    async def test_resume_with_feedback_sends_dict(self):
+        """When feedback is provided, Command(resume=dict) is constructed."""
+        from app import generate_resume_sse
+        from langgraph.types import Command
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(
+            return_value=AsyncIteratorMock([]),
+        )
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[]),
+        )
+
+        async for _ in generate_resume_sse("", "把周三改成物理", mock_graph, "t-1"):
+            pass
+
+        call_args = mock_graph.astream_events.call_args
+        first_arg = call_args[0][0]
+        assert isinstance(first_arg, Command)
+        assert first_arg.resume == {"action": "feedback", "text": "把周三改成物理"}
+
+    @pytest.mark.anyio
+    async def test_resume_without_feedback_sends_string(self):
+        """When feedback is None, Command(resume=string) is constructed (backward compat)."""
+        from app import generate_resume_sse
+        from langgraph.types import Command
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(
+            return_value=AsyncIteratorMock([]),
+        )
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[]),
+        )
+
+        async for _ in generate_resume_sse("edited plan", None, mock_graph, "t-1"):
+            pass
+
+        call_args = mock_graph.astream_events.call_args
+        first_arg = call_args[0][0]
+        assert isinstance(first_arg, Command)
+        assert first_arg.resume == "edited plan"
 
 
 # ---------------------------------------------------------------------------
@@ -387,11 +431,31 @@ class TestResumeEndpoint:
         with pytest.raises(Exception):
             ResumeRequest(edited_plan="test")
 
-    def test_resume_request_requires_edited_plan(self):
+    def test_resume_request_edited_plan_defaults_empty(self):
+        """edited_plan now defaults to '' (not required)."""
         from src.schemas import ResumeRequest
 
-        with pytest.raises(Exception):
-            ResumeRequest(thread_id="abc")
+        req = ResumeRequest(thread_id="abc")
+        assert req.edited_plan == ""
+
+    def test_resume_request_feedback_defaults_none(self):
+        from src.schemas import ResumeRequest
+
+        req = ResumeRequest(thread_id="abc")
+        assert req.feedback is None
+
+    def test_resume_request_feedback_accepts_value(self):
+        from src.schemas import ResumeRequest
+
+        req = ResumeRequest(thread_id="abc", feedback="改一下时间")
+        assert req.feedback == "改一下时间"
+
+    def test_resume_request_feedback_max_length(self):
+        from pydantic import ValidationError
+        from src.schemas import ResumeRequest
+
+        with pytest.raises(ValidationError):
+            ResumeRequest(thread_id="abc", feedback="x" * 5000)
 
     @pytest.mark.anyio
     async def test_resume_endpoint_exists(self):

@@ -16,4 +16,5 @@ class ResumeRequest(BaseModel):
     """Resume a graph interrupted by Human-in-the-loop."""
 
     thread_id: str
-    edited_plan: str = Field(max_length=16384)
+    edited_plan: str = Field(default="", max_length=16384)
+    feedback: str | None = Field(default=None, max_length=4096)

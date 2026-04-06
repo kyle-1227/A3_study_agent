@@ -47,3 +47,8 @@ class TutorState(TypedDict):
     adv_round: int                                                      # Current review round
     consensus: bool                                                     # Both reviewers approved?
     revision_notes: str                                                 # Combined feedback for drafter
+    # ── HIL feedback loop ────────────────────────────────────────────
+    hil_action: str                                                     # "confirm" or "feedback" — set by plan_output
+    hil_feedback: str                                                   # User's raw feedback text — set by plan_output
+    hil_summary: str                                                    # Compressed summary of all prior feedback rounds (overwritten, not appended)
+    feedback_route: str                                                 # "tweak" or "rewrite" — set by feedback_router

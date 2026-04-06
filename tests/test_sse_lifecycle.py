@@ -332,6 +332,8 @@ class TestSSEAllGraphNodes:
         "consensus_check",
         "adv_rewrite",
         "plan_output",
+        "feedback_router",
+        "plan_tweak",
         "emotional_response",
         "handle_unknown",
     ]

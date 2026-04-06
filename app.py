@@ -75,7 +75,7 @@ app.add_middleware(
 )
 
 
-ALLOWED_NODES = {"generate_answer", "drafter", "emotional_response"}
+ALLOWED_NODES = {"generate_answer", "drafter", "plan_tweak", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
 TEXT_EMIT_NODES = {"plan_output", "handle_unknown"}
@@ -97,6 +97,8 @@ GRAPH_NODES = {
     "consensus_check",
     "adv_rewrite",
     "plan_output",
+    "feedback_router",
+    "plan_tweak",
     "emotional_response",
     "handle_unknown",
 }
@@ -258,6 +260,7 @@ async def generate_sse(
 
 async def generate_resume_sse(
     edited_plan: str,
+    feedback: str | None,
     graph,
     thread_id: str,
 ) -> AsyncGenerator[str, None]:
@@ -265,11 +268,18 @@ async def generate_resume_sse(
 
     Args:
         edited_plan: The user-edited plan text to resume with.
+        feedback: Optional feedback text for AI-driven plan revision.
         graph: The compiled LangGraph instance from app.state.
         thread_id: Session ID identifying the interrupted graph state.
     """
     config = make_thread_config(thread_id)
-    resume_input = Command(resume=edited_plan)
+
+    if feedback:
+        resume_value = {"action": "feedback", "text": feedback}
+    else:
+        resume_value = edited_plan
+
+    resume_input = Command(resume=resume_value)
 
     async for chunk in _stream_graph_events(graph, resume_input, config, thread_id):
         yield chunk
@@ -286,7 +296,7 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
     return StreamingResponse(
-        generate_resume_sse(req.edited_plan, request.app.state.graph, req.thread_id),
+        generate_resume_sse(req.edited_plan, req.feedback, request.app.state.graph, req.thread_id),
         media_type="text/event-stream",
     )
 
