@@ -27,13 +27,17 @@
 
 ## 效果演示
 
-<!-- TODO: 替换为 v0.3.0 截图 -->
-<!-- <img src="./assets/v0.3.0/screenshot-chat.png" alt="聊天界面" style="zoom:40%;" /> -->
-<!-- <img src="./assets/v0.3.0/screenshot-hil.png" alt="HIL计划审阅" style="zoom:40%;" /> -->
-<!-- <img src="./assets/v0.3.0/screenshot-dag.png" alt="DAG图视图" style="zoom:40%;" /> -->
+#### 本地RAG + 联网搜索（Fan-out/Fan-in）
 
-<!-- TODO: 替换为演示视频链接 -->
-<!-- [演示视频](./assets/v0.3.0/demo.mp4) -->
+ <img src="./assets/v0.3.0/3adbf438-97c8-4433-baf6-1454fe61a8ce.png" alt="聊天界面" style="zoom:40%;" /> 
+
+ <img src="./assets/v0.3.0/img.png" alt="聊天界面" style="zoom:40%;" /> 
+
+#### HIL介入 + 修改（重新给予一份新的计划）
+
+<img src="./assets/v0.3.0/img_1.png" alt="HIL计划审阅" style="zoom:40%;" />
+
+<img src="./assets/v0.3.0/img_2.png" alt="HIL计划审阅" style="zoom:40%;" />
 
 ---
 

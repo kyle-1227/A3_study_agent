@@ -26,10 +26,17 @@ A production-oriented, multi-agent conversational AI for Chinese Gaokao preparat
 
 ## Demo
 
-<!-- TODO: Replace with v0.3.0 screenshots -->
-<!-- <img src="./assets/v0.3.0/screenshot-chat.png" alt="Chat UI" style="zoom:40%;" /> -->
-<!-- <img src="./assets/v0.3.0/screenshot-hil.png" alt="HIL Plan Review" style="zoom:40%;" /> -->
-<!-- <img src="./assets/v0.3.0/screenshot-dag.png" alt="Interactive DAG" style="zoom:40%;" /> -->
+#### RAG + Search（Fan-out/Fan-in）
+
+ <img src="./assets/v0.3.0/3adbf438-97c8-4433-baf6-1454fe61a8ce.png" alt="聊天界面" style="zoom:40%;" /> 
+
+ <img src="./assets/v0.3.0/img.png" alt="聊天界面" style="zoom:40%;" /> 
+
+#### HIL Interrupt + System Change（give a new plan）
+
+<img src="./assets/v0.3.0/img_1.png" alt="HIL计划审阅" style="zoom:40%;" />
+
+<img src="./assets/v0.3.0/img_2.png" alt="HIL计划审阅" style="zoom:40%;" />
 
 ---
 
