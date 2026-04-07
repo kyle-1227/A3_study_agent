@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<prompt><![CDATA[
+## 学生需求
+
+{user_request}
+
+## 综合情报
+
+{intel_summary}
+
+## 当前计划草案
+
+{current_draft}
+
+## 审查反馈
+
+{revision_notes}
+
+请根据审查反馈修改学习计划。保留原计划中合理的部分，针对反馈意见进行改进。
+
+使用 Markdown 格式输出修改后的完整计划。
+]]></prompt>

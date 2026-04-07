@@ -9,13 +9,27 @@ from src.graph.academic import (
     evaluate_hallucination,
     generate_answer,
     rag_retrieve,
+    rewrite_query,
     should_retry_or_end,
     web_search,
 )
 from src.graph.emotional import emotional_response
-from src.graph.planner import generate_plan, search_policy
+from src.graph.plan_adversarial import (
+    adv_rewrite_node,
+    consensus_check_node,
+    drafter_node,
+    feedback_router,
+    plan_output_node,
+    plan_tweak_node,
+    reviewer_academic_node,
+    reviewer_emotional_node,
+    route_after_hil,
+    route_feedback,
+    should_output_or_revise,
+)
+from src.graph.planner import gather_intel, search_policy
 from src.graph.state import TutorState
-from src.graph.supervisor import route_by_intent, supervisor_node
+from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
 
 def build_graph() -> StateGraph:
@@ -33,13 +47,25 @@ def build_graph() -> StateGraph:
     graph.add_node("web_search", web_search)
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
+    graph.add_node("rewrite_query", rewrite_query)
 
-    # SubGraph B — Planner (search first, then single-call plan)
+    # Planner (gather intel → flattened adversarial planning)
     graph.add_node("search_policy", search_policy)
-    graph.add_node("generate_plan", generate_plan)
+    graph.add_node("gather_intel", gather_intel)
+    graph.add_node("drafter", drafter_node)
+    graph.add_node("reviewer_academic", reviewer_academic_node)
+    graph.add_node("reviewer_emotional", reviewer_emotional_node)
+    graph.add_node("consensus_check", consensus_check_node)
+    graph.add_node("adv_rewrite", adv_rewrite_node)
+    graph.add_node("plan_output", plan_output_node)
+    graph.add_node("feedback_router", feedback_router)
+    graph.add_node("plan_tweak", plan_tweak_node)
 
     # Emotional
     graph.add_node("emotional_response", emotional_response)
+
+    # Unknown / off-topic
+    graph.add_node("handle_unknown", handle_unknown)
 
     # ── Edges ────────────────────────────────────────────────────────
     graph.set_entry_point("supervisor")
@@ -52,6 +78,7 @@ def build_graph() -> StateGraph:
             "academic": "academic_router",
             "planning": "search_policy",
             "emotional": "emotional_response",
+            "unknown": "handle_unknown",
         },
     )
 
@@ -69,17 +96,45 @@ def build_graph() -> StateGraph:
         "evaluate_hallucination",
         should_retry_or_end,
         {
-            "retry": "academic_router",
+            "retry": "rewrite_query",
             "end": END,
         },
     )
+    graph.add_edge("rewrite_query", "academic_router")
 
-    # Planner flow (search → generate in 2 steps)
-    graph.add_edge("search_policy", "generate_plan")
-    graph.add_edge("generate_plan", END)
+    # Planner flow: search_policy → gather_intel → adversarial loop → plan_output → END
+    graph.add_edge("search_policy", "gather_intel")
+    graph.add_edge("gather_intel", "drafter")
+    graph.add_edge("drafter", "reviewer_academic")
+    graph.add_edge("drafter", "reviewer_emotional")
+    graph.add_edge("reviewer_academic", "consensus_check")
+    graph.add_edge("reviewer_emotional", "consensus_check")
+    graph.add_conditional_edges(
+        "consensus_check",
+        should_output_or_revise,
+        {
+            "output": "plan_output",
+            "revise": "adv_rewrite",
+        },
+    )
+    graph.add_edge("adv_rewrite", "drafter")
+    graph.add_conditional_edges(
+        "plan_output",
+        route_after_hil,
+        {"end": END, "feedback": "feedback_router"},
+    )
+    graph.add_conditional_edges(
+        "feedback_router",
+        route_feedback,
+        {"tweak": "plan_tweak", "rewrite": "drafter"},
+    )
+    graph.add_edge("plan_tweak", "plan_output")
 
     # Emotional — direct to END
     graph.add_edge("emotional_response", END)
+
+    # Unknown — direct to END
+    graph.add_edge("handle_unknown", END)
 
     return graph
 

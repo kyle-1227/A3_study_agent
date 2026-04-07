@@ -26,6 +26,7 @@ DEFAULT_TOP_K = 5
 _vectorstore = None
 _bm25_index: BM25Okapi | None = None
 _bm25_corpus: list[dict[str, Any]] = []  # parallel list of doc dicts
+_bm25_doc_count: int = 0  # ChromaDB doc count at last BM25 build
 
 
 def _get_vectorstore():
@@ -41,7 +42,9 @@ def _build_bm25_index() -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
 
     Returns (bm25_index, corpus) where corpus is a parallel list of doc dicts
     with keys: content, source, metadata.
+    Also updates ``_bm25_doc_count`` with the current ChromaDB collection size.
     """
+    global _bm25_doc_count
     try:
         vs = _get_vectorstore()
         collection = vs._collection
@@ -49,6 +52,8 @@ def _build_bm25_index() -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
 
         documents = data.get("documents") or []
         metadatas = data.get("metadatas") or []
+
+        _bm25_doc_count = collection.count()
 
         if not documents:
             logger.warning("ChromaDB collection is empty; BM25 index will be empty")
@@ -77,11 +82,36 @@ def _build_bm25_index() -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
         return None, []
 
 
-def _get_bm25() -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
-    """Lazy-load BM25 singleton."""
+def _get_bm25(force_rebuild: bool = False) -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
+    """Lazy-load BM25 singleton with automatic invalidation.
+
+    Rebuilds the index when:
+    - No index has been built yet (first call)
+    - ``force_rebuild`` is True
+    - ChromaDB document count differs from the cached ``_bm25_doc_count``
+    """
     global _bm25_index, _bm25_corpus
-    if _bm25_index is None and not _bm25_corpus:
+
+    needs_build = _bm25_index is None and not _bm25_corpus
+
+    if not needs_build and not force_rebuild:
+        # Check if ChromaDB has changed since last build
+        try:
+            vs = _get_vectorstore()
+            current_count = vs._collection.count()
+            if current_count != _bm25_doc_count:
+                needs_build = True
+                logger.info(
+                    "BM25 invalidation: doc count changed %d → %d, rebuilding",
+                    _bm25_doc_count,
+                    current_count,
+                )
+        except Exception:
+            logger.warning("Failed to check ChromaDB doc count", exc_info=True)
+
+    if needs_build or force_rebuild:
         _bm25_index, _bm25_corpus = _build_bm25_index()
+
     return _bm25_index, _bm25_corpus
 
 

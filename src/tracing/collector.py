@@ -1,4 +1,17 @@
-"""OpenTelemetry collector -- TracerProvider setup with OTLP + SQLite fallback."""
+"""OpenTelemetry collector -- TracerProvider setup with OTLP + SQLite fallback.
+
+Timeout strategy
+~~~~~~~~~~~~~~~~
+When the OTLP collector (Jaeger) is unreachable the gRPC exporter enters an
+internal retry loop with exponential back-off.  With the SDK defaults
+(timeout=10 s, up to 3 retries) a single ``export()`` call can block for ~33 s.
+Because ``BatchSpanProcessor`` runs that call on a daemon thread that holds the
+GIL, the asyncio event-loop is starved and SSE responses stall.
+
+Fix: set a short per-RPC ``timeout`` on the exporter **and** a short
+``export_timeout_millis`` on the processor so traces are silently dropped when
+the collector is down, rather than blocking the application.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +27,12 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 logger = logging.getLogger(__name__)
 
 _tracer_provider: TracerProvider | None = None
+
+# ── Timeout knobs (seconds / milliseconds) ──────────────────────────────
+_OTLP_TIMEOUT_SEC = 5          # gRPC deadline *and* SDK total retry ceiling
+_BATCH_EXPORT_TIMEOUT_MS = 8000  # max wait for a single batch export
+_BATCH_SCHEDULE_DELAY_MS = 5000  # how often the processor flushes
+_SHUTDOWN_TIMEOUT_MS = 5000      # max wait during provider.shutdown()
 
 
 def setup_tracing() -> TracerProvider | None:
@@ -50,9 +69,19 @@ def setup_tracing() -> TracerProvider | None:
             )
 
             endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
-            otlp_exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
-            provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-            logger.info("OTLP exporter configured -> %s", endpoint)
+            otlp_exporter = OTLPSpanExporter(
+                endpoint=endpoint,
+                insecure=True,
+                timeout=_OTLP_TIMEOUT_SEC,
+            )
+            provider.add_span_processor(
+                BatchSpanProcessor(
+                    otlp_exporter,
+                    export_timeout_millis=_BATCH_EXPORT_TIMEOUT_MS,
+                    schedule_delay_millis=_BATCH_SCHEDULE_DELAY_MS,
+                )
+            )
+            logger.info("OTLP exporter configured -> %s (timeout=%ss)", endpoint, _OTLP_TIMEOUT_SEC)
         except Exception:
             logger.exception("Failed to configure OTLP exporter, continuing with fallback only")
 
@@ -86,9 +115,17 @@ def get_tracer(name: str = "gaokao_tutor") -> trace.Tracer:
 
 
 def shutdown_tracing() -> None:
-    """Flush pending spans and shut down the TracerProvider."""
+    """Flush pending spans and shut down the TracerProvider.
+
+    Uses a bounded timeout so the application never blocks at exit waiting for
+    an unreachable collector.
+    """
     global _tracer_provider
     if _tracer_provider is not None:
+        try:
+            _tracer_provider.force_flush(timeout_millis=_SHUTDOWN_TIMEOUT_MS)
+        except Exception:
+            logger.warning("Timeout flushing remaining traces — dropping them")
         _tracer_provider.shutdown()
         logger.info("OpenTelemetry tracing shut down")
         _tracer_provider = None

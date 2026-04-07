@@ -6,6 +6,7 @@
 
 # python
 __pycache__/
+*.pyc
 .venv/
 venv/
 env/
@@ -17,7 +18,7 @@ env/
 .pytest_cache/
 
 # some drafts
-drafts/
+docs/drafts/
 
 # vector store(ChromaDB)
 chroma_store/
@@ -41,8 +42,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+frontend/dist/
 frontend/%TEMP%/
 
-# local binary tools
+# some local tools
 jaeger*
 *-windows-amd64/
+local_tools/cloc-2.08.exe
+
+# Claude Code local config
+CLAUDE.md
+
+
+docker-compose.override.yml

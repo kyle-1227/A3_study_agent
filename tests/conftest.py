@@ -52,6 +52,11 @@ def sample_state(human_msg):
         "plan": "",
         "retry_count": 0,
         "hallucination_detected": False,
+        "rewritten_query": "",
+        "hallucination_reason": "",
+        "emotional_intel": "",
+        "resource_intel": "",
+        "intel_summary": "",
     }
 
 

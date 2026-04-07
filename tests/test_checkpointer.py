@@ -144,39 +144,48 @@ class AsyncIteratorMock:
 class TestSSEWithConfig:
     """Tests that the SSE generator passes config to graph.astream_events."""
 
+    @staticmethod
+    def _make_mock_graph(events=None):
+        """Create a mock graph with astream_events and aget_state."""
+        from types import SimpleNamespace
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(
+            return_value=AsyncIteratorMock(events or []),
+        )
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[]),
+        )
+        return mock_graph
+
     @pytest.mark.anyio
     async def test_generate_sse_passes_config(self):
         """generate_sse should pass thread config to astream_events."""
         from app import generate_sse
 
-        mock_graph = MagicMock()
-        # astream_events must return an async iterable (not a coroutine)
-        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph = self._make_mock_graph()
 
-        with patch("app.graph", mock_graph):
-            async for _ in generate_sse("hello", thread_id="test-thread"):
-                pass
+        async for _ in generate_sse("hello", mock_graph, thread_id="test-thread"):
+            pass
 
-            call_args = mock_graph.astream_events.call_args
-            config = call_args.kwargs.get("config")
-            assert config is not None
-            assert config["configurable"]["thread_id"] == "test-thread"
+        call_args = mock_graph.astream_events.call_args
+        config = call_args.kwargs.get("config")
+        assert config is not None
+        assert config["configurable"]["thread_id"] == "test-thread"
 
     @pytest.mark.anyio
     async def test_generate_sse_auto_generates_thread_id(self):
         """When no thread_id is provided, one should be auto-generated."""
         from app import generate_sse
 
-        mock_graph = MagicMock()
-        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph = self._make_mock_graph()
 
-        with patch("app.graph", mock_graph):
-            async for _ in generate_sse("hello"):
-                pass
+        async for _ in generate_sse("hello", mock_graph):
+            pass
 
-            call_args = mock_graph.astream_events.call_args
-            config = call_args.kwargs.get("config")
-            assert config is not None
-            thread_id = config["configurable"]["thread_id"]
-            # Should be a valid UUID
-            uuid.UUID(thread_id)
+        call_args = mock_graph.astream_events.call_args
+        config = call_args.kwargs.get("config")
+        assert config is not None
+        thread_id = config["configurable"]["thread_id"]
+        # Should be a valid UUID
+        uuid.UUID(thread_id)

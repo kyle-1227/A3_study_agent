@@ -15,6 +15,7 @@ load_dotenv(project_root / ".env")
 
 from src.rag.loader import load_documents
 from src.rag.indexer import build_index
+from src.rag.section_splitter import SectionAwareSplitter
 
 DATA_DIR = project_root / "data"
 
@@ -23,6 +24,11 @@ SUBJECT_DIRS = {
     "chinese": DATA_DIR / "chinese",
 }
 
+# Subjects whose documents are exam papers and benefit from section-aware splitting.
+EXAM_PAPER_SUBJECTS = {"math", "chinese"}
+
+_section_splitter = SectionAwareSplitter()
+
 
 def main() -> None:
     all_docs = []
@@ -30,7 +36,9 @@ def main() -> None:
         if not directory.is_dir() or not any(directory.iterdir()):
             print(f"[SKIP] {directory} — empty or missing")
             continue
-        docs = load_documents(directory, subject=subject)
+        splitter = _section_splitter if subject in EXAM_PAPER_SUBJECTS else None
+        doc_type = "exam_paper" if subject in EXAM_PAPER_SUBJECTS else "exam"
+        docs = load_documents(directory, subject=subject, doc_type=doc_type, splitter=splitter)
         print(f"[OK]   {subject}: loaded {len(docs)} chunks from {directory}")
         all_docs.extend(docs)
 
