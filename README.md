@@ -1,4 +1,4 @@
-# 高考辅导 AI
+# Agentic-Tutor
 
 <p align="center">
   <a href="README_en.md">English_README</a> ·
@@ -19,13 +19,29 @@
     <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
   </a>
 </p>
+<p align="center">
+    <a href="##快速启动"><strong>快速开始</strong></a>
+    |
+    <a href="##系统架构"><strong>系统架构</strong></a>
+</p>
 
+## 关于本项目
 
 一个面向生产场景的高考备考多智能体对话 AI 系统，基于 **LangGraph**（有状态编排）、**FastAPI**（SSE 流式传输）和 **Next.js**（响应式前端）构建。轻量级 Qwen2.5-7B 路由 Agent 将用户问题分发给三个专项 Agent：学科辅导、学习规划和情绪疏导，每个分支都具备完整的可观测性和容错机制。
 
 ---
 
+## 项目初衷
+
+本项目主要 想做**教育方向的 multi-agent 场景的探索尝试**，同时为了**深度实践 LangGraph 的底层框架使用**
+
+> 本项目将在空闲时间**不定期进行代码维护与技术栈的迭代探索**
+
+---
+
 ## 效果演示
+
+> 本项目当前提供的 React 前端定位为 **轻量级参考实现**。其主要目的是为了直观演示复杂 Agent 交互（项目的核心侧重），故而较为朴素
 
 #### 本地RAG + 联网搜索（Fan-out/Fan-in）
 

@@ -18,13 +18,29 @@
     <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
   </a>
 </p>
+<p align="center">
+    <a href="##快速启动"><strong>Quick Start</strong></a>
+    |
+    <a href="##系统架构"><strong>Architecture</strong></a>
+</p>
 
+## About Project
 
 A production-oriented, multi-agent conversational AI for Chinese Gaokao preparation. Built on **LangGraph** (stateful orchestration), **FastAPI** (SSE streaming), and **Next.js** (reactive frontend). A lightweight Qwen2.5-7B supervisor routes queries to three specialized agents — subject tutor, study planner, and emotional support — each backed by a fully observable, fault-tolerant pipeline.
 
 ---
 
+## Project Purpose
+
+This project is primarily intended as an **exploratory attempt at multi-agent scenarios within the education sector**, while also serving as a **deep dive into the practical application of the LangGraph underlying framework**.
+
+> > Code maintenance and iterative exploration of the technology stack will be conducted **periodically during spare time**.
+
+---
+
 ## Demo
+
+> The React frontend provided in this project is positioned as a **lightweight reference implementation**. Its main purpose is to intuitively demonstrate complex Agent interactions (the core focus of the project), and is therefore relatively simple in design.
 
 #### RAG + Search（Fan-out/Fan-in）
 
