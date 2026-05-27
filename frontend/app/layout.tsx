@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: '高考辅导 AI 助手',
-  description: 'AI-powered tutoring assistant for Gaokao preparation',
+  title: '高校学习 AI 助手',
+  description: 'AI-powered learning assistant for college students',
   generator: 'v0.app',
   icons: {
     icon: [

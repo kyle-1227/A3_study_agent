@@ -41,7 +41,7 @@ _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
 async def search_policy(state: TutorState) -> dict:
     """Use DuckDuckGo to fetch the latest Gaokao policy information. Times out after 15s."""
     year = datetime.now().year
-    query = f"{year}年高考最新政策 考试时间安排 科目改革"
+    query = f"{year}年高校课程学习资源 专业入门路径"
 
     with traced_search(query=query, timeout=_SEARCH_TIMEOUT) as span:
         try:
@@ -79,7 +79,7 @@ async def _gather_emotional_intel(state: TutorState) -> str:
     fallback = get_fallback_llm(temperature=get_setting("emotional.temperature", 0.8))
 
     history_text = "\n".join(
-        f"{'学生' if isinstance(m, HumanMessage) else '老师'}: {m.content}"
+        f"{'学习者' if isinstance(m, HumanMessage) else '学业导师'}: {m.content}"
         for m in state["messages"]
         if hasattr(m, "content")
     )

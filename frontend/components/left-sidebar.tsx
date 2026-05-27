@@ -113,7 +113,7 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
                 </svg>
               </div>
               <div className="flex-1 min-w-0">
-                <h1 className="text-base font-semibold text-[#3D5A40] leading-tight">高考辅导 AI 助手</h1>
+                <h1 className="text-base font-semibold text-[#3D5A40] leading-tight">高校学习 AI 助手</h1>
                 <div className="flex flex-wrap gap-1 mt-1.5">
                   <Badge variant="secondary" className="text-xs px-1.5 py-0 bg-[#3D5A40]/10 text-[#3D5A40] border-0">
                     学科答疑

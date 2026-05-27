@@ -45,6 +45,9 @@ pnpm-debug.log*
 frontend/dist/
 frontend/%TEMP%/
 
+# pip editable install
+*.egg-info/
+
 # some local tools
 jaeger*
 *-windows-amd64/

@@ -121,8 +121,8 @@ async def _run_reviewer(
     structured_fallback = fallback_llm.with_structured_output(ReviewVerdict, method="json_mode")
 
     review_prompt = (
-        f"## 学习计划\n\n{state.get('draft', '')}\n\n"
-        f"## 学生情况\n\n{state.get('intel_summary', '')}\n\n"
+        f"## 个性化学习路径\n\n{state.get('draft', '')}\n\n"
+        f"## 学习者情况\n\n{state.get('intel_summary', '')}\n\n"
         f"请以 json 格式返回你的审查结论。"
     )
     messages = [
@@ -261,9 +261,9 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
 
     # ── Step 1: Classify feedback ──
     classify_prompt = (
-        f"学生对以下学习计划提出了修改意见。\n\n"
-        f"## 当前计划（前500字）\n{draft[:500]}\n\n"
-        f"## 学生反馈\n{feedback}\n\n"
+        f"学习者对以下个性化学习路径或资源生成方案提出了修改意见。\n\n"
+        f"## 当前计划(前500字)\n{draft[:500]}\n\n"
+        f"## 学习者反馈\n{feedback}\n\n"
         f"判断这个反馈需要的修改程度：\n"
         f"- tweak: 只需要局部微调（如调整某天科目、修改时间、增删某个小项）\n"
         f"- rewrite: 需要重新规划（如整体思路不对、完全不符合需求、需要换方向）\n\n"
@@ -272,7 +272,7 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
 
     try:
         result = await structured_llm.ainvoke([
-            SystemMessage(content="你是一个学习计划修改分类器。根据学生反馈判断需要微调还是重写。"),
+            SystemMessage(content="你是一个个性化学习路径修改分类器。请根据学习者反馈判断当前方案需要局部微调还是整体重构。"),
             HumanMessage(content=classify_prompt),
         ])
         route = result.route
@@ -323,10 +323,10 @@ async def plan_tweak_node(state: TutorState) -> dict[str, Any]:
     summary = state.get("hil_summary", "")
 
     prompt = (
-        f"请根据学生的反馈对以下学习计划进行**局部微调**。\n"
-        f"只修改学生提到的部分，保持其他内容不变。\n\n"
+        f"请根据学习者的反馈对以下个性化学习路径或资源生成方案进行**局部微调**。\n"
+        f"只修改学习者明确提到的部分，未涉及的阶段、资源和评估方式尽量保持不变。\n\n"
         f"## 当前计划\n{draft}\n\n"
-        f"## 学生反馈\n{feedback}\n\n"
+        f"## 学习者反馈\n{feedback}\n\n"
     )
     if summary:
         prompt += f"## 修改历史摘要\n{summary}\n\n"

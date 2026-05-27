@@ -94,9 +94,9 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
                   <circle cx="16" cy="14" r="1.5" fill="#FFCC99" />
                 </svg>
               </div>
-              <h2 className="text-xl font-semibold text-[#3D5A40] mb-2">高考辅导 AI 助手</h2>
+              <h2 className="text-xl font-semibold text-[#3D5A40] mb-2">高校学习 AI 助手</h2>
               <p className="text-muted-foreground max-w-md leading-relaxed">
-                我是你的高考学习伙伴，可以帮助你解答学科问题、制定学习计划、提供情绪支持。有什么想问的吗？
+                我是你的高校学习伙伴，可以帮助你探索专业方向、解答课程知识、制定学习路径、提供情绪支持。有什么想问的吗？
               </p>
             </div>
           ) : (
