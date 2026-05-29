@@ -294,3 +294,53 @@ class TestGenerateAnswer:
         result = await generate_answer(state)
 
         assert len(result["messages"]) == 1
+
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_plain_answer_prompt_offers_followup_resources(
+        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+    ):
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("answer"))
+        mock_get_llm.return_value = mock_llm
+        mock_get_fallback.return_value = MagicMock()
+
+        state = {
+            "messages": [HumanMessage(content="机器学习里的过拟合是什么意思？")],
+            "context": [
+                {"type": "rag", "content": "过拟合是泛化不足", "source": "ml.md", "score": 0.9},
+                {"type": "web", "content": "正则化可缓解过拟合", "title": "ML", "url": "https://example.com"},
+            ],
+            "requested_resource_type": "",
+            "needs_mindmap": False,
+        }
+        await generate_answer(state)
+
+        prompt_text = mock_llm.ainvoke.call_args[0][0][-1].content
+        assert "本地课程知识库" in prompt_text
+        assert "网络或外部搜索补充资料" in prompt_text
+        assert "过拟合是泛化不足" in prompt_text
+        assert "正则化可缓解过拟合" in prompt_text
+        assert "## 还可以继续生成的个性化学习资源" in prompt_text
+
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_resource_request_prompt_does_not_offer_followup_resources(
+        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+    ):
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("resource answer"))
+        mock_get_llm.return_value = mock_llm
+        mock_get_fallback.return_value = MagicMock()
+
+        state = {
+            "messages": [HumanMessage(content="请生成机器学习过拟合的分层练习题")],
+            "context": [],
+            "requested_resource_type": "quiz",
+            "needs_mindmap": False,
+        }
+        await generate_answer(state)
+
+        prompt_text = mock_llm.ainvoke.call_args[0][0][-1].content
+        assert "不要追加“还可以继续生成的个性化学习资源”小节" in prompt_text
+        assert "## 还可以继续生成的个性化学习资源" not in prompt_text

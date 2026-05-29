@@ -26,9 +26,7 @@ JSON 格式：
 {
   "intent": "academic | planning | emotional | unknown",
   "keywords": ["1-3 个核心关键词"],
-  "confidence": 0.95,
-  "requested_resource_type": "mindmap | ppt | quiz | project | reading | video_script | code_case | other | \"\"",
-  "needs_mindmap": true 或 false
+  "confidence": 0.95
 }
 
 用户:计算机专业主要学什么？
@@ -47,7 +45,7 @@ JSON 格式：
 → intent=academic, keywords=["数据库课程", "练习题"], confidence=0.95
 
 用户:给我做一个数据结构栈和队列的思维导图
-→ intent=academic, keywords=["数据结构", "栈", "队列"], confidence=0.95, requested_resource_type="mindmap", needs_mindmap=true
+→ intent=academic, keywords=["数据结构", "栈", "队列"], confidence=0.95
 
 用户:帮我写一个 Python 入门项目案例
 → intent=academic, keywords=["Python", "入门项目"], confidence=0.9
@@ -122,7 +120,7 @@ JSON 格式：
 2. 只有明确涉及高校课程知识、专业内容、知识点讲解、题目、代码、实验、作业、学习资源生成的输入，才归类为 academic。
 
 3. 查询或生成课程讲义、PPT大纲、思维导图、练习题、题库、代码案例、项目案例、拓展阅读、视频脚本等学习资源，归类为 academic。
-   如果用户明确要求思维导图、知识图谱、脑图、结构图、mindmap 或 markmap，requested_resource_type="mindmap"，needs_mindmap=true。
+   资源类型和是否进入资源生成链路由系统代码规则判断，你只需要完成 intent、keywords 和 confidence。
 
 4. 涉及专业选择、专业适配、大学入门准备、学习画像、学习路径、阶段计划、复盘评估、能力补齐的输入，归类为 planning。
 

@@ -98,6 +98,7 @@ class TestPrompts:
         assert "{retrieved_context}" in answer_prompt
         assert "{search_context}" in answer_prompt
         assert "{question}" in answer_prompt
+        assert "{resource_offer_instruction}" in answer_prompt
         assert len(system_prompt) > 50
 
     def test_planner_prompts_have_placeholders(self):

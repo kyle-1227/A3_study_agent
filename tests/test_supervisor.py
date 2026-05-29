@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.supervisor import (
     SupervisorOutput,
     _VALID_INTENTS,
+    _detect_requested_resource_type,
     handle_unknown,
     route_by_intent,
     supervisor_node,
@@ -157,6 +158,27 @@ class TestSupervisorNode:
         assert result["keypoints"] == ["椭圆", "离心率"]
 
     @patch("src.graph.supervisor.get_node_llm")
+    async def test_ignores_llm_mindmap_flag_for_plain_question(self, mock_get_llm):
+        mock_llm = MagicMock()
+        structured_llm = MagicMock()
+        llm_result = MagicMock(
+            intent="academic",
+            keywords=["思维导图"],
+            confidence=0.95,
+            requested_resource_type="mindmap",
+            needs_mindmap=True,
+        )
+        structured_llm.ainvoke = AsyncMock(return_value=llm_result)
+        mock_llm.with_structured_output.return_value = structured_llm
+        mock_get_llm.return_value = mock_llm
+
+        state = {"messages": [HumanMessage(content="思维导图是什么？")]}
+        result = await supervisor_node(state)
+
+        assert result["needs_mindmap"] is False
+        assert result["requested_resource_type"] == ""
+
+    @patch("src.graph.supervisor.get_node_llm")
     async def test_mindmap_request_sets_route_flag(self, mock_get_llm):
         mock_llm = MagicMock()
         structured_llm = MagicMock()
@@ -171,6 +193,52 @@ class TestSupervisorNode:
 
         assert result["needs_mindmap"] is True
         assert result["requested_resource_type"] == "mindmap"
+
+    @patch("src.graph.supervisor.get_node_llm")
+    async def test_plain_mindmap_question_does_not_route_to_mindmap(self, mock_get_llm):
+        mock_llm = MagicMock()
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+            intent="academic", keywords=["思维导图"],
+        ))
+        mock_llm.with_structured_output.return_value = structured_llm
+        mock_get_llm.return_value = mock_llm
+
+        state = {"messages": [HumanMessage(content="思维导图是什么？")]}
+        result = await supervisor_node(state)
+
+        assert result["needs_mindmap"] is False
+        assert result["requested_resource_type"] == ""
+
+    @patch("src.graph.supervisor.get_node_llm")
+    async def test_other_resource_request_is_detected_without_mindmap_route(self, mock_get_llm):
+        mock_llm = MagicMock()
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+            intent="academic", keywords=["机器学习", "练习题"],
+        ))
+        mock_llm.with_structured_output.return_value = structured_llm
+        mock_get_llm.return_value = mock_llm
+
+        state = {"messages": [HumanMessage(content="请生成机器学习过拟合的分层练习题")]}
+        result = await supervisor_node(state)
+
+        assert result["needs_mindmap"] is False
+        assert result["requested_resource_type"] == "quiz"
+
+
+class TestResourceTypeDetection:
+
+    def test_detects_explicit_mindmap_generation(self):
+        assert _detect_requested_resource_type("生成机器学习过拟合的思维导图") == "mindmap"
+
+    def test_does_not_detect_mindmap_explanation_question(self):
+        assert _detect_requested_resource_type("思维导图是什么？") == ""
+
+    def test_detects_other_resource_types(self):
+        assert _detect_requested_resource_type("请生成数据库第一章练习题") == "quiz"
+        assert _detect_requested_resource_type("帮我制作人工智能导论 PPT") == "ppt"
+        assert _detect_requested_resource_type("给我做一个 Python 代码案例") == "code_case"
 
 
 class TestRouteByIntent:

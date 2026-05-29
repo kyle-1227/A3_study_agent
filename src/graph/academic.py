@@ -165,6 +165,32 @@ def _format_search(results: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+_RESOURCE_OFFER_SECTION = """请在回答末尾追加以下小节。注意：这里只能询问用户是否需要继续生成资源，不能直接生成资源。
+
+---
+
+## 还可以继续生成的个性化学习资源
+
+根据你刚才的问题，我还可以继续帮你生成：
+
+1. 知识点思维导图：梳理核心概念、前置知识、易错点和实践任务；
+2. 分层练习题：生成基础题、进阶题和应用题；
+3. 代码实操案例：用一个小案例帮助你动手理解；
+4. 学习路径建议：告诉你接下来应该按什么顺序学习。
+
+你可以直接回复：“生成思维导图” / “生成练习题” / “生成代码案例”。
+"""
+
+_NO_RESOURCE_OFFER = "不要追加“还可以继续生成的个性化学习资源”小节，只处理用户当前明确要求的资源或问题。"
+
+
+def _resource_offer_instruction(state: TutorState) -> str:
+    """Return prompt instruction for optional follow-up resource offers."""
+    if state.get("needs_mindmap") or state.get("requested_resource_type"):
+        return _NO_RESOURCE_OFFER
+    return _RESOURCE_OFFER_SECTION
+
+
 @traced_node
 async def generate_answer(state: TutorState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
@@ -182,6 +208,7 @@ async def generate_answer(state: TutorState) -> dict:
         retrieved_context=_format_retrieved(rag_docs),
         search_context=_format_search(web_results),
         question=question,
+        resource_offer_instruction=_resource_offer_instruction(state),
     )
 
     fallback = get_fallback_llm(temperature=temperature)

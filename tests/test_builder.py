@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.graph.builder import build_graph, get_compiled_graph
+from src.graph.builder import build_graph, get_compiled_graph, route_after_academic_retrieval
 
 
 class TestBuildGraph:
@@ -56,3 +56,8 @@ class TestBuildGraph:
         compiled = get_compiled_graph()
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
+
+    def test_route_after_academic_retrieval_uses_needs_mindmap_only(self):
+        assert route_after_academic_retrieval({"needs_mindmap": True}) == "mindmap"
+        assert route_after_academic_retrieval({"needs_mindmap": False}) == "answer"
+        assert route_after_academic_retrieval({}) == "answer"

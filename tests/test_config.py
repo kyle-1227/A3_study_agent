@@ -250,7 +250,7 @@ class TestPromptRendering:
     """Test that loaded prompts render correctly with .format()."""
 
     def test_academic_answer_renders(self):
-        """academic_answer prompt renders with all 3 variables."""
+        """academic_answer prompt renders with retrieval, search, question, and resource offer variables."""
         from src.config import load_prompt
 
         prompt = load_prompt("academic_answer")
@@ -258,11 +258,13 @@ class TestPromptRendering:
             retrieved_context="some docs",
             search_context="some search",
             question="What is X?",
+            resource_offer_instruction="offer resources",
         )
 
         assert "some docs" in rendered
         assert "some search" in rendered
         assert "What is X?" in rendered
+        assert "offer resources" in rendered
 
     def test_hallucination_eval_renders(self):
         """hallucination_eval prompt renders with question, context, answer."""
