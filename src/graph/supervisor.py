@@ -27,6 +27,8 @@ class SupervisorOutput(BaseModel):
     intent: Literal["academic", "planning", "emotional", "unknown"]
     keywords: list[str]
     confidence: float
+    requested_resource_type: str = ""
+    needs_mindmap: bool = False
 
 
 _VALID_INTENTS = set(get_setting(
@@ -65,6 +67,8 @@ async def supervisor_node(state: TutorState) -> dict:
             intent = result.intent
             subject = "other"
             keypoints = result.keywords
+            requested_resource_type = getattr(result, "requested_resource_type", "") or ""
+            needs_mindmap = bool(getattr(result, "needs_mindmap", False))
             # Detect subject from structured output context
             if intent == "academic" and keypoints:
                 query_lower = user_text.lower()
@@ -81,11 +85,23 @@ async def supervisor_node(state: TutorState) -> dict:
             intent = "academic"
             subject = "other"
             keypoints = []
+            requested_resource_type = ""
+            needs_mindmap = False
+
+    if _looks_like_mindmap_request(user_text, requested_resource_type):
+        requested_resource_type = "mindmap"
+        needs_mindmap = True
 
     if intent not in _VALID_INTENTS:
         intent = "academic"
 
-    return {"intent": intent, "subject": subject, "keypoints": keypoints}
+    return {
+        "intent": intent,
+        "subject": subject,
+        "keypoints": keypoints,
+        "requested_resource_type": requested_resource_type,
+        "needs_mindmap": needs_mindmap,
+    }
 
 
 @traced_node
@@ -104,4 +120,14 @@ async def handle_unknown(state: TutorState) -> dict:
 
 def route_by_intent(state: TutorState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
+    if state.get("needs_mindmap"):
+        return "mindmap"
     return state.get("intent", "academic")
+
+
+def _looks_like_mindmap_request(text: str, requested_resource_type: str = "") -> bool:
+    """Heuristic fallback so explicit mindmap requests do not miss routing."""
+    lowered = text.lower()
+    resource = requested_resource_type.lower()
+    markers = ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap")
+    return any(marker in lowered for marker in markers) or any(marker in resource for marker in markers)

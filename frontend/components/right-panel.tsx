@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useRef, useMemo } from "react"
-import { ChevronLeft, ChevronRight } from "lucide-react"
+import { useState, useEffect, useRef, useMemo, useCallback } from "react"
+import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripHorizontal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -61,6 +61,11 @@ const NODE_LABELS: Record<string, string> = {
   plan_output: "计划输出",
   feedback_router: "反馈分类",
   plan_tweak: "计划微调",
+  mindmap_planner: "导图规划",
+  mindmap_agent: "JSON Tree",
+  mindmap_reviewer: "导图审查",
+  mindmap_rewrite: "导图重写",
+  mindmap_output: "导图导出",
   emotional_response: "情绪支持",
   handle_unknown: "未知意图",
 }
@@ -70,18 +75,58 @@ const NODE_LABELS: Record<string, string> = {
 export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(true)
   const [viewTab, setViewTab] = useState<"trail" | "graph">("trail")
+  const [isLogsCollapsed, setIsLogsCollapsed] = useState(false)
+  const [splitPct, setSplitPct] = useState(65)
   const logsEndRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const draggingRef = useRef(false)
+  const startYRef = useRef(0)
+  const startSplitRef = useRef(65)
 
   // Auto-scroll logs to bottom when new entries arrive
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [logs])
 
+  // ── Drag-to-resize divider ──────────────────────────────────────
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    draggingRef.current = true
+    startYRef.current = e.clientY
+    startSplitRef.current = splitPct
+    document.body.style.cursor = "row-resize"
+    document.body.style.userSelect = "none"
+  }, [splitPct])
+
+  useEffect(() => {
+    const handleDragMove = (e: MouseEvent) => {
+      if (!draggingRef.current || !panelRef.current) return
+      const rect = panelRef.current.getBoundingClientRect()
+      const deltaY = e.clientY - startYRef.current
+      const deltaPct = (deltaY / rect.height) * 100
+      const newPct = Math.min(90, Math.max(20, startSplitRef.current + deltaPct))
+      setSplitPct(newPct)
+    }
+    const handleDragEnd = () => {
+      if (!draggingRef.current) return
+      draggingRef.current = false
+      document.body.style.cursor = ""
+      document.body.style.userSelect = ""
+    }
+    window.addEventListener("mousemove", handleDragMove)
+    window.addEventListener("mouseup", handleDragEnd)
+    return () => {
+      window.removeEventListener("mousemove", handleDragMove)
+      window.removeEventListener("mouseup", handleDragEnd)
+    }
+  }, [])
+
   return (
     <div
+      ref={panelRef}
       className={cn(
-        "relative h-full border-l border-border bg-sidebar flex flex-col",
-        "transition-all duration-300 ease-in-out",
+        "relative h-full border-l border-border bg-sidebar flex flex-col overflow-hidden",
+        "transition-all duration-300 ease-in-out select-none",
         isCollapsed ? "w-12" : "w-80"
       )}
     >
@@ -106,115 +151,162 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             <ChevronRight className="h-4 w-4" />
           </Button>
 
-          {/* Reasoning Path Visualization - 70% height */}
-          <div className="p-4 pl-12 flex-[7] flex flex-col border-b border-border">
-            {/* Tab toggle */}
-            <div className="flex items-center gap-2 mb-3">
-              <button
-                onClick={() => setViewTab("trail")}
-                className={cn(
-                  "text-xs px-2 py-1 rounded transition-colors",
-                  viewTab === "trail"
-                    ? "bg-[#3D5A40] text-white"
-                    : "text-[#3D5A40] hover:bg-[#3D5A40]/10"
-                )}
-              >
-                Node Trail
-              </button>
-              <button
-                onClick={() => setViewTab("graph")}
-                className={cn(
-                  "text-xs px-2 py-1 rounded transition-colors",
-                  viewTab === "graph"
-                    ? "bg-[#3D5A40] text-white"
-                    : "text-[#3D5A40] hover:bg-[#3D5A40]/10"
-                )}
-              >
-                Graph View
-              </button>
-            </div>
-
-            <ScrollArea className="flex-1">
-              {viewTab === "trail" ? (
-                <div className="bg-[#F5F3E8] rounded-lg p-6">
-                  {nodeEvents.length === 0 ? (
-                    <div className="flex flex-col items-center gap-3">
-                      <IdleNode label="等待请求..." />
-                      <p className="text-xs text-muted-foreground mt-2">
-                        发送消息后，推理路径将实时显示
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center gap-1">
-                      {nodeEvents.map((event, idx) => (
-                        <div key={`${event.node}-${idx}`} className="flex flex-col items-center">
-                          {idx > 0 && <ArrowDown />}
-                          <TraversalNode event={event} />
-                        </div>
-                      ))}
-                    </div>
+          {/* ── Upper Section: Node Trail / Graph + status bars ───── */}
+          <div
+            className="flex flex-col min-h-0"
+            style={
+              isLogsCollapsed
+                ? { flex: "1 1 0%" }
+                : { height: `${splitPct}%`, flexShrink: 0 }
+            }
+          >
+            {/* Tabs + Scroll Content */}
+            <div className="p-4 pl-12 flex-1 flex flex-col min-h-0">
+              <div className="flex items-center gap-2 mb-3">
+                <button
+                  onClick={() => setViewTab("trail")}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded transition-colors",
+                    viewTab === "trail"
+                      ? "bg-[#3D5A40] text-white"
+                      : "text-[#3D5A40] hover:bg-[#3D5A40]/10"
                   )}
-                </div>
-              ) : (
-                <div className="bg-[#F5F3E8] rounded-lg" style={{ height: 420 }}>
-                  <GraphDAGView nodeEvents={nodeEvents} />
-                </div>
-              )}
-            </ScrollArea>
-          </div>
-
-          {/* HIL Interrupt Status */}
-          {isInterrupted && (
-            <div className="px-4 py-2 pl-12 border-b border-[#E8A87C] bg-[#FFF9E6]">
-              <p className="text-xs font-medium text-[#5C3D2E] flex items-center gap-1.5">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
-                </span>
-                等待用户审批
-              </p>
-            </div>
-          )}
-
-          {/* Token Usage Counter */}
-          {tokenUsage.total > 0 && (
-            <div className="px-4 py-2 pl-12 border-b border-border bg-[#F5F3E8]/50">
-              <p className="text-xs font-mono text-[#3D5A40]">
-                Tokens: {tokenUsage.total}
-                <span className="text-muted-foreground ml-1">
-                  (in: {tokenUsage.input} / out: {tokenUsage.output})
-                </span>
-              </p>
-            </div>
-          )}
-
-          {/* System Logs - 30% height */}
-          <div className="flex-[3] flex flex-col overflow-hidden min-h-0">
-            <div className="px-4 py-3">
-              <h3 className="text-sm font-semibold text-[#3D5A40]">系统 Logs</h3>
-            </div>
-            <ScrollArea className="flex-1 px-4">
-              <div className="flex flex-col gap-1 pb-4">
-                {logs.map((log, index) => (
-                  <div
-                    key={index}
-                    className={cn(
-                      "text-xs font-mono py-1 px-2 rounded flex gap-2",
-                      log.type === "error" && "text-[#D97B6C] bg-[#D97B6C]/10",
-                      log.type === "info" && "text-muted-foreground bg-[#F5F3E8]",
-                      log.type === "warning" && "text-[#B8860B] bg-[#FFCC99]/20",
-                      log.type === "perf" && "text-[#4A90D9] bg-[#4A90D9]/10",
-                      log.type === "usage" && "text-[#8B5CF6] bg-[#8B5CF6]/10"
-                    )}
-                  >
-                    <span className="opacity-50 shrink-0">{log.ts}</span>
-                    <span>{log.message}</span>
-                  </div>
-                ))}
-                <div ref={logsEndRef} />
+                >
+                  Node Trail
+                </button>
+                <button
+                  onClick={() => setViewTab("graph")}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded transition-colors",
+                    viewTab === "graph"
+                      ? "bg-[#3D5A40] text-white"
+                      : "text-[#3D5A40] hover:bg-[#3D5A40]/10"
+                  )}
+                >
+                  Graph View
+                </button>
               </div>
-            </ScrollArea>
+
+              <ScrollArea className="flex-1">
+                {viewTab === "trail" ? (
+                  <div className="bg-[#F5F3E8] rounded-lg p-6">
+                    {nodeEvents.length === 0 ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <IdleNode label="等待请求..." />
+                        <p className="text-xs text-muted-foreground mt-2">
+                          发送消息后，推理路径将实时显示
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-1">
+                        {nodeEvents.map((event, idx) => (
+                          <div key={`${event.node}-${idx}`} className="flex flex-col items-center">
+                            {idx > 0 && <ArrowDown />}
+                            <TraversalNode event={event} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-[#F5F3E8] rounded-lg" style={{ height: 420 }}>
+                    <GraphDAGView nodeEvents={nodeEvents} />
+                  </div>
+                )}
+              </ScrollArea>
+            </div>
+
+            {/* HIL Interrupt Status */}
+            {isInterrupted && (
+              <div className="px-4 py-2 pl-12 border-t border-[#E8A87C] bg-[#FFF9E6]">
+                <p className="text-xs font-medium text-[#5C3D2E] flex items-center gap-1.5">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
+                  </span>
+                  等待用户审批
+                </p>
+              </div>
+            )}
+
+            {/* Token Usage Counter */}
+            {tokenUsage.total > 0 && (
+              <div className="px-4 py-2 pl-12 border-t border-border bg-[#F5F3E8]/50">
+                <p className="text-xs font-mono text-[#3D5A40]">
+                  Tokens: {tokenUsage.total}
+                  <span className="text-muted-foreground ml-1">
+                    (in: {tokenUsage.input} / out: {tokenUsage.output})
+                  </span>
+                </p>
+              </div>
+            )}
           </div>
+
+          {/* ── Draggable Divider ─────────────────────────────────── */}
+          {!isLogsCollapsed && (
+            <div
+              onMouseDown={handleDragStart}
+              className={cn(
+                "flex-shrink-0 h-6 cursor-row-resize z-10",
+                "flex items-center justify-center",
+                "bg-[#E8E5D8]/60 hover:bg-[#3D5A40]/15 border-y border-[#E8E5D8]",
+                "group transition-colors"
+              )}
+            >
+              <GripHorizontal className="h-3 w-6 text-muted-foreground/50 group-hover:text-[#3D5A40]/70 transition-colors" />
+            </div>
+          )}
+
+          {/* ── System Logs (collapsed/expanded) ──────────────────── */}
+          {!isLogsCollapsed ? (
+            <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+              <div className="px-4 py-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-[#3D5A40]">系统 Logs</h3>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setIsLogsCollapsed(true)}
+                  className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <ScrollArea className="flex-1 px-4">
+                <div className="flex flex-col gap-1 pb-4">
+                  {logs.map((log, index) => (
+                    <div
+                      key={index}
+                      className={cn(
+                        "text-xs font-mono py-1 px-2 rounded flex gap-2",
+                        log.type === "error" && "text-[#D97B6C] bg-[#D97B6C]/10",
+                        log.type === "info" && "text-muted-foreground bg-[#F5F3E8]",
+                        log.type === "warning" && "text-[#B8860B] bg-[#FFCC99]/20",
+                        log.type === "perf" && "text-[#4A90D9] bg-[#4A90D9]/10",
+                        log.type === "usage" && "text-[#8B5CF6] bg-[#8B5CF6]/10"
+                      )}
+                    >
+                      <span className="opacity-50 shrink-0">{log.ts}</span>
+                      <span>{log.message}</span>
+                    </div>
+                  ))}
+                  <div ref={logsEndRef} />
+                </div>
+              </ScrollArea>
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsLogsCollapsed(false)}
+              className="flex-shrink-0 px-4 py-2 border-t border-border flex items-center gap-1.5 text-xs text-muted-foreground hover:text-[#3D5A40] hover:bg-[#F5F3E8]/50 transition-colors"
+            >
+              <ChevronUp className="h-3 w-3" />
+              系统 Logs
+              {logs.length > 0 && (
+                <span className="bg-[#3D5A40]/10 text-[#3D5A40] text-[10px] px-1.5 py-0.5 rounded-full">
+                  {logs.length}
+                </span>
+              )}
+            </button>
+          )}
         </>
       )}
     </div>
@@ -249,6 +341,11 @@ const DAG_NODE_IDS = [
   "plan_output",
   "feedback_router",
   "plan_tweak",
+  "mindmap_planner",
+  "mindmap_agent",
+  "mindmap_reviewer",
+  "mindmap_rewrite",
+  "mindmap_output",
 ]
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
@@ -262,6 +359,13 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "academic_router", to: "web_search" },
   { from: "rag_retrieve", to: "generate_answer" },
   { from: "web_search", to: "generate_answer" },
+  { from: "rag_retrieve", to: "mindmap_planner" },
+  { from: "web_search", to: "mindmap_planner" },
+  { from: "mindmap_planner", to: "mindmap_agent" },
+  { from: "mindmap_agent", to: "mindmap_reviewer" },
+  { from: "mindmap_reviewer", to: "mindmap_output" },
+  { from: "mindmap_reviewer", to: "mindmap_rewrite", retry: true },
+  { from: "mindmap_rewrite", to: "mindmap_agent", retry: true },
   { from: "generate_answer", to: "evaluate_hallucination" },
   { from: "evaluate_hallucination", to: "rewrite_query" },
   { from: "rewrite_query", to: "academic_router", retry: true },

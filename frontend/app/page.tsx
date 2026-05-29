@@ -3,7 +3,12 @@
 import { useState, useCallback, useRef } from "react"
 import { LeftSidebar } from "@/components/left-sidebar"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
-import { ChatArea, Message } from "@/components/chat-area"
+import {
+  ChatArea,
+  Message,
+  ResourceGenerationStatus,
+  ResourceGenerationStep,
+} from "@/components/chat-area"
 import { PlanReview } from "@/components/plan-review"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
@@ -20,6 +25,140 @@ function getAuthHeaders(): Record<string, string> {
     if (token) return { "X-Access-Token": token }
   }
   return {}
+}
+
+const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
+  supervisor: {
+    title: "解析学习需求",
+    detail: "识别专业课程、学习目标、知识短板和需要生成的资源类型。",
+  },
+  academic_router: {
+    title: "选择课程资源链路",
+    detail: "判断当前任务更适合课程讲解、资料生成、练习设计还是综合答疑。",
+  },
+  rag_retrieve: {
+    title: "检索课程知识库",
+    detail: "从初始课程文档集和知识库中抽取可引用的课程依据。",
+  },
+  web_search: {
+    title: "补充前沿资料",
+    detail: "补充高校课程、项目实践和拓展阅读相关参考信息。",
+  },
+  generate_answer: {
+    title: "生成学习资源",
+    detail: "生成课程讲解、练习题、实操案例、拓展阅读或多模态脚本内容。",
+  },
+  evaluate_hallucination: {
+    title: "内容可信校验",
+    detail: "检查学术事实、引用依据和内容安全，降低幻觉风险。",
+  },
+  rewrite_query: {
+    title: "重写检索问题",
+    detail: "根据校验反馈补全查询，准备再次检索关键课程资料。",
+  },
+  search_policy: {
+    title: "整理规划约束",
+    detail: "提取学习阶段、画像线索、学习偏好和资源推送约束。",
+  },
+  gather_intel: {
+    title: "汇总画像与情报",
+    detail: "整合学习者基础、知识短板、目标课程和资源生成需求。",
+  },
+  drafter: {
+    title: "起草个性化方案",
+    detail: "生成学习路径、资源清单、练习安排和项目实践建议。",
+  },
+  reviewer_academic: {
+    title: "学术质量审查",
+    detail: "审查知识准确性、课程逻辑、难度递进和资源覆盖度。",
+  },
+  reviewer_emotional: {
+    title: "学习负荷审查",
+    detail: "检查学习节奏、任务压力和执行可持续性。",
+  },
+  consensus_check: {
+    title: "协同评审汇总",
+    detail: "汇总多智能体审查结论，判断方案是否可以输出。",
+  },
+  adv_rewrite: {
+    title: "修订资源方案",
+    detail: "根据审查意见优化学习路径、资源顺序和任务颗粒度。",
+  },
+  plan_output: {
+    title: "输出资源方案",
+    detail: "整理最终的个性化学习路径与多类型资源生成结果。",
+  },
+  feedback_router: {
+    title: "分析用户反馈",
+    detail: "判断反馈需要局部微调还是重新生成资源方案。",
+  },
+  plan_tweak: {
+    title: "微调学习方案",
+    detail: "根据反馈更新学习路径、资源推荐和练习安排。",
+  },
+  mindmap_agent: {
+    title: "生成 JSON Tree",
+    detail: "将知识结构蓝图转换为统一 JSON Tree，供多格式导图预览与导出使用。",
+  },
+  mindmap_planner: {
+    title: "规划知识结构蓝图",
+    detail: "整合课程资料、关键词和学习目标，规划具体到知识点的导图结构。",
+  },
+  mindmap_reviewer: {
+    title: "审查导图质量",
+    detail: "检查导图层级、具体知识点覆盖、易错辨析、实践案例和学术准确性。",
+  },
+  mindmap_rewrite: {
+    title: "根据审查意见重写",
+    detail: "根据审查反馈补充课程核心知识点，优化分支层级和资源可用性。",
+  },
+  mindmap_output: {
+    title: "导出多格式导图",
+    detail: "生成 XMind 下载文件，并准备 Mermaid、Markdown、SVG、PNG 和交互树预览。",
+  },
+  emotional_response: {
+    title: "生成学习支持建议",
+    detail: "围绕学习压力、专业适应和执行困难生成支持性建议。",
+  },
+  handle_unknown: {
+    title: "确认服务范围",
+    detail: "判断请求是否属于高校课程学习与个性化资源生成范围。",
+  },
+}
+
+function createInitialResourceStatus(): ResourceGenerationStatus {
+  return {
+    state: "running",
+    summary: "正在解析学习需求，准备调度多智能体生成个性化学习资源。",
+    steps: [],
+    tokenUsage: { input: 0, output: 0, total: 0 },
+  }
+}
+
+function createResourceStep(
+  node: string,
+  state: ResourceGenerationStep["state"],
+  ts: string,
+): ResourceGenerationStep {
+  const copy = RESOURCE_NODE_COPY[node] ?? {
+    title: node,
+    detail: "正在处理个性化学习资源生成流程中的一个技术阶段。",
+  }
+
+  return {
+    node,
+    title: copy.title,
+    detail: copy.detail,
+    state,
+    startedAt: ts,
+  }
+}
+
+function findLastRunningStepIndex(steps: ResourceGenerationStep[], node: string): number {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].node === node && steps[i].state === "running") return i
+  }
+  return -1
 }
 
 export default function Home() {
@@ -39,6 +178,21 @@ export default function Home() {
   const [isResuming, setIsResuming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const assistantMessageIdRef = useRef<string>("")
+
+  const updateAssistantResourceStatus = useCallback((
+    messageId: string,
+    updater: (status: ResourceGenerationStatus) => ResourceGenerationStatus,
+  ) => {
+    if (!messageId) return
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId && msg.role === "assistant"
+          ? { ...msg, resourceStatus: updater(msg.resourceStatus ?? createInitialResourceStatus()) }
+          : msg
+      )
+    )
+  }, [])
 
   const handleNewChat = useCallback(() => {
     setSelectedChatId(undefined)
@@ -77,6 +231,12 @@ export default function Home() {
       setInterruptDraft(data.draft)
       setIsInterrupted(true)
       if (data.thread_id) threadIdRef.current = data.thread_id
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        state: "waiting_review",
+        summary: "个性化学习路径与资源方案已生成，等待确认或反馈后继续优化。",
+        waitingForReview: true,
+      }))
       setLogs((prev) => [
         ...prev,
         { type: "warning", message: "[HIL] Graph interrupted — awaiting user plan review", ts: timestamp() },
@@ -104,11 +264,46 @@ export default function Home() {
       return
     }
 
+    if (data.type === "mindmap_result") {
+      const xmindUrl =
+        typeof data.xmind_url === "string" && data.xmind_url.startsWith("/")
+          ? `${API_BASE_URL}${data.xmind_url}`
+          : data.xmind_url
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === asstId
+            ? {
+                ...msg,
+                mindmap: {
+                  title: data.title || "知识点思维导图",
+                  tree: data.tree,
+                  xmindUrl,
+                },
+              }
+            : msg
+        )
+      )
+      return
+    }
+
     if (data.type === "done") {
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        state: status.state === "error" ? "error" : "done",
+        summary: "个性化学习资源已生成，可继续根据反馈调整。",
+        waitingForReview: false,
+      }))
       return
     }
 
     if (data.type === "error") {
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        state: "error",
+        summary: "个性化资源生成遇到异常，请稍后重试或调整输入。",
+        error: data.message,
+        waitingForReview: false,
+      }))
       setLogs((prev) => [
         ...prev,
         { type: "error", message: `[ERROR] Server: ${data.message}`, ts: timestamp() },
@@ -120,6 +315,48 @@ export default function Home() {
       const node: string = data.node
       const status: "start" | "end" = data.status
       const now = timestamp()
+
+      updateAssistantResourceStatus(asstId, (resourceStatus) => {
+        const steps = [...resourceStatus.steps]
+        const copy = RESOURCE_NODE_COPY[node]
+
+        if (status === "start") {
+          steps.push(createResourceStep(node, "running", now))
+          return {
+            ...resourceStatus,
+            state: "running",
+            summary: copy?.detail ?? "多智能体正在推进个性化学习资源生成。",
+            steps,
+            waitingForReview: false,
+          }
+        }
+
+        const nextState: ResourceGenerationStep["state"] = data.error ? "error" : "done"
+        const runningIndex = findLastRunningStepIndex(steps, node)
+        const completedStep = {
+          ...(runningIndex >= 0 ? steps[runningIndex] : createResourceStep(node, nextState, now)),
+          state: nextState,
+          endedAt: now,
+          durationMs: data.duration_ms ?? undefined,
+          error: data.error ?? undefined,
+        }
+
+        if (runningIndex >= 0) {
+          steps[runningIndex] = completedStep
+        } else {
+          steps.push(completedStep)
+        }
+
+        return {
+          ...resourceStatus,
+          state: data.error ? "error" : resourceStatus.state,
+          summary: data.error
+            ? "个性化资源生成的某个阶段遇到异常。"
+            : copy?.detail ?? resourceStatus.summary,
+          steps,
+          error: data.error ?? resourceStatus.error,
+        }
+      })
 
       setNodeEvents((prev) => {
         if (status === "start") {
@@ -156,6 +393,14 @@ export default function Home() {
 
     if (data.type === "usage") {
       const now = timestamp()
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        tokenUsage: {
+          input: status.tokenUsage.input + (data.input_tokens ?? 0),
+          output: status.tokenUsage.output + (data.output_tokens ?? 0),
+          total: status.tokenUsage.total + (data.total_tokens ?? 0),
+        },
+      }))
       setTokenUsage((prev) => ({
         input: prev.input + (data.input_tokens ?? 0),
         output: prev.output + (data.output_tokens ?? 0),
@@ -166,7 +411,7 @@ export default function Home() {
         { type: "usage", message: `[USAGE] ${data.node}: ${data.input_tokens} in / ${data.output_tokens} out`, ts: now },
       ])
     }
-  }, [])
+  }, [updateAssistantResourceStatus])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
@@ -264,7 +509,7 @@ export default function Home() {
       assistantMessageIdRef.current = assistantMessageId
       setMessages((prev) => [
         ...prev,
-        { id: assistantMessageId, role: "assistant", content: "" },
+        { id: assistantMessageId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
       ])
 
       await consumeSSEStream(body)
@@ -371,7 +616,7 @@ export default function Home() {
       assistantMessageIdRef.current = newAsstId
       setMessages((prev) => [
         ...prev,
-        { id: newAsstId, role: "assistant", content: "" },
+        { id: newAsstId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
       ])
 
       await consumeSSEStream(body)

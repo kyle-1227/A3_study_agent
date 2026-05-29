@@ -28,6 +28,15 @@ class TutorState(TypedDict):
     intent: Literal["academic", "planning", "emotional", "unknown"]    # User intent
     subject: str                                                        # The topic being discussed
     keypoints: list[str]                                                # Key points
+    requested_resource_type: str                                        # Requested resource type, e.g. mindmap
+    needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
+    mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
+    mindmap_tree: dict                                                  # Reviewed JSON tree draft
+    mindmap_artifact: dict                                              # Generated mindmap tree and artifact metadata
+    mindmap_review_verdict: str                                         # "approve" / "reject"
+    mindmap_review_reason: str                                          # Reviewer reasoning
+    mindmap_revision_notes: str                                         # Feedback for mindmap_agent regeneration
+    mindmap_round: int                                                  # Mindmap generation/review round
     context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
     search_results: list[dict]                                          # Planner search results
     plan: str                                                           # Generated plans

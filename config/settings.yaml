@@ -16,6 +16,11 @@ planner:
 emotional:
   temperature: 0.8                      # Slightly creative for empathy
 
+mindmap:
+  temperature: 0.2                      # Structured JSON tree generation
+  reviewer_temperature: 0.0             # Deterministic mindmap quality review
+  max_generation_rounds: 3              # Initial generation + up to 2 rewrites
+
 rag:
   vector_top_k: 10                      # Candidates from vector search
   bm25_top_k: 10                        # Candidates from BM25 keyword search

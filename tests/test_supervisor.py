@@ -156,6 +156,22 @@ class TestSupervisorNode:
 
         assert result["keypoints"] == ["椭圆", "离心率"]
 
+    @patch("src.graph.supervisor.get_node_llm")
+    async def test_mindmap_request_sets_route_flag(self, mock_get_llm):
+        mock_llm = MagicMock()
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+            intent="academic", keywords=["数据结构", "栈", "队列"],
+        ))
+        mock_llm.with_structured_output.return_value = structured_llm
+        mock_get_llm.return_value = mock_llm
+
+        state = {"messages": [HumanMessage(content="给我做一个数据结构栈和队列的思维导图")]}
+        result = await supervisor_node(state)
+
+        assert result["needs_mindmap"] is True
+        assert result["requested_resource_type"] == "mindmap"
+
 
 class TestRouteByIntent:
 
@@ -170,6 +186,9 @@ class TestRouteByIntent:
 
     def test_routes_unknown(self):
         assert route_by_intent({"intent": "unknown"}) == "unknown"
+
+    def test_routes_mindmap_first(self):
+        assert route_by_intent({"intent": "academic", "needs_mindmap": True}) == "mindmap"
 
     def test_missing_intent_defaults_to_academic(self):
         assert route_by_intent({}) == "academic"

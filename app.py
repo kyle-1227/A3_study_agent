@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
@@ -23,6 +23,7 @@ load_dotenv(Path(__file__).parent / ".env")
 from src.database.checkpointer import get_db_uri, make_thread_config
 from src.graph.builder import get_compiled_graph
 from src.schemas import ChatRequest, ResumeRequest
+from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "drafter", "plan_tweak", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"plan_output", "handle_unknown"}
+TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -99,6 +100,11 @@ GRAPH_NODES = {
     "plan_output",
     "feedback_router",
     "plan_tweak",
+    "mindmap_planner",
+    "mindmap_agent",
+    "mindmap_reviewer",
+    "mindmap_rewrite",
+    "mindmap_output",
     "emotional_response",
     "handle_unknown",
 }
@@ -168,6 +174,21 @@ async def _stream_graph_events(
                                         ensure_ascii=False,
                                     )
                                     yield f"data: {text_payload}\n\n"
+
+                    if event_type == "on_chain_end" and node_name == "mindmap_output":
+                        output = event.get("data", {}).get("output")
+                        if isinstance(output, dict) and output.get("mindmap_artifact"):
+                            artifact = output["mindmap_artifact"]
+                            mindmap_payload = json.dumps(
+                                {
+                                    "type": "mindmap_result",
+                                    "title": artifact.get("title", "知识点思维导图"),
+                                    "tree": artifact.get("tree", {}),
+                                    "xmind_url": artifact.get("xmind_url", ""),
+                                },
+                                ensure_ascii=False,
+                            )
+                            yield f"data: {mindmap_payload}\n\n"
 
             # ── Token streaming ────────────────────────────────────────────
             elif event_type == "on_chat_model_stream":
@@ -298,6 +319,25 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
     return StreamingResponse(
         generate_resume_sse(req.edited_plan, req.feedback, request.app.state.graph, req.thread_id),
         media_type="text/event-stream",
+    )
+
+
+@app.get("/artifacts/mindmaps/{artifact_id}/{filename}")
+async def download_mindmap_artifact(artifact_id: str, filename: str):
+    root = get_mindmap_artifact_dir()
+    artifact_path = (root / artifact_id / filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    if not artifact_path.is_file() or artifact_path.suffix.lower() != ".xmind":
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    return FileResponse(
+        artifact_path,
+        media_type="application/vnd.xmind.workbook",
+        filename=filename,
     )
 
 

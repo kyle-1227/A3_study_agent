@@ -334,6 +334,11 @@ class TestSSEAllGraphNodes:
         "plan_output",
         "feedback_router",
         "plan_tweak",
+        "mindmap_planner",
+        "mindmap_agent",
+        "mindmap_reviewer",
+        "mindmap_rewrite",
+        "mindmap_output",
         "emotional_response",
         "handle_unknown",
     ]
@@ -621,6 +626,42 @@ class TestSSETextEvent:
         all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
         text_events = [p for p in all_payloads if p.get("type") == "text"]
         assert len(text_events) == 0
+
+
+class TestSSEMindmapResult:
+    """Tests that mindmap_output emits structured mindmap_result SSE payloads."""
+
+    @pytest.mark.anyio
+    async def test_mindmap_result_emitted(self):
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        end_event = {
+            "event": "on_chain_end",
+            "name": "mindmap_output",
+            "metadata": {"langgraph_node": "mindmap_output"},
+            "data": {
+                "output": {
+                    "messages": [AIMessage(content="已生成思维导图")],
+                    "mindmap_artifact": {
+                        "title": "过拟合",
+                        "tree": {"title": "过拟合", "children": []},
+                        "xmind_url": "/artifacts/mindmaps/a/mindmap.xmind",
+                    },
+                },
+            },
+        }
+        mock_graph = _make_mock_graph([_node_start("mindmap_output"), end_event])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        mindmap_events = [p for p in all_payloads if p.get("type") == "mindmap_result"]
+        assert len(mindmap_events) == 1
+        assert mindmap_events[0]["title"] == "过拟合"
+        assert mindmap_events[0]["tree"]["title"] == "过拟合"
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,14 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
+from src.graph.mindmap import (
+    mindmap_agent,
+    mindmap_output,
+    mindmap_planner,
+    mindmap_reviewer,
+    mindmap_rewrite,
+    should_rewrite_mindmap,
+)
 from src.graph.plan_adversarial import (
     adv_rewrite_node,
     consensus_check_node,
@@ -64,6 +72,13 @@ def build_graph() -> StateGraph:
     # Emotional
     graph.add_node("emotional_response", emotional_response)
 
+    # Mindmap resource generation
+    graph.add_node("mindmap_planner", mindmap_planner)
+    graph.add_node("mindmap_agent", mindmap_agent)
+    graph.add_node("mindmap_reviewer", mindmap_reviewer)
+    graph.add_node("mindmap_rewrite", mindmap_rewrite)
+    graph.add_node("mindmap_output", mindmap_output)
+
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
@@ -79,6 +94,7 @@ def build_graph() -> StateGraph:
             "planning": "search_policy",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
+            "mindmap": "academic_router",
         },
     )
 
@@ -86,9 +102,24 @@ def build_graph() -> StateGraph:
     graph.add_edge("academic_router", "rag_retrieve")
     graph.add_edge("academic_router", "web_search")
 
-    # Fan-in: both converge at generate_answer
-    graph.add_edge("rag_retrieve", "generate_answer")
-    graph.add_edge("web_search", "generate_answer")
+    # Fan-in: ordinary academic requests converge at answer generation;
+    # mindmap requests reuse retrieval first, then enter the resource chain.
+    graph.add_conditional_edges(
+        "rag_retrieve",
+        route_after_academic_retrieval,
+        {
+            "answer": "generate_answer",
+            "mindmap": "mindmap_planner",
+        },
+    )
+    graph.add_conditional_edges(
+        "web_search",
+        route_after_academic_retrieval,
+        {
+            "answer": "generate_answer",
+            "mindmap": "mindmap_planner",
+        },
+    )
 
     # Hallucination evaluation with retry loop
     graph.add_edge("generate_answer", "evaluate_hallucination")
@@ -133,10 +164,29 @@ def build_graph() -> StateGraph:
     # Emotional — direct to END
     graph.add_edge("emotional_response", END)
 
+    # Mindmap resource generation: plan -> JSON tree -> review -> export
+    graph.add_edge("mindmap_planner", "mindmap_agent")
+    graph.add_edge("mindmap_agent", "mindmap_reviewer")
+    graph.add_conditional_edges(
+        "mindmap_reviewer",
+        should_rewrite_mindmap,
+        {
+            "rewrite": "mindmap_rewrite",
+            "output": "mindmap_output",
+        },
+    )
+    graph.add_edge("mindmap_rewrite", "mindmap_agent")
+    graph.add_edge("mindmap_output", END)
+
     # Unknown — direct to END
     graph.add_edge("handle_unknown", END)
 
     return graph
+
+
+def route_after_academic_retrieval(state: TutorState) -> str:
+    """Route retrieval fan-in to answer generation or mindmap resource chain."""
+    return "mindmap" if state.get("needs_mindmap") else "answer"
 
 
 def get_compiled_graph(checkpointer=None):

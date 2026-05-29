@@ -37,6 +37,11 @@ class TestBuildGraph:
             "plan_output",
             "feedback_router",
             "plan_tweak",
+            "mindmap_planner",
+            "mindmap_agent",
+            "mindmap_reviewer",
+            "mindmap_rewrite",
+            "mindmap_output",
             "emotional_response",
             "handle_unknown",
         }

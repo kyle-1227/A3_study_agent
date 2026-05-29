@@ -123,3 +123,34 @@ class TestInputValidation:
 
         req = ResumeRequest(thread_id="t-1", edited_plan="## 正常计划")
         assert req.edited_plan == "## 正常计划"
+
+
+class TestMindmapArtifacts:
+    """Verify mindmap artifact download route is safely wired."""
+
+    def test_download_route_returns_xmind(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        from app import app
+
+        monkeypatch.setenv("MINDMAP_ARTIFACT_DIR", str(tmp_path))
+        artifact_dir = tmp_path / "a1"
+        artifact_dir.mkdir()
+        artifact_file = artifact_dir / "mindmap.xmind"
+        artifact_file.write_bytes(b"fake-xmind")
+
+        with TestClient(app) as client:
+            response = client.get("/artifacts/mindmaps/a1/mindmap.xmind")
+
+        assert response.status_code == 200
+        assert response.content == b"fake-xmind"
+
+    def test_download_route_rejects_missing_file(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        from app import app
+
+        monkeypatch.setenv("MINDMAP_ARTIFACT_DIR", str(tmp_path))
+
+        with TestClient(app) as client:
+            response = client.get("/artifacts/mindmaps/a1/missing.xmind")
+
+        assert response.status_code == 404
