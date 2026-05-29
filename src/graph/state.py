@@ -37,6 +37,13 @@ class TutorState(TypedDict):
     mindmap_review_reason: str                                          # Reviewer reasoning
     mindmap_revision_notes: str                                         # Feedback for mindmap_agent regeneration
     mindmap_round: int                                                  # Mindmap generation/review round
+    exercise_outline: str                                               # Planner-produced exercise blueprint
+    exercise_items: list[dict]                                          # Reviewed exercise item drafts
+    exercise_artifact: dict                                             # Generated exercise metadata/content
+    exercise_review_verdict: str                                        # "approve" / "reject"
+    exercise_review_reason: str                                         # Exercise reviewer reasoning
+    exercise_revision_notes: str                                        # Feedback for exercise_agent regeneration
+    exercise_round: int                                                 # Exercise generation/review round
     context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
     search_results: list[dict]                                          # Planner search results
     plan: str                                                           # Generated plans

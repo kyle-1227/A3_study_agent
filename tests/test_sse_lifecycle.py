@@ -339,6 +339,11 @@ class TestSSEAllGraphNodes:
         "mindmap_reviewer",
         "mindmap_rewrite",
         "mindmap_output",
+        "exercise_planner",
+        "exercise_agent",
+        "exercise_reviewer",
+        "exercise_rewrite",
+        "exercise_output",
         "emotional_response",
         "handle_unknown",
     ]

@@ -66,6 +66,11 @@ const NODE_LABELS: Record<string, string> = {
   mindmap_reviewer: "导图审查",
   mindmap_rewrite: "导图重写",
   mindmap_output: "导图导出",
+  exercise_planner: "练习规划",
+  exercise_agent: "题目生成",
+  exercise_reviewer: "题目审查",
+  exercise_rewrite: "题目修订",
+  exercise_output: "练习输出",
   emotional_response: "情绪支持",
   handle_unknown: "未知意图",
 }
@@ -346,6 +351,11 @@ const DAG_NODE_IDS = [
   "mindmap_reviewer",
   "mindmap_rewrite",
   "mindmap_output",
+  "exercise_planner",
+  "exercise_agent",
+  "exercise_reviewer",
+  "exercise_rewrite",
+  "exercise_output",
 ]
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
@@ -366,6 +376,13 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "mindmap_reviewer", to: "mindmap_output" },
   { from: "mindmap_reviewer", to: "mindmap_rewrite", retry: true },
   { from: "mindmap_rewrite", to: "mindmap_agent", retry: true },
+  { from: "rag_retrieve", to: "exercise_planner" },
+  { from: "web_search", to: "exercise_planner" },
+  { from: "exercise_planner", to: "exercise_agent" },
+  { from: "exercise_agent", to: "exercise_reviewer" },
+  { from: "exercise_reviewer", to: "exercise_output" },
+  { from: "exercise_reviewer", to: "exercise_rewrite", retry: true },
+  { from: "exercise_rewrite", to: "exercise_agent", retry: true },
   { from: "generate_answer", to: "evaluate_hallucination" },
   { from: "evaluate_hallucination", to: "rewrite_query" },
   { from: "rewrite_query", to: "academic_router", retry: true },

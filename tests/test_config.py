@@ -358,6 +358,12 @@ class TestAllPromptsLoadable:
         "planner_system",
         "planner_generate",
         "emotional_system",
+        "mindmap_planner",
+        "mindmap_agent",
+        "mindmap_reviewer",
+        "exercise_planner",
+        "exercise_agent",
+        "exercise_reviewer",
     ])
     def test_prompt_loads(self, name):
         from src.config import load_prompt

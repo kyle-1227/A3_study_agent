@@ -42,6 +42,11 @@ class TestBuildGraph:
             "mindmap_reviewer",
             "mindmap_rewrite",
             "mindmap_output",
+            "exercise_planner",
+            "exercise_agent",
+            "exercise_reviewer",
+            "exercise_rewrite",
+            "exercise_output",
             "emotional_response",
             "handle_unknown",
         }
@@ -57,7 +62,9 @@ class TestBuildGraph:
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
 
-    def test_route_after_academic_retrieval_uses_needs_mindmap_only(self):
-        assert route_after_academic_retrieval({"needs_mindmap": True}) == "mindmap"
-        assert route_after_academic_retrieval({"needs_mindmap": False}) == "answer"
+    def test_route_after_academic_retrieval_routes_resource_chains(self):
+        assert route_after_academic_retrieval({"requested_resource_type": "mindmap"}) == "mindmap"
+        assert route_after_academic_retrieval({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "exercise"
+        assert route_after_academic_retrieval({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
+        assert route_after_academic_retrieval({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
         assert route_after_academic_retrieval({}) == "answer"

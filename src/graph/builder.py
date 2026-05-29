@@ -14,6 +14,14 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
+from src.graph.exercises import (
+    exercise_agent,
+    exercise_output,
+    exercise_planner,
+    exercise_reviewer,
+    exercise_rewrite,
+    should_rewrite_exercise,
+)
 from src.graph.mindmap import (
     mindmap_agent,
     mindmap_output,
@@ -79,6 +87,13 @@ def build_graph() -> StateGraph:
     graph.add_node("mindmap_rewrite", mindmap_rewrite)
     graph.add_node("mindmap_output", mindmap_output)
 
+    # Exercise resource generation
+    graph.add_node("exercise_planner", exercise_planner)
+    graph.add_node("exercise_agent", exercise_agent)
+    graph.add_node("exercise_reviewer", exercise_reviewer)
+    graph.add_node("exercise_rewrite", exercise_rewrite)
+    graph.add_node("exercise_output", exercise_output)
+
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
@@ -94,7 +109,6 @@ def build_graph() -> StateGraph:
             "planning": "search_policy",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
-            "mindmap": "academic_router",
         },
     )
 
@@ -103,13 +117,14 @@ def build_graph() -> StateGraph:
     graph.add_edge("academic_router", "web_search")
 
     # Fan-in: ordinary academic requests converge at answer generation;
-    # mindmap requests reuse retrieval first, then enter the resource chain.
+    # resource requests reuse retrieval first, then enter sibling resource chains.
     graph.add_conditional_edges(
         "rag_retrieve",
         route_after_academic_retrieval,
         {
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
+            "exercise": "exercise_planner",
         },
     )
     graph.add_conditional_edges(
@@ -118,6 +133,7 @@ def build_graph() -> StateGraph:
         {
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
+            "exercise": "exercise_planner",
         },
     )
 
@@ -178,6 +194,20 @@ def build_graph() -> StateGraph:
     graph.add_edge("mindmap_rewrite", "mindmap_agent")
     graph.add_edge("mindmap_output", END)
 
+    # Exercise resource generation: plan -> structured exercises -> review -> output
+    graph.add_edge("exercise_planner", "exercise_agent")
+    graph.add_edge("exercise_agent", "exercise_reviewer")
+    graph.add_conditional_edges(
+        "exercise_reviewer",
+        should_rewrite_exercise,
+        {
+            "rewrite": "exercise_rewrite",
+            "output": "exercise_output",
+        },
+    )
+    graph.add_edge("exercise_rewrite", "exercise_agent")
+    graph.add_edge("exercise_output", END)
+
     # Unknown — direct to END
     graph.add_edge("handle_unknown", END)
 
@@ -185,8 +215,13 @@ def build_graph() -> StateGraph:
 
 
 def route_after_academic_retrieval(state: TutorState) -> str:
-    """Route retrieval fan-in to answer generation or mindmap resource chain."""
-    return "mindmap" if state.get("needs_mindmap") else "answer"
+    """Route retrieval fan-in to answer generation or resource chains."""
+    resource_type = state.get("requested_resource_type")
+    if resource_type == "mindmap":
+        return "mindmap"
+    if resource_type == "quiz":
+        return "exercise"
+    return "answer"
 
 
 def get_compiled_graph(checkpointer=None):

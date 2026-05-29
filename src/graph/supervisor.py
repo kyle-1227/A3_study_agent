@@ -87,6 +87,8 @@ async def supervisor_node(state: TutorState) -> dict:
 
     if intent not in _VALID_INTENTS:
         intent = "academic"
+    if requested_resource_type:
+        intent = "academic"
 
     return {
         "intent": intent,
@@ -113,8 +115,6 @@ async def handle_unknown(state: TutorState) -> dict:
 
 def route_by_intent(state: TutorState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
-    if state.get("needs_mindmap"):
-        return "mindmap"
     return state.get("intent", "academic")
 
 

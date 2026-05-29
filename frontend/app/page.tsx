@@ -116,6 +116,26 @@ const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
     title: "导出多格式导图",
     detail: "生成 XMind 下载文件，并准备 Mermaid、Markdown、SVG、PNG 和交互树预览。",
   },
+  exercise_planner: {
+    title: "规划练习结构",
+    detail: "结合课程资料、关键词和学习目标，规划基础题、进阶题、应用题和自我检查题。",
+  },
+  exercise_agent: {
+    title: "生成分层题目",
+    detail: "生成包含答案、解析和易错提醒的分层练习题。",
+  },
+  exercise_reviewer: {
+    title: "审查题目质量",
+    detail: "检查题型覆盖、难度递进、答案解析、易错提醒和课程主题匹配度。",
+  },
+  exercise_rewrite: {
+    title: "修订练习题",
+    detail: "根据审查意见补齐题型层级、解析细节和易错提醒。",
+  },
+  exercise_output: {
+    title: "输出练习资源",
+    detail: "整理最终分层练习题，包含基础题、进阶题、应用题、自我检查题和解析。",
+  },
   emotional_response: {
     title: "生成学习支持建议",
     detail: "围绕学习压力、专业适应和执行困难生成支持性建议。",

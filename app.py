@@ -79,7 +79,7 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "drafter", "plan_tweak", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output"}
+TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output", "exercise_output"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -105,6 +105,11 @@ GRAPH_NODES = {
     "mindmap_reviewer",
     "mindmap_rewrite",
     "mindmap_output",
+    "exercise_planner",
+    "exercise_agent",
+    "exercise_reviewer",
+    "exercise_rewrite",
+    "exercise_output",
     "emotional_response",
     "handle_unknown",
 }

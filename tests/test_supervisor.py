@@ -255,8 +255,8 @@ class TestRouteByIntent:
     def test_routes_unknown(self):
         assert route_by_intent({"intent": "unknown"}) == "unknown"
 
-    def test_routes_mindmap_first(self):
-        assert route_by_intent({"intent": "academic", "needs_mindmap": True}) == "mindmap"
+    def test_routes_mindmap_request_as_academic(self):
+        assert route_by_intent({"intent": "academic", "needs_mindmap": True}) == "academic"
 
     def test_missing_intent_defaults_to_academic(self):
         assert route_by_intent({}) == "academic"
