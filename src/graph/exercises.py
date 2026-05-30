@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
+from src.graph.json_output import ainvoke_strict_json
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
 from src.tracing import traced_llm_call, traced_node
@@ -96,44 +97,6 @@ def _fallback_outline(query: str, keypoints: list[str], context: list[dict]) -> 
         "4. 自我检查题：帮助学习者复盘掌握程度、易错点和后续补强方向。\n"
         f"依据摘要：{_format_context(context)[:500]}"
     )
-
-
-def _fallback_items(query: str, outline: str, keypoints: list[str]) -> list[dict]:
-    topic = "、".join(keypoints[:3]) or query[:40] or "该知识点"
-    return [
-        {
-            "level": "基础题",
-            "question": f"请用自己的话说明{topic}的核心含义。",
-            "answer": f"{topic}的核心含义应围绕定义、适用场景和关键约束展开。",
-            "explanation": "先给出概念定义，再说明它解决什么问题，最后补充一个简单例子。",
-            "pitfall": "不要只背名词，要说明它和课程中相邻概念的区别。",
-            "tags": keypoints[:3],
-        },
-        {
-            "level": "进阶题",
-            "question": f"比较{topic}中两个容易混淆的概念或步骤，并说明判断依据。",
-            "answer": "应从前提条件、输入输出、适用场景和结果解释四个角度比较。",
-            "explanation": "进阶题重点考查概念关系，而不是单点记忆。",
-            "pitfall": "避免把相似概念当作同义词使用。",
-            "tags": keypoints[:3],
-        },
-        {
-            "level": "应用题",
-            "question": f"设计一个小案例，说明如何在实践中使用{topic}。",
-            "answer": "案例应包含问题背景、操作步骤、结果判断和改进建议。",
-            "explanation": "把抽象知识放进代码、实验或项目任务中，可以检验迁移能力。",
-            "pitfall": "不要停留在口头描述，要说明可观察的结果或评价指标。",
-            "tags": keypoints[:3],
-        },
-        {
-            "level": "自我检查题",
-            "question": f"学完{topic}后，你会用哪三个问题检查自己是否真正掌握？",
-            "answer": "可从能否解释概念、能否区分误区、能否完成应用任务三个方面检查。",
-            "explanation": "自我检查题用于暴露薄弱点，并指导下一步复习。",
-            "pitfall": "只看答案不复盘错误原因，容易形成虚假掌握感。",
-            "tags": keypoints[:3],
-        },
-    ]
 
 
 def _normalize_items(items: list[dict]) -> list[dict]:
@@ -286,29 +249,26 @@ async def exercise_agent(state: TutorState) -> dict:
     )
 
     llm = get_node_llm("exercise")
-    structured_llm = llm.with_structured_output(ExerciseArtifact)
-    fallback = get_fallback_llm(temperature=get_setting("exercise.temperature", 0.2))
-    structured_fallback = fallback.with_structured_output(ExerciseArtifact)
     temperature = get_setting("exercise.temperature", 0.2)
     model_name = get_setting("exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
     try:
         with traced_llm_call(model_name=model_name, node_name="exercise_agent", temperature=temperature) as span:
-            result = await async_invoke_with_fallback(
-                structured_llm,
+            result = await ainvoke_strict_json(
+                llm,
                 [
-                    SystemMessage(content="你是分层练习题生成智能体。只输出结构化题目结果。"),
+                    SystemMessage(content="你是分层练习题生成智能体。只输出一个 JSON 对象，不要输出 Markdown、代码块或解释文本。"),
                     HumanMessage(content=prompt),
                 ],
-                fallback=structured_fallback,
+                schema=ExerciseArtifact,
+                node_name="exercise_agent",
                 span=span,
             )
         title = result.title.strip() or "分层练习题"
         raw_items = [_model_to_dict(item) for item in result.items]
-    except Exception:
-        logger.warning("Exercise structured generation failed, using fallback items", exc_info=True)
-        title = "分层练习题"
-        raw_items = _fallback_items(query, outline, keypoints)
+    except Exception as exc:
+        logger.exception("exercise_agent structured output failed; fallback disabled")
+        raise RuntimeError(f"exercise_agent structured output failed; fallback disabled: {exc}") from exc
 
     return {
         "exercise_items": _normalize_items(raw_items),

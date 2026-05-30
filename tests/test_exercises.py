@@ -33,20 +33,21 @@ async def test_exercise_agent_generates_structured_items(
     mock_get_llm,
     mock_get_fallback,
 ):
-    structured = MagicMock()
-    structured.ainvoke = AsyncMock(
-        return_value=ExerciseArtifact(
-            title="过拟合分层练习题",
-            items=[
-                _exercise_item("基础题"),
-                _exercise_item("进阶题"),
-                _exercise_item("应用题"),
-                _exercise_item("自我检查题"),
-            ],
-        )
+    artifact = ExerciseArtifact(
+        title="过拟合分层练习题",
+        items=[
+            _exercise_item("基础题"),
+            _exercise_item("进阶题"),
+            _exercise_item("应用题"),
+            _exercise_item("自我检查题"),
+        ],
     )
     llm = MagicMock()
-    llm.with_structured_output.return_value = structured
+    llm.ainvoke = AsyncMock(
+        return_value=AIMessage(
+            content=artifact.model_dump_json() if hasattr(artifact, "model_dump_json") else artifact.json()
+        )
+    )
     mock_get_llm.return_value = llm
 
     fallback_llm = MagicMock()

@@ -22,35 +22,36 @@ async def test_mindmap_agent_generates_json_tree_from_outline(
     mock_get_llm,
     mock_get_fallback,
 ):
-    structured = MagicMock()
-    structured.ainvoke = AsyncMock(
-        return_value=MindmapArtifact(
-            title="过拟合思维导图",
-            tree=MindmapNode(
-                title="过拟合",
-                children=[
-                    MindmapNode(
-                        title="现象识别",
-                        children=[MindmapNode(title="训练误差低"), MindmapNode(title="验证误差高")],
-                    ),
-                    MindmapNode(
-                        title="缓解方法",
-                        children=[MindmapNode(title="正则化"), MindmapNode(title="交叉验证")],
-                    ),
-                    MindmapNode(
-                        title="模型评估",
-                        children=[MindmapNode(title="泛化误差"), MindmapNode(title="验证集")],
-                    ),
-                    MindmapNode(
-                        title="实践检查",
-                        children=[MindmapNode(title="学习曲线"), MindmapNode(title="数据增强")],
-                    ),
-                ],
-            ),
-        )
+    artifact = MindmapArtifact(
+        title="过拟合思维导图",
+        tree=MindmapNode(
+            title="过拟合",
+            children=[
+                MindmapNode(
+                    title="现象识别",
+                    children=[MindmapNode(title="训练误差低"), MindmapNode(title="验证误差高")],
+                ),
+                MindmapNode(
+                    title="缓解方法",
+                    children=[MindmapNode(title="正则化"), MindmapNode(title="交叉验证")],
+                ),
+                MindmapNode(
+                    title="模型评估",
+                    children=[MindmapNode(title="泛化误差"), MindmapNode(title="验证集")],
+                ),
+                MindmapNode(
+                    title="实践检查",
+                    children=[MindmapNode(title="学习曲线"), MindmapNode(title="数据增强")],
+                ),
+            ],
+        ),
     )
     llm = MagicMock()
-    llm.with_structured_output.return_value = structured
+    llm.ainvoke = AsyncMock(
+        return_value=AIMessage(
+            content=artifact.model_dump_json() if hasattr(artifact, "model_dump_json") else artifact.json()
+        )
+    )
     mock_get_llm.return_value = llm
 
     fallback_llm = MagicMock()

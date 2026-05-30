@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
+from src.graph.json_output import ainvoke_strict_json
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
 from src.tools.mindmap_tool import create_xmind_artifact, normalize_mindmap_tree
@@ -150,46 +151,6 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def _fallback_tree_from_outline(query: str, outline: str, keypoints: list[str]) -> dict[str, Any]:
-    items = _extract_concrete_items(outline)
-    if not items:
-        items = _extract_concrete_items("、".join(keypoints))
-    if not items:
-        raise ValueError("mindmap_outline is empty; cannot build a meaningful fallback tree")
-
-    root_title = _clean_title(query, default="知识点思维导图")
-    groups = [
-        ("概念基础", items[0:4]),
-        ("方法机制", items[4:8] or items[0:4]),
-        ("易错辨析", items[8:12] or items[:3]),
-        ("实践应用", items[12:16] or items[:3]),
-    ]
-    return {
-        "title": root_title,
-        "children": [
-            {
-                "title": branch,
-                "children": [
-                    {
-                        "title": item,
-                        "note": "来自知识结构蓝图的具体学习节点。",
-                        "children": [{"title": f"{item}的定义/作用"}, {"title": f"{item}的应用检查"}],
-                    }
-                    for item in branch_items
-                ],
-            }
-            for branch, branch_items in groups
-            if branch_items
-        ],
-    }
-
-
-def _clean_title(value: str, *, default: str) -> str:
-    value = re.sub(r"^(请|帮我|生成|制作|画一个|给我)", "", value.strip())
-    value = re.sub(r"[：:，,。.!！?？]+$", "", value)
-    return value[:40] or default
-
-
 def _tree_stats(tree: dict[str, Any]) -> tuple[int, int]:
     def visit(node: Any, depth: int) -> tuple[int, int]:
         if not isinstance(node, dict):
@@ -321,36 +282,26 @@ async def mindmap_agent(state: TutorState) -> dict:
     )
 
     llm = get_node_llm("mindmap")
-    structured_llm = llm.with_structured_output(MindmapArtifact)
-    fallback = get_fallback_llm(temperature=get_setting("mindmap.temperature", 0.2))
-    structured_fallback = fallback.with_structured_output(MindmapArtifact)
     temperature = get_setting("mindmap.temperature", 0.2)
     model_name = get_setting("mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
     try:
         with traced_llm_call(model_name=model_name, node_name="mindmap_agent", temperature=temperature) as span:
-            result = await async_invoke_with_fallback(
-                structured_llm,
+            result = await ainvoke_strict_json(
+                llm,
                 [
-                    SystemMessage(content="你是 JSON Tree 生成智能体。只输出结构化结果，不输出 Mermaid 或 Markdown。"),
+                    SystemMessage(content="你是 JSON Tree 生成智能体。只输出一个 JSON 对象，不要输出 Mermaid、Markdown、代码块或解释文本。"),
                     HumanMessage(content=prompt),
                 ],
-                fallback=structured_fallback,
+                schema=MindmapArtifact,
+                node_name="mindmap_agent",
                 span=span,
             )
         title = result.title.strip() or "知识点思维导图"
         raw_tree = _model_to_dict(result.tree)
-    except Exception:
-        logger.warning("Mindmap structured generation failed, using outline fallback tree", exc_info=True)
-        try:
-            title = "知识点思维导图"
-            raw_tree = _fallback_tree_from_outline(query, outline, keypoints)
-        except Exception as exc:
-            return {
-                "error": str(exc),
-                "mindmap_round": round_no,
-                "mindmap_tree": {},
-            }
+    except Exception as exc:
+        logger.exception("mindmap_agent structured output failed; fallback disabled")
+        raise RuntimeError(f"mindmap_agent structured output failed; fallback disabled: {exc}") from exc
 
     tree = normalize_mindmap_tree(raw_tree)
     if not tree.get("title"):
