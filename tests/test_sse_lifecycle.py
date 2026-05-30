@@ -319,6 +319,7 @@ class TestSSEAllGraphNodes:
     ALL_NODES = [
         "supervisor",
         "academic_router",
+        "search_query_rewriter",
         "rag_retrieve",
         "web_search",
         "generate_answer",

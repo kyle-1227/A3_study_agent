@@ -9,6 +9,7 @@ rag_retrieve and web_search in parallel.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
@@ -40,12 +41,46 @@ class HallucinationEvaluation(BaseModel):
     )
 
 
+class SearchQueryRewriteOutput(BaseModel):
+    """Structured initial retrieval-query rewrite result."""
+
+    rag_query: str = Field(description="Query optimized for local course/RAG retrieval")
+    web_search_query: str = Field(description="Query optimized for external web search")
+    expanded_keypoints: list[str] = Field(description="Expanded concrete knowledge points")
+    reason: str = Field(description="Brief rationale for the rewrite")
+
+
 def _last_human_query(state: TutorState) -> str:
     """Extract the last HumanMessage content (robust for retry loops)."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             return msg.content
     return ""
+
+
+def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
+    """Render named placeholders without interpreting JSON braces in prompts."""
+    prompt = load_prompt(prompt_name)
+    for key, value in replacements.items():
+        prompt = prompt.replace("{" + key + "}", value)
+    return prompt
+
+
+def _message_content_to_text(content) -> str:
+    """Convert chat message content into text for diagnostics."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
+    return str(content or "")
 
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
@@ -85,17 +120,140 @@ async def rewrite_query(state: TutorState) -> dict:
     return {"rewritten_query": rewritten}
 
 
+# ── Node 0c: initial search-query rewriting ───────────────────────────────
+
+@traced_node
+async def search_query_rewriter(state: TutorState) -> dict:
+    """Rewrite the original request into RAG and web-search queries."""
+    if state.get("rewritten_query"):
+        return {}
+
+    original_query = _last_human_query(state)
+    keypoints = state.get("keypoints", [])
+    requested_resource_type = state.get("requested_resource_type", "")
+    subject = state.get("subject", "")
+
+    prompt = _render_prompt(
+        "search_query_rewriter",
+        {
+            "question": original_query,
+            "keypoints": "、".join(keypoints) if keypoints else "未提取到明确关键词",
+            "requested_resource_type": requested_resource_type or "none",
+            "subject": subject or "other",
+        },
+    )
+
+    llm = get_node_llm("query_rewrite", temperature=0.0)
+    messages = [
+        SystemMessage(content="你是高校个性化学习资源系统中的检索查询改写智能体，只输出结构化查询结果。"),
+        HumanMessage(content=prompt),
+    ]
+    debug_raw = os.getenv("DEBUG_QUERY_REWRITE_RAW", "").strip().lower() == "true"
+
+    if debug_raw:
+        try:
+            with traced_llm_call(
+                model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+                node_name="search_query_rewriter",
+                temperature=0.0,
+            ) as span:
+                response = await llm.ainvoke(messages)
+                if span is not None:
+                    span.set_attribute("llm.fallback_used", False)
+
+            raw = _message_content_to_text(getattr(response, "content", response))
+            raw_preview = raw[:2000]
+            logger.warning("search_query_rewriter raw output preview: %s", raw_preview)
+            try:
+                raw_data = json.loads(raw)
+                if hasattr(SearchQueryRewriteOutput, "model_validate"):
+                    result = SearchQueryRewriteOutput.model_validate(raw_data)
+                else:
+                    result = SearchQueryRewriteOutput.parse_obj(raw_data)
+            except Exception:
+                logger.warning("search_query_rewriter raw JSON parse failed", exc_info=True)
+                return {
+                    "search_query_rewrite_error": "raw_json_parse_failed",
+                    "search_query_rewrite_raw_preview": raw_preview,
+                    "search_rag_query": "",
+                    "search_web_query": "",
+                    "expanded_keypoints": [],
+                    "search_query_rewrite_reason": "",
+                }
+
+            return {
+                "search_rag_query": result.rag_query.strip(),
+                "search_web_query": result.web_search_query.strip(),
+                "expanded_keypoints": [str(item).strip() for item in result.expanded_keypoints if str(item).strip()],
+                "search_query_rewrite_reason": result.reason.strip(),
+                "search_query_rewrite_error": "",
+                "search_query_rewrite_raw_preview": raw_preview,
+            }
+        except Exception as exc:
+            logger.warning("Initial raw search query rewrite failed; continuing with original query", exc_info=True)
+            return {
+                "search_query_rewrite_error": str(exc),
+                "search_query_rewrite_raw_preview": "",
+                "search_rag_query": "",
+                "search_web_query": "",
+                "expanded_keypoints": [],
+                "search_query_rewrite_reason": "",
+            }
+
+    structured_llm = llm.with_structured_output(SearchQueryRewriteOutput)
+    fallback_llm = get_fallback_llm(temperature=0.0)
+    structured_fallback = fallback_llm.with_structured_output(SearchQueryRewriteOutput)
+
+    try:
+        with traced_llm_call(
+            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+            node_name="search_query_rewriter",
+            temperature=0.0,
+        ) as span:
+            result = await async_invoke_with_fallback(
+                structured_llm,
+                messages,
+                fallback=structured_fallback,
+                span=span,
+            )
+    except Exception as exc:
+        logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
+        return {
+            "search_query_rewrite_error": str(exc),
+            "search_rag_query": "",
+            "search_web_query": "",
+            "expanded_keypoints": [],
+            "search_query_rewrite_reason": "",
+            "search_query_rewrite_raw_preview": "",
+        }
+
+    return {
+        "search_rag_query": result.rag_query.strip(),
+        "search_web_query": result.web_search_query.strip(),
+        "expanded_keypoints": [str(item).strip() for item in result.expanded_keypoints if str(item).strip()],
+        "search_query_rewrite_reason": result.reason.strip(),
+        "search_query_rewrite_error": "",
+        "search_query_rewrite_raw_preview": "",
+    }
+
+
 # ── Node 1: RAG retrieval (parallel branch A) ─────────────────────
 
 @traced_node
 async def rag_retrieve(state: TutorState) -> dict:
     """Query ChromaDB with keypoints extracted by the supervisor node."""
     rewritten = state.get("rewritten_query", "")
+    search_rag_query = state.get("search_rag_query", "")
+    expanded_keypoints = state.get("expanded_keypoints", [])
     keypoints = state.get("keypoints", [])
     subject = state.get("subject")
 
     if rewritten:
         query = rewritten
+    elif search_rag_query:
+        query = search_rag_query
+    elif expanded_keypoints:
+        query = " ".join(expanded_keypoints)
     elif keypoints:
         query = " ".join(keypoints)
     else:
@@ -123,7 +281,13 @@ _SEARCH_TIMEOUT = get_setting("academic.search_timeout", 15)
 async def web_search(state: TutorState) -> dict:
     """Fan-out web search — runs in parallel with rag_retrieve."""
     rewritten = state.get("rewritten_query", "")
-    query = rewritten if rewritten else _last_human_query(state)
+    search_web_query = state.get("search_web_query", "")
+    if rewritten:
+        query = rewritten
+    elif search_web_query:
+        query = search_web_query
+    else:
+        query = _last_human_query(state)
 
     with traced_search(query=query, timeout=_SEARCH_TIMEOUT) as span:
         try:

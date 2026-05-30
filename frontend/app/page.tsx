@@ -36,6 +36,10 @@ const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
     title: "选择课程资源链路",
     detail: "判断当前任务更适合课程讲解、资料生成、练习设计还是综合答疑。",
   },
+  search_query_rewriter: {
+    title: "改写检索查询",
+    detail: "将学习者原始问题转换为适合课程知识库和网络搜索的精准查询。",
+  },
   rag_retrieve: {
     title: "检索课程知识库",
     detail: "从初始课程文档集和知识库中抽取可引用的课程依据。",

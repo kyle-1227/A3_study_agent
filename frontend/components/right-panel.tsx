@@ -46,6 +46,7 @@ interface RightPanelProps {
 const NODE_LABELS: Record<string, string> = {
   supervisor: "意图分类",
   academic_router: "学术路由",
+  search_query_rewriter: "查询改写",
   rag_retrieve: "RAG 检索",
   web_search: "网络搜索",
   generate_answer: "回答生成",
@@ -332,6 +333,7 @@ const DAG_NODE_IDS = [
   "search_policy",
   "emotional_response",
   "handle_unknown",
+  "search_query_rewriter",
   "rag_retrieve",
   "web_search",
   "gather_intel",
@@ -365,8 +367,9 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "supervisor", to: "emotional_response" },
   { from: "supervisor", to: "handle_unknown" },
   // Academic branch
-  { from: "academic_router", to: "rag_retrieve" },
-  { from: "academic_router", to: "web_search" },
+  { from: "academic_router", to: "search_query_rewriter" },
+  { from: "search_query_rewriter", to: "rag_retrieve" },
+  { from: "search_query_rewriter", to: "web_search" },
   { from: "rag_retrieve", to: "generate_answer" },
   { from: "web_search", to: "generate_answer" },
   { from: "rag_retrieve", to: "mindmap_planner" },

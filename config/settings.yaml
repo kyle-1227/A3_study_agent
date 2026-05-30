@@ -43,3 +43,9 @@ supervisor:
     - planning
     - emotional
     - unknown
+
+query_rewrite:
+  model: "Qwen/Qwen2.5-7B-Instruct"
+  base_url: "https://api.siliconflow.cn/v1"
+  api_key_env: "SILICONFLOW_API_KEY"
+  temperature: 0.0                      # Deterministic retrieval-query rewriting

@@ -10,10 +10,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.academic import (
     _format_retrieved,
     _format_search,
+    SearchQueryRewriteOutput,
     academic_router,
     generate_answer,
     rag_retrieve,
     rewrite_query,
+    search_query_rewriter,
     web_search,
 )
 from src.graph.state import CONTEXT_CLEAR
@@ -108,6 +110,125 @@ class TestRewriteQuery:
         assert result["rewritten_query"] == "original question"
 
 
+class TestSearchQueryRewriter:
+    """search_query_rewriter rewrites initial retrieval queries."""
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_produces_rag_and_web_queries(self, mock_get_llm, mock_get_fallback):
+        structured = MagicMock()
+        structured.ainvoke = AsyncMock(
+            return_value=SearchQueryRewriteOutput(
+                rag_query="Python 变量 条件判断 循环 课程知识点",
+                web_search_query="Python beginner variables conditionals loops exercises",
+                expanded_keypoints=["变量", "条件判断", "循环"],
+                reason="用户请求较宽泛，展开为 Python 基础知识点",
+            )
+        )
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="生成一份 Python 练习题")],
+            "keypoints": ["Python", "练习题"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert result["search_rag_query"] == "Python 变量 条件判断 循环 课程知识点"
+        assert result["search_web_query"] == "Python beginner variables conditionals loops exercises"
+        assert result["expanded_keypoints"] == ["变量", "条件判断", "循环"]
+        assert result["search_query_rewrite_reason"]
+        assert result["search_query_rewrite_error"] == ""
+        mock_get_llm.assert_called_once_with("query_rewrite", temperature=0.0)
+
+    async def test_noops_when_retry_rewritten_query_exists(self):
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="original")],
+            "rewritten_query": "retry query",
+        })
+        assert result == {}
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_returns_empty_queries_on_failure(self, mock_get_llm, mock_get_fallback):
+        structured = MagicMock()
+        structured.ainvoke = AsyncMock(side_effect=RuntimeError("structured failure"))
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="Python 练习题")],
+            "keypoints": ["Python"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert result["search_rag_query"] == ""
+        assert result["search_web_query"] == ""
+        assert result["expanded_keypoints"] == []
+        assert "structured failure" in result["search_query_rewrite_error"]
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "true"})
+    @patch("src.graph.academic.get_node_llm")
+    async def test_raw_debug_parses_valid_json(self, mock_get_llm):
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=(
+            '{"rag_query":"Python 变量 条件判断 循环",'
+            '"web_search_query":"Python practice exercises answers explanations",'
+            '"expanded_keypoints":["变量","条件判断","循环"],'
+            '"reason":"用户请求宽泛，展开为 Python 基础知识点"}'
+        )))
+        mock_get_llm.return_value = mock_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="请给我一份python练习题和思维导图")],
+            "keypoints": ["Python"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert result["search_rag_query"] == "Python 变量 条件判断 循环"
+        assert result["search_web_query"] == "Python practice exercises answers explanations"
+        assert result["expanded_keypoints"] == ["变量", "条件判断", "循环"]
+        assert result["search_query_rewrite_error"] == ""
+        assert result["search_query_rewrite_raw_preview"].startswith('{"rag_query"')
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "true"})
+    @patch("src.graph.academic.get_node_llm")
+    async def test_raw_debug_returns_parse_error_and_preview(self, mock_get_llm):
+        raw = "not json " + ("x" * 2500)
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=raw))
+        mock_get_llm.return_value = mock_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="请给我一份python练习题和思维导图")],
+            "keypoints": ["Python"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert result["search_query_rewrite_error"] == "raw_json_parse_failed"
+        assert result["search_rag_query"] == ""
+        assert result["search_web_query"] == ""
+        assert result["expanded_keypoints"] == []
+        assert len(result["search_query_rewrite_raw_preview"]) == 2000
+        assert result["search_query_rewrite_raw_preview"] == raw[:2000]
+
+
 class TestRagRetrieveWithRewrittenQuery:
     """rag_retrieve uses rewritten_query when available."""
 
@@ -143,6 +264,39 @@ class TestRagRetrieveWithRewrittenQuery:
 
         mock_retrieve.assert_called_once_with(query="判别式", subject="math")
 
+    @patch("src.graph.academic.retrieve")
+    async def test_uses_search_rag_query_before_keypoints(self, mock_retrieve):
+        mock_retrieve.return_value = {"docs": []}
+
+        state = {
+            "messages": [HumanMessage(content="original")],
+            "keypoints": ["original"],
+            "subject": "computer_science",
+            "rewritten_query": "",
+            "search_rag_query": "Python variables loops course concepts",
+        }
+        await rag_retrieve(state)
+
+        mock_retrieve.assert_called_once_with(
+            query="Python variables loops course concepts", subject="computer_science",
+        )
+
+    @patch("src.graph.academic.retrieve")
+    async def test_uses_expanded_keypoints_before_original_keypoints(self, mock_retrieve):
+        mock_retrieve.return_value = {"docs": []}
+
+        state = {
+            "messages": [HumanMessage(content="original")],
+            "keypoints": ["Python"],
+            "expanded_keypoints": ["变量", "条件判断", "循环"],
+            "subject": "computer_science",
+            "rewritten_query": "",
+            "search_rag_query": "",
+        }
+        await rag_retrieve(state)
+
+        mock_retrieve.assert_called_once_with(query="变量 条件判断 循环", subject="computer_science")
+
 
 class TestWebSearchWithRewrittenQuery:
     """web_search uses rewritten_query when available."""
@@ -172,6 +326,19 @@ class TestWebSearchWithRewrittenQuery:
         await web_search(state)
 
         mock_search.assert_called_once_with("the real question")
+
+    @patch("src.graph.academic.web_search_fn")
+    async def test_uses_search_web_query_before_original_question(self, mock_search):
+        mock_search.return_value = []
+
+        state = {
+            "messages": [HumanMessage(content="the real question")],
+            "rewritten_query": "",
+            "search_web_query": "Python practice problems answers explanations",
+        }
+        await web_search(state)
+
+        mock_search.assert_called_once_with("Python practice problems answers explanations")
 
 
 class TestRagRetrieve:

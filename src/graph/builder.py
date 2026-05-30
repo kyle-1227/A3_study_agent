@@ -10,6 +10,7 @@ from src.graph.academic import (
     generate_answer,
     rag_retrieve,
     rewrite_query,
+    search_query_rewriter,
     should_retry_or_end,
     web_search,
 )
@@ -59,6 +60,7 @@ def build_graph() -> StateGraph:
 
     # SubGraph A — Academic (parallel retrieval + answer generation)
     graph.add_node("academic_router", academic_router)
+    graph.add_node("search_query_rewriter", search_query_rewriter)
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
     graph.add_node("generate_answer", generate_answer)
@@ -113,8 +115,9 @@ def build_graph() -> StateGraph:
     )
 
     # Academic flow — fan-out/fan-in parallel retrieval
-    graph.add_edge("academic_router", "rag_retrieve")
-    graph.add_edge("academic_router", "web_search")
+    graph.add_edge("academic_router", "search_query_rewriter")
+    graph.add_edge("search_query_rewriter", "rag_retrieve")
+    graph.add_edge("search_query_rewriter", "web_search")
 
     # Fan-in: ordinary academic requests converge at answer generation;
     # resource requests reuse retrieval first, then enter sibling resource chains.
