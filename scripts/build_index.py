@@ -1,6 +1,8 @@
-"""Offline script to build the ChromaDB index from documents in data/.
+"""Build ChromaDB index from university course materials in data/.
 
-Note: This script is for sprint programming purpose.
+Business scenario:
+- University / pre-university personalized learning resource generation
+- Course materials: Python, Machine Learning, Big Data, Higher Mathematics, Computer Basics
 """
 
 import sys
@@ -15,42 +17,50 @@ load_dotenv(project_root / ".env")
 
 from src.rag.loader import load_documents
 from src.rag.indexer import build_index
-from src.rag.section_splitter import SectionAwareSplitter
 
 DATA_DIR = project_root / "data"
 
-SUBJECT_DIRS = {
+COURSE_DIRS = {
+    "big_data": DATA_DIR / "big_data",
+    "computer": DATA_DIR / "computer",
+    "machine_learning": DATA_DIR / "machine_learning",
     "math": DATA_DIR / "math",
-    "chinese": DATA_DIR / "chinese",
-    "computer": DATA_DIR / "computer"
+    "python": DATA_DIR / "python",
 }
 
-# Subjects whose documents are exam papers and benefit from section-aware splitting.
-EXAM_PAPER_SUBJECTS = {"math", "chinese", "computer"}
-
-_section_splitter = SectionAwareSplitter()
+COURSE_DOC_TYPE = "course_material"
 
 
 def main() -> None:
     all_docs = []
-    for subject, directory in SUBJECT_DIRS.items():
+
+    for subject, directory in COURSE_DIRS.items():
         if not directory.is_dir() or not any(directory.iterdir()):
-            print(f"[SKIP] {directory} — empty or missing")
+            print(f"[SKIP] {subject}: {directory} — empty or missing")
             continue
-        splitter = _section_splitter if subject in EXAM_PAPER_SUBJECTS else None
-        doc_type = "exam_paper" if subject in EXAM_PAPER_SUBJECTS else "exam"
-        docs = load_documents(directory, subject=subject, doc_type=doc_type, splitter=splitter)
+
+        docs = load_documents(
+            directory,
+            subject=subject,
+            doc_type=COURSE_DOC_TYPE,
+            splitter=None,
+        )
+
         print(f"[OK]   {subject}: loaded {len(docs)} chunks from {directory}")
         all_docs.extend(docs)
 
     if not all_docs:
-        print("\nNo documents found. Place PDF/MD/TXT files in data/math/ or data/chinese/ first.")
+        print(
+            "\nNo course materials found. "
+            "Place PDF/MD/TXT files in data/big_data, data/python, "
+            "data/machine_learning, data/math, or data/computer."
+        )
         return
 
-    print(f"\nBuilding index with {len(all_docs)} total chunks ...")
+    print(f"\nBuilding university course RAG index with {len(all_docs)} total chunks ...")
     vectorstore = build_index(all_docs)
     count = vectorstore._collection.count()
-    print(f"Index built successfully — {count} vectors in ChromaDB.")
+    print(f"Index built successfully — {count} course-material vectors in ChromaDB.")
 
 
 if __name__ == "__main__":
