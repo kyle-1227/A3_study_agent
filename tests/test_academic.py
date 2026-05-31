@@ -113,7 +113,6 @@ class TestRewriteQuery:
 class TestSearchQueryRewriter:
     """search_query_rewriter rewrites initial retrieval queries."""
 
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
     async def test_produces_rag_and_web_queries(self, mock_get_llm, mock_get_fallback):
@@ -171,7 +170,6 @@ class TestSearchQueryRewriter:
         })
         assert result == {}
 
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
     async def test_returns_empty_queries_on_failure(self, mock_get_llm, mock_get_fallback):
@@ -197,7 +195,6 @@ class TestSearchQueryRewriter:
         assert result["expanded_keypoints"] == []
         assert "structured failure" in result["search_query_rewrite_error"]
 
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
     async def test_structured_path_returns_parsing_error_with_raw_preview(self, mock_get_llm, mock_get_fallback):
@@ -229,7 +226,6 @@ class TestSearchQueryRewriter:
         assert result["search_rag_query"] == ""
         assert result["search_web_query"] == ""
 
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
     async def test_structured_path_rejects_none_parsed_with_raw_preview(self, mock_get_llm, mock_get_fallback):
@@ -260,54 +256,6 @@ class TestSearchQueryRewriter:
         assert result["search_query_rewrite_raw_preview"] == "{}"
         assert result["search_rag_query"] == ""
         assert result["search_web_query"] == ""
-
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "true"})
-    @patch("src.graph.academic.get_node_llm")
-    async def test_raw_debug_parses_valid_json(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=(
-            '{"rag_query":"Python 变量 条件判断 循环",'
-            '"web_search_query":"Python practice exercises answers explanations",'
-            '"expanded_keypoints":["变量","条件判断","循环"],'
-            '"reason":"用户请求宽泛，展开为 Python 基础知识点"}'
-        )))
-        mock_get_llm.return_value = mock_llm
-
-        result = await search_query_rewriter({
-            "messages": [HumanMessage(content="请给我一份python练习题和思维导图")],
-            "keypoints": ["Python"],
-            "requested_resource_type": "quiz",
-            "subject": "computer_science",
-        })
-
-        assert result["search_rag_query"] == "Python 变量 条件判断 循环"
-        assert result["search_web_query"] == "Python practice exercises answers explanations"
-        assert result["expanded_keypoints"] == ["变量", "条件判断", "循环"]
-        assert result["search_query_rewrite_error"] == ""
-        assert result["search_query_rewrite_raw_preview"].startswith('{"rag_query"')
-
-    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "true"})
-    @patch("src.graph.academic.get_node_llm")
-    async def test_raw_debug_returns_parse_error_and_preview(self, mock_get_llm):
-        raw = "not json " + ("x" * 2500)
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=raw))
-        mock_get_llm.return_value = mock_llm
-
-        result = await search_query_rewriter({
-            "messages": [HumanMessage(content="请给我一份python练习题和思维导图")],
-            "keypoints": ["Python"],
-            "requested_resource_type": "quiz",
-            "subject": "computer_science",
-        })
-
-        assert result["search_query_rewrite_error"] == "raw_json_parse_failed"
-        assert result["search_rag_query"] == ""
-        assert result["search_web_query"] == ""
-        assert result["expanded_keypoints"] == []
-        assert len(result["search_query_rewrite_raw_preview"]) == 2000
-        assert result["search_query_rewrite_raw_preview"] == raw[:2000]
-
 
 class TestRagRetrieveWithRewrittenQuery:
     """rag_retrieve uses rewritten_query when available."""

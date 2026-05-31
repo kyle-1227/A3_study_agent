@@ -22,10 +22,11 @@ DATA_DIR = project_root / "data"
 SUBJECT_DIRS = {
     "math": DATA_DIR / "math",
     "chinese": DATA_DIR / "chinese",
+    "computer": DATA_DIR / "computer"
 }
 
 # Subjects whose documents are exam papers and benefit from section-aware splitting.
-EXAM_PAPER_SUBJECTS = {"math", "chinese"}
+EXAM_PAPER_SUBJECTS = {"math", "chinese", "computer"}
 
 _section_splitter = SectionAwareSplitter()
 

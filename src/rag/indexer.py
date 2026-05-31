@@ -58,6 +58,7 @@ def _get_embedding(model_name: Optional[str] = None) -> OpenAIEmbeddings:
         "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
     )
     return OpenAIEmbeddings(
+        chunk_size=64,
         model=model_name,
         openai_api_key=os.getenv("SILICONFLOW_API_KEY"),
         openai_api_base=os.getenv(

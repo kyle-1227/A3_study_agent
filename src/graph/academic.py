@@ -148,57 +148,6 @@ async def search_query_rewriter(state: TutorState) -> dict:
         SystemMessage(content="你是高校个性化学习资源系统中的检索查询改写智能体，只输出结构化查询结果。"),
         HumanMessage(content=prompt),
     ]
-    debug_raw = os.getenv("DEBUG_QUERY_REWRITE_RAW", "").strip().lower() == "true"
-
-    if debug_raw:
-        try:
-            with traced_llm_call(
-                model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
-                node_name="search_query_rewriter",
-                temperature=0.0,
-            ) as span:
-                response = await llm.ainvoke(messages)
-                if span is not None:
-                    span.set_attribute("llm.fallback_used", False)
-
-            raw = _message_content_to_text(getattr(response, "content", response))
-            raw_preview = raw[:2000]
-            logger.warning("search_query_rewriter raw output preview: %s", raw_preview)
-            try:
-                raw_data = json.loads(raw)
-                if hasattr(SearchQueryRewriteOutput, "model_validate"):
-                    result = SearchQueryRewriteOutput.model_validate(raw_data)
-                else:
-                    result = SearchQueryRewriteOutput.parse_obj(raw_data)
-            except Exception:
-                logger.warning("search_query_rewriter raw JSON parse failed", exc_info=True)
-                return {
-                    "search_query_rewrite_error": "raw_json_parse_failed",
-                    "search_query_rewrite_raw_preview": raw_preview,
-                    "search_rag_query": "",
-                    "search_web_query": "",
-                    "expanded_keypoints": [],
-                    "search_query_rewrite_reason": "",
-                }
-
-            return {
-                "search_rag_query": result.rag_query.strip(),
-                "search_web_query": result.web_search_query.strip(),
-                "expanded_keypoints": [str(item).strip() for item in result.expanded_keypoints if str(item).strip()],
-                "search_query_rewrite_reason": result.reason.strip(),
-                "search_query_rewrite_error": "",
-                "search_query_rewrite_raw_preview": raw_preview,
-            }
-        except Exception as exc:
-            logger.warning("Initial raw search query rewrite failed; continuing with original query", exc_info=True)
-            return {
-                "search_query_rewrite_error": str(exc),
-                "search_query_rewrite_raw_preview": "",
-                "search_rag_query": "",
-                "search_web_query": "",
-                "expanded_keypoints": [],
-                "search_query_rewrite_reason": "",
-            }
 
     log_query_rewrite_result = os.getenv("LOG_QUERY_REWRITE_RESULT", "").strip().lower() == "true"
     structured_llm = llm.with_structured_output(
@@ -232,8 +181,8 @@ async def search_query_rewriter(state: TutorState) -> dict:
         raw_preview = raw_text[:2000] if raw_text else ""
 
         if log_query_rewrite_result:
-            logger.info("search_query_rewriter raw result preview: %s", raw_preview)
-            logger.info("search_query_rewriter parsing_error: %s", parsing_error)
+            logger.warning("search_query_rewriter raw result preview: %s", raw_preview)
+            logger.warning("search_query_rewriter parsing_error: %s", parsing_error)
 
         if parsing_error is not None:
             raise ValueError(f"search_query_rewriter parsing_error: {parsing_error}")
@@ -252,7 +201,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
         }
 
         if log_query_rewrite_result:
-            logger.info(
+            logger.warning(
                 "search_query_rewriter parsed result: %s",
                 json.dumps(result_payload, ensure_ascii=False),
             )
