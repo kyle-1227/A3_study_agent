@@ -52,6 +52,8 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     api_key_env = get_setting(f"{node_name}.api_key_env", "DEEPSEEK_API_KEY")
     base_url = get_setting(f"{node_name}.base_url", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
     temperature = get_setting(f"{node_name}.temperature", 0.7)
+    max_tokens = get_setting(f"{node_name}.max_tokens", None)
+    streaming = get_setting(f"{node_name}.streaming", None)
 
     defaults = dict(
         model=model,
@@ -59,6 +61,10 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
         base_url=base_url,
         temperature=temperature,
     )
+    if max_tokens is not None:
+        defaults["max_tokens"] = max_tokens
+    if streaming is not None:
+        defaults["streaming"] = streaming
     defaults.update(overrides)
     return ChatOpenAI(**defaults)
 

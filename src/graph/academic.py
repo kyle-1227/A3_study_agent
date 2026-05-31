@@ -200,9 +200,18 @@ async def search_query_rewriter(state: TutorState) -> dict:
                 "search_query_rewrite_reason": "",
             }
 
-    structured_llm = llm.with_structured_output(SearchQueryRewriteOutput)
+    log_query_rewrite_result = os.getenv("LOG_QUERY_REWRITE_RESULT", "").strip().lower() == "true"
+    structured_llm = llm.with_structured_output(
+        SearchQueryRewriteOutput,
+        method="json_mode",
+        include_raw=True,
+    )
     fallback_llm = get_fallback_llm(temperature=0.0)
-    structured_fallback = fallback_llm.with_structured_output(SearchQueryRewriteOutput)
+    structured_fallback = fallback_llm.with_structured_output(
+        SearchQueryRewriteOutput,
+        method="json_mode",
+        include_raw=True,
+    )
 
     try:
         with traced_llm_call(
@@ -210,11 +219,42 @@ async def search_query_rewriter(state: TutorState) -> dict:
             node_name="search_query_rewriter",
             temperature=0.0,
         ) as span:
-            result = await async_invoke_with_fallback(
+            result_pack = await async_invoke_with_fallback(
                 structured_llm,
                 messages,
                 fallback=structured_fallback,
                 span=span,
+            )
+        raw_message = result_pack.get("raw")
+        parsed = result_pack.get("parsed")
+        parsing_error = result_pack.get("parsing_error")
+        raw_text = _message_content_to_text(getattr(raw_message, "content", raw_message))
+        raw_preview = raw_text[:2000] if raw_text else ""
+
+        if log_query_rewrite_result:
+            logger.info("search_query_rewriter raw result preview: %s", raw_preview)
+            logger.info("search_query_rewriter parsing_error: %s", parsing_error)
+
+        if parsing_error is not None:
+            raise ValueError(f"search_query_rewriter parsing_error: {parsing_error}")
+        if parsed is None:
+            raise ValueError("search_query_rewriter parsed result is None")
+
+        result_payload = {
+            "rag_query": parsed.rag_query.strip(),
+            "web_search_query": parsed.web_search_query.strip(),
+            "expanded_keypoints": [
+                str(item).strip()
+                for item in parsed.expanded_keypoints
+                if str(item).strip()
+            ],
+            "reason": parsed.reason.strip(),
+        }
+
+        if log_query_rewrite_result:
+            logger.info(
+                "search_query_rewriter parsed result: %s",
+                json.dumps(result_payload, ensure_ascii=False),
             )
     except Exception as exc:
         logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
@@ -224,16 +264,16 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "search_web_query": "",
             "expanded_keypoints": [],
             "search_query_rewrite_reason": "",
-            "search_query_rewrite_raw_preview": "",
+            "search_query_rewrite_raw_preview": raw_preview if "raw_preview" in locals() else "",
         }
 
     return {
-        "search_rag_query": result.rag_query.strip(),
-        "search_web_query": result.web_search_query.strip(),
-        "expanded_keypoints": [str(item).strip() for item in result.expanded_keypoints if str(item).strip()],
-        "search_query_rewrite_reason": result.reason.strip(),
+        "search_rag_query": result_payload["rag_query"],
+        "search_web_query": result_payload["web_search_query"],
+        "expanded_keypoints": result_payload["expanded_keypoints"],
+        "search_query_rewrite_reason": result_payload["reason"],
         "search_query_rewrite_error": "",
-        "search_query_rewrite_raw_preview": "",
+        "search_query_rewrite_raw_preview": raw_preview,
     }
 
 

@@ -118,13 +118,18 @@ class TestSearchQueryRewriter:
     @patch("src.graph.academic.get_node_llm")
     async def test_produces_rag_and_web_queries(self, mock_get_llm, mock_get_fallback):
         structured = MagicMock()
+        parsed = SearchQueryRewriteOutput(
+            rag_query="Python 变量 条件判断 循环 课程知识点",
+            web_search_query="Python beginner variables conditionals loops exercises",
+            expanded_keypoints=["变量", "条件判断", "循环"],
+            reason="用户请求较宽泛，展开为 Python 基础知识点",
+        )
         structured.ainvoke = AsyncMock(
-            return_value=SearchQueryRewriteOutput(
-                rag_query="Python 变量 条件判断 循环 课程知识点",
-                web_search_query="Python beginner variables conditionals loops exercises",
-                expanded_keypoints=["变量", "条件判断", "循环"],
-                reason="用户请求较宽泛，展开为 Python 基础知识点",
-            )
+            return_value={
+                "raw": AIMessage(content='{"rag_query":"Python 变量 条件判断 循环 课程知识点"}'),
+                "parsed": parsed,
+                "parsing_error": None,
+            }
         )
         llm = MagicMock()
         llm.with_structured_output.return_value = structured
@@ -146,7 +151,18 @@ class TestSearchQueryRewriter:
         assert result["expanded_keypoints"] == ["变量", "条件判断", "循环"]
         assert result["search_query_rewrite_reason"]
         assert result["search_query_rewrite_error"] == ""
+        assert result["search_query_rewrite_raw_preview"].startswith('{"rag_query"')
         mock_get_llm.assert_called_once_with("query_rewrite", temperature=0.0)
+        llm.with_structured_output.assert_called_once_with(
+            SearchQueryRewriteOutput,
+            method="json_mode",
+            include_raw=True,
+        )
+        fallback_llm.with_structured_output.assert_called_once_with(
+            SearchQueryRewriteOutput,
+            method="json_mode",
+            include_raw=True,
+        )
 
     async def test_noops_when_retry_rewritten_query_exists(self):
         result = await search_query_rewriter({
@@ -180,6 +196,70 @@ class TestSearchQueryRewriter:
         assert result["search_web_query"] == ""
         assert result["expanded_keypoints"] == []
         assert "structured failure" in result["search_query_rewrite_error"]
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_structured_path_returns_parsing_error_with_raw_preview(self, mock_get_llm, mock_get_fallback):
+        structured = MagicMock()
+        structured.ainvoke = AsyncMock(
+            return_value={
+                "raw": AIMessage(content="bad structured output"),
+                "parsed": None,
+                "parsing_error": ValueError("invalid JSON"),
+            }
+        )
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="Python 练习题")],
+            "keypoints": ["Python"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert "search_query_rewriter parsing_error" in result["search_query_rewrite_error"]
+        assert result["search_query_rewrite_raw_preview"] == "bad structured output"
+        assert result["search_rag_query"] == ""
+        assert result["search_web_query"] == ""
+
+    @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "false"})
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_structured_path_rejects_none_parsed_with_raw_preview(self, mock_get_llm, mock_get_fallback):
+        structured = MagicMock()
+        structured.ainvoke = AsyncMock(
+            return_value={
+                "raw": AIMessage(content="{}"),
+                "parsed": None,
+                "parsing_error": None,
+            }
+        )
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="Python 练习题")],
+            "keypoints": ["Python"],
+            "requested_resource_type": "quiz",
+            "subject": "computer_science",
+        })
+
+        assert "parsed result is None" in result["search_query_rewrite_error"]
+        assert result["search_query_rewrite_raw_preview"] == "{}"
+        assert result["search_rag_query"] == ""
+        assert result["search_web_query"] == ""
 
     @patch.dict("os.environ", {"DEBUG_QUERY_REWRITE_RAW": "true"})
     @patch("src.graph.academic.get_node_llm")

@@ -34,9 +34,9 @@ rag:
   reranker_model: "BAAI/bge-reranker-v2-m3"
 
 supervisor:
-  model: "Qwen/Qwen2.5-7B-Instruct"
-  base_url: "https://api.siliconflow.cn/v1"
-  api_key_env: "SILICONFLOW_API_KEY"
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic intent routing
   valid_intents:
     - academic
@@ -45,7 +45,9 @@ supervisor:
     - unknown
 
 query_rewrite:
-  model: "Qwen/Qwen2.5-7B-Instruct"
-  base_url: "https://api.siliconflow.cn/v1"
-  api_key_env: "SILICONFLOW_API_KEY"
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic retrieval-query rewriting
+  max_tokens: 512
+  streaming: false

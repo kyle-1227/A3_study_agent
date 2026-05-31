@@ -45,7 +45,10 @@ async def supervisor_node(state: TutorState) -> dict:
         Dict with ``intent``, ``subject``, and ``keypoints`` for state update.
     """
     llm = get_node_llm("supervisor")
-    structured_llm = llm.with_structured_output(SupervisorOutput)
+    structured_llm = llm.with_structured_output(
+        SupervisorOutput,
+        method="json_mode",
+    )
 
     last_msg = state["messages"][-1]
     user_text = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
