@@ -275,8 +275,14 @@ async def generate_sse(
     """
     if thread_id is None:
         thread_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
     config = make_thread_config(thread_id)
-    state_input = {"messages": [HumanMessage(content=query)]}
+    state_input = {
+        "messages": [HumanMessage(content=query)],
+        "request_id": request_id,
+        "session_id": thread_id,
+        "thread_id": thread_id,
+    }
 
     # Emit thread_id so frontend can use it for /resume
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"

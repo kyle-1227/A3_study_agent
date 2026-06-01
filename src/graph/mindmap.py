@@ -14,6 +14,7 @@ from src.config import get_setting, load_prompt
 from src.graph.json_output import ainvoke_strict_json
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
+from src.observability.a3_trace import emit_a3_trace
 from src.tools.mindmap_tool import create_xmind_artifact, normalize_mindmap_tree
 from src.tracing import traced_llm_call, traced_node
 
@@ -76,6 +77,14 @@ def _model_to_dict(model: BaseModel) -> dict:
 def _format_keypoints(state: TutorState) -> str:
     keypoints = state.get("keypoints", [])
     return "、".join(keypoints) if keypoints else "未提取到明确关键词"
+
+
+def _subjects_used(context: list[dict]) -> list[str]:
+    return sorted({str(item.get("retrieval_subject")) for item in context if item.get("retrieval_subject")})
+
+
+def _roles_used(context: list[dict]) -> list[str]:
+    return sorted({str(item.get("retrieval_role")) for item in context if item.get("retrieval_role")})
 
 
 def _format_context(context: list[dict]) -> str:
@@ -210,6 +219,21 @@ async def mindmap_planner(state: TutorState) -> dict:
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     context = state.get("context", [])
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "mindmap_planner",
+        {
+            "subjects_used": _subjects_used(context),
+            "roles_used": _roles_used(context),
+            "learning_goal": state.get("learning_goal", ""),
+            "primary_subject": state.get("primary_subject", ""),
+            "subject_relation_summary": state.get("subject_relation_summary", ""),
+            "context_count": len(context),
+        },
+        state=state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
     prompt = _render_prompt(
         "mindmap_planner",
         {

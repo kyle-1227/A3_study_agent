@@ -24,6 +24,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
+from src.observability.a3_trace import emit_a3_trace
 from src.rag.retriever import retrieve
 from src.tools.search_tool import search as web_search_fn
 from src.tracing import traced_llm_call, traced_node, traced_search
@@ -126,8 +127,10 @@ async def _gather_resource_intel(state: TutorState) -> str:
     subject = state.get("subject")
     subj = subject if subject and subject != "other" else None
     retrieval_plan = state.get("retrieval_plan") or []
+    rag_sections_count = 0
 
     async def _rag():
+        nonlocal rag_sections_count
         try:
             if retrieval_plan:
                 sections: list[str] = []
@@ -155,6 +158,7 @@ async def _gather_resource_intel(state: TutorState) -> str:
                         f"  - {d.get('content', '')[:220]}"
                         for d in docs[:2]
                     ]
+                    rag_sections_count += 1
                     sections.append(
                         f"【知识库资源｜{plan_subject}｜{role}】\n"
                         f"用途：{purpose}\n"
@@ -169,6 +173,7 @@ async def _gather_resource_intel(state: TutorState) -> str:
             docs = result.get("docs", [])
             if not docs:
                 return ""
+            rag_sections_count = 1
             parts = [f"- {d.get('content', '')[:200]}" for d in docs[:3]]
             return "【知识库资源】\n" + "\n".join(parts)
         except Exception:
@@ -190,6 +195,21 @@ async def _gather_resource_intel(state: TutorState) -> str:
             return ""
 
     rag_text, web_text = await asyncio.gather(_rag(), _web())
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "planning_gather_intel",
+        {
+            "mode": "multi_subject" if retrieval_plan else "single_query",
+            "retrieval_plan_count": len(retrieval_plan),
+            "subjects": [item.get("subject") for item in retrieval_plan],
+            "roles": [item.get("role") for item in retrieval_plan],
+            "rag_sections_count": rag_sections_count,
+            "web_query": web_query,
+        },
+        state=state,
+        env_flag="LOG_PLANNING_INTEL",
+    )
 
     combined = "\n\n".join(part for part in [rag_text, web_text] if part)
     return combined if combined else "未获取到相关资源信息。"

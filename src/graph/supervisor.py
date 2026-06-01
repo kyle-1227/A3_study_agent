@@ -18,6 +18,7 @@ from src.config import get_setting, load_prompt
 from src.graph.llm import get_node_llm
 from src.graph.state import TutorState
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
+from src.observability.a3_trace import emit_a3_trace
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,26 @@ async def supervisor_node(state: TutorState) -> dict:
         intent = "academic"
     if requested_resource_type:
         intent = "academic"
+
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "supervisor",
+        {
+            "intent": intent,
+            "subject": subject,
+            "subject_candidates": subject_candidates,
+            "keypoints": keypoints,
+            "requested_resource_type": requested_resource_type,
+            "needs_mindmap": needs_mindmap,
+            "confidence": result.confidence if "result" in locals() else 0.0,
+            "available_subjects": available_subjects,
+            "user_query_preview": user_text,
+        },
+        state=state,
+        env_flag="LOG_SUPERVISOR_RESULT",
+        max_chars=200,
+    )
 
     return {
         "intent": intent,

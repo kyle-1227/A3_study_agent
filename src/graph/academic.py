@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -21,6 +20,7 @@ from pydantic import BaseModel, Field
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
 from src.tools.search_tool import search as web_search_fn
@@ -129,6 +129,53 @@ def _clear_retrieval_plan_state() -> dict:
     }
 
 
+def _query_source(state: TutorState) -> tuple[str, str]:
+    rewritten = state.get("rewritten_query", "")
+    search_rag_query = state.get("search_rag_query", "")
+    expanded_keypoints = state.get("expanded_keypoints", [])
+    keypoints = state.get("keypoints", [])
+    if rewritten:
+        return rewritten, "rewritten_query"
+    if search_rag_query:
+        return search_rag_query, "search_rag_query"
+    if expanded_keypoints:
+        return " ".join(expanded_keypoints), "expanded_keypoints"
+    if keypoints:
+        return " ".join(keypoints), "keypoints"
+    return _last_human_query(state), "original_query"
+
+
+def _doc_subject(doc: dict) -> str | None:
+    return (doc.get("metadata") or {}).get("subject")
+
+
+def _subject_mismatch_count(docs: list[dict], subject: str | None) -> int:
+    if not subject:
+        return 0
+    return sum(1 for doc in docs if _doc_subject(doc) != subject)
+
+
+def _top_doc_summaries(docs: list[dict], limit: int = 5) -> list[dict]:
+    return [
+        {
+            "rank": i + 1,
+            "source": doc.get("source"),
+            "metadata_subject": _doc_subject(doc),
+            "score": doc.get("score"),
+            "rerank_score": doc.get("rerank_score"),
+        }
+        for i, doc in enumerate(docs[:limit])
+    ]
+
+
+def _subjects_used(docs: list[dict]) -> list[str]:
+    return sorted({str(doc.get("retrieval_subject")) for doc in docs if doc.get("retrieval_subject")})
+
+
+def _roles_used(docs: list[dict]) -> list[str]:
+    return sorted({str(doc.get("retrieval_role")) for doc in docs if doc.get("retrieval_role")})
+
+
 def _score_doc(doc: dict) -> float:
     """Best available score for sorting retrieved docs."""
     value = doc.get("rerank_score", doc.get("score", 0))
@@ -165,21 +212,28 @@ def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
 def _normalize_retrieval_plan(
     raw_plan: list[RetrievalPlanItem],
     state: TutorState,
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], dict]:
     """Filter and normalize LLM-produced per-subject retrieval plan."""
     allowed_subjects = _allowed_retrieval_subjects(state)
     by_subject: dict[str, dict] = {}
+    rejected_items: list[dict] = []
 
     for item in raw_plan or []:
         subject = normalize_subject(item.subject)
         rag_query = item.rag_query.strip()
-        if not subject or not rag_query:
+        if not subject:
+            rejected_items.append({"subject": subject, "reason": "empty_subject"})
+            continue
+        if not rag_query:
+            rejected_items.append({"subject": subject, "reason": "empty_rag_query"})
             continue
         if subject not in allowed_subjects:
+            rejected_items.append({"subject": subject, "reason": "subject_not_in_available_subjects"})
             continue
 
         role = item.role.strip() or "supporting_context"
         if role not in _RETRIEVAL_ROLES:
+            rejected_items.append({"subject": subject, "reason": "invalid_role_fallback_to_supporting_context"})
             role = "supporting_context"
 
         normalized = {
@@ -194,11 +248,20 @@ def _normalize_retrieval_plan(
 
         existing = by_subject.get(subject)
         if existing is None or normalized["priority"] > existing["priority"]:
+            if existing is not None:
+                rejected_items.append({"subject": subject, "reason": "duplicate_subject_lower_priority"})
             by_subject[subject] = normalized
+        else:
+            rejected_items.append({"subject": subject, "reason": "duplicate_subject_lower_priority"})
 
     plan = sorted(by_subject.values(), key=lambda item: item["priority"], reverse=True)[:4]
 
-    return plan, ""
+    return plan, {
+        "raw_plan_count": len(raw_plan or []),
+        "normalized_plan_count": len(plan),
+        "accepted_subjects": [item["subject"] for item in plan],
+        "rejected_items": rejected_items,
+    }
 
 
 def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
@@ -310,6 +373,20 @@ async def rewrite_query(state: TutorState) -> dict:
         logger.warning("Query rewrite failed, using original query")
         rewritten = original_query
 
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "rewrite_query_retry",
+        {
+            "retry_count": state.get("retry_count", 0),
+            "hallucination_reason": reason,
+            "rewritten_query": rewritten,
+            "retrieval_plan_cleared": True,
+        },
+        state=state,
+        env_flag="LOG_RETRY_TRACE",
+    )
+
     return {"rewritten_query": rewritten, **_clear_retrieval_plan_state()}
 
 
@@ -346,7 +423,6 @@ async def search_query_rewriter(state: TutorState) -> dict:
         HumanMessage(content=prompt),
     ]
 
-    log_query_rewrite_result = os.getenv("LOG_QUERY_REWRITE_RESULT", "").strip().lower() == "true"
     structured_llm = llm.with_structured_output(
         SearchQueryRewriteOutput,
         method="json_mode",
@@ -377,10 +453,6 @@ async def search_query_rewriter(state: TutorState) -> dict:
         raw_text = _message_content_to_text(getattr(raw_message, "content", raw_message))
         raw_preview = raw_text[:2000] if raw_text else ""
 
-        if log_query_rewrite_result:
-            logger.warning("search_query_rewriter raw result preview: %s", raw_preview)
-            logger.warning("search_query_rewriter parsing_error: %s", parsing_error)
-
         if parsing_error is not None:
             raise ValueError(f"search_query_rewriter parsing_error: {parsing_error}")
         if parsed is None:
@@ -396,7 +468,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
             ],
             "reason": parsed.reason.strip(),
         }
-        retrieval_plan, _ = _normalize_retrieval_plan(parsed.retrieval_plan, state)
+        retrieval_plan, normalize_debug = _normalize_retrieval_plan(parsed.retrieval_plan, state)
         primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
         multi_subject_payload = {
             "retrieval_plan": retrieval_plan,
@@ -405,13 +477,65 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "subject_relation_summary": parsed.subject_relation_summary.strip(),
         }
 
-        if log_query_rewrite_result:
-            logger.warning(
-                "search_query_rewriter parsed result: %s",
-                json.dumps({**result_payload, **multi_subject_payload}, ensure_ascii=False),
-            )
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "query_rewrite",
+            {
+                "intent": state.get("intent"),
+                "subject": state.get("subject"),
+                "subject_candidates": state.get("subject_candidates", []),
+                "available_subjects": available_subjects,
+                "learning_goal": parsed.learning_goal,
+                "primary_subject": primary_subject,
+                "subject_relation_summary": parsed.subject_relation_summary,
+                "search_rag_query": result_payload["rag_query"],
+                "search_web_query": result_payload["web_search_query"],
+                "expanded_keypoints": result_payload["expanded_keypoints"],
+                "retrieval_plan_count": len(retrieval_plan),
+                "retrieval_plan": retrieval_plan,
+                "reason": result_payload["reason"],
+                "parsing_error": str(parsing_error) if parsing_error else None,
+                "raw_preview": raw_preview,
+            },
+            state=state,
+            env_flag="LOG_QUERY_REWRITE_RESULT",
+            max_chars=800,
+        )
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "retrieval_plan_normalize",
+            {
+                "available_subjects": available_subjects,
+                "subject_candidates": subject_candidates,
+                "raw_plan_count": normalize_debug["raw_plan_count"],
+                "normalized_plan_count": normalize_debug["normalized_plan_count"],
+                "accepted_subjects": normalize_debug["accepted_subjects"],
+                "rejected_items": normalize_debug["rejected_items"],
+                "primary_subject": primary_subject,
+            },
+            state=state,
+            env_flag="LOG_RETRIEVAL_PLAN",
+        )
     except Exception as exc:
         logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "query_rewrite_failed",
+            {
+                "error": str(exc),
+                "fallback": "empty_retrieval_plan_and_single_query_fallback",
+                "retrieval_plan": [],
+                "learning_goal": "",
+                "primary_subject": "",
+                "subject_relation_summary": "",
+                "raw_preview": raw_preview if "raw_preview" in locals() else "",
+            },
+            state=state,
+            env_flag="LOG_QUERY_REWRITE_RESULT",
+        )
         return {
             "search_query_rewrite_error": str(exc),
             "search_rag_query": "",
@@ -440,21 +564,8 @@ async def rag_retrieve(state: TutorState) -> dict:
     """Query ChromaDB with keypoints extracted by the supervisor node."""
     rewritten = state.get("rewritten_query", "")
     retrieval_plan = state.get("retrieval_plan") or []
-    search_rag_query = state.get("search_rag_query", "")
-    expanded_keypoints = state.get("expanded_keypoints", [])
-    keypoints = state.get("keypoints", [])
     subject = state.get("subject")
-
-    if rewritten:
-        query = rewritten
-    elif search_rag_query:
-        query = search_rag_query
-    elif expanded_keypoints:
-        query = " ".join(expanded_keypoints)
-    elif keypoints:
-        query = " ".join(keypoints)
-    else:
-        query = _last_human_query(state)
+    query, query_source = _query_source(state)
 
     subj = subject if subject != "other" else None
 
@@ -479,19 +590,68 @@ async def rag_retrieve(state: TutorState) -> dict:
                     subject=plan_subject,
                     top_k=per_subject_top_k,
                 )
-                for doc in result.get("docs", []):
+                docs = result.get("docs", [])
+                role = item.get("role", "supporting_context")
+                priority = item.get("priority", 0.5)
+                # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+                emit_a3_trace(
+                    logger,
+                    "rag_retrieve_plan_item",
+                    {
+                        "subject": plan_subject,
+                        "role": role,
+                        "priority": priority,
+                        "query": plan_query,
+                        "top_k": per_subject_top_k,
+                        "doc_count": len(docs),
+                        "is_hit": result.get("is_hit", False),
+                        "subject_mismatch_count": _subject_mismatch_count(docs, plan_subject),
+                        "top_docs": _top_doc_summaries(docs),
+                    },
+                    state=state,
+                    env_flag="LOG_RAG_RESULT",
+                )
+                for doc in docs:
                     all_docs.append({
                         "type": "rag",
                         "retrieval_subject": plan_subject,
-                        "retrieval_role": item.get("role", "supporting_context"),
+                        "retrieval_role": role,
                         "retrieval_query": plan_query,
                         "retrieval_purpose": item.get("purpose", ""),
                         "relation_to_goal": item.get("relation_to_goal", ""),
-                        "retrieval_priority": item.get("priority", 0.5),
+                        "retrieval_priority": priority,
                         **doc,
                     })
 
             selected_docs = _select_docs_with_subject_quota(all_docs, max_docs)
+            subject_counter = Counter(doc.get("retrieval_subject") for doc in selected_docs)
+            role_counter = Counter(doc.get("retrieval_role") for doc in selected_docs)
+            # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+            emit_a3_trace(
+                logger,
+                "context_assembly",
+                {
+                    "mode": "multi_subject",
+                    "retrieval_plan_count": len(retrieval_plan),
+                    "raw_doc_count": len(all_docs),
+                    "final_doc_count": len(selected_docs),
+                    "max_docs": max_docs,
+                    "subject_doc_distribution": dict(subject_counter),
+                    "role_distribution": dict(role_counter),
+                    "selected_docs": [
+                        {
+                            "subject": doc.get("retrieval_subject"),
+                            "role": doc.get("retrieval_role"),
+                            "source": doc.get("source"),
+                            "score": doc.get("score"),
+                            "rerank_score": doc.get("rerank_score"),
+                        }
+                        for doc in selected_docs
+                    ],
+                },
+                state=state,
+                env_flag="LOG_CONTEXT_ASSEMBLY",
+            )
             span.set_attribute("rag.doc_count", len(selected_docs))
             span.set_attribute("rag.is_hit", bool(selected_docs))
             if selected_docs:
@@ -501,12 +661,40 @@ async def rag_retrieve(state: TutorState) -> dict:
 
     with traced_retrieval(query=query, subject=subj) as span:
         result = await asyncio.to_thread(retrieve, query=query, subject=subj)
+        docs = result.get("docs", [])
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "rag_retrieve_single_subject",
+            {
+                "subject": subj,
+                "query": query,
+                "query_source": query_source,
+                "doc_count": len(docs),
+                "is_hit": result.get("is_hit", False),
+                "subject_mismatch_count": _subject_mismatch_count(docs, subj),
+                "top_docs": _top_doc_summaries(docs),
+            },
+            state=state,
+            env_flag="LOG_RAG_RESULT",
+        )
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "context_assembly",
+            {
+                "mode": "single_subject",
+                "subject": subj,
+                "final_doc_count": len(docs),
+            },
+            state=state,
+            env_flag="LOG_CONTEXT_ASSEMBLY",
+        )
         span.set_attribute("rag.doc_count", len(result.get("docs", [])))
         span.set_attribute("rag.is_hit", result.get("is_hit", False))
         if result.get("docs"):
             span.set_attribute("rag.top_score", result["docs"][0].get("score", 0))
 
-    docs = result["docs"]
     return {"context": [{"type": "rag", **doc} for doc in docs]}
 
 
@@ -521,20 +709,27 @@ async def web_search(state: TutorState) -> dict:
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
     retrieval_plan = state.get("retrieval_plan") or []
+    selected_subject = ""
     if rewritten:
         query = rewritten
+        query_source = "rewritten_query"
     elif search_web_query:
         query = search_web_query
+        query_source = "search_web_query"
     elif retrieval_plan:
         best_item = max(
             retrieval_plan,
             key=lambda item: float(item.get("priority") or 0),
         )
+        selected_subject = best_item.get("subject", "")
         query = best_item.get("web_search_query") or best_item.get("rag_query") or _last_human_query(state)
+        query_source = "retrieval_plan_top_priority"
     else:
         query = _last_human_query(state)
+        query_source = "original_query"
 
     with traced_search(query=query, timeout=_SEARCH_TIMEOUT) as span:
+        timed_out = False
         try:
             search_results = await asyncio.wait_for(
                 asyncio.to_thread(web_search_fn, query),
@@ -544,12 +739,29 @@ async def web_search(state: TutorState) -> dict:
             span.set_attribute("search.timed_out", False)
         except asyncio.TimeoutError:
             search_results = []
+            timed_out = True
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", True)
         except Exception:
             search_results = []
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", False)
+
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "web_search",
+        {
+            "query_source": query_source,
+            "query": query,
+            "retrieval_plan_count": len(retrieval_plan),
+            "selected_subject": selected_subject,
+            "result_count": len(search_results),
+            "timed_out": timed_out,
+        },
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+    )
 
     return {"context": [{"type": "web", **r} for r in search_results]}
 
@@ -628,6 +840,23 @@ async def generate_answer(state: TutorState) -> dict:
     context = state.get("context", [])
     rag_docs = [c for c in context if c.get("type") == "rag"]
     web_results = [c for c in context if c.get("type") == "web"]
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "generate_answer",
+        {
+            "context_rag_count": len(rag_docs),
+            "context_web_count": len(web_results),
+            "subjects_used": _subjects_used(rag_docs),
+            "roles_used": _roles_used(rag_docs),
+            "learning_goal": state.get("learning_goal", ""),
+            "primary_subject": state.get("primary_subject", ""),
+            "resource_offer": not bool(state.get("requested_resource_type") or state.get("needs_mindmap")),
+            "model_group": "academic",
+        },
+        state=state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
 
     temperature = get_setting("academic.temperature", 0.7)
     user_prompt = load_prompt("academic_answer").format(
@@ -707,6 +936,18 @@ async def evaluate_hallucination(state: TutorState) -> dict:
             is_faithful = True
 
     hallucination_detected = not is_faithful
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "hallucination_eval",
+        {
+            "is_faithful": is_faithful,
+            "retry_count": retry_count,
+            "reason": evaluation.reason if "evaluation" in locals() else "evaluation_failed",
+        },
+        state=state,
+        env_flag="LOG_RETRY_TRACE",
+    )
 
     result: dict = {"hallucination_detected": hallucination_detected}
     if hallucination_detected:

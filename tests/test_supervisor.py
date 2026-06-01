@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,6 +52,36 @@ class TestSupervisorNode:
         assert result["subject_candidates"] == ["python"]
         assert "函数/function" in result["keypoints"]
         mock_llm.with_structured_output.assert_called_once_with(SupervisorOutput, method="json_mode")
+
+    @patch("src.graph.supervisor.get_node_llm")
+    async def test_emits_a3_trace_when_enabled(self, mock_get_llm, caplog, monkeypatch):
+        monkeypatch.setenv("LOG_SUPERVISOR_RESULT", "true")
+        mock_llm = MagicMock()
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+            intent="academic",
+            keywords=["Python"],
+            confidence=0.95,
+            subject_candidates=["python"],
+        ))
+        mock_llm.with_structured_output.return_value = structured_llm
+        mock_get_llm.return_value = mock_llm
+
+        state = {
+            "messages": [HumanMessage(content="Python 函数怎么理解？")],
+            "request_id": "req-1",
+            "session_id": "sess-1",
+            "thread_id": "thread-1",
+        }
+        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
+            with caplog.at_level("WARNING"):
+                await supervisor_node(state)
+
+        record = next(r for r in caplog.records if r.getMessage().startswith("A3_TRACE "))
+        payload = json.loads(record.getMessage().removeprefix("A3_TRACE "))
+        assert payload["stage"] == "supervisor"
+        assert payload["request_id"] == "req-1"
+        assert payload["subject"] == "python"
 
     @patch("src.graph.supervisor.get_node_llm")
     async def test_planning_intent(self, mock_get_llm):

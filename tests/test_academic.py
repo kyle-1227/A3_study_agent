@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -10,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.academic import (
     _format_retrieved,
     _format_search,
+    _normalize_retrieval_plan,
     RetrievalPlanItem,
     SearchQueryRewriteOutput,
     academic_router,
@@ -182,6 +184,42 @@ class TestSearchQueryRewriter:
         assert "retrieval_plan" in prompt
         assert "core_concept" in prompt
 
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    def test_normalize_retrieval_plan_returns_debug(self, mock_available_subjects):
+        mock_available_subjects.return_value = ["python", "machine_learning"]
+
+        plan, debug = _normalize_retrieval_plan(
+            [
+                RetrievalPlanItem(subject="", role="core_concept", rag_query="x"),
+                RetrievalPlanItem(subject="python", role="bad_role", rag_query="old", priority=0.1),
+                RetrievalPlanItem(subject="python", role="implementation_tool", rag_query="new", priority=0.9),
+                RetrievalPlanItem(subject="law", role="core_concept", rag_query="law", priority=0.8),
+                RetrievalPlanItem(subject="machine_learning", role="core_concept", rag_query="", priority=0.8),
+            ],
+            {"subject": "python"},
+        )
+
+        assert plan == [
+            {
+                "subject": "python",
+                "role": "implementation_tool",
+                "rag_query": "new",
+                "web_search_query": "",
+                "purpose": "",
+                "relation_to_goal": "",
+                "priority": 0.9,
+            },
+        ]
+        assert debug["raw_plan_count"] == 5
+        assert debug["normalized_plan_count"] == 1
+        assert debug["accepted_subjects"] == ["python"]
+        reasons = {item["reason"] for item in debug["rejected_items"]}
+        assert "empty_subject" in reasons
+        assert "invalid_role_fallback_to_supporting_context" in reasons
+        assert "duplicate_subject_lower_priority" in reasons
+        assert "subject_not_in_available_subjects" in reasons
+        assert "empty_rag_query" in reasons
+
     async def test_noops_when_retry_rewritten_query_exists(self):
         result = await search_query_rewriter({
             "messages": [HumanMessage(content="original")],
@@ -252,6 +290,52 @@ class TestSearchQueryRewriter:
         assert result["primary_subject"] == "machine_learning"
         assert result["learning_goal"] == "用 Python 理解和检测机器学习过拟合"
         assert result["subject_relation_summary"] == "machine_learning 提供核心概念，python 提供实现工具"
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_query_rewrite_emits_a3_trace(
+        self, mock_get_llm, mock_get_fallback, mock_available_subjects, caplog, monkeypatch,
+    ):
+        monkeypatch.setenv("LOG_QUERY_REWRITE_RESULT", "true")
+        mock_available_subjects.return_value = ["python"]
+        structured = MagicMock()
+        parsed = SearchQueryRewriteOutput(
+            rag_query="Python function",
+            web_search_query="Python function course notes",
+            expanded_keypoints=["Python", "function"],
+            reason="test",
+            retrieval_plan=[
+                RetrievalPlanItem(
+                    subject="python",
+                    role="implementation_tool",
+                    rag_query="Python function",
+                    priority=0.8,
+                ),
+            ],
+        )
+        structured.ainvoke = AsyncMock(return_value={"raw": AIMessage(content="raw"), "parsed": parsed, "parsing_error": None})
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        with caplog.at_level("WARNING"):
+            await search_query_rewriter({
+                "messages": [HumanMessage(content="Python 函数")],
+                "subject": "python",
+                "request_id": "req-qr",
+                "thread_id": "thread-qr",
+            })
+
+        payload = json.loads(
+            next(r.getMessage() for r in caplog.records if '"stage": "query_rewrite"' in r.getMessage()).removeprefix("A3_TRACE ")
+        )
+        assert payload["request_id"] == "req-qr"
+        assert payload["thread_id"] == "thread-qr"
+        assert payload["retrieval_plan_count"] == 1
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.get_fallback_llm")
