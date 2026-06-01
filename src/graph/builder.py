@@ -107,17 +107,26 @@ def build_graph() -> StateGraph:
         "supervisor",
         route_by_intent,    # judge users intent
         {
-            "academic": "academic_router",
-            "planning": "search_policy",
+            "academic": "search_query_rewriter",
+            "planning": "search_query_rewriter",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
     )
 
+    # Shared initial query rewrite, then route into academic or planning flow.
+    graph.add_conditional_edges(
+        "search_query_rewriter",
+        route_after_query_rewrite,
+        {
+            "academic": "academic_router",
+            "planning": "search_policy",
+        },
+    )
+
     # Academic flow — fan-out/fan-in parallel retrieval
-    graph.add_edge("academic_router", "search_query_rewriter")
-    graph.add_edge("search_query_rewriter", "rag_retrieve")
-    graph.add_edge("search_query_rewriter", "web_search")
+    graph.add_edge("academic_router", "rag_retrieve")
+    graph.add_edge("academic_router", "web_search")
 
     # Fan-in: ordinary academic requests converge at answer generation;
     # resource requests reuse retrieval first, then enter sibling resource chains.
@@ -225,6 +234,11 @@ def route_after_academic_retrieval(state: TutorState) -> str:
     if resource_type == "quiz":
         return "exercise"
     return "answer"
+
+
+def route_after_query_rewrite(state: TutorState) -> str:
+    """Route shared query rewrite output to planning or academic flow."""
+    return "planning" if state.get("intent") == "planning" else "academic"
 
 
 def get_compiled_graph(checkpointer=None):

@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.graph.builder import build_graph, get_compiled_graph, route_after_academic_retrieval
+from src.graph.builder import (
+    build_graph,
+    get_compiled_graph,
+    route_after_academic_retrieval,
+    route_after_query_rewrite,
+)
 
 
 class TestBuildGraph:
@@ -69,3 +74,19 @@ class TestBuildGraph:
         assert route_after_academic_retrieval({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
         assert route_after_academic_retrieval({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
         assert route_after_academic_retrieval({}) == "answer"
+
+    def test_route_after_query_rewrite_routes_planning_and_academic(self):
+        assert route_after_query_rewrite({"intent": "planning"}) == "planning"
+        assert route_after_query_rewrite({"intent": "academic"}) == "academic"
+        assert route_after_query_rewrite({}) == "academic"
+
+    def test_academic_router_no_longer_points_to_query_rewriter(self):
+        graph = build_graph()
+        assert ("academic_router", "search_query_rewriter") not in graph.edges
+        assert ("academic_router", "rag_retrieve") in graph.edges
+        assert ("academic_router", "web_search") in graph.edges
+
+    def test_search_query_rewriter_is_shared_after_supervisor(self):
+        graph = build_graph()
+        assert "search_query_rewriter" in graph.branches
+        assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]

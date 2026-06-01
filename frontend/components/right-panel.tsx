@@ -362,14 +362,15 @@ const DAG_NODE_IDS = [
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
   // Supervisor routing
-  { from: "supervisor", to: "academic_router" },
-  { from: "supervisor", to: "search_policy" },
+  { from: "supervisor", to: "search_query_rewriter" },
   { from: "supervisor", to: "emotional_response" },
   { from: "supervisor", to: "handle_unknown" },
+  // Shared query rewrite routes to academic or planning
+  { from: "search_query_rewriter", to: "academic_router" },
+  { from: "search_query_rewriter", to: "search_policy" },
   // Academic branch
-  { from: "academic_router", to: "search_query_rewriter" },
-  { from: "search_query_rewriter", to: "rag_retrieve" },
-  { from: "search_query_rewriter", to: "web_search" },
+  { from: "academic_router", to: "rag_retrieve" },
+  { from: "academic_router", to: "web_search" },
   { from: "rag_retrieve", to: "generate_answer" },
   { from: "web_search", to: "generate_answer" },
   { from: "rag_retrieve", to: "mindmap_planner" },

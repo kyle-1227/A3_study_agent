@@ -43,4 +43,16 @@ class TestSearchPolicy:
         call_args = mock_search.call_args[0][0]
         assert str(datetime.now().year) in call_args
 
+    @patch("src.graph.planner.web_search_fn")
+    async def test_uses_rewritten_web_query_when_available(self, mock_search):
+        mock_search.return_value = []
+
+        state = {
+            "messages": [HumanMessage(content="帮我规划 Python 学习路径")],
+            "search_web_query": "Python learning path course notes roadmap",
+        }
+        await search_policy(state)
+
+        mock_search.assert_called_once_with("Python learning path course notes roadmap")
+
 
