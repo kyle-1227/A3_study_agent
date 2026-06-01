@@ -93,6 +93,8 @@ class TestRewriteQuery:
         prompt_text = " ".join(m.content for m in call_args)
         assert "fabricated formula" in prompt_text
         assert "original question" in prompt_text
+        assert "只输出一行检索查询" in prompt_text
+        assert "英文术语" in prompt_text
 
     @patch("src.graph.academic.get_node_llm")
     async def test_falls_back_to_original_on_failure(self, mock_get_llm):

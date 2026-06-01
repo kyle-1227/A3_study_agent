@@ -27,6 +27,7 @@ class TutorState(TypedDict):
     messages: Annotated[list, add_messages]                             # Chat history
     intent: Literal["academic", "planning", "emotional", "unknown"]    # User intent
     subject: str                                                        # The topic being discussed
+    subject_candidates: list[str]                                       # Ordered available-subject candidates
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true

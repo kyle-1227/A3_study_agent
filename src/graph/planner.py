@@ -73,6 +73,21 @@ def _last_human_query(state: TutorState) -> str:
     return ""
 
 
+def _build_planning_retrieval_query(state: TutorState) -> str:
+    """Build a planning retrieval query without subject-specific hardcoding."""
+    search_rag_query = state.get("search_rag_query", "")
+    expanded_keypoints = state.get("expanded_keypoints", [])
+    keypoints = state.get("keypoints", [])
+
+    if search_rag_query:
+        return search_rag_query
+    if expanded_keypoints:
+        return " ".join(str(item) for item in expanded_keypoints if str(item).strip())
+    if keypoints:
+        return " ".join(str(item) for item in keypoints if str(item).strip())
+    return _last_human_query(state)
+
+
 async def _gather_emotional_intel(state: TutorState) -> str:
     """Call LLM to summarize user's emotional state from conversation history."""
     llm = get_node_llm("emotional")
@@ -106,7 +121,8 @@ async def _gather_emotional_intel(state: TutorState) -> str:
 
 async def _gather_resource_intel(state: TutorState) -> str:
     """Retrieve RAG + web search results in parallel, format as resource summary."""
-    query = _last_human_query(state)
+    query = _build_planning_retrieval_query(state)
+    web_query = state.get("search_web_query") or query
     subject = state.get("subject")
     subj = subject if subject and subject != "other" else None
 
@@ -125,7 +141,7 @@ async def _gather_resource_intel(state: TutorState) -> str:
     async def _web():
         try:
             results = await asyncio.wait_for(
-                asyncio.to_thread(web_search_fn, query),
+                asyncio.to_thread(web_search_fn, web_query),
                 timeout=_SEARCH_TIMEOUT,
             )
             if not results:

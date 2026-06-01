@@ -266,6 +266,39 @@ class TestPromptRendering:
         assert "What is X?" in rendered
         assert "offer resources" in rendered
 
+    def test_prompts_preserve_professional_original_terms(self):
+        from src.config import load_prompt
+
+        for name in [
+            "academic_answer",
+            "mindmap_planner",
+            "mindmap_agent",
+            "exercise_planner",
+            "exercise_agent",
+            "mindmap_reviewer",
+            "exercise_reviewer",
+        ]:
+            prompt = load_prompt(name)
+            assert "专业原词" in prompt, f"{name} should preserve original terms"
+
+    def test_supervisor_prompt_supports_soft_subjects_and_bilingual_keywords(self):
+        from src.config import load_prompt
+
+        prompt = load_prompt("supervisor_system")
+        assert "available subjects" in prompt
+        assert "subject_candidates" in prompt
+        assert "英文术语" in prompt
+        assert "不要编造" in prompt
+
+    def test_rewrite_query_prompt_requires_bilingual_original_terms(self):
+        from src.config import load_prompt
+
+        prompt = load_prompt("rewrite_query")
+        assert "只输出一行检索查询" in prompt
+        assert "保留用户原始核心关键词" in prompt
+        assert "专业原词" in prompt
+        assert "英文术语" in prompt
+
     def test_hallucination_eval_renders(self):
         """hallucination_eval prompt renders with question, context, answer."""
         from src.config import load_prompt
@@ -362,8 +395,10 @@ class TestAllPromptsLoadable:
         "mindmap_agent",
         "mindmap_reviewer",
         "exercise_planner",
-        "exercise_agent",
-        "exercise_reviewer",
+            "exercise_agent",
+            "exercise_reviewer",
+            "search_query_rewriter",
+            "rewrite_query",
     ])
     def test_prompt_loads(self, name):
         from src.config import load_prompt

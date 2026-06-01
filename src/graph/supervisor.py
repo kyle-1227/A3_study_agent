@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from src.config import get_setting, load_prompt
 from src.graph.llm import get_node_llm
 from src.graph.state import TutorState
+from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class SupervisorOutput(BaseModel):
     intent: Literal["academic", "planning", "emotional", "unknown"]
     keywords: list[str]
     confidence: float
+    subject_candidates: list[str] = []
 
 
 _VALID_INTENTS = set(get_setting(
@@ -52,6 +54,19 @@ async def supervisor_node(state: TutorState) -> dict:
 
     last_msg = state["messages"][-1]
     user_text = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+    available_subjects = get_available_subjects_from_data()
+    available_subject_set = set(available_subjects)
+    available_subjects_text = (
+        "\n".join(f"- {subject}" for subject in available_subjects)
+        if available_subjects
+        else "当前 data/ 目录下未发现可用课程 subject。"
+    )
+    user_message = (
+        "## 当前知识库 available subjects\n"
+        f"{available_subjects_text}\n\n"
+        "## 用户输入\n"
+        f"{user_text}"
+    )
 
     temperature = get_setting("supervisor.temperature", 0.0)
     model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
@@ -63,26 +78,20 @@ async def supervisor_node(state: TutorState) -> dict:
         try:
             result = await structured_llm.ainvoke([
                 SystemMessage(content=load_prompt("supervisor_system")),
-                HumanMessage(content=user_text),
+                HumanMessage(content=user_message),
             ])
             intent = result.intent
-            subject = "other"
             keypoints = result.keywords
-            # Detect subject from structured output context
-            if intent == "academic" and keypoints:
-                query_lower = user_text.lower()
-                math_keywords = {"数学", "函数", "方程", "几何", "代数", "概率", "向量",
-                                 "导数", "积分", "椭圆", "双曲线", "抛物线", "三角"}
-                chinese_keywords = {"语文", "作文", "文言文", "古诗", "阅读理解", "诗词",
-                                    "鉴赏", "修辞", "散文", "小说"}
-                if any(kw in query_lower for kw in math_keywords):
-                    subject = "math"
-                elif any(kw in query_lower for kw in chinese_keywords):
-                    subject = "chinese"
+            subject_candidates = _filter_subject_candidates(
+                result.subject_candidates,
+                available_subject_set,
+            )
+            subject = subject_candidates[0] if subject_candidates else "other"
         except Exception:
             logger.warning("Supervisor structured output failed, defaulting to academic")
             intent = "academic"
             subject = "other"
+            subject_candidates = []
             keypoints = []
 
     requested_resource_type = _detect_requested_resource_type(user_text)
@@ -96,10 +105,21 @@ async def supervisor_node(state: TutorState) -> dict:
     return {
         "intent": intent,
         "subject": subject,
+        "subject_candidates": subject_candidates,
         "keypoints": keypoints,
         "requested_resource_type": requested_resource_type,
         "needs_mindmap": needs_mindmap,
     }
+
+
+def _filter_subject_candidates(candidates: list[str], available_subjects: set[str]) -> list[str]:
+    """Keep normalized subject candidates that exist in the current course catalog."""
+    filtered: list[str] = []
+    for candidate in candidates or []:
+        subject = normalize_subject(str(candidate))
+        if subject and subject in available_subjects and subject not in filtered:
+            filtered.append(subject)
+    return filtered
 
 
 @traced_node

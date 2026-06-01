@@ -13,10 +13,58 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.graph.planner import gather_intel
+from src.graph.planner import _build_planning_retrieval_query, gather_intel
 
 
 class TestGatherIntel:
+    def test_build_planning_retrieval_query_priority(self):
+        state = {
+            "messages": [HumanMessage(content="原始问题")],
+            "search_rag_query": "bilingual rag query",
+            "expanded_keypoints": ["扩展", "expanded"],
+            "keypoints": ["原始关键词"],
+        }
+        assert _build_planning_retrieval_query(state) == "bilingual rag query"
+
+        state["search_rag_query"] = ""
+        assert _build_planning_retrieval_query(state) == "扩展 expanded"
+
+        state["expanded_keypoints"] = []
+        assert _build_planning_retrieval_query(state) == "原始关键词"
+
+        state["keypoints"] = []
+        assert _build_planning_retrieval_query(state) == "原始问题"
+
+    @patch("src.graph.planner.retrieve")
+    @patch("src.graph.planner.web_search_fn")
+    @patch("src.graph.planner.get_fallback_llm")
+    @patch("src.graph.planner.get_node_llm")
+    async def test_resource_intel_uses_rewritten_planning_queries(
+        self, mock_get_llm, mock_get_fallback, mock_web_search, mock_retrieve
+    ):
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="情绪正常"))
+        mock_get_llm.return_value = mock_llm
+        mock_get_fallback.return_value = MagicMock()
+        mock_retrieve.return_value = {"docs": [], "is_hit": False}
+        mock_web_search.return_value = []
+
+        state = {
+            "messages": [HumanMessage(content="帮我制定 Python 学习计划")],
+            "intent": "planning",
+            "subject": "python",
+            "keypoints": ["Python"],
+            "search_rag_query": "Python 函数 function 作用域 scope",
+            "search_web_query": "Python function scope course notes",
+        }
+
+        await gather_intel(state)
+
+        mock_retrieve.assert_called_once_with(
+            query="Python 函数 function 作用域 scope",
+            subject="python",
+        )
+        mock_web_search.assert_called_once_with("Python function scope course notes")
 
     @patch("src.graph.planner.retrieve")
     @patch("src.graph.planner.web_search_fn")
