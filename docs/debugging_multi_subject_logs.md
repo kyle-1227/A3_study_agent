@@ -100,3 +100,44 @@ python -m py_compile \
 
 pytest
 ```
+
+## Web Search 排查
+
+开启：
+```env
+LOG_WEB_SEARCH_RESULT=true
+```
+
+重点看 `stage=web_search` 的字段：
+- `query_source`：本次搜索 query 来自 `rewritten_query`、`search_web_query`、`retrieval_plan_top_priority` 还是原始问题。
+- `provider`：当前为 `duckduckgo`。
+- `ok`：搜索工具是否认为调用成功。
+- `result_count`：最终可用结果数量。
+- `raw_type` / `raw_count`：底层工具返回的是 `list`、`str`、`str_empty_or_error` 等。
+- `error_type` / `error_message`：错误类型与脱敏后的短错误信息。
+- `elapsed_ms`：搜索耗时。
+
+如果 `raw_type=str_empty_or_error` 且 `result_count=0`，通常表示 DuckDuckGo 返回了“无有效结果”或限流/错误文本，这类字符串不会被当成真实搜索结果写入上下文。
+
+也可以脱离 Agent 直接运行：
+```bash
+python scripts/debug_web_search.py
+```
+
+## Hallucination Evaluation 排查
+
+开启：
+```env
+LOG_RETRY_TRACE=true
+```
+
+重点看 `stage=hallucination_eval` 的字段：
+- `success=true`：最终拿到了可解析的 `HallucinationEvaluation`。
+- `success=false` 且 `defaulted_to_valid=true`：primary 和 fallback 都没有得到可解析结果，因此按现有业务规则默认通过。
+- `primary_called` / `fallback_called` / `fallback_used`：是否调用 primary、是否尝试 fallback、最终是否采用 fallback 结果。
+- `failure_phase`：失败阶段，例如 `structured_parsing_error`、`parsed_none`、`fallback_structured_parsing_error`、`fallback_parsed_none`、`primary_call_failed`。
+- `parsing_error`：结构化输出解析错误摘要。
+- `raw_preview`：LLM 原始返回的短预览，不包含完整 raw。
+- `context_rag_count` / `context_web_count`：评估时使用的上下文来源数量。
+
+注意：诊断日志只写入后端 logger，不会进入 `messages`、用户回答、RAG context 或前端气泡。

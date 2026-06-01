@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 from collections import Counter, defaultdict
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -23,7 +24,7 @@ from src.graph.state import CONTEXT_CLEAR, TutorState
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
-from src.tools.search_tool import search as web_search_fn
+from src.tools.search_tool import sanitize_error_message, search_with_diagnostics as web_search_fn
 from src.tracing import traced_llm_call, traced_node, traced_retrieval, traced_search
 
 logger = logging.getLogger(__name__)
@@ -703,6 +704,53 @@ async def rag_retrieve(state: TutorState) -> dict:
 _SEARCH_TIMEOUT = get_setting("academic.search_timeout", 15)
 
 
+# TEMP A3_TRACE: remove after diagnostics validation.
+def _web_search_diagnostics_from_legacy_result(result, query: str) -> dict:
+    """Normalize old list mocks and new diagnostic dictionaries."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        return {
+            "provider": "duckduckgo",
+            "query": query,
+            "ok": True,
+            "results": result,
+            "result_count": len(result),
+            "error_type": "",
+            "error_message": "",
+            "raw_type": "legacy_list",
+            "raw_count": len(result),
+            "elapsed_ms": None,
+        }
+    return {
+        "provider": "duckduckgo",
+        "query": query,
+        "ok": False,
+        "results": [],
+        "result_count": 0,
+        "error_type": "UnexpectedSearchDiagnosticsType",
+        "error_message": sanitize_error_message(f"Unexpected diagnostics type: {type(result).__name__}"),
+        "raw_type": type(result).__name__,
+        "raw_count": None,
+        "elapsed_ms": None,
+    }
+
+
+def _web_search_exception_diagnostics(query: str, exc: Exception, *, elapsed_ms=None) -> dict:
+    return {
+        "provider": "duckduckgo",
+        "query": query,
+        "ok": False,
+        "results": [],
+        "result_count": 0,
+        "error_type": type(exc).__name__,
+        "error_message": sanitize_error_message(exc),
+        "raw_type": "",
+        "raw_count": None,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
 @traced_node
 async def web_search(state: TutorState) -> dict:
     """Fan-out web search — runs in parallel with rag_retrieve."""
@@ -729,20 +777,38 @@ async def web_search(state: TutorState) -> dict:
         query_source = "original_query"
 
     with traced_search(query=query, timeout=_SEARCH_TIMEOUT) as span:
-        timed_out = False
+        diagnostics: dict = {
+            "provider": "duckduckgo",
+            "query": query,
+            "ok": False,
+            "results": [],
+            "result_count": 0,
+            "error_type": "",
+            "error_message": "",
+            "raw_type": "",
+            "raw_count": None,
+            "elapsed_ms": None,
+        }
         try:
-            search_results = await asyncio.wait_for(
+            raw_diagnostics = await asyncio.wait_for(
                 asyncio.to_thread(web_search_fn, query),
                 timeout=_SEARCH_TIMEOUT,
             )
+            diagnostics = _web_search_diagnostics_from_legacy_result(raw_diagnostics, query)
+            search_results = diagnostics.get("results", [])
             span.set_attribute("search.result_count", len(search_results))
             span.set_attribute("search.timed_out", False)
         except asyncio.TimeoutError:
+            diagnostics = _web_search_exception_diagnostics(
+                query,
+                TimeoutError(f"web search exceeded {_SEARCH_TIMEOUT}s"),
+                elapsed_ms=round(_SEARCH_TIMEOUT * 1000, 2),
+            )
             search_results = []
-            timed_out = True
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", True)
-        except Exception:
+        except Exception as exc:
+            diagnostics = _web_search_exception_diagnostics(query, exc)
             search_results = []
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", False)
@@ -757,7 +823,14 @@ async def web_search(state: TutorState) -> dict:
             "retrieval_plan_count": len(retrieval_plan),
             "selected_subject": selected_subject,
             "result_count": len(search_results),
-            "timed_out": timed_out,
+            "timed_out": diagnostics.get("error_type") == "TimeoutError",
+            "provider": diagnostics.get("provider", "duckduckgo"),
+            "ok": diagnostics.get("ok", False),
+            "raw_type": diagnostics.get("raw_type", ""),
+            "raw_count": diagnostics.get("raw_count"),
+            "elapsed_ms": diagnostics.get("elapsed_ms"),
+            "error_type": diagnostics.get("error_type", ""),
+            "error_message": diagnostics.get("error_message", ""),
         },
         state=state,
         env_flag="LOG_WEB_SEARCH_RESULT",
@@ -886,6 +959,67 @@ async def generate_answer(state: TutorState) -> dict:
 
 # ── Node 4: hallucination evaluation (reflection loop) ─────────
 
+
+# TEMP A3_TRACE: remove after diagnostics validation.
+def _coerce_hallucination_evaluation(value: Any) -> HallucinationEvaluation | None:
+    if isinstance(value, HallucinationEvaluation):
+        return value
+    if isinstance(value, dict):
+        return HallucinationEvaluation.model_validate(value)
+    return None
+
+
+def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation | None, Any, str]:
+    if isinstance(result_pack, HallucinationEvaluation):
+        return result_pack, None, ""
+    if not isinstance(result_pack, dict):
+        return _coerce_hallucination_evaluation(result_pack), None, ""
+
+    raw_message = result_pack.get("raw")
+    raw_text = _message_content_to_text(getattr(raw_message, "content", raw_message))
+    parsed = _coerce_hallucination_evaluation(result_pack.get("parsed"))
+    return parsed, result_pack.get("parsing_error"), raw_text[:500] if raw_text else ""
+
+
+async def _invoke_hallucination_eval(
+    structured_llm,
+    messages: list,
+    *,
+    label: str,
+) -> tuple[HallucinationEvaluation | None, dict]:
+    """Invoke one hallucination evaluator and expose parsing diagnostics."""
+    diagnostics = {
+        "called": True,
+        "error_type": "",
+        "error_message": "",
+        "parsing_error": None,
+        "parsed_is_none": False,
+        "raw_preview": "",
+        "failure_phase": "",
+    }
+    try:
+        result_pack = await structured_llm.ainvoke(messages)
+        parsed, parsing_error, raw_preview = _hallucination_pack_parts(result_pack)
+        diagnostics["raw_preview"] = raw_preview
+        if parsing_error is not None:
+            diagnostics["parsing_error"] = sanitize_error_message(parsing_error)
+            diagnostics["failure_phase"] = (
+                "structured_parsing_error"
+                if label == "primary"
+                else "fallback_structured_parsing_error"
+            )
+            return None, diagnostics
+        if parsed is None:
+            diagnostics["parsed_is_none"] = True
+            diagnostics["failure_phase"] = "parsed_none" if label == "primary" else "fallback_parsed_none"
+            return None, diagnostics
+        return parsed, diagnostics
+    except Exception as exc:
+        diagnostics["error_type"] = type(exc).__name__
+        diagnostics["error_message"] = sanitize_error_message(exc)
+        diagnostics["failure_phase"] = f"{label}_call_failed"
+        return None, diagnostics
+
 @traced_node
 async def evaluate_hallucination(state: TutorState) -> dict:
     """Evaluate whether the generated answer hallucinates beyond retrieved context.
@@ -896,10 +1030,18 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     """
     eval_temp = get_setting("academic.hallucination_eval_temperature", 0.0)
     llm = get_node_llm("academic", temperature=eval_temp)
-    structured_primary = llm.with_structured_output(HallucinationEvaluation)
+    structured_primary = llm.with_structured_output(
+        HallucinationEvaluation,
+        method="json_mode",
+        include_raw=True,
+    )
 
     fallback_llm = get_fallback_llm(temperature=eval_temp)
-    structured_fallback = fallback_llm.with_structured_output(HallucinationEvaluation)
+    structured_fallback = fallback_llm.with_structured_output(
+        HallucinationEvaluation,
+        method="json_mode",
+        include_raw=True,
+    )
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content
@@ -914,39 +1056,91 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     )
 
     retry_count = state.get("retry_count", 0)
+    eval_messages = [
+        SystemMessage(content=load_prompt("hallucination_system")),
+        HumanMessage(content=eval_prompt),
+    ]
+    rag_docs = [d for d in docs if d.get("type") == "rag"]
+    web_results = [d for d in docs if d.get("type") == "web"]
+    primary_diag: dict = {"called": False}
+    fallback_diag: dict = {"called": False}
+    fallback_called = False
+    fallback_used = False
+    defaulted_to_valid = False
+    failure_phase = ""
 
     with traced_llm_call(
         model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         node_name="evaluate_hallucination",
         temperature=eval_temp,
     ) as span:
-        try:
-            evaluation = await async_invoke_with_fallback(
-                structured_primary,
-                [
-                    SystemMessage(content=load_prompt("hallucination_system")),
-                    HumanMessage(content=eval_prompt),
-                ],
-                fallback=structured_fallback,
-                span=span,
+        evaluation, primary_diag = await _invoke_hallucination_eval(
+            structured_primary,
+            eval_messages,
+            label="primary",
+        )
+        if evaluation is None:
+            fallback_called = True
+            evaluation, fallback_diag = await _invoke_hallucination_eval(
+                structured_fallback,
+                eval_messages,
+                label="fallback",
             )
-            is_faithful = evaluation.is_faithful
-        except Exception:
+            fallback_used = evaluation is not None
+
+        if evaluation is None:
             logger.warning("Hallucination evaluation failed, defaulting to valid")
+            defaulted_to_valid = True
+            failure_phase = (
+                fallback_diag.get("failure_phase")
+                or primary_diag.get("failure_phase")
+                or "primary_and_fallback_failed"
+            )
+            evaluation = HallucinationEvaluation(
+                is_faithful=True,
+                reason="evaluation_failed",
+            )
             is_faithful = True
+        else:
+            failure_phase = primary_diag.get("failure_phase", "")
+            is_faithful = evaluation.is_faithful
 
     hallucination_detected = not is_faithful
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    raw_preview = primary_diag.get("raw_preview") or fallback_diag.get("raw_preview") or ""
+    parsing_error = primary_diag.get("parsing_error") or fallback_diag.get("parsing_error")
     emit_a3_trace(
         logger,
         "hallucination_eval",
         {
+            "success": not defaulted_to_valid,
+            "defaulted_to_valid": defaulted_to_valid,
             "is_faithful": is_faithful,
             "retry_count": retry_count,
-            "reason": evaluation.reason if "evaluation" in locals() else "evaluation_failed",
+            "reason": evaluation.reason,
+            "failure_phase": failure_phase,
+            "primary_called": primary_diag.get("called", False),
+            "fallback_called": fallback_called,
+            "fallback_used": fallback_used,
+            "primary_error_type": primary_diag.get("error_type", ""),
+            "primary_error_message": primary_diag.get("error_message", ""),
+            "fallback_error_type": fallback_diag.get("error_type", ""),
+            "fallback_error_message": fallback_diag.get("error_message", ""),
+            "parsing_error": parsing_error,
+            "raw_preview": raw_preview,
+            "parsed_is_none": primary_diag.get("parsed_is_none", False)
+            or fallback_diag.get("parsed_is_none", False),
+            "model_group": "academic",
+            "eval_model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+            "fallback_model": os.getenv("OPENAI_FALLBACK_MODEL", ""),
+            "context_rag_count": len(rag_docs),
+            "context_web_count": len(web_results),
+            "answer_chars": len(str(answer)),
+            "prompt_chars": len(eval_prompt),
         },
         state=state,
         env_flag="LOG_RETRY_TRACE",
+        max_chars=500,
     )
 
     result: dict = {"hallucination_detected": hallucination_detected}
