@@ -32,6 +32,8 @@ rag:
   reranker_top_n: 5                     # Results after reranking
   relevance_threshold: 0.3              # Minimum score for a "hit"
   reranker_model: "BAAI/bge-reranker-v2-m3"
+  multi_subject_per_subject_top_k: 3     # Per-subject docs for retrieval_plan RAG
+  multi_subject_max_docs: 8              # Final merged docs across subjects
 
 supervisor:
   model: "deepseek-v4-flash"

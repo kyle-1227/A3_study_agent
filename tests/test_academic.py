@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.academic import (
     _format_retrieved,
     _format_search,
+    RetrievalPlanItem,
     SearchQueryRewriteOutput,
     academic_router,
     generate_answer,
@@ -176,13 +177,126 @@ class TestSearchQueryRewriter:
         assert "中英双语" in prompt
         assert "英文教材常用术语" in prompt
         assert "不要只复述用户原始 query" in prompt
+        assert "available subjects" in prompt
+        assert "subject_candidates" in prompt
+        assert "retrieval_plan" in prompt
+        assert "core_concept" in prompt
 
     async def test_noops_when_retry_rewritten_query_exists(self):
         result = await search_query_rewriter({
             "messages": [HumanMessage(content="original")],
             "rewritten_query": "retry query",
         })
-        assert result == {}
+        assert result == {
+            "retrieval_plan": [],
+            "learning_goal": "",
+            "primary_subject": "",
+            "subject_relation_summary": "",
+        }
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_retrieval_plan_uses_available_subjects_not_only_candidates(
+        self, mock_get_llm, mock_get_fallback, mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["python", "machine_learning", "big_data"]
+        structured = MagicMock()
+        parsed = SearchQueryRewriteOutput(
+            rag_query="Python machine learning overfitting code",
+            web_search_query="Python machine learning overfitting course notes",
+            expanded_keypoints=["Python", "overfitting", "机器学习"],
+            reason="用户问题涉及实现工具和机器学习核心概念",
+            learning_goal="用 Python 理解和检测机器学习过拟合",
+            primary_subject="machine_learning",
+            subject_relation_summary="machine_learning 提供核心概念，python 提供实现工具",
+            retrieval_plan=[
+                RetrievalPlanItem(
+                    subject="python",
+                    role="implementation_tool",
+                    rag_query="Python code function sklearn overfitting detection",
+                    web_search_query="Python sklearn overfitting code example",
+                    purpose="检索实现工具与代码资料",
+                    relation_to_goal="用 Python 承载机器学习检测实践",
+                    priority=0.8,
+                ),
+                RetrievalPlanItem(
+                    subject="machine_learning",
+                    role="core_concept",
+                    rag_query="机器学习 overfitting 正则化 regularization 泛化 generalization",
+                    web_search_query="machine learning overfitting regularization course notes",
+                    purpose="检索过拟合核心概念",
+                    relation_to_goal="解释检测与改进依据",
+                    priority=0.95,
+                ),
+            ],
+        )
+        structured.ainvoke = AsyncMock(return_value={"raw": AIMessage(content="{}"), "parsed": parsed, "parsing_error": None})
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="用 Python 做机器学习过拟合检测")],
+            "keypoints": ["Python", "机器学习", "过拟合"],
+            "requested_resource_type": "",
+            "subject": "python",
+            "subject_candidates": ["python"],
+        })
+
+        subjects = [item["subject"] for item in result["retrieval_plan"]]
+        assert subjects == ["machine_learning", "python"]
+        assert result["primary_subject"] == "machine_learning"
+        assert result["learning_goal"] == "用 Python 理解和检测机器学习过拟合"
+        assert result["subject_relation_summary"] == "machine_learning 提供核心概念，python 提供实现工具"
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.get_fallback_llm")
+    @patch("src.graph.academic.get_node_llm")
+    async def test_retrieval_plan_filters_and_normalizes_subjects(
+        self, mock_get_llm, mock_get_fallback, mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["python", "machine_learning", "big_data", "math"]
+        structured = MagicMock()
+        parsed = SearchQueryRewriteOutput(
+            rag_query="multi subject query",
+            web_search_query="multi subject web query",
+            expanded_keypoints=["multi"],
+            reason="test",
+            primary_subject="law",
+            retrieval_plan=[
+                RetrievalPlanItem(subject="Python", role="implementation_tool", rag_query="old python", priority=0.2),
+                RetrievalPlanItem(subject="python", role="implementation_tool", rag_query="best python", priority=1.8),
+                RetrievalPlanItem(subject="machine learning", role="core_concept", rag_query="ml query", priority=0.9),
+                RetrievalPlanItem(subject="law", role="core_concept", rag_query="law query", priority=0.99),
+                RetrievalPlanItem(subject="big-data", role="bad_role", rag_query="big data query", priority=-2),
+                RetrievalPlanItem(subject="math", role="prerequisite", rag_query="math query", priority=0.7),
+            ],
+        )
+        structured.ainvoke = AsyncMock(return_value={"raw": AIMessage(content="{}"), "parsed": parsed, "parsing_error": None})
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        mock_get_llm.return_value = llm
+        fallback_llm = MagicMock()
+        fallback_llm.with_structured_output.return_value = MagicMock()
+        mock_get_fallback.return_value = fallback_llm
+
+        result = await search_query_rewriter({
+            "messages": [HumanMessage(content="test")],
+            "subject": "python",
+            "subject_candidates": ["python"],
+        })
+
+        plan = result["retrieval_plan"]
+        assert [item["subject"] for item in plan] == ["python", "machine_learning", "math", "big_data"]
+        assert plan[0]["rag_query"] == "best python"
+        assert plan[0]["priority"] == 1.0
+        assert plan[-1]["role"] == "supporting_context"
+        assert plan[-1]["priority"] == 0.0
+        assert result["primary_subject"] == "python"
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
@@ -208,6 +322,10 @@ class TestSearchQueryRewriter:
         assert result["search_web_query"] == ""
         assert result["expanded_keypoints"] == []
         assert "structured failure" in result["search_query_rewrite_error"]
+        assert result["retrieval_plan"] == []
+        assert result["learning_goal"] == ""
+        assert result["primary_subject"] == ""
+        assert result["subject_relation_summary"] == ""
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
@@ -239,6 +357,7 @@ class TestSearchQueryRewriter:
         assert result["search_query_rewrite_raw_preview"] == "bad structured output"
         assert result["search_rag_query"] == ""
         assert result["search_web_query"] == ""
+        assert result["retrieval_plan"] == []
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
@@ -270,6 +389,7 @@ class TestSearchQueryRewriter:
         assert result["search_query_rewrite_raw_preview"] == "{}"
         assert result["search_rag_query"] == ""
         assert result["search_web_query"] == ""
+        assert result["retrieval_plan"] == []
 
 class TestRagRetrieveWithRewrittenQuery:
     """rag_retrieve uses rewritten_query when available."""
@@ -339,6 +459,82 @@ class TestRagRetrieveWithRewrittenQuery:
 
         mock_retrieve.assert_called_once_with(query="变量 条件判断 循环", subject="computer_science")
 
+    @patch("src.graph.academic.retrieve")
+    async def test_uses_retrieval_plan_by_subject_with_quota(self, mock_retrieve):
+        def fake_retrieve(query, subject, top_k):
+            docs_by_subject = {
+                "python": [
+                    {"content": "Python doc 1", "source": "py1.pdf", "score": 0.2, "metadata": {"subject": "python"}},
+                    {"content": "Python doc 2", "source": "py2.pdf", "score": 0.3, "metadata": {"subject": "python"}},
+                ],
+                "machine_learning": [
+                    {"content": "ML doc 1", "source": "ml1.pdf", "score": 0.9, "metadata": {"subject": "machine_learning"}},
+                    {"content": "ML doc 2", "source": "ml2.pdf", "score": 0.8, "metadata": {"subject": "machine_learning"}},
+                ],
+            }
+            return {"docs": docs_by_subject[subject], "is_hit": True}
+
+        mock_retrieve.side_effect = fake_retrieve
+
+        state = {
+            "messages": [HumanMessage(content="用 Python 做过拟合检测")],
+            "subject": "python",
+            "rewritten_query": "",
+            "search_rag_query": "overall query",
+            "retrieval_plan": [
+                {
+                    "subject": "python",
+                    "role": "implementation_tool",
+                    "rag_query": "Python sklearn code",
+                    "purpose": "实现工具",
+                    "relation_to_goal": "承载实践",
+                    "priority": 0.4,
+                },
+                {
+                    "subject": "machine_learning",
+                    "role": "core_concept",
+                    "rag_query": "overfitting regularization",
+                    "purpose": "核心概念",
+                    "relation_to_goal": "解释过拟合",
+                    "priority": 0.9,
+                },
+            ],
+        }
+
+        with patch("src.graph.academic.get_setting") as mock_setting:
+            mock_setting.side_effect = lambda key, default=None: {
+                "rag.multi_subject_per_subject_top_k": 2,
+                "rag.multi_subject_max_docs": 3,
+            }.get(key, default)
+            result = await rag_retrieve(state)
+
+        mock_retrieve.assert_has_calls([
+            call(query="Python sklearn code", subject="python", top_k=2),
+            call(query="overfitting regularization", subject="machine_learning", top_k=2),
+        ])
+        context = result["context"]
+        subjects = {doc["retrieval_subject"] for doc in context}
+        assert {"python", "machine_learning"}.issubset(subjects)
+        assert len(context) == 3
+        assert all(doc["type"] == "rag" for doc in context)
+        assert any(doc["retrieval_role"] == "implementation_tool" for doc in context)
+
+    @patch("src.graph.academic.retrieve")
+    async def test_rewritten_query_ignores_retrieval_plan(self, mock_retrieve):
+        mock_retrieve.return_value = {"docs": []}
+
+        state = {
+            "messages": [HumanMessage(content="original")],
+            "subject": "python",
+            "rewritten_query": "retry query",
+            "retrieval_plan": [
+                {"subject": "machine_learning", "rag_query": "should not run"},
+            ],
+        }
+        await rag_retrieve(state)
+
+        mock_retrieve.assert_called_once_with(query="retry query", subject="python")
+
 
 class TestWebSearchWithRewrittenQuery:
     """web_search uses rewritten_query when available."""
@@ -381,6 +577,33 @@ class TestWebSearchWithRewrittenQuery:
         await web_search(state)
 
         mock_search.assert_called_once_with("Python practice problems answers explanations")
+
+    @patch("src.graph.academic.web_search_fn")
+    async def test_uses_highest_priority_retrieval_plan_query_once(self, mock_search):
+        mock_search.return_value = []
+
+        state = {
+            "messages": [HumanMessage(content="the real question")],
+            "rewritten_query": "",
+            "search_web_query": "",
+            "retrieval_plan": [
+                {
+                    "subject": "python",
+                    "web_search_query": "Python code examples",
+                    "rag_query": "Python code",
+                    "priority": 0.4,
+                },
+                {
+                    "subject": "machine_learning",
+                    "web_search_query": "machine learning overfitting course notes",
+                    "rag_query": "overfitting",
+                    "priority": 0.9,
+                },
+            ],
+        }
+        await web_search(state)
+
+        mock_search.assert_called_once_with("machine learning overfitting course notes")
 
 
 class TestRagRetrieve:
@@ -458,6 +681,27 @@ class TestFormatHelpers:
         assert "[1]" in output
         assert "[2]" in output
         assert "math_2024.pdf" in output
+
+    def test_format_retrieved_with_retrieval_plan_metadata(self):
+        docs = [
+            {
+                "content": "Overfitting means poor generalization.",
+                "source": "ml.pdf",
+                "score": 0.9,
+                "retrieval_subject": "machine_learning",
+                "retrieval_role": "core_concept",
+                "retrieval_purpose": "解释核心概念",
+                "relation_to_goal": "支撑过拟合检测",
+                "retrieval_query": "overfitting generalization",
+            },
+        ]
+
+        output = _format_retrieved(docs)
+
+        assert "machine_learning｜core_concept｜依据" in output
+        assert "用途：解释核心概念" in output
+        assert "关系：支撑过拟合检测" in output
+        assert "检索 query：overfitting generalization" in output
 
     def test_format_search_empty(self):
         assert _format_search([]) == "无网络搜索结果。"

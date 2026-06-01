@@ -125,9 +125,46 @@ async def _gather_resource_intel(state: TutorState) -> str:
     web_query = state.get("search_web_query") or query
     subject = state.get("subject")
     subj = subject if subject and subject != "other" else None
+    retrieval_plan = state.get("retrieval_plan") or []
 
     async def _rag():
         try:
+            if retrieval_plan:
+                sections: list[str] = []
+                top_k = get_setting("rag.multi_subject_per_subject_top_k", 3)
+                for item in retrieval_plan:
+                    plan_subject = str(item.get("subject") or "").strip()
+                    plan_query = str(item.get("rag_query") or "").strip()
+                    if not plan_subject or not plan_query:
+                        continue
+
+                    result = await asyncio.to_thread(
+                        retrieve,
+                        query=plan_query,
+                        subject=plan_subject,
+                        top_k=top_k,
+                    )
+                    docs = result.get("docs", [])
+                    if not docs:
+                        continue
+
+                    role = item.get("role") or "supporting_context"
+                    purpose = item.get("purpose") or "补充学习规划所需课程依据"
+                    relation = item.get("relation_to_goal") or "服务学习目标"
+                    doc_lines = [
+                        f"  - {d.get('content', '')[:220]}"
+                        for d in docs[:2]
+                    ]
+                    sections.append(
+                        f"【知识库资源｜{plan_subject}｜{role}】\n"
+                        f"用途：{purpose}\n"
+                        f"关系：{relation}\n"
+                        f"检索 query：{plan_query}\n"
+                        + "\n".join(doc_lines)
+                    )
+
+                return "\n\n".join(sections)
+
             result = await asyncio.to_thread(retrieve, query=query, subject=subj)
             docs = result.get("docs", [])
             if not docs:

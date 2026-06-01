@@ -53,10 +53,22 @@ TEST_CASES = [
         "expected_terms": ["list", "dictionary", "dict", "loop", "for", "while", "exercise"],
     },
     {
+        "subject": "python",
+        "label": "跨学科过滤：Python + 机器学习，只看 Python 资料",
+        "query": "Python 机器学习 overfitting detection code example function pandas scikit-learn",
+        "expected_terms": ["Python", "function", "code", "pandas", "scikit-learn"],
+    },
+    {
         "subject": "machine_learning",
         "label": "机器学习中文基准：过拟合正则化",
         "query": "机器学习 监督学习 过拟合 正则化",
         "expected_terms": ["过拟合", "正则化", "监督学习", "泛化"],
+    },
+    {
+        "subject": "machine_learning",
+        "label": "跨学科过滤：Python + 机器学习，只看机器学习资料",
+        "query": "Python 机器学习 overfitting detection code example 正则化 泛化 交叉验证",
+        "expected_terms": ["过拟合", "正则化", "泛化", "交叉验证", "overfitting"],
     },
     {
         "subject": "big_data",

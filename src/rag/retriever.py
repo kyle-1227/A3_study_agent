@@ -115,7 +115,21 @@ def _get_bm25(force_rebuild: bool = False) -> tuple[BM25Okapi | None, list[dict[
     return _bm25_index, _bm25_corpus
 
 
-def _bm25_search(query: str, top_k: int = 10) -> list[dict[str, Any]]:
+def _metadata_matches(meta: dict[str, Any], subject: str | None = None, year: str | None = None) -> bool:
+    """Return True when metadata satisfies optional subject/year filters."""
+    if subject and meta.get("subject") != subject:
+        return False
+    if year and meta.get("year") != year:
+        return False
+    return True
+
+
+def _bm25_search(
+    query: str,
+    top_k: int = 10,
+    subject: str | None = None,
+    year: str | None = None,
+) -> list[dict[str, Any]]:
     """Run BM25 keyword search over the cached corpus."""
     bm25, corpus = _get_bm25()
     if bm25 is None or not corpus:
@@ -126,16 +140,20 @@ def _bm25_search(query: str, top_k: int = 10) -> list[dict[str, Any]]:
 
     scored = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     results: list[dict[str, Any]] = []
-    for idx, score in scored[:top_k]:
+    for idx, score in scored:
         if score <= 0:
             break
         doc = corpus[idx]
+        if not _metadata_matches(doc.get("metadata") or {}, subject=subject, year=year):
+            continue
         results.append({
             "content": doc["content"],
             "source": doc["source"],
             "score": round(float(score), 4),
             "metadata": doc["metadata"],
         })
+        if len(results) >= top_k:
+            break
     return results
 
 
@@ -222,7 +240,7 @@ def retrieve(
         })
 
     # --- 2. BM25 keyword search ---
-    bm25_docs = _bm25_search(query, top_k=bm25_top_k)
+    bm25_docs = _bm25_search(query, top_k=bm25_top_k, subject=subject, year=year)
 
     # --- 3. Merge + deduplicate ---
     merged = _merge_and_dedup(vector_docs, bm25_docs)

@@ -299,6 +299,24 @@ class TestPromptRendering:
         assert "专业原词" in prompt
         assert "英文术语" in prompt
 
+    def test_search_query_rewriter_prompt_supports_retrieval_plan(self):
+        from src.config import load_prompt
+
+        prompt = load_prompt("search_query_rewriter")
+        assert "available subjects" in prompt
+        assert "subject_candidates" in prompt
+        assert "retrieval_plan" in prompt
+        assert "core_concept" in prompt
+        assert "implementation_tool" in prompt
+
+    def test_resource_prompts_explain_multi_subject_relations(self):
+        from src.config import load_prompt
+
+        for name in ["academic_answer", "mindmap_planner", "exercise_planner"]:
+            prompt = load_prompt(name)
+            assert "多个 subject" in prompt
+            assert "核心概念 → 工具实现 → 应用场景" in prompt
+
     def test_hallucination_eval_renders(self):
         """hallucination_eval prompt renders with question, context, answer."""
         from src.config import load_prompt
@@ -456,6 +474,12 @@ class TestSettingsValues:
 
         intents = get_setting("supervisor.valid_intents")
         assert set(intents) == {"academic", "planning", "emotional", "unknown"}
+
+    def test_multi_subject_rag_settings(self):
+        from src.config import get_setting
+
+        assert get_setting("rag.multi_subject_per_subject_top_k") == 3
+        assert get_setting("rag.multi_subject_max_docs") == 8
 
 
 # ===========================================================================

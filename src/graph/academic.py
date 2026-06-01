@@ -9,9 +9,11 @@ rag_retrieve and web_search in parallel.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+from collections import defaultdict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
 from src.tools.search_tool import search as web_search_fn
 from src.tracing import traced_llm_call, traced_node, traced_retrieval, traced_search
@@ -41,6 +44,18 @@ class HallucinationEvaluation(BaseModel):
     )
 
 
+class RetrievalPlanItem(BaseModel):
+    """Structured per-subject retrieval instruction."""
+
+    subject: str = ""
+    role: str = ""
+    rag_query: str = ""
+    web_search_query: str = ""
+    purpose: str = ""
+    relation_to_goal: str = ""
+    priority: float = 0.5
+
+
 class SearchQueryRewriteOutput(BaseModel):
     """Structured initial retrieval-query rewrite result."""
 
@@ -48,6 +63,13 @@ class SearchQueryRewriteOutput(BaseModel):
     web_search_query: str = Field(description="Query optimized for external web search")
     expanded_keypoints: list[str] = Field(description="Expanded concrete knowledge points")
     reason: str = Field(description="Brief rationale for the rewrite")
+    learning_goal: str = Field(default="", description="Normalized learning goal")
+    primary_subject: str = Field(default="", description="Main subject for the user goal")
+    subject_relation_summary: str = Field(default="", description="How subjects relate to the goal")
+    retrieval_plan: list[RetrievalPlanItem] = Field(
+        default_factory=list,
+        description="Per-subject retrieval plan",
+    )
 
 
 def _last_human_query(state: TutorState) -> str:
@@ -81,6 +103,177 @@ def _message_content_to_text(content) -> str:
                     parts.append(str(text))
         return "\n".join(parts)
     return str(content or "")
+
+
+_RETRIEVAL_ROLES = {
+    "core_concept",
+    "implementation_tool",
+    "application_context",
+    "prerequisite",
+    "comparison",
+    "extension",
+    "method_for_domain",
+    "case_carrier",
+    "constraint",
+    "supporting_context",
+}
+
+
+def _clear_retrieval_plan_state() -> dict:
+    """Clear multi-subject retrieval fields to avoid checkpointer residue."""
+    return {
+        "retrieval_plan": [],
+        "learning_goal": "",
+        "primary_subject": "",
+        "subject_relation_summary": "",
+    }
+
+
+def _score_doc(doc: dict) -> float:
+    """Best available score for sorting retrieved docs."""
+    value = doc.get("rerank_score", doc.get("score", 0))
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _doc_dedupe_key(doc: dict) -> str:
+    source = str(doc.get("source") or (doc.get("metadata") or {}).get("source_file") or "")
+    content = str(doc.get("content") or "")
+    digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+    return f"{source}:{digest}"
+
+
+def _clamp_priority(value) -> float:
+    try:
+        priority = float(value)
+    except (TypeError, ValueError):
+        priority = 0.5
+    return max(0.0, min(1.0, priority))
+
+
+def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
+    """Build the subject hard boundary for retrieval plans."""
+    available = set(get_available_subjects_from_data())
+    if available:
+        return available
+    subject = normalize_subject(str(state.get("subject") or ""))
+    return {subject} if subject and subject != "other" else set()
+
+
+def _normalize_retrieval_plan(
+    raw_plan: list[RetrievalPlanItem],
+    state: TutorState,
+) -> tuple[list[dict], str]:
+    """Filter and normalize LLM-produced per-subject retrieval plan."""
+    allowed_subjects = _allowed_retrieval_subjects(state)
+    by_subject: dict[str, dict] = {}
+
+    for item in raw_plan or []:
+        subject = normalize_subject(item.subject)
+        rag_query = item.rag_query.strip()
+        if not subject or not rag_query:
+            continue
+        if subject not in allowed_subjects:
+            continue
+
+        role = item.role.strip() or "supporting_context"
+        if role not in _RETRIEVAL_ROLES:
+            role = "supporting_context"
+
+        normalized = {
+            "subject": subject,
+            "role": role,
+            "rag_query": rag_query,
+            "web_search_query": item.web_search_query.strip(),
+            "purpose": item.purpose.strip(),
+            "relation_to_goal": item.relation_to_goal.strip(),
+            "priority": _clamp_priority(item.priority),
+        }
+
+        existing = by_subject.get(subject)
+        if existing is None or normalized["priority"] > existing["priority"]:
+            by_subject[subject] = normalized
+
+    plan = sorted(by_subject.values(), key=lambda item: item["priority"], reverse=True)[:4]
+
+    return plan, ""
+
+
+def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
+    primary = normalize_subject(parsed_primary)
+    plan_subjects = {item["subject"] for item in plan}
+    if primary and primary in plan_subjects:
+        return primary
+    return plan[0]["subject"] if plan else ""
+
+
+def _select_docs_with_subject_quota(docs: list[dict], max_docs: int) -> list[dict]:
+    """Keep at least one doc per subject when possible, then fill by priority/score."""
+    if max_docs <= 0:
+        return []
+
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for doc in docs:
+        key = _doc_dedupe_key(doc)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(doc)
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for doc in deduped:
+        grouped[str(doc.get("retrieval_subject") or "unknown")].append(doc)
+
+    for subject_docs in grouped.values():
+        subject_docs.sort(
+            key=lambda doc: (
+                float(doc.get("retrieval_priority") or 0),
+                _score_doc(doc),
+            ),
+            reverse=True,
+        )
+
+    selected: list[dict] = []
+    selected_keys: set[str] = set()
+    subjects_by_priority = sorted(
+        grouped,
+        key=lambda subject: (
+            float(grouped[subject][0].get("retrieval_priority") or 0),
+            _score_doc(grouped[subject][0]),
+        ),
+        reverse=True,
+    )
+
+    for subject in subjects_by_priority:
+        if len(selected) >= max_docs:
+            break
+        doc = grouped[subject][0]
+        key = _doc_dedupe_key(doc)
+        selected.append(doc)
+        selected_keys.add(key)
+
+    remaining = [
+        doc
+        for subject_docs in grouped.values()
+        for doc in subject_docs
+        if _doc_dedupe_key(doc) not in selected_keys
+    ]
+    remaining.sort(
+        key=lambda doc: (
+            float(doc.get("retrieval_priority") or 0),
+            _score_doc(doc),
+        ),
+        reverse=True,
+    )
+
+    for doc in remaining:
+        if len(selected) >= max_docs:
+            break
+        selected.append(doc)
+    return selected
 
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
@@ -117,7 +310,7 @@ async def rewrite_query(state: TutorState) -> dict:
         logger.warning("Query rewrite failed, using original query")
         rewritten = original_query
 
-    return {"rewritten_query": rewritten}
+    return {"rewritten_query": rewritten, **_clear_retrieval_plan_state()}
 
 
 # ── Node 0c: initial search-query rewriting ───────────────────────────────
@@ -126,12 +319,14 @@ async def rewrite_query(state: TutorState) -> dict:
 async def search_query_rewriter(state: TutorState) -> dict:
     """Rewrite the original request into RAG and web-search queries."""
     if state.get("rewritten_query"):
-        return {}
+        return _clear_retrieval_plan_state()
 
     original_query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
+    subject_candidates = state.get("subject_candidates", [])
+    available_subjects = get_available_subjects_from_data()
 
     prompt = _render_prompt(
         "search_query_rewriter",
@@ -140,6 +335,8 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "keypoints": "、".join(keypoints) if keypoints else "未提取到明确关键词",
             "requested_resource_type": requested_resource_type or "none",
             "subject": subject or "other",
+            "subject_candidates": "、".join(subject_candidates) if subject_candidates else "无",
+            "available_subjects": "、".join(available_subjects) if available_subjects else "无",
         },
     )
 
@@ -199,11 +396,19 @@ async def search_query_rewriter(state: TutorState) -> dict:
             ],
             "reason": parsed.reason.strip(),
         }
+        retrieval_plan, _ = _normalize_retrieval_plan(parsed.retrieval_plan, state)
+        primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
+        multi_subject_payload = {
+            "retrieval_plan": retrieval_plan,
+            "learning_goal": parsed.learning_goal.strip(),
+            "primary_subject": primary_subject,
+            "subject_relation_summary": parsed.subject_relation_summary.strip(),
+        }
 
         if log_query_rewrite_result:
             logger.warning(
                 "search_query_rewriter parsed result: %s",
-                json.dumps(result_payload, ensure_ascii=False),
+                json.dumps({**result_payload, **multi_subject_payload}, ensure_ascii=False),
             )
     except Exception as exc:
         logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
@@ -214,6 +419,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "expanded_keypoints": [],
             "search_query_rewrite_reason": "",
             "search_query_rewrite_raw_preview": raw_preview if "raw_preview" in locals() else "",
+            **_clear_retrieval_plan_state(),
         }
 
     return {
@@ -223,6 +429,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
         "search_query_rewrite_reason": result_payload["reason"],
         "search_query_rewrite_error": "",
         "search_query_rewrite_raw_preview": raw_preview,
+        **multi_subject_payload,
     }
 
 
@@ -232,6 +439,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
 async def rag_retrieve(state: TutorState) -> dict:
     """Query ChromaDB with keypoints extracted by the supervisor node."""
     rewritten = state.get("rewritten_query", "")
+    retrieval_plan = state.get("retrieval_plan") or []
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
     keypoints = state.get("keypoints", [])
@@ -249,6 +457,47 @@ async def rag_retrieve(state: TutorState) -> dict:
         query = _last_human_query(state)
 
     subj = subject if subject != "other" else None
+
+    if not rewritten and retrieval_plan:
+        per_subject_top_k = get_setting("rag.multi_subject_per_subject_top_k", 3)
+        max_docs = get_setting("rag.multi_subject_max_docs", 8)
+        subjects = [str(item.get("subject", "")) for item in retrieval_plan if item.get("subject")]
+
+        with traced_retrieval(query=query, subject="multi") as span:
+            span.set_attribute("rag.retrieval_plan_count", len(retrieval_plan))
+            span.set_attribute("rag.retrieval_subjects", ",".join(subjects))
+            all_docs: list[dict] = []
+            for item in retrieval_plan:
+                plan_subject = item.get("subject")
+                plan_query = item.get("rag_query")
+                if not plan_subject or not plan_query:
+                    continue
+
+                result = await asyncio.to_thread(
+                    retrieve,
+                    query=plan_query,
+                    subject=plan_subject,
+                    top_k=per_subject_top_k,
+                )
+                for doc in result.get("docs", []):
+                    all_docs.append({
+                        "type": "rag",
+                        "retrieval_subject": plan_subject,
+                        "retrieval_role": item.get("role", "supporting_context"),
+                        "retrieval_query": plan_query,
+                        "retrieval_purpose": item.get("purpose", ""),
+                        "relation_to_goal": item.get("relation_to_goal", ""),
+                        "retrieval_priority": item.get("priority", 0.5),
+                        **doc,
+                    })
+
+            selected_docs = _select_docs_with_subject_quota(all_docs, max_docs)
+            span.set_attribute("rag.doc_count", len(selected_docs))
+            span.set_attribute("rag.is_hit", bool(selected_docs))
+            if selected_docs:
+                span.set_attribute("rag.top_score", _score_doc(selected_docs[0]))
+
+        return {"context": selected_docs}
 
     with traced_retrieval(query=query, subject=subj) as span:
         result = await asyncio.to_thread(retrieve, query=query, subject=subj)
@@ -271,10 +520,17 @@ async def web_search(state: TutorState) -> dict:
     """Fan-out web search — runs in parallel with rag_retrieve."""
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
+    retrieval_plan = state.get("retrieval_plan") or []
     if rewritten:
         query = rewritten
     elif search_web_query:
         query = search_web_query
+    elif retrieval_plan:
+        best_item = max(
+            retrieval_plan,
+            key=lambda item: float(item.get("priority") or 0),
+        )
+        query = best_item.get("web_search_query") or best_item.get("rag_query") or _last_human_query(state)
     else:
         query = _last_human_query(state)
 
@@ -303,6 +559,23 @@ async def web_search(state: TutorState) -> dict:
 def _format_retrieved(docs: list[dict]) -> str:
     if not docs:
         return "无相关参考资料。"
+    if any(doc.get("retrieval_subject") for doc in docs):
+        parts = []
+        for i, d in enumerate(docs, 1):
+            subject = d.get("retrieval_subject", "unknown")
+            role = d.get("retrieval_role", "supporting_context")
+            purpose = d.get("retrieval_purpose") or "提供该学科相关课程依据"
+            relation = d.get("relation_to_goal") or "与学习目标相关"
+            parts.append(
+                f"【{subject}｜{role}｜依据】\n"
+                f"[{i}] 来源：{d.get('source', '未知')}（相关度：{d.get('score', 'N/A')}）\n"
+                f"用途：{purpose}\n"
+                f"关系：{relation}\n"
+                f"检索 query：{d.get('retrieval_query', '')}\n"
+                f"内容：{d.get('content', '')}"
+            )
+        return "\n\n".join(parts)
+
     parts = []
     for i, d in enumerate(docs, 1):
         parts.append(f"[{i}] 来源：{d.get('source', '未知')}（相关度：{d.get('score', 'N/A')}）\n{d.get('content', '')}")

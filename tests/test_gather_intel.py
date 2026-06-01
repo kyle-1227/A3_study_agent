@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.graph.planner import _build_planning_retrieval_query, gather_intel
+from src.graph.planner import _build_planning_retrieval_query, _gather_resource_intel, gather_intel
 
 
 class TestGatherIntel:
@@ -65,6 +65,67 @@ class TestGatherIntel:
             subject="python",
         )
         mock_web_search.assert_called_once_with("Python function scope course notes")
+
+    @patch("src.graph.planner.retrieve")
+    @patch("src.graph.planner.web_search_fn")
+    async def test_resource_intel_uses_retrieval_plan_by_subject(self, mock_web_search, mock_retrieve):
+        def fake_retrieve(query, subject, top_k):
+            return {
+                "docs": [
+                    {
+                        "content": f"{subject} doc for {query}",
+                        "source": f"{subject}.pdf",
+                        "score": 0.8,
+                    },
+                ],
+                "is_hit": True,
+            }
+
+        mock_retrieve.side_effect = fake_retrieve
+        mock_web_search.return_value = [
+            {"title": "course notes", "content": "web result", "url": "https://example.com"},
+        ]
+
+        state = {
+            "messages": [HumanMessage(content="用 Python 做机器学习过拟合检测")],
+            "intent": "planning",
+            "subject": "python",
+            "search_rag_query": "overall query",
+            "search_web_query": "overall web query",
+            "retrieval_plan": [
+                {
+                    "subject": "python",
+                    "role": "implementation_tool",
+                    "rag_query": "Python sklearn code",
+                    "purpose": "实现工具",
+                    "relation_to_goal": "承载实践",
+                    "priority": 0.4,
+                },
+                {
+                    "subject": "machine_learning",
+                    "role": "core_concept",
+                    "rag_query": "overfitting regularization",
+                    "purpose": "核心概念",
+                    "relation_to_goal": "解释过拟合",
+                    "priority": 0.9,
+                },
+            ],
+        }
+
+        with patch("src.graph.planner.get_setting") as mock_setting:
+            mock_setting.side_effect = lambda key, default=None: {
+                "rag.multi_subject_per_subject_top_k": 2,
+            }.get(key, default)
+            result = await _gather_resource_intel(state)
+
+        assert "【知识库资源｜python｜implementation_tool】" in result
+        assert "【知识库资源｜machine_learning｜core_concept】" in result
+        assert "用途：实现工具" in result
+        assert "关系：解释过拟合" in result
+        assert "【网络搜索】" in result
+        mock_retrieve.assert_any_call(query="Python sklearn code", subject="python", top_k=2)
+        mock_retrieve.assert_any_call(query="overfitting regularization", subject="machine_learning", top_k=2)
+        mock_web_search.assert_called_once_with("overall web query")
 
     @patch("src.graph.planner.retrieve")
     @patch("src.graph.planner.web_search_fn")

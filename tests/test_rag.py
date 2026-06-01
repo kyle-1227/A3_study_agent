@@ -226,6 +226,44 @@ class TestBM25Search:
             ret._vectorstore = old_vs
             ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
 
+    def test_bm25_subject_filter_walks_past_mismatches(self):
+        """BM25 subject filter should skip top mismatches and keep scanning."""
+        import jieba
+        import src.rag.retriever as ret
+
+        from rank_bm25 import BM25Okapi
+
+        corpus_texts = [
+            "Python overfitting overfitting overfitting",
+            "machine learning overfitting regularization",
+            "big data overfitting log analysis",
+        ]
+        tokenized = [jieba.lcut(t) for t in corpus_texts]
+        corpus = [
+            {"content": corpus_texts[0], "source": "py.pdf", "metadata": {"subject": "python"}},
+            {"content": corpus_texts[1], "source": "ml.pdf", "metadata": {"subject": "machine_learning"}},
+            {"content": corpus_texts[2], "source": "bd.pdf", "metadata": {"subject": "big_data"}},
+        ]
+
+        mock_vs = MagicMock()
+        mock_vs._collection.count.return_value = 3
+
+        old_vs = ret._vectorstore
+        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
+        try:
+            ret._vectorstore = mock_vs
+            ret._bm25_index = BM25Okapi(tokenized)
+            ret._bm25_corpus = corpus
+            ret._bm25_doc_count = 3
+            results = ret._bm25_search("overfitting", top_k=1, subject="machine_learning")
+
+            assert len(results) == 1
+            assert results[0]["metadata"]["subject"] == "machine_learning"
+            assert results[0]["source"] == "ml.pdf"
+        finally:
+            ret._vectorstore = old_vs
+            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
+
     def test_bm25_search_empty_index(self):
         """BM25 search with no index returns empty list."""
         import src.rag.retriever as ret

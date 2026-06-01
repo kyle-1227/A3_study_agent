@@ -47,6 +47,10 @@ class TutorState(TypedDict):
     exercise_round: int                                                 # Exercise generation/review round
     context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
     search_results: list[dict]                                          # Planner search results
+    retrieval_plan: list[dict]                                          # Multi-subject retrieval plan
+    primary_subject: str                                                # Main subject of the user goal
+    learning_goal: str                                                  # Normalized learning goal
+    subject_relation_summary: str                                       # How subjects relate to the goal
     search_rag_query: str                                               # Initial rewritten query for local course retrieval
     search_web_query: str                                               # Initial rewritten query for web search
     expanded_keypoints: list[str]                                       # Query rewriter expanded concrete keypoints
