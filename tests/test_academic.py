@@ -18,6 +18,7 @@ from src.graph.academic import (
     search_query_rewriter,
     web_search,
 )
+from src.config import load_prompt
 from src.graph.state import CONTEXT_CLEAR
 
 
@@ -118,10 +119,10 @@ class TestSearchQueryRewriter:
     async def test_produces_rag_and_web_queries(self, mock_get_llm, mock_get_fallback):
         structured = MagicMock()
         parsed = SearchQueryRewriteOutput(
-            rag_query="Python 变量 条件判断 循环 课程知识点",
-            web_search_query="Python beginner variables conditionals loops exercises",
-            expanded_keypoints=["变量", "条件判断", "循环"],
-            reason="用户请求较宽泛，展开为 Python 基础知识点",
+            rag_query="Python 函数 function 参数 parameter argument 返回值 return value 作用域 scope def local variable global variable",
+            web_search_query="Python function parameters arguments return value scope course notes tutorial",
+            expanded_keypoints=["函数", "function", "参数", "parameter", "argument", "返回值", "return value", "作用域", "scope"],
+            reason="用户输入包含中文课程术语，补充英文教材常用术语以召回中英双语资料",
         )
         structured.ainvoke = AsyncMock(
             return_value={
@@ -145,9 +146,13 @@ class TestSearchQueryRewriter:
             "subject": "computer_science",
         })
 
-        assert result["search_rag_query"] == "Python 变量 条件判断 循环 课程知识点"
-        assert result["search_web_query"] == "Python beginner variables conditionals loops exercises"
-        assert result["expanded_keypoints"] == ["变量", "条件判断", "循环"]
+        assert result["search_rag_query"] == (
+            "Python 函数 function 参数 parameter argument 返回值 return value 作用域 scope def local variable global variable"
+        )
+        assert result["search_web_query"] == "Python function parameters arguments return value scope course notes tutorial"
+        assert result["expanded_keypoints"] == [
+            "函数", "function", "参数", "parameter", "argument", "返回值", "return value", "作用域", "scope",
+        ]
         assert result["search_query_rewrite_reason"]
         assert result["search_query_rewrite_error"] == ""
         assert result["search_query_rewrite_raw_preview"].startswith('{"rag_query"')
@@ -162,6 +167,13 @@ class TestSearchQueryRewriter:
             method="json_mode",
             include_raw=True,
         )
+
+    def test_search_query_rewriter_prompt_requires_bilingual_retrieval(self):
+        prompt = load_prompt("search_query_rewriter")
+        assert "中文和英文高校课程资料" in prompt
+        assert "中英双语" in prompt
+        assert "英文教材常用术语" in prompt
+        assert "不要只复述用户原始 query" in prompt
 
     async def test_noops_when_retry_rewritten_query_exists(self):
         result = await search_query_rewriter({
