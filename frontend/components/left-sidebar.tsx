@@ -1,15 +1,23 @@
 "use client"
 
-import { useState } from "react"
-import { ChevronLeft, ChevronRight, MessageSquarePlus, MessageSquare, Settings } from "lucide-react"
+import { useState, useEffect } from "react"
+import { ChevronLeft, ChevronRight, MessageSquarePlus, MessageSquare, Settings, GraduationCap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
+import { useRouter } from "next/navigation"
 
 interface ChatHistoryItem {
   id: string
   title: string
+}
+
+export interface VolunteerHistoryItem {
+  id: string
+  title: string
+  targetRegion: string
+  homeRegion: string
 }
 
 interface LeftSidebarProps {
@@ -19,8 +27,49 @@ interface LeftSidebarProps {
   selectedChatId?: string
 }
 
+const VOLUNTEER_STORAGE_KEY = "volunteer_chat_history"
+
+export function getVolunteerHistory(): VolunteerHistoryItem[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = localStorage.getItem(VOLUNTEER_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+export function saveVolunteerHistory(items: VolunteerHistoryItem[]) {
+  if (typeof window === "undefined") return
+  localStorage.setItem(VOLUNTEER_STORAGE_KEY, JSON.stringify(items))
+}
+
 export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChatId }: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
+  const router = useRouter()
+
+  useEffect(() => {
+    setVolunteerHistory(getVolunteerHistory())
+    const onStorage = () => setVolunteerHistory(getVolunteerHistory())
+    window.addEventListener("storage", onStorage)
+    return () => window.removeEventListener("storage", onStorage)
+  }, [])
+
+  // Re-read from localStorage when sidebar gains focus / becomes visible
+  useEffect(() => {
+    const onFocus = () => setVolunteerHistory(getVolunteerHistory())
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [])
+
+  const handleNewVolunteer = () => {
+    router.push("/volunteer")
+  }
+
+  const handleSelectVolunteer = (id: string) => {
+    router.push(`/volunteer?chatId=${encodeURIComponent(id)}`)
+  }
 
   return (
     <div
@@ -49,6 +98,15 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
             >
               <MessageSquarePlus className="h-5 w-5" />
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleNewVolunteer}
+              className="h-10 w-10 text-[#3D5A40] hover:bg-sidebar-accent"
+              title="志愿填报"
+            >
+              <GraduationCap className="h-5 w-5" />
+            </Button>
           </div>
         </>
       ) : (
@@ -69,46 +127,42 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
               {/* Phoenix Icon */}
               <div className="relative flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-[#3D5A40] to-[#5A7A5E]">
                 <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  {/* Phoenix body - interweaving lines */}
-                  <path 
-                    d="M16 28C16 28 12 24 12 18C12 14 14 10 16 8" 
-                    stroke="#FFCC99" 
-                    strokeWidth="2" 
+                  <path
+                    d="M16 28C16 28 12 24 12 18C12 14 14 10 16 8"
+                    stroke="#FFCC99"
+                    strokeWidth="2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                  <path 
-                    d="M16 28C16 28 20 24 20 18C20 14 18 10 16 8" 
-                    stroke="#FFCC99" 
-                    strokeWidth="2" 
+                  <path
+                    d="M16 28C16 28 20 24 20 18C20 14 18 10 16 8"
+                    stroke="#FFCC99"
+                    strokeWidth="2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                  {/* Wings */}
-                  <path 
-                    d="M16 12C16 12 10 10 6 12C4 13 3 15 4 17C5 19 8 18 10 16C12 14 14 13 16 14" 
-                    stroke="white" 
-                    strokeWidth="1.8" 
+                  <path
+                    d="M16 12C16 12 10 10 6 12C4 13 3 15 4 17C5 19 8 18 10 16C12 14 14 13 16 14"
+                    stroke="white"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                  <path 
-                    d="M16 12C16 12 22 10 26 12C28 13 29 15 28 17C27 19 24 18 22 16C20 14 18 13 16 14" 
-                    stroke="white" 
-                    strokeWidth="1.8" 
+                  <path
+                    d="M16 12C16 12 22 10 26 12C28 13 29 15 28 17C27 19 24 18 22 16C20 14 18 13 16 14"
+                    stroke="white"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                  {/* Head/flame */}
-                  <path 
-                    d="M16 8C16 8 14 5 16 3C18 5 16 8 16 8Z" 
+                  <path
+                    d="M16 8C16 8 14 5 16 3C18 5 16 8 16 8Z"
                     fill="#FFCC99"
                     stroke="#FFCC99"
                     strokeWidth="1"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                  {/* Inner detail */}
                   <circle cx="16" cy="14" r="1.5" fill="#FFCC99" />
                 </svg>
               </div>
@@ -127,6 +181,40 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
                 </div>
               </div>
             </div>
+          </div>
+
+          {/* 志愿填报历史纪录 */}
+          <div className="px-4 pb-3">
+            <div className="flex items-center justify-between pb-2">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">志愿填报</span>
+              <button
+                onClick={handleNewVolunteer}
+                className="text-xs text-[#3D5A40] hover:text-[#4A6B4D] font-medium"
+              >
+                + 新建
+              </button>
+            </div>
+            {volunteerHistory.length > 0 ? (
+              <div className="flex flex-col gap-0.5 max-h-36 overflow-y-auto">
+                {volunteerHistory.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => handleSelectVolunteer(item.id)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-lg transition-colors text-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  >
+                    <GraduationCap className="h-4 w-4 flex-shrink-0 text-[#3D5A40]" />
+                    <div className="min-w-0">
+                      <span className="truncate block">{item.title}</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {item.homeRegion} → {item.targetRegion}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground px-3 py-1">暂无志愿填报记录</p>
+            )}
           </div>
 
           {/* New Chat Button */}
@@ -154,8 +242,8 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
                     className={cn(
                       "w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-lg transition-colors",
                       "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                      selectedChatId === chat.id 
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground" 
+                      selectedChatId === chat.id
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
                         : "text-foreground"
                     )}
                   >

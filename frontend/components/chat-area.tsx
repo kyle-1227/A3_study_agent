@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, type ReactNode } from "react"
+import { useRouter } from "next/navigation"
 import {
   Send,
   Bot,
@@ -20,6 +21,7 @@ import {
   Loader2,
   Map,
   PauseCircle,
+  GraduationCap,
 } from "lucide-react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -81,6 +83,7 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const router = useRouter()
 
   useEffect(() => {
     // Scroll to bottom when messages change
@@ -112,6 +115,10 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
     }
     setInput("请生成知识点思维导图：")
     inputRef.current?.focus()
+  }
+
+  const handleVolunteerTool = () => {
+    router.push("/volunteer")
   }
 
   return (
@@ -250,6 +257,18 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
                 )}
               </div>
               
+              {/* 志愿填报 */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={handleVolunteerTool}
+                className="h-9 rounded-full text-muted-foreground hover:text-[#3D5A40] hover:bg-white/50 gap-1.5 px-3"
+              >
+                <GraduationCap className="h-4 w-4" />
+                <span className="text-sm">志愿填报</span>
+              </Button>
+
               {/* Flexible Spacer */}
               <div className="flex-1" />
               
