@@ -186,6 +186,62 @@ def _score_doc(doc: dict) -> float:
         return 0.0
 
 
+def _best_doc_score(docs: list[dict]) -> float:
+    """Return the best rerank/score value available for a doc list."""
+    if not docs:
+        return 0.0
+    return max(_score_doc(doc) for doc in docs)
+
+
+def _evaluate_retrieval_branch(
+    *,
+    subject: str,
+    role: str,
+    docs: list[dict],
+    is_hit: bool,
+    subject_mismatch_count: int,
+) -> dict:
+    """
+    Classify one retrieval_plan branch by local evidence quality.
+
+    ``role`` is accepted for future policy tuning; V1 keeps the threshold rules
+    subject-agnostic and role-agnostic.
+    """
+    del subject, role
+    doc_count = len(docs)
+    best_score = _best_doc_score(docs)
+    usable_threshold = float(get_setting("rag.branch_usable_threshold", 0.45))
+    strong_threshold = float(get_setting("rag.branch_strong_threshold", 0.7))
+
+    if doc_count == 0:
+        branch_status = "missing"
+        weak_reason = "no_docs"
+    elif subject_mismatch_count > 0:
+        branch_status = "weak"
+        weak_reason = "subject_mismatch"
+    elif not is_hit:
+        branch_status = "weak"
+        weak_reason = "retrieve_is_hit_false"
+    elif best_score < usable_threshold:
+        branch_status = "weak"
+        weak_reason = "low_rerank_score"
+    elif best_score >= strong_threshold:
+        branch_status = "strong"
+        weak_reason = ""
+    else:
+        branch_status = "usable"
+        weak_reason = ""
+
+    return {
+        "branch_status": branch_status,
+        "weak_reason": weak_reason,
+        "best_rerank_score": best_score,
+        "doc_count": doc_count,
+        "should_use_in_generation": branch_status in {"strong", "usable", "weak"},
+        "needs_supplement": branch_status in {"weak", "missing"},
+    }
+
+
 def _doc_dedupe_key(doc: dict) -> str:
     source = str(doc.get("source") or (doc.get("metadata") or {}).get("source_file") or "")
     content = str(doc.get("content") or "")
@@ -273,15 +329,36 @@ def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
     return plan[0]["subject"] if plan else ""
 
 
-def _select_docs_with_subject_quota(docs: list[dict], max_docs: int) -> list[dict]:
-    """Keep at least one doc per subject when possible, then fill by priority/score."""
+_BRANCH_STATUS_RANK = {
+    "strong": 3,
+    "usable": 2,
+    "weak": 1,
+    "missing": 0,
+}
+
+
+def _select_docs_with_subject_quota(
+    docs: list[dict],
+    max_docs: int,
+    *,
+    primary_subject: str = "",
+) -> tuple[list[dict], dict]:
+    """Keep a balanced, quality-aware multi-subject context."""
     if max_docs <= 0:
-        return []
+        return [], {
+            "quota_used": {},
+            "subject_quota": {},
+            "dropped_docs_count": len(docs),
+        }
 
     deduped: list[dict] = []
     seen: set[str] = set()
     for doc in docs:
-        key = _doc_dedupe_key(doc)
+        key = (
+            f"diagnostic:{doc.get('retrieval_subject')}:{doc.get('retrieval_role')}"
+            if doc.get("type") == "rag_diagnostic"
+            else _doc_dedupe_key(doc)
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -291,53 +368,118 @@ def _select_docs_with_subject_quota(docs: list[dict], max_docs: int) -> list[dic
     for doc in deduped:
         grouped[str(doc.get("retrieval_subject") or "unknown")].append(doc)
 
-    for subject_docs in grouped.values():
-        subject_docs.sort(
-            key=lambda doc: (
-                float(doc.get("retrieval_priority") or 0),
-                _score_doc(doc),
-            ),
-            reverse=True,
+    subject_max_docs = int(get_setting("rag.multi_subject_subject_max_docs", 3))
+    primary_extra_docs = int(get_setting("rag.multi_subject_primary_extra_docs", 1))
+    weak_max_docs = int(get_setting("rag.multi_subject_weak_max_docs", 1))
+
+    subject_quota: dict[str, int] = {}
+    for subject in grouped:
+        quota = subject_max_docs + (primary_extra_docs if subject == primary_subject else 0)
+        subject_quota[subject] = max(1, quota)
+
+    def _sort_key(doc: dict) -> tuple:
+        status = str(doc.get("branch_status") or "usable")
+        return (
+            _BRANCH_STATUS_RANK.get(status, 0),
+            float(doc.get("retrieval_priority") or 0),
+            _score_doc(doc),
         )
+
+    for subject_docs in grouped.values():
+        subject_docs.sort(key=_sort_key, reverse=True)
 
     selected: list[dict] = []
     selected_keys: set[str] = set()
+    quota_used: Counter = Counter()
+
+    def _doc_key(doc: dict) -> str:
+        if doc.get("type") == "rag_diagnostic":
+            return f"diagnostic:{doc.get('retrieval_subject')}:{doc.get('retrieval_role')}"
+        return _doc_dedupe_key(doc)
+
+    def _can_select(doc: dict) -> bool:
+        subject = str(doc.get("retrieval_subject") or "unknown")
+        status = str(doc.get("branch_status") or "usable")
+        if quota_used[subject] >= subject_quota.get(subject, subject_max_docs):
+            return False
+        if status == "weak":
+            weak_used = sum(
+                1
+                for selected_doc in selected
+                if selected_doc.get("retrieval_subject") == subject
+                and selected_doc.get("branch_status") == "weak"
+            )
+            if weak_used >= weak_max_docs:
+                return False
+        if status == "missing":
+            missing_used = any(
+                selected_doc.get("retrieval_subject") == subject
+                and selected_doc.get("branch_status") == "missing"
+                for selected_doc in selected
+            )
+            if missing_used:
+                return False
+        return True
+
+    def _add_doc(doc: dict) -> bool:
+        if len(selected) >= max_docs:
+            return False
+        key = _doc_key(doc)
+        if key in selected_keys or not _can_select(doc):
+            return False
+        selected.append(doc)
+        selected_keys.add(key)
+        quota_used[str(doc.get("retrieval_subject") or "unknown")] += 1
+        return True
+
     subjects_by_priority = sorted(
         grouped,
         key=lambda subject: (
-            float(grouped[subject][0].get("retrieval_priority") or 0),
-            _score_doc(grouped[subject][0]),
+            _sort_key(grouped[subject][0]),
         ),
         reverse=True,
     )
 
     for subject in subjects_by_priority:
-        if len(selected) >= max_docs:
-            break
-        doc = grouped[subject][0]
-        key = _doc_dedupe_key(doc)
-        selected.append(doc)
-        selected_keys.add(key)
+        for doc in grouped[subject]:
+            if _add_doc(doc):
+                break
 
     remaining = [
         doc
         for subject_docs in grouped.values()
         for doc in subject_docs
-        if _doc_dedupe_key(doc) not in selected_keys
+        if _doc_key(doc) not in selected_keys
     ]
-    remaining.sort(
-        key=lambda doc: (
-            float(doc.get("retrieval_priority") or 0),
-            _score_doc(doc),
-        ),
-        reverse=True,
-    )
+    remaining.sort(key=_sort_key, reverse=True)
 
     for doc in remaining:
-        if len(selected) >= max_docs:
-            break
-        selected.append(doc)
-    return selected
+        _add_doc(doc)
+
+    branch_status_distribution = Counter(doc.get("branch_status", "usable") for doc in selected)
+    branch_status_by_subject: dict[str, dict[str, int]] = defaultdict(dict)
+    for subject, subject_docs in grouped.items():
+        status_counter = Counter(doc.get("branch_status", "usable") for doc in subject_docs)
+        branch_status_by_subject[subject] = dict(status_counter)
+
+    quota_debug = {
+        "quota_used": dict(quota_used),
+        "subject_quota": subject_quota,
+        "branch_status_distribution": dict(branch_status_distribution),
+        "branch_status_by_subject": dict(branch_status_by_subject),
+        "dropped_docs_count": max(0, len(deduped) - len(selected)),
+        "weak_subjects": sorted({
+            str(doc.get("retrieval_subject"))
+            for doc in deduped
+            if doc.get("branch_status") == "weak"
+        }),
+        "missing_subjects": sorted({
+            str(doc.get("retrieval_subject"))
+            for doc in deduped
+            if doc.get("branch_status") == "missing"
+        }),
+    }
+    return selected, quota_debug
 
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
@@ -591,9 +733,18 @@ async def rag_retrieve(state: TutorState) -> dict:
                     subject=plan_subject,
                     top_k=per_subject_top_k,
                 )
-                docs = result.get("docs", [])
+                raw_docs = result.get("docs", []) or []
+                used_docs = raw_docs[:per_subject_top_k]
                 role = item.get("role", "supporting_context")
                 priority = item.get("priority", 0.5)
+                subject_mismatch_count = _subject_mismatch_count(used_docs, plan_subject)
+                branch_eval = _evaluate_retrieval_branch(
+                    subject=plan_subject,
+                    role=role,
+                    docs=used_docs,
+                    is_hit=result.get("is_hit", False),
+                    subject_mismatch_count=subject_mismatch_count,
+                )
                 # TEMP A3_TRACE: remove after multi-subject retrieval validation.
                 emit_a3_trace(
                     logger,
@@ -604,15 +755,40 @@ async def rag_retrieve(state: TutorState) -> dict:
                         "priority": priority,
                         "query": plan_query,
                         "top_k": per_subject_top_k,
-                        "doc_count": len(docs),
+                        "raw_doc_count": len(raw_docs),
+                        "used_doc_count": len(used_docs),
+                        "doc_count": len(used_docs),
                         "is_hit": result.get("is_hit", False),
-                        "subject_mismatch_count": _subject_mismatch_count(docs, plan_subject),
-                        "top_docs": _top_doc_summaries(docs),
+                        "subject_mismatch_count": subject_mismatch_count,
+                        "branch_status": branch_eval["branch_status"],
+                        "weak_reason": branch_eval["weak_reason"],
+                        "best_rerank_score": branch_eval["best_rerank_score"],
+                        "needs_supplement": branch_eval["needs_supplement"],
+                        "top_docs": _top_doc_summaries(used_docs),
                     },
                     state=state,
                     env_flag="LOG_RAG_RESULT",
                 )
-                for doc in docs:
+                if branch_eval["branch_status"] == "missing":
+                    all_docs.append({
+                        "type": "rag_diagnostic",
+                        "retrieval_subject": plan_subject,
+                        "retrieval_role": role,
+                        "retrieval_query": plan_query,
+                        "retrieval_purpose": item.get("purpose", ""),
+                        "relation_to_goal": item.get("relation_to_goal", ""),
+                        "retrieval_priority": priority,
+                        "branch_status": "missing",
+                        "weak_reason": "no_docs",
+                        "best_rerank_score": 0.0,
+                        "needs_supplement": True,
+                        "content": "本地知识库中暂未检索到该学科分支的有效资料。",
+                        "source": "local_rag_diagnostic",
+                        "score": 0.0,
+                    })
+                    continue
+
+                for doc in used_docs:
                     all_docs.append({
                         "type": "rag",
                         "retrieval_subject": plan_subject,
@@ -621,10 +797,18 @@ async def rag_retrieve(state: TutorState) -> dict:
                         "retrieval_purpose": item.get("purpose", ""),
                         "relation_to_goal": item.get("relation_to_goal", ""),
                         "retrieval_priority": priority,
+                        "branch_status": branch_eval["branch_status"],
+                        "weak_reason": branch_eval["weak_reason"],
+                        "best_rerank_score": branch_eval["best_rerank_score"],
+                        "needs_supplement": branch_eval["needs_supplement"],
                         **doc,
                     })
 
-            selected_docs = _select_docs_with_subject_quota(all_docs, max_docs)
+            selected_docs, quota_debug = _select_docs_with_subject_quota(
+                all_docs,
+                max_docs,
+                primary_subject=str(state.get("primary_subject") or ""),
+            )
             subject_counter = Counter(doc.get("retrieval_subject") for doc in selected_docs)
             role_counter = Counter(doc.get("retrieval_role") for doc in selected_docs)
             # TEMP A3_TRACE: remove after multi-subject retrieval validation.
@@ -639,10 +823,13 @@ async def rag_retrieve(state: TutorState) -> dict:
                     "max_docs": max_docs,
                     "subject_doc_distribution": dict(subject_counter),
                     "role_distribution": dict(role_counter),
+                    **quota_debug,
                     "selected_docs": [
                         {
                             "subject": doc.get("retrieval_subject"),
                             "role": doc.get("retrieval_role"),
+                            "branch_status": doc.get("branch_status"),
+                            "weak_reason": doc.get("weak_reason"),
                             "source": doc.get("source"),
                             "score": doc.get("score"),
                             "rerank_score": doc.get("rerank_score"),
@@ -662,7 +849,15 @@ async def rag_retrieve(state: TutorState) -> dict:
 
     with traced_retrieval(query=query, subject=subj) as span:
         result = await asyncio.to_thread(retrieve, query=query, subject=subj)
-        docs = result.get("docs", [])
+        docs = result.get("docs", []) or []
+        subject_mismatch_count = _subject_mismatch_count(docs, subj)
+        branch_eval = _evaluate_retrieval_branch(
+            subject=subj or "",
+            role="single_subject",
+            docs=docs,
+            is_hit=result.get("is_hit", False),
+            subject_mismatch_count=subject_mismatch_count,
+        )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
@@ -671,9 +866,14 @@ async def rag_retrieve(state: TutorState) -> dict:
                 "subject": subj,
                 "query": query,
                 "query_source": query_source,
+                "raw_doc_count": len(docs),
+                "used_doc_count": len(docs),
                 "doc_count": len(docs),
                 "is_hit": result.get("is_hit", False),
-                "subject_mismatch_count": _subject_mismatch_count(docs, subj),
+                "subject_mismatch_count": subject_mismatch_count,
+                "branch_status": branch_eval["branch_status"],
+                "weak_reason": branch_eval["weak_reason"],
+                "best_rerank_score": branch_eval["best_rerank_score"],
                 "top_docs": _top_doc_summaries(docs),
             },
             state=state,
@@ -849,10 +1049,21 @@ def _format_retrieved(docs: list[dict]) -> str:
         for i, d in enumerate(docs, 1):
             subject = d.get("retrieval_subject", "unknown")
             role = d.get("retrieval_role", "supporting_context")
+            branch_status = d.get("branch_status", "usable")
+            weak_reason = d.get("weak_reason", "")
+            if branch_status == "weak":
+                evidence_note = f"证据状态：弱证据（{weak_reason or '相关性不足'}），只能谨慎补充，不要当作强课程依据。"
+            elif branch_status == "missing":
+                evidence_note = f"证据状态：本地资料不足（{weak_reason or 'no_docs'}），只能说明资料缺口，不要当作课程依据。"
+            elif branch_status == "strong":
+                evidence_note = "证据状态：强证据，可作为核心课程依据。"
+            else:
+                evidence_note = "证据状态：可用证据，可作为课程依据但需结合其它资料。"
             purpose = d.get("retrieval_purpose") or "提供该学科相关课程依据"
             relation = d.get("relation_to_goal") or "与学习目标相关"
             parts.append(
                 f"【{subject}｜{role}｜依据】\n"
+                f"{evidence_note}\n"
                 f"[{i}] 来源：{d.get('source', '未知')}（相关度：{d.get('score', 'N/A')}）\n"
                 f"用途：{purpose}\n"
                 f"关系：{relation}\n"

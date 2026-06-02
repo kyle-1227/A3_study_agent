@@ -1,7 +1,7 @@
 """ChromaDB index builder with incremental upsert support.
 
-Uses SiliconFlow's OpenAI-compatible embedding API (BAAI/bge-m3) instead
-of local HuggingFace models, eliminating heavy local dependencies.
+Uses an OpenAI-compatible embedding API instead of local HuggingFace
+models, eliminating heavy local dependencies.
 """
 
 from __future__ import annotations
@@ -11,18 +11,22 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import httpx
 import math
 
 from langchain_community.vectorstores import Chroma
+from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 
 COLLECTION_NAME = "gaokao_docs"
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_EMBEDDING_API_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_EMBEDDING_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
 DEFAULT_INDEX_BATCH_SIZE = 64
 DEFAULT_INDEX_MAX_RETRIES = 3
+DEFAULT_EMBEDDING_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +53,129 @@ def _resolve_persist_dir(persist_directory: Optional[str] = None) -> str:
     return str(path)
 
 
-def _get_embedding(model_name: Optional[str] = None) -> OpenAIEmbeddings:
-    """Create an OpenAI-compatible embedding client backed by SiliconFlow.
+def _embedding_api_key_env() -> str:
+    return os.getenv("EMBEDDING_API_KEY_ENV", DEFAULT_EMBEDDING_API_KEY_ENV)
+
+
+def _embedding_api_key() -> str | None:
+    api_key_env = _embedding_api_key_env()
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        return api_key
+
+    if api_key_env.startswith(("sk-", "or-")):
+        logger.warning(
+            "EMBEDDING_API_KEY_ENV appears to contain an API key value instead "
+            "of an environment variable name. Prefer "
+            "EMBEDDING_API_KEY_ENV=OPENROUTER_API_KEY."
+        )
+        return api_key_env
+
+    return None
+
+
+def _embedding_base_url() -> str:
+    return os.getenv(
+        "EMBEDDING_BASE_URL",
+        os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+    )
+
+
+def _embedding_request_timeout() -> float:
+    try:
+        return max(1.0, float(os.getenv("EMBEDDING_TIMEOUT", DEFAULT_EMBEDDING_TIMEOUT)))
+    except ValueError:
+        return DEFAULT_EMBEDDING_TIMEOUT
+
+
+def _embedding_document_input_type() -> str:
+    return os.getenv("EMBEDDING_DOCUMENT_INPUT_TYPE", "passage").strip()
+
+
+def _embedding_query_input_type() -> str:
+    return os.getenv("EMBEDDING_QUERY_INPUT_TYPE", "query").strip()
+
+
+class OpenAICompatibleEmbeddings(Embeddings):
+    """Small embeddings adapter for OpenAI-compatible `/embeddings` endpoints.
+
+    LangChain's OpenAIEmbeddings sends tokenized input through the OpenAI SDK.
+    Some OpenRouter embedding models, including NVIDIA Nemotron Embed, expect
+    raw text strings plus an optional query/passage input_type. This adapter
+    keeps Chroma compatibility while sending that provider-friendly payload.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None,
+        base_url: str,
+        batch_size: int = 64,
+        document_input_type: str = "",
+        query_input_type: str = "",
+        timeout: float = DEFAULT_EMBEDDING_TIMEOUT,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.batch_size = batch_size
+        self.document_input_type = document_input_type
+        self.query_input_type = query_input_type
+        self.timeout = timeout
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        embeddings: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            embeddings.extend(self._embed(batch, input_type=self.document_input_type))
+        return embeddings
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text], input_type=self.query_input_type)[0]
+
+    def _embed(self, texts: list[str], *, input_type: str = "") -> list[list[float]]:
+        if not texts:
+            return []
+        if not self.api_key:
+            raise RuntimeError("Embedding API key is not configured")
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": texts,
+        }
+        if input_type:
+            payload["input_type"] = input_type
+
+        response = httpx.post(
+            f"{self.base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error"):
+            raise RuntimeError(f"Embedding provider returned error: {data['error']}")
+
+        items = data.get("data")
+        if not isinstance(items, list) or not items:
+            raise ValueError("No embedding data received")
+
+        embeddings: list[list[float]] = []
+        for item in items:
+            embedding = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(embedding, list):
+                raise ValueError("Embedding response item missing embedding vector")
+            embeddings.append(embedding)
+        return embeddings
+
+
+def _get_embedding(model_name: Optional[str] = None) -> Embeddings:
+    """Create an OpenAI-compatible embedding client.
 
     Args:
         model_name: Override for the embedding model identifier.
@@ -58,19 +183,20 @@ def _get_embedding(model_name: Optional[str] = None) -> OpenAIEmbeddings:
             ``DEFAULT_EMBEDDING_MODEL``.
 
     Returns:
-        A configured ``OpenAIEmbeddings`` instance pointing at SiliconFlow.
+        A configured ``OpenAIEmbeddings`` instance pointing at the configured
+        embedding provider.
     """
     model_name = model_name or os.getenv(
         "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
     )
-    return OpenAIEmbeddings(
-        chunk_size=64,
-        check_embedding_ctx_length=False,
+    return OpenAICompatibleEmbeddings(
         model=model_name,
-        openai_api_key=os.getenv("SILICONFLOW_API_KEY"),
-        openai_api_base=os.getenv(
-            "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
-        ),
+        api_key=_embedding_api_key(),
+        base_url=_embedding_base_url(),
+        batch_size=64,
+        document_input_type=_embedding_document_input_type(),
+        query_input_type=_embedding_query_input_type(),
+        timeout=_embedding_request_timeout(),
     )
 
 
@@ -94,17 +220,18 @@ def _content_id(doc: Document) -> str:
     return f"{doc.metadata.get('source_file', 'unknown')}_{digest}"
 
 
-def _validate_embedding_provider(embedding: OpenAIEmbeddings) -> None:
+def _validate_embedding_provider(embedding: Embeddings) -> None:
     """Fail fast when the configured embedding provider/model is unavailable."""
     try:
         embedding.embed_documents(["embedding provider health check"])
     except Exception as exc:
         model_name = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-        base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+        api_key_env = _embedding_api_key_env()
+        base_url = _embedding_base_url()
         raise RuntimeError(
             "Embedding provider health check failed before indexing. "
-            f"model={model_name}, base_url={base_url}. "
-            "Please verify SILICONFLOW_API_KEY, EMBEDDING_MODEL, account quota, "
+            f"model={model_name}, base_url={base_url}, api_key_env={api_key_env}. "
+            "Please verify the embedding API key, EMBEDDING_MODEL, account quota, "
             f"and provider availability. Original error: {exc}"
         ) from exc
 

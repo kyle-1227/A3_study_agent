@@ -24,6 +24,9 @@ dependencies = [
     # Utilities
     "python-dotenv>=1.0,<2",
     "pyyaml>=6.0,<7",
+    "httpx>=0.28,<1",
+    "pydantic>=2.0,<3",
+    "typing-extensions>=4.8,<5",
     # API
     "fastapi>=0.100,<1",
     "uvicorn>=0.23,<1",
@@ -38,7 +41,6 @@ dependencies = [
 dev = [
     "pytest>=9.0,<10",
     "pytest-asyncio>=1.0,<2",
-    "httpx>=0.28,<1",
 ]
 
 [tool.pytest.ini_options]

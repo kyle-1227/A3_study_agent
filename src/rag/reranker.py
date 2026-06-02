@@ -1,8 +1,8 @@
-"""SiliconFlow BGE Reranker API wrapper.
+"""OpenAI-compatible reranker API wrapper.
 
-Calls the SiliconFlow reranking endpoint to re-score candidate documents
-against a query.  On any API failure the original documents are returned
-in their existing order (graceful degradation).
+Calls the configured reranking endpoint to re-score candidate documents
+against a query.  On any API failure the original documents are returned in
+their existing order (graceful degradation).
 """
 
 from __future__ import annotations
@@ -17,9 +17,45 @@ from src.config import get_setting
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
-_RERANK_URL = "https://api.siliconflow.cn/v1/rerank"
+_DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_DEFAULT_RERANKER_API_KEY_ENV = "OPENROUTER_API_KEY"
+_DEFAULT_RERANKER_MODEL = "cohere/rerank-4-fast"
 _TIMEOUT = 15  # seconds
+
+
+def _reranker_api_key_env() -> str:
+    return os.getenv("RERANKER_API_KEY_ENV", _DEFAULT_RERANKER_API_KEY_ENV)
+
+
+def _reranker_api_key() -> str | None:
+    api_key_env = _reranker_api_key_env()
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        return api_key
+
+    if api_key_env.startswith(("sk-", "or-")):
+        logger.warning(
+            "RERANKER_API_KEY_ENV appears to contain an API key value instead "
+            "of an environment variable name. Prefer "
+            "RERANKER_API_KEY_ENV=OPENROUTER_API_KEY."
+        )
+        return api_key_env
+
+    return None
+
+
+def _reranker_base_url() -> str:
+    return os.getenv(
+        "RERANKER_BASE_URL",
+        get_setting("rag.reranker_base_url", os.getenv("OPENROUTER_BASE_URL", _DEFAULT_OPENROUTER_BASE_URL)),
+    )
+
+
+def _rerank_url() -> str:
+    explicit_url = os.getenv("RERANKER_URL", get_setting("rag.reranker_url", ""))
+    if explicit_url:
+        return explicit_url
+    return _reranker_base_url().rstrip("/") + "/rerank"
 
 
 def rerank(
@@ -27,7 +63,7 @@ def rerank(
     documents: list[dict[str, Any]],
     top_n: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Rerank *documents* against *query* via SiliconFlow BGE Reranker.
+    """Rerank *documents* against *query* via the configured reranker.
 
     Parameters
     ----------
@@ -52,7 +88,8 @@ def rerank(
     if top_n is None:
         top_n = get_setting("rag.reranker_top_n", 5)
 
-    api_key = os.getenv("SILICONFLOW_API_KEY")
+    api_key_env = _reranker_api_key_env()
+    api_key = _reranker_api_key()
     model = os.getenv(
         "RERANKER_MODEL",
         get_setting("rag.reranker_model", _DEFAULT_RERANKER_MODEL),
@@ -62,7 +99,7 @@ def rerank(
 
     try:
         resp = httpx.post(
-            _RERANK_URL,
+            _rerank_url(),
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": model,
@@ -75,7 +112,14 @@ def rerank(
         resp.raise_for_status()
         data = resp.json()
     except Exception:
-        logger.warning("Reranker API call failed; returning original order", exc_info=True)
+        logger.warning(
+            "Reranker API call failed; returning original order "
+            "(model=%s, api_key_env=%s, base_url=%s)",
+            model,
+            api_key_env,
+            _reranker_base_url(),
+            exc_info=True,
+        )
         return documents[:top_n]
 
     results: list[dict[str, Any]] = data.get("results", [])

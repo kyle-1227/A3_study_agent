@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.academic import (
+    _best_doc_score,
+    _evaluate_retrieval_branch,
     _format_retrieved,
     _format_search,
     _normalize_retrieval_plan,
+    _select_docs_with_subject_quota,
     RetrievalPlanItem,
     SearchQueryRewriteOutput,
     academic_router,
@@ -475,6 +479,94 @@ class TestSearchQueryRewriter:
         assert result["search_web_query"] == ""
         assert result["retrieval_plan"] == []
 
+class TestRetrievalBranchQuality:
+    def test_best_doc_score_prefers_rerank_score(self):
+        assert _best_doc_score([
+            {"score": 0.9, "rerank_score": 0.2},
+            {"score": 0.4, "rerank_score": 0.8},
+        ]) == 0.8
+
+    def test_evaluates_strong_usable_weak_missing(self):
+        strong = _evaluate_retrieval_branch(
+            subject="python",
+            role="implementation_tool",
+            docs=[{"rerank_score": 0.8}],
+            is_hit=True,
+            subject_mismatch_count=0,
+        )
+        usable = _evaluate_retrieval_branch(
+            subject="python",
+            role="implementation_tool",
+            docs=[{"rerank_score": 0.5}],
+            is_hit=True,
+            subject_mismatch_count=0,
+        )
+        weak = _evaluate_retrieval_branch(
+            subject="python",
+            role="implementation_tool",
+            docs=[{"rerank_score": 0.8}],
+            is_hit=False,
+            subject_mismatch_count=0,
+        )
+        missing = _evaluate_retrieval_branch(
+            subject="python",
+            role="implementation_tool",
+            docs=[],
+            is_hit=False,
+            subject_mismatch_count=0,
+        )
+
+        assert strong["branch_status"] == "strong"
+        assert usable["branch_status"] == "usable"
+        assert weak["branch_status"] == "weak"
+        assert weak["weak_reason"] == "retrieve_is_hit_false"
+        assert missing["branch_status"] == "missing"
+        assert missing["weak_reason"] == "no_docs"
+
+    def test_select_docs_with_subject_quota_caps_subject_and_weak_docs(self):
+        docs = [
+            {
+                "content": f"ml {i}",
+                "source": f"ml{i}.pdf",
+                "score": 0.9 - i * 0.01,
+                "retrieval_subject": "machine_learning",
+                "retrieval_priority": 0.9,
+                "branch_status": "strong",
+            }
+            for i in range(5)
+        ] + [
+            {
+                "content": "python weak",
+                "source": "py.pdf",
+                "score": 0.2,
+                "retrieval_subject": "python",
+                "retrieval_priority": 0.6,
+                "branch_status": "weak",
+            },
+            {
+                "type": "rag_diagnostic",
+                "content": "missing",
+                "source": "local_rag_diagnostic",
+                "retrieval_subject": "big_data",
+                "retrieval_priority": 0.5,
+                "branch_status": "missing",
+            },
+        ]
+
+        selected, debug = _select_docs_with_subject_quota(
+            docs,
+            8,
+            primary_subject="machine_learning",
+        )
+
+        distribution = Counter(doc["retrieval_subject"] for doc in selected)
+        assert distribution["machine_learning"] == 4
+        assert distribution["python"] == 1
+        assert distribution["big_data"] == 1
+        assert debug["weak_subjects"] == ["python"]
+        assert debug["missing_subjects"] == ["big_data"]
+
+
 class TestRagRetrieveWithRewrittenQuery:
     """rag_retrieve uses rewritten_query when available."""
 
@@ -548,12 +640,12 @@ class TestRagRetrieveWithRewrittenQuery:
         def fake_retrieve(query, subject, top_k):
             docs_by_subject = {
                 "python": [
-                    {"content": "Python doc 1", "source": "py1.pdf", "score": 0.2, "metadata": {"subject": "python"}},
-                    {"content": "Python doc 2", "source": "py2.pdf", "score": 0.3, "metadata": {"subject": "python"}},
+                    {"content": f"Python doc {i}", "source": f"py{i}.pdf", "score": 0.8, "metadata": {"subject": "python"}}
+                    for i in range(1, 6)
                 ],
                 "machine_learning": [
-                    {"content": "ML doc 1", "source": "ml1.pdf", "score": 0.9, "metadata": {"subject": "machine_learning"}},
-                    {"content": "ML doc 2", "source": "ml2.pdf", "score": 0.8, "metadata": {"subject": "machine_learning"}},
+                    {"content": f"ML doc {i}", "source": f"ml{i}.pdf", "score": 0.9, "metadata": {"subject": "machine_learning"}}
+                    for i in range(1, 6)
                 ],
             }
             return {"docs": docs_by_subject[subject], "is_hit": True}
@@ -601,7 +693,39 @@ class TestRagRetrieveWithRewrittenQuery:
         assert {"python", "machine_learning"}.issubset(subjects)
         assert len(context) == 3
         assert all(doc["type"] == "rag" for doc in context)
+        assert all("doc 4" not in doc["content"] and "doc 5" not in doc["content"] for doc in context)
+        assert all(doc["branch_status"] == "strong" for doc in context)
         assert any(doc["retrieval_role"] == "implementation_tool" for doc in context)
+
+    @patch("src.graph.academic.retrieve")
+    async def test_missing_retrieval_plan_branch_adds_diagnostic_context(self, mock_retrieve):
+        mock_retrieve.return_value = {"docs": [], "is_hit": False}
+
+        state = {
+            "messages": [HumanMessage(content="test")],
+            "subject": "python",
+            "rewritten_query": "",
+            "search_rag_query": "overall query",
+            "retrieval_plan": [
+                {
+                    "subject": "python",
+                    "role": "implementation_tool",
+                    "rag_query": "Python code",
+                    "purpose": "实现工具",
+                    "relation_to_goal": "支持实践",
+                    "priority": 0.8,
+                },
+            ],
+        }
+
+        result = await rag_retrieve(state)
+
+        assert len(result["context"]) == 1
+        diagnostic = result["context"][0]
+        assert diagnostic["type"] == "rag_diagnostic"
+        assert diagnostic["branch_status"] == "missing"
+        assert diagnostic["weak_reason"] == "no_docs"
+        assert "暂未检索到" in diagnostic["content"]
 
     @patch("src.graph.academic.retrieve")
     async def test_rewritten_query_ignores_retrieval_plan(self, mock_retrieve):
@@ -786,6 +910,33 @@ class TestFormatHelpers:
         assert "用途：解释核心概念" in output
         assert "关系：支撑过拟合检测" in output
         assert "检索 query：overfitting generalization" in output
+
+    def test_format_retrieved_marks_weak_and_missing_evidence(self):
+        docs = [
+            {
+                "content": "Weak Python material.",
+                "source": "py.pdf",
+                "score": 0.1,
+                "retrieval_subject": "python",
+                "retrieval_role": "implementation_tool",
+                "branch_status": "weak",
+                "weak_reason": "low_rerank_score",
+            },
+            {
+                "content": "本地知识库中暂未检索到该学科分支的有效资料。",
+                "source": "local_rag_diagnostic",
+                "retrieval_subject": "big_data",
+                "retrieval_role": "application_context",
+                "branch_status": "missing",
+                "weak_reason": "no_docs",
+            },
+        ]
+
+        output = _format_retrieved(docs)
+
+        assert "弱证据" in output
+        assert "本地资料不足" in output
+        assert "不要当作强课程依据" in output
 
     def test_format_search_empty(self):
         assert _format_search([]) == "无网络搜索结果。"

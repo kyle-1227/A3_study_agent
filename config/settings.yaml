@@ -31,9 +31,15 @@ rag:
   bm25_top_k: 10                        # Candidates from BM25 keyword search
   reranker_top_n: 5                     # Results after reranking
   relevance_threshold: 0.3              # Minimum score for a "hit"
-  reranker_model: "BAAI/bge-reranker-v2-m3"
+  reranker_model: "cohere/rerank-4-fast"
+  reranker_base_url: "https://openrouter.ai/api/v1"
   multi_subject_per_subject_top_k: 3     # Per-subject docs for retrieval_plan RAG
   multi_subject_max_docs: 8              # Final merged docs across subjects
+  multi_subject_subject_max_docs: 3       # Max docs per subject in merged multi-subject context
+  multi_subject_primary_extra_docs: 1     # Extra docs allowed for primary subject
+  multi_subject_weak_max_docs: 1          # Max weak-evidence docs per subject
+  branch_usable_threshold: 0.45           # Minimum score for usable local evidence
+  branch_strong_threshold: 0.7            # Minimum score for strong local evidence
 
 supervisor:
   model: "deepseek-v4-flash"
