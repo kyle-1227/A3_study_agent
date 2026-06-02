@@ -53,3 +53,11 @@ query_rewrite:
   temperature: 0.0                      # Deterministic retrieval-query rewriting
   max_tokens: 512
   streaming: false
+
+hallucination_eval:
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  temperature: 0.0                      # Deterministic answer faithfulness evaluation
+  max_tokens: 256
+  streaming: false

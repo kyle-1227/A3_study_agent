@@ -76,6 +76,22 @@ class TestEvaluateHallucinationNode:
 
         assert result["hallucination_detected"] is False
         assert "retry_count" not in result
+        mock_get_llm.assert_called_once_with(
+            "hallucination_eval",
+            temperature=0.0,
+            max_tokens=256,
+            streaming=False,
+        )
+        mock_llm.with_structured_output.assert_called_once_with(
+            HallucinationEvaluation,
+            method="json_mode",
+            include_raw=True,
+        )
+        mock_get_fallback.assert_called_once_with(
+            temperature=0.0,
+            max_tokens=256,
+            streaming=False,
+        )
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")

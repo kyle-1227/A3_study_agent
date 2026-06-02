@@ -1028,15 +1028,25 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     increments retry_count to signal the conditional edge for re-retrieval.
     Defaults to valid on any parsing/model failure (safe fallback).
     """
-    eval_temp = get_setting("academic.hallucination_eval_temperature", 0.0)
-    llm = get_node_llm("academic", temperature=eval_temp)
+    eval_temp = get_setting("hallucination_eval.temperature", 0.0)
+    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    llm = get_node_llm(
+        "hallucination_eval",
+        temperature=0.0,
+        max_tokens=256,
+        streaming=False,
+    )
     structured_primary = llm.with_structured_output(
         HallucinationEvaluation,
         method="json_mode",
         include_raw=True,
     )
 
-    fallback_llm = get_fallback_llm(temperature=eval_temp)
+    fallback_llm = get_fallback_llm(
+        temperature=0.0,
+        max_tokens=256,
+        streaming=False,
+    )
     structured_fallback = fallback_llm.with_structured_output(
         HallucinationEvaluation,
         method="json_mode",
@@ -1131,8 +1141,8 @@ async def evaluate_hallucination(state: TutorState) -> dict:
             "parsed_is_none": primary_diag.get("parsed_is_none", False)
             or fallback_diag.get("parsed_is_none", False),
             "model_group": "academic",
-            "eval_model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            "fallback_model": os.getenv("OPENAI_FALLBACK_MODEL", ""),
+            "eval_model": eval_model,
+            "fallback_model": os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "")),
             "context_rag_count": len(rag_docs),
             "context_web_count": len(web_results),
             "answer_chars": len(str(answer)),

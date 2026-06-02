@@ -7,7 +7,9 @@ of local HuggingFace models, eliminating heavy local dependencies.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +21,10 @@ from langchain_openai import OpenAIEmbeddings
 
 COLLECTION_NAME = "gaokao_docs"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_INDEX_BATCH_SIZE = 64
+DEFAULT_INDEX_MAX_RETRIES = 3
+
+logger = logging.getLogger(__name__)
 
 
 def _l2_to_relevance(distance: float) -> float:
@@ -59,6 +65,7 @@ def _get_embedding(model_name: Optional[str] = None) -> OpenAIEmbeddings:
     )
     return OpenAIEmbeddings(
         chunk_size=64,
+        check_embedding_ctx_length=False,
         model=model_name,
         openai_api_key=os.getenv("SILICONFLOW_API_KEY"),
         openai_api_base=os.getenv(
@@ -67,10 +74,118 @@ def _get_embedding(model_name: Optional[str] = None) -> OpenAIEmbeddings:
     )
 
 
+def _index_batch_size() -> int:
+    try:
+        return max(1, int(os.getenv("INDEX_ADD_BATCH_SIZE", DEFAULT_INDEX_BATCH_SIZE)))
+    except ValueError:
+        return DEFAULT_INDEX_BATCH_SIZE
+
+
+def _index_max_retries() -> int:
+    try:
+        return max(0, int(os.getenv("INDEX_MAX_RETRIES", DEFAULT_INDEX_MAX_RETRIES)))
+    except ValueError:
+        return DEFAULT_INDEX_MAX_RETRIES
+
+
 def _content_id(doc: Document) -> str:
     """Deterministic ID from chunk content — true dedup across repeated runs."""
     digest = hashlib.md5(doc.page_content.encode("utf-8")).hexdigest()
     return f"{doc.metadata.get('source_file', 'unknown')}_{digest}"
+
+
+def _validate_embedding_provider(embedding: OpenAIEmbeddings) -> None:
+    """Fail fast when the configured embedding provider/model is unavailable."""
+    try:
+        embedding.embed_documents(["embedding provider health check"])
+    except Exception as exc:
+        model_name = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+        raise RuntimeError(
+            "Embedding provider health check failed before indexing. "
+            f"model={model_name}, base_url={base_url}. "
+            "Please verify SILICONFLOW_API_KEY, EMBEDDING_MODEL, account quota, "
+            f"and provider availability. Original error: {exc}"
+        ) from exc
+
+
+def _add_documents_resilient(
+    vectorstore: Chroma,
+    documents: list[Document],
+    ids: list[str],
+    *,
+    batch_size: int,
+    max_retries: int,
+) -> None:
+    """Add documents in small batches, retrying transient embedding failures."""
+    total = len(documents)
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        _add_batch_with_retry(
+            vectorstore,
+            documents[start:end],
+            ids[start:end],
+            max_retries=max_retries,
+            batch_label=f"{start + 1}-{end}/{total}",
+        )
+
+
+def _add_batch_with_retry(
+    vectorstore: Chroma,
+    documents: list[Document],
+    ids: list[str],
+    *,
+    max_retries: int,
+    batch_label: str,
+) -> None:
+    """Retry a Chroma add batch; split once smaller if the provider keeps failing."""
+    for attempt in range(max_retries + 1):
+        try:
+            vectorstore.add_documents(documents=documents, ids=ids)
+            return
+        except Exception as exc:
+            if attempt >= max_retries:
+                if len(documents) > 1:
+                    mid = len(documents) // 2
+                    logger.warning(
+                        "Index batch %s failed after %s retries; splitting into %s and %s docs",
+                        batch_label,
+                        max_retries,
+                        mid,
+                        len(documents) - mid,
+                    )
+                    _add_batch_with_retry(
+                        vectorstore,
+                        documents[:mid],
+                        ids[:mid],
+                        max_retries=max_retries,
+                        batch_label=f"{batch_label}:left",
+                    )
+                    _add_batch_with_retry(
+                        vectorstore,
+                        documents[mid:],
+                        ids[mid:],
+                        max_retries=max_retries,
+                        batch_label=f"{batch_label}:right",
+                    )
+                    return
+
+                source = documents[0].metadata.get("source_file", "unknown")
+                raise RuntimeError(
+                    f"Embedding/indexing failed for single chunk from {source}: {exc}"
+                ) from exc
+
+            delay = min(2 ** attempt, 8)
+            logger.warning(
+                "Index batch %s failed on attempt %s/%s (%s: %s); retrying in %ss",
+                batch_label,
+                attempt + 1,
+                max_retries + 1,
+                type(exc).__name__,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
 
 
 def build_index(
@@ -92,16 +207,22 @@ def build_index(
     """
     persist_directory = _resolve_persist_dir(persist_directory)
     embedding = _get_embedding(embedding_model)
+    _validate_embedding_provider(embedding)
 
     ids = [_content_id(doc) for doc in documents]
 
-    vectorstore = Chroma.from_documents(
-        documents=documents,
-        embedding=embedding,
+    vectorstore = Chroma(
         collection_name=COLLECTION_NAME,
+        embedding_function=embedding,
         persist_directory=persist_directory,
-        ids=ids,
         relevance_score_fn=_l2_to_relevance,
+    )
+    _add_documents_resilient(
+        vectorstore,
+        documents,
+        ids,
+        batch_size=_index_batch_size(),
+        max_retries=_index_max_retries(),
     )
     return vectorstore
 
