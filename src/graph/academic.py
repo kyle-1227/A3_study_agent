@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
+import time
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -55,6 +57,8 @@ class RetrievalPlanItem(BaseModel):
     purpose: str = ""
     relation_to_goal: str = ""
     priority: float = 0.5
+    coverage_hint: str = ""
+    expected_coverage: list[str] = Field(default_factory=list)
 
 
 class SearchQueryRewriteOutput(BaseModel):
@@ -71,6 +75,51 @@ class SearchQueryRewriteOutput(BaseModel):
         default_factory=list,
         description="Per-subject retrieval plan",
     )
+
+
+class SupplementPlanItem(BaseModel):
+    """One candidate Web Search query for a supplement purpose."""
+
+    purpose: str = ""
+    query: str = ""
+    priority: float = 0.5
+    reason: str = ""
+
+
+class SubjectCoverageDecision(BaseModel):
+    """LLM decision for one retrieval branch."""
+
+    subject: str = ""
+    role: str = ""
+    local_evidence_strength: str = "unknown"
+    coverage_risk: str = "low"
+    web_supplement_needed: bool = False
+    supplement_purposes: list[str] = Field(default_factory=list)
+    supplement_plan: list[SupplementPlanItem] = Field(default_factory=list)
+    reason: str = ""
+    priority: float = 0.5
+
+
+class CoverageDecisionOutput(BaseModel):
+    """LLM output for branch-aware Web supplement decisions."""
+
+    overall_need_web: bool = False
+    decision_summary: str = ""
+    subject_decisions: list[SubjectCoverageDecision] = Field(default_factory=list)
+
+
+ALLOWED_SUPPLEMENT_PURPOSES = {
+    "repair",
+    "coverage_expansion",
+    "application_context",
+    "tool_ecosystem",
+    "latest_practice",
+    "case_example",
+    "implementation_detail",
+    "comparison",
+    "planning_support",
+    "resource_enrichment",
+}
 
 
 def _last_human_query(state: TutorState) -> str:
@@ -127,6 +176,10 @@ def _clear_retrieval_plan_state() -> dict:
         "learning_goal": "",
         "primary_subject": "",
         "subject_relation_summary": "",
+        "web_supplement_decisions": [],
+        "web_supplement_results": [],
+        "coverage_decision_summary": "",
+        "retrieval_branch_mode": "",
     }
 
 
@@ -301,6 +354,12 @@ def _normalize_retrieval_plan(
             "purpose": item.purpose.strip(),
             "relation_to_goal": item.relation_to_goal.strip(),
             "priority": _clamp_priority(item.priority),
+            "coverage_hint": item.coverage_hint.strip(),
+            "expected_coverage": [
+                str(value).strip()
+                for value in item.expected_coverage
+                if str(value).strip()
+            ],
         }
 
         existing = by_subject.get(subject)
@@ -327,6 +386,55 @@ def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
     if primary and primary in plan_subjects:
         return primary
     return plan[0]["subject"] if plan else ""
+
+
+def _web_query_source(state: TutorState) -> tuple[str, str]:
+    search_web_query = state.get("search_web_query", "")
+    rewritten = state.get("rewritten_query", "")
+    if search_web_query:
+        return search_web_query, "search_web_query"
+    if rewritten:
+        return rewritten, "rewritten_query"
+    return _last_human_query(state), "original_query"
+
+
+def _build_retrieval_branches(state: TutorState) -> tuple[list[dict], dict]:
+    """Build unified retrieval branches for multi- and single-subject paths."""
+    retrieval_plan = state.get("retrieval_plan") or []
+    if retrieval_plan and not state.get("rewritten_query"):
+        branches = [dict(item, _synthetic_single_subject=False) for item in retrieval_plan]
+        debug = {
+            "mode": "multi_subject_plan",
+            "branch_count": len(branches),
+            "subjects": [item.get("subject") for item in branches],
+            "synthetic_single_subject": False,
+            "query_source": "retrieval_plan",
+        }
+        return branches, debug
+
+    query, query_source = _query_source(state)
+    web_query, _web_source = _web_query_source(state)
+    subject = normalize_subject(str(state.get("subject") or "other")) or "other"
+    branch = {
+        "subject": subject,
+        "role": "core_concept",
+        "rag_query": query,
+        "web_search_query": web_query,
+        "purpose": "Retrieve local course evidence for the current single-subject question.",
+        "relation_to_goal": "This subject is the main evidence source for the current question.",
+        "priority": 1.0,
+        "coverage_hint": "",
+        "expected_coverage": [],
+        "_synthetic_single_subject": True,
+    }
+    debug = {
+        "mode": "single_subject_synthetic",
+        "branch_count": 1 if query else 0,
+        "subjects": [subject] if query else [],
+        "synthetic_single_subject": True,
+        "query_source": query_source,
+    }
+    return ([branch] if query else []), debug
 
 
 _BRANCH_STATUS_RANK = {
@@ -480,6 +588,539 @@ def _select_docs_with_subject_quota(
         }),
     }
     return selected, quota_debug
+
+
+def _web_setting(key: str, default):
+    return get_setting(f"web_search.{key}", default)
+
+
+def _web_conditional_enabled() -> bool:
+    return bool(_web_setting("conditional_supplement_enabled", True))
+
+
+def _web_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(_web_setting("timeout_seconds", get_setting("academic.search_timeout", 6))))
+    except (TypeError, ValueError):
+        return 6.0
+
+
+# TEMP A3_TRACE: remove after diagnostics validation.
+def _web_search_diagnostics_from_legacy_result(result, query: str) -> dict:
+    """Normalize old list mocks and new diagnostic dictionaries."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        return {
+            "provider": "duckduckgo",
+            "query": query,
+            "ok": True,
+            "results": result,
+            "result_count": len(result),
+            "error_type": "",
+            "error_message": "",
+            "raw_type": "legacy_list",
+            "raw_count": len(result),
+            "elapsed_ms": None,
+        }
+    return {
+        "provider": "duckduckgo",
+        "query": query,
+        "ok": False,
+        "results": [],
+        "result_count": 0,
+        "error_type": "UnexpectedSearchDiagnosticsType",
+        "error_message": sanitize_error_message(f"Unexpected diagnostics type: {type(result).__name__}"),
+        "raw_type": type(result).__name__,
+        "raw_count": None,
+        "elapsed_ms": None,
+    }
+
+
+# TEMP A3_TRACE: remove after diagnostics validation.
+def _web_search_exception_diagnostics(query: str, exc: Exception, *, elapsed_ms=None) -> dict:
+    return {
+        "provider": "duckduckgo",
+        "query": query,
+        "ok": False,
+        "results": [],
+        "result_count": 0,
+        "error_type": type(exc).__name__,
+        "error_message": sanitize_error_message(exc),
+        "raw_type": "",
+        "raw_count": None,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _build_branch_summaries(
+    *,
+    retrieval_plan: list[dict],
+    branch_evals: dict[str, dict],
+    docs_by_subject: dict[str, list[dict]],
+) -> list[dict]:
+    """Build compact summaries for LLM coverage decision."""
+    summaries: list[dict] = []
+    for item in retrieval_plan:
+        subject = str(item.get("subject") or "")
+        docs = docs_by_subject.get(subject, [])
+        branch_eval = branch_evals.get(subject, {})
+        summaries.append({
+            "subject": subject,
+            "role": item.get("role", ""),
+            "priority": item.get("priority", 0.5),
+            "branch_status": branch_eval.get("branch_status", "unknown"),
+            "weak_reason": branch_eval.get("weak_reason", ""),
+            "best_rerank_score": branch_eval.get("best_rerank_score", 0.0),
+            "used_doc_count": len(docs),
+            "top_docs": [
+                {
+                    "source": doc.get("source"),
+                    "metadata_subject": _doc_subject(doc),
+                    "rerank_score": doc.get("rerank_score"),
+                    "score": doc.get("score"),
+                    "preview": _clip_text(doc.get("content", ""), 160),
+                }
+                for doc in docs[:3]
+            ],
+            "coverage_hint": item.get("coverage_hint", ""),
+            "expected_coverage": item.get("expected_coverage", []),
+            "web_search_query": item.get("web_search_query", ""),
+        })
+    return summaries
+
+
+def _allowed_plan_subjects(branches: list[dict]) -> set[str]:
+    return {str(item.get("subject") or "") for item in branches if item.get("subject")}
+
+
+def _normalize_purposes(values: list[str]) -> list[str]:
+    max_purposes = int(_web_setting("max_purposes_per_subject", 4))
+    purposes: list[str] = []
+    for value in values or []:
+        purpose = str(value).strip()
+        if purpose in ALLOWED_SUPPLEMENT_PURPOSES and purpose not in purposes:
+            purposes.append(purpose)
+        if len(purposes) >= max_purposes:
+            break
+    return purposes
+
+
+def _normalize_supplement_query(query: str) -> str:
+    max_chars = int(_web_setting("max_query_chars", 180))
+    return _clip_text(query, max_chars)
+
+
+def _targets_from_decision(
+    *,
+    parsed: CoverageDecisionOutput,
+    branches: list[dict],
+    branch_evals: dict[str, dict],
+) -> list[dict]:
+    allowed_subjects = _allowed_plan_subjects(branches)
+    branch_by_subject = {str(item.get("subject")): item for item in branches}
+    max_subjects = int(_web_setting("max_supplement_subjects", 2))
+    max_items = int(_web_setting("max_plan_items_per_subject", 3))
+    targets: list[dict] = []
+
+    for decision in parsed.subject_decisions or []:
+        subject = normalize_subject(decision.subject)
+        if subject not in allowed_subjects or not decision.web_supplement_needed:
+            continue
+        branch = branch_by_subject.get(subject, {})
+        purposes = _normalize_purposes(decision.supplement_purposes)
+        query_items: list[dict] = []
+        for item in sorted(decision.supplement_plan or [], key=lambda value: _clamp_priority(value.priority), reverse=True):
+            purpose = item.purpose if item.purpose in ALLOWED_SUPPLEMENT_PURPOSES else (purposes[0] if purposes else "coverage_expansion")
+            query = _normalize_supplement_query(item.query)
+            if not query:
+                continue
+            query_items.append({
+                "purpose": purpose,
+                "query": query,
+                "priority": _clamp_priority(item.priority),
+                "reason": item.reason.strip(),
+            })
+            if len(query_items) >= max_items:
+                break
+        if not query_items and decision.web_supplement_needed:
+            fallback_query = branch.get("web_search_query") or branch.get("rag_query") or ""
+            if fallback_query:
+                purpose = purposes[0] if purposes else "coverage_expansion"
+                query_items.append({
+                    "purpose": purpose,
+                    "query": _normalize_supplement_query(fallback_query),
+                    "priority": _clamp_priority(decision.priority),
+                    "reason": decision.reason.strip() or "Fallback query from retrieval branch.",
+                })
+        if not query_items:
+            continue
+        branch_eval = branch_evals.get(subject, {})
+        targets.append({
+            "subject": subject,
+            "role": decision.role.strip() or branch.get("role", "supporting_context"),
+            "coverage_risk": decision.coverage_risk if decision.coverage_risk in {"low", "medium", "high"} else "low",
+            "local_evidence_strength": decision.local_evidence_strength or branch_eval.get("branch_status", "unknown"),
+            "supplement_purposes": purposes,
+            "supplement_queries": query_items,
+            "decision_reason": decision.reason.strip(),
+            "subject_priority": _clamp_priority(decision.priority),
+            "branch_status": branch_eval.get("branch_status", "unknown"),
+        })
+
+    targets.sort(
+        key=lambda target: (
+            _clamp_priority(target.get("subject_priority")),
+            max((_clamp_priority(item.get("priority")) for item in target.get("supplement_queries", [])), default=0),
+        ),
+        reverse=True,
+    )
+    return targets[:max_subjects]
+
+
+_OPEN_APPLICATION_TERMS = (
+    "应用", "怎么用", "案例", "项目", "实践", "路线", "规划", "最新", "工具", "框架",
+    "场景", "扩展", "行业", "前沿", "发展", "趋势", "真实", "落地",
+    "apply", "application", "case", "project", "practice", "tool", "framework",
+    "latest", "trend", "industry", "roadmap", "plan", "ecosystem",
+)
+
+
+def _question_has_any(question: str, terms: tuple[str, ...]) -> bool:
+    lower = question.lower()
+    return any(term.lower() in lower for term in terms)
+
+
+def _rule_based_web_supplement_targets(
+    *,
+    state: TutorState,
+    retrieval_plan: list[dict],
+    branch_evals: dict[str, dict],
+) -> tuple[list[dict], dict]:
+    """Fallback when LLM coverage decision fails."""
+    question = _last_human_query(state)
+    open_application = _question_has_any(question, _OPEN_APPLICATION_TERMS)
+    requested_resource = bool(state.get("requested_resource_type") or state.get("needs_mindmap"))
+    intent = state.get("intent", "")
+    targets: list[dict] = []
+    for item in retrieval_plan:
+        subject = str(item.get("subject") or "")
+        branch_eval = branch_evals.get(subject, {})
+        status = str(branch_eval.get("branch_status") or "unknown")
+        purposes: list[str] = []
+        if status in {"weak", "missing"}:
+            purposes.append("repair")
+        if open_application:
+            purposes.extend(["coverage_expansion", "application_context"])
+        if _question_has_any(question, ("工具", "框架", "库", "技术栈", "tool", "framework", "library", "ecosystem")):
+            purposes.append("tool_ecosystem")
+        if _question_has_any(question, ("案例", "项目", "实践", "示例", "case", "project", "example", "practice")):
+            purposes.extend(["case_example", "implementation_detail"])
+        if _question_has_any(question, ("最新", "前沿", "趋势", "当前", "latest", "trend", "current")):
+            purposes.append("latest_practice")
+        if intent == "planning":
+            purposes.append("planning_support")
+        if requested_resource:
+            purposes.append("resource_enrichment")
+
+        purposes = _normalize_purposes(purposes)
+        if not purposes:
+            continue
+        query = item.get("web_search_query") or item.get("rag_query") or question
+        targets.append({
+            "subject": subject,
+            "role": item.get("role", "supporting_context"),
+            "coverage_risk": "high" if open_application or requested_resource else ("medium" if status in {"weak", "missing"} else "low"),
+            "local_evidence_strength": status,
+            "supplement_purposes": purposes,
+            "supplement_queries": [
+                {
+                    "purpose": purposes[0],
+                    "query": _normalize_supplement_query(query),
+                    "priority": _clamp_priority(item.get("priority", 0.5)),
+                    "reason": "Rule fallback selected this branch for Web supplement.",
+                }
+            ],
+            "decision_reason": "Rule fallback based on branch status and task wording.",
+            "subject_priority": _clamp_priority(item.get("priority", 0.5)),
+            "branch_status": status,
+        })
+
+    max_subjects = int(_web_setting("max_supplement_subjects", 2))
+    targets.sort(key=lambda target: _clamp_priority(target.get("subject_priority")), reverse=True)
+    return targets[:max_subjects], {
+        "fallback_reason": "rule_based_coverage_decision",
+        "open_application": open_application,
+        "requested_resource": requested_resource,
+        "target_count": len(targets[:max_subjects]),
+    }
+
+
+async def _decide_web_supplement_with_llm(
+    *,
+    state: TutorState,
+    retrieval_plan: list[dict],
+    branch_evals: dict[str, dict],
+    docs_by_subject: dict[str, list[dict]],
+    branch_mode: str,
+) -> tuple[list[dict], dict]:
+    """Return selected Web supplement targets and diagnostics."""
+    enabled = bool(_web_setting("llm_decision_enabled", True))
+    if not enabled:
+        targets, fallback_debug = _rule_based_web_supplement_targets(
+            state=state,
+            retrieval_plan=retrieval_plan,
+            branch_evals=branch_evals,
+        )
+        return targets, {
+            "enabled": False,
+            "llm_used": False,
+            "success": True,
+            "fallback_used": True,
+            "overall_need_web": bool(targets),
+            "decision_summary": "LLM coverage decision disabled; used rule fallback.",
+            "subject_decisions": [],
+            "selected_targets": targets,
+            **fallback_debug,
+        }
+
+    branch_summaries = _build_branch_summaries(
+        retrieval_plan=retrieval_plan,
+        branch_evals=branch_evals,
+        docs_by_subject=docs_by_subject,
+    )
+    web_budget = {
+        "max_total_attempts": int(_web_setting("max_total_attempts", 10)),
+        "max_attempts_per_subject": int(_web_setting("max_attempts_per_subject", 3)),
+        "max_supplement_subjects": int(_web_setting("max_supplement_subjects", 2)),
+        "max_results_per_attempt": int(_web_setting("max_results_per_attempt", 5)),
+        "timeout_seconds": _web_timeout_seconds(),
+    }
+    prompt = _render_prompt(
+        "web_coverage_decision",
+        {
+            "question": _last_human_query(state),
+            "intent": str(state.get("intent", "")),
+            "requested_resource_type": str(state.get("requested_resource_type", "")),
+            "learning_goal": str(state.get("learning_goal", "")),
+            "subject_relation_summary": str(state.get("subject_relation_summary", "")),
+            "branch_mode": branch_mode,
+            "branch_summaries": json.dumps(branch_summaries, ensure_ascii=False),
+            "web_budget": json.dumps(web_budget, ensure_ascii=False),
+        },
+    )
+    raw_preview = ""
+    parsing_error = ""
+    try:
+        llm = get_node_llm(
+            "web_coverage_decision",
+            temperature=0.0,
+            max_tokens=1000,
+            streaming=False,
+        )
+        structured_llm = llm.with_structured_output(
+            CoverageDecisionOutput,
+            method="json_mode",
+            include_raw=True,
+        )
+        fallback = get_fallback_llm(temperature=0.0, max_tokens=1000, streaming=False)
+        structured_fallback = fallback.with_structured_output(
+            CoverageDecisionOutput,
+            method="json_mode",
+            include_raw=True,
+        )
+        messages = [
+            SystemMessage(content="You are a coverage decision agent. Return only valid JSON."),
+            HumanMessage(content=prompt),
+        ]
+        result_pack = await async_invoke_with_fallback(
+            structured_llm,
+            messages,
+            fallback=structured_fallback,
+        )
+        raw_message = result_pack.get("raw") if isinstance(result_pack, dict) else None
+        parsed = result_pack.get("parsed") if isinstance(result_pack, dict) else result_pack
+        parsing_error = str(result_pack.get("parsing_error") or "") if isinstance(result_pack, dict) else ""
+        raw_preview = _message_content_to_text(getattr(raw_message, "content", raw_message))[:500] if raw_message else ""
+        if parsing_error:
+            raise ValueError(f"coverage decision parsing_error: {parsing_error}")
+        if parsed is None:
+            raise ValueError("coverage decision parsed result is None")
+        if not isinstance(parsed, CoverageDecisionOutput):
+            parsed = CoverageDecisionOutput.model_validate(parsed)
+        targets = _targets_from_decision(
+            parsed=parsed,
+            branches=retrieval_plan,
+            branch_evals=branch_evals,
+        )
+        subject_decisions = [
+            {
+                "subject": decision.subject,
+                "role": decision.role,
+                "local_evidence_strength": decision.local_evidence_strength,
+                "coverage_risk": decision.coverage_risk,
+                "web_supplement_needed": decision.web_supplement_needed,
+                "supplement_purposes": decision.supplement_purposes,
+                "supplement_plan_count": len(decision.supplement_plan),
+                "priority": decision.priority,
+                "reason": decision.reason,
+            }
+            for decision in parsed.subject_decisions
+        ]
+        return targets, {
+            "enabled": True,
+            "llm_used": True,
+            "success": True,
+            "fallback_used": False,
+            "overall_need_web": parsed.overall_need_web,
+            "decision_summary": parsed.decision_summary,
+            "subject_decisions": subject_decisions,
+            "selected_targets": targets,
+            "error_type": "",
+            "parsing_error": parsing_error,
+            "raw_preview": raw_preview,
+        }
+    except Exception as exc:
+        targets, fallback_debug = _rule_based_web_supplement_targets(
+            state=state,
+            retrieval_plan=retrieval_plan,
+            branch_evals=branch_evals,
+        )
+        return targets, {
+            "enabled": True,
+            "llm_used": True,
+            "success": False,
+            "fallback_used": True,
+            "overall_need_web": bool(targets),
+            "decision_summary": "Coverage decision LLM failed; used rule fallback.",
+            "subject_decisions": [],
+            "selected_targets": targets,
+            "error_type": type(exc).__name__,
+            "error_message": sanitize_error_message(exc),
+            "parsing_error": parsing_error,
+            "raw_preview": raw_preview,
+            **fallback_debug,
+        }
+
+
+async def _run_dynamic_web_supplement(
+    *,
+    state: TutorState,
+    targets: list[dict],
+    decision_debug: dict,
+    branch_mode: str,
+) -> tuple[list[dict], dict]:
+    """Run dynamic Web supplement with bounded attempts."""
+    del decision_debug
+    max_total = int(_web_setting("max_total_attempts", 10))
+    max_per_subject = int(_web_setting("max_attempts_per_subject", 3))
+    max_results = int(_web_setting("max_results_per_attempt", 5))
+    timeout = _web_timeout_seconds()
+    attempts = 0
+    attempts_by_subject: Counter = Counter()
+    docs: list[dict] = []
+    attempt_logs: list[dict] = []
+
+    for target in targets:
+        subject = target.get("subject", "")
+        if attempts >= max_total:
+            break
+        for query_item in sorted(target.get("supplement_queries", []), key=lambda item: _clamp_priority(item.get("priority")), reverse=True):
+            if attempts >= max_total or attempts_by_subject[subject] >= max_per_subject:
+                break
+            attempts += 1
+            attempts_by_subject[subject] += 1
+            query = _normalize_supplement_query(query_item.get("query", ""))
+            purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
+            started = time.perf_counter()
+            diagnostics: dict
+            timed_out = False
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.to_thread(web_search_fn, query),
+                    timeout=timeout,
+                )
+                diagnostics = _web_search_diagnostics_from_legacy_result(raw, query)
+            except asyncio.TimeoutError:
+                timed_out = True
+                diagnostics = _web_search_exception_diagnostics(
+                    query,
+                    TimeoutError(f"web supplement exceeded {timeout}s"),
+                    elapsed_ms=round(timeout * 1000, 2),
+                )
+            except Exception as exc:
+                diagnostics = _web_search_exception_diagnostics(query, exc)
+
+            elapsed_ms = diagnostics.get("elapsed_ms")
+            if elapsed_ms is None:
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            results = diagnostics.get("results", []) or []
+            used_results = results[:max_results]
+            for result in used_results:
+                docs.append({
+                    "type": "web_supplement",
+                    "content": result.get("content", ""),
+                    "title": result.get("title", ""),
+                    "url": result.get("url", ""),
+                    "source": result.get("url") or result.get("title") or "web_search",
+                    "supplement_for_subject": subject,
+                    "supplement_for_role": target.get("role", ""),
+                    "supplement_purpose": purpose,
+                    "supplement_purposes": target.get("supplement_purposes", []),
+                    "supplement_reason": query_item.get("reason") or target.get("decision_reason", ""),
+                    "retrieval_subject": subject,
+                    "retrieval_role": target.get("role", ""),
+                    "retrieval_query": query,
+                    "branch_status": target.get("branch_status", ""),
+                    "coverage_risk": target.get("coverage_risk", ""),
+                    "local_evidence_strength": target.get("local_evidence_strength", ""),
+                })
+            attempt_payload = {
+                "branch_mode": branch_mode,
+                "subject": subject,
+                "role": target.get("role", ""),
+                "purpose": purpose,
+                "attempt": attempts,
+                "subject_attempt": attempts_by_subject[subject],
+                "max_total_attempts": max_total,
+                "max_attempts_per_subject": max_per_subject,
+                "query": query,
+                "ok": diagnostics.get("ok", False),
+                "timed_out": timed_out or diagnostics.get("error_type") == "TimeoutError",
+                "result_count": diagnostics.get("result_count", len(results)),
+                "used_result_count": len(used_results),
+                "elapsed_ms": elapsed_ms,
+                "error_type": diagnostics.get("error_type", ""),
+                "error_message": diagnostics.get("error_message", ""),
+                "top_results": [
+                    {"title": item.get("title", ""), "url": item.get("url", "")}
+                    for item in used_results[:3]
+                ],
+            }
+            attempt_logs.append(attempt_payload)
+            # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+            emit_a3_trace(
+                logger,
+                "dynamic_web_supplement",
+                attempt_payload,
+                state=state,
+                env_flag="LOG_WEB_SEARCH_RESULT",
+            )
+            if used_results:
+                break
+
+    return docs, {
+        "attempts_used": attempts,
+        "max_total_attempts": max_total,
+        "attempts_by_subject": dict(attempts_by_subject),
+        "result_doc_count": len(docs),
+        "attempts": attempt_logs,
+    }
 
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
@@ -704,251 +1345,261 @@ async def search_query_rewriter(state: TutorState) -> dict:
 
 @traced_node
 async def rag_retrieve(state: TutorState) -> dict:
-    """Query ChromaDB with keypoints extracted by the supervisor node."""
-    rewritten = state.get("rewritten_query", "")
-    retrieval_plan = state.get("retrieval_plan") or []
-    subject = state.get("subject")
-    query, query_source = _query_source(state)
+    """Retrieve local course evidence, then run branch-aware Web supplement when needed."""
+    branches, branch_debug = _build_retrieval_branches(state)
+    branch_mode = branch_debug.get("mode", "unknown")
+    per_subject_top_k = int(get_setting("rag.multi_subject_per_subject_top_k", 3))
+    max_docs = int(get_setting("rag.multi_subject_max_docs", 8))
 
-    subj = subject if subject != "other" else None
+    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+    emit_a3_trace(
+        logger,
+        "retrieval_branch_build",
+        branch_debug,
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
 
-    if not rewritten and retrieval_plan:
-        per_subject_top_k = get_setting("rag.multi_subject_per_subject_top_k", 3)
-        max_docs = get_setting("rag.multi_subject_max_docs", 8)
-        subjects = [str(item.get("subject", "")) for item in retrieval_plan if item.get("subject")]
-
-        with traced_retrieval(query=query, subject="multi") as span:
-            span.set_attribute("rag.retrieval_plan_count", len(retrieval_plan))
-            span.set_attribute("rag.retrieval_subjects", ",".join(subjects))
-            all_docs: list[dict] = []
-            for item in retrieval_plan:
-                plan_subject = item.get("subject")
-                plan_query = item.get("rag_query")
-                if not plan_subject or not plan_query:
-                    continue
-
-                result = await asyncio.to_thread(
-                    retrieve,
-                    query=plan_query,
-                    subject=plan_subject,
-                    top_k=per_subject_top_k,
-                )
-                raw_docs = result.get("docs", []) or []
-                used_docs = raw_docs[:per_subject_top_k]
-                role = item.get("role", "supporting_context")
-                priority = item.get("priority", 0.5)
-                subject_mismatch_count = _subject_mismatch_count(used_docs, plan_subject)
-                branch_eval = _evaluate_retrieval_branch(
-                    subject=plan_subject,
-                    role=role,
-                    docs=used_docs,
-                    is_hit=result.get("is_hit", False),
-                    subject_mismatch_count=subject_mismatch_count,
-                )
-                # TEMP A3_TRACE: remove after multi-subject retrieval validation.
-                emit_a3_trace(
-                    logger,
-                    "rag_retrieve_plan_item",
-                    {
-                        "subject": plan_subject,
-                        "role": role,
-                        "priority": priority,
-                        "query": plan_query,
-                        "top_k": per_subject_top_k,
-                        "raw_doc_count": len(raw_docs),
-                        "used_doc_count": len(used_docs),
-                        "doc_count": len(used_docs),
-                        "is_hit": result.get("is_hit", False),
-                        "subject_mismatch_count": subject_mismatch_count,
-                        "branch_status": branch_eval["branch_status"],
-                        "weak_reason": branch_eval["weak_reason"],
-                        "best_rerank_score": branch_eval["best_rerank_score"],
-                        "needs_supplement": branch_eval["needs_supplement"],
-                        "top_docs": _top_doc_summaries(used_docs),
-                    },
-                    state=state,
-                    env_flag="LOG_RAG_RESULT",
-                )
-                if branch_eval["branch_status"] == "missing":
-                    all_docs.append({
-                        "type": "rag_diagnostic",
-                        "retrieval_subject": plan_subject,
-                        "retrieval_role": role,
-                        "retrieval_query": plan_query,
-                        "retrieval_purpose": item.get("purpose", ""),
-                        "relation_to_goal": item.get("relation_to_goal", ""),
-                        "retrieval_priority": priority,
-                        "branch_status": "missing",
-                        "weak_reason": "no_docs",
-                        "best_rerank_score": 0.0,
-                        "needs_supplement": True,
-                        "content": "本地知识库中暂未检索到该学科分支的有效资料。",
-                        "source": "local_rag_diagnostic",
-                        "score": 0.0,
-                    })
-                    continue
-
-                for doc in used_docs:
-                    all_docs.append({
-                        "type": "rag",
-                        "retrieval_subject": plan_subject,
-                        "retrieval_role": role,
-                        "retrieval_query": plan_query,
-                        "retrieval_purpose": item.get("purpose", ""),
-                        "relation_to_goal": item.get("relation_to_goal", ""),
-                        "retrieval_priority": priority,
-                        "branch_status": branch_eval["branch_status"],
-                        "weak_reason": branch_eval["weak_reason"],
-                        "best_rerank_score": branch_eval["best_rerank_score"],
-                        "needs_supplement": branch_eval["needs_supplement"],
-                        **doc,
-                    })
-
-            selected_docs, quota_debug = _select_docs_with_subject_quota(
-                all_docs,
-                max_docs,
-                primary_subject=str(state.get("primary_subject") or ""),
+    if not branches:
+        query, query_source = _query_source(state)
+        subj = state.get("subject") if state.get("subject") != "other" else None
+        with traced_retrieval(query=query, subject=subj) as span:
+            result = await asyncio.to_thread(retrieve, query=query, subject=subj)
+            raw_docs = result.get("docs", []) or []
+            mismatch_count = _subject_mismatch_count(raw_docs, subj)
+            branch_eval = _evaluate_retrieval_branch(
+                subject=str(subj or ""),
+                role="core_concept",
+                docs=raw_docs,
+                is_hit=result.get("is_hit", False),
+                subject_mismatch_count=mismatch_count,
             )
-            subject_counter = Counter(doc.get("retrieval_subject") for doc in selected_docs)
-            role_counter = Counter(doc.get("retrieval_role") for doc in selected_docs)
             # TEMP A3_TRACE: remove after multi-subject retrieval validation.
             emit_a3_trace(
                 logger,
-                "context_assembly",
+                "rag_retrieve_single_subject",
                 {
-                    "mode": "multi_subject",
-                    "retrieval_plan_count": len(retrieval_plan),
-                    "raw_doc_count": len(all_docs),
-                    "final_doc_count": len(selected_docs),
-                    "max_docs": max_docs,
-                    "subject_doc_distribution": dict(subject_counter),
-                    "role_distribution": dict(role_counter),
-                    **quota_debug,
-                    "selected_docs": [
-                        {
-                            "subject": doc.get("retrieval_subject"),
-                            "role": doc.get("retrieval_role"),
-                            "branch_status": doc.get("branch_status"),
-                            "weak_reason": doc.get("weak_reason"),
-                            "source": doc.get("source"),
-                            "score": doc.get("score"),
-                            "rerank_score": doc.get("rerank_score"),
-                        }
-                        for doc in selected_docs
-                    ],
+                    "subject": subj,
+                    "query": query,
+                    "query_source": query_source,
+                    "raw_doc_count": len(raw_docs),
+                    "used_doc_count": len(raw_docs),
+                    "doc_count": len(raw_docs),
+                    "is_hit": result.get("is_hit", False),
+                    "subject_mismatch_count": mismatch_count,
+                    "branch_status": branch_eval["branch_status"],
+                    "weak_reason": branch_eval["weak_reason"],
+                    "best_rerank_score": branch_eval["best_rerank_score"],
+                    "top_docs": _top_doc_summaries(raw_docs),
                 },
                 state=state,
-                env_flag="LOG_CONTEXT_ASSEMBLY",
+                env_flag="LOG_RAG_RESULT",
             )
-            span.set_attribute("rag.doc_count", len(selected_docs))
-            span.set_attribute("rag.is_hit", bool(selected_docs))
-            if selected_docs:
-                span.set_attribute("rag.top_score", _score_doc(selected_docs[0]))
+            span.set_attribute("rag.doc_count", len(raw_docs))
+            span.set_attribute("rag.is_hit", result.get("is_hit", False))
+        return {"context": [{"type": "rag", **doc} for doc in raw_docs]}
 
-        return {"context": selected_docs}
+    subjects = [str(item.get("subject", "")) for item in branches if item.get("subject")]
+    query, _query_source_name = _query_source(state)
+    with traced_retrieval(query=query, subject=branch_mode) as span:
+        span.set_attribute("rag.branch_mode", branch_mode)
+        span.set_attribute("rag.branch_count", len(branches))
+        span.set_attribute("rag.retrieval_subjects", ",".join(subjects))
 
-    with traced_retrieval(query=query, subject=subj) as span:
-        result = await asyncio.to_thread(retrieve, query=query, subject=subj)
-        docs = result.get("docs", []) or []
-        subject_mismatch_count = _subject_mismatch_count(docs, subj)
-        branch_eval = _evaluate_retrieval_branch(
-            subject=subj or "",
-            role="single_subject",
-            docs=docs,
-            is_hit=result.get("is_hit", False),
-            subject_mismatch_count=subject_mismatch_count,
+        local_docs: list[dict] = []
+        docs_by_subject: dict[str, list[dict]] = {}
+        branch_evals: dict[str, dict] = {}
+
+        for item in branches:
+            plan_subject = str(item.get("subject") or "other")
+            plan_query = str(item.get("rag_query") or "").strip()
+            if not plan_query:
+                continue
+            retrieve_subject = None if plan_subject == "other" else plan_subject
+            result = await asyncio.to_thread(
+                retrieve,
+                query=plan_query,
+                subject=retrieve_subject,
+                top_k=per_subject_top_k,
+            )
+            raw_docs = result.get("docs", []) or []
+            used_docs = raw_docs[:per_subject_top_k]
+            docs_by_subject[plan_subject] = used_docs
+            role = item.get("role", "supporting_context")
+            priority = item.get("priority", 0.5)
+            subject_mismatch_count = _subject_mismatch_count(used_docs, retrieve_subject)
+            branch_eval = _evaluate_retrieval_branch(
+                subject=plan_subject,
+                role=role,
+                docs=used_docs,
+                is_hit=result.get("is_hit", False),
+                subject_mismatch_count=subject_mismatch_count,
+            )
+            branch_evals[plan_subject] = branch_eval
+
+            # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+            emit_a3_trace(
+                logger,
+                "rag_retrieve_plan_item",
+                {
+                    "branch_mode": branch_mode,
+                    "subject": plan_subject,
+                    "role": role,
+                    "priority": priority,
+                    "query": plan_query,
+                    "top_k": per_subject_top_k,
+                    "raw_doc_count": len(raw_docs),
+                    "used_doc_count": len(used_docs),
+                    "doc_count": len(used_docs),
+                    "is_hit": result.get("is_hit", False),
+                    "subject_mismatch_count": subject_mismatch_count,
+                    "branch_status": branch_eval["branch_status"],
+                    "weak_reason": branch_eval["weak_reason"],
+                    "best_rerank_score": branch_eval["best_rerank_score"],
+                    "needs_supplement": branch_eval["needs_supplement"],
+                    "top_docs": _top_doc_summaries(used_docs),
+                },
+                state=state,
+                env_flag="LOG_RAG_RESULT",
+            )
+
+            if branch_eval["branch_status"] == "missing":
+                local_docs.append({
+                    "type": "rag_diagnostic",
+                    "retrieval_subject": plan_subject,
+                    "retrieval_role": role,
+                    "retrieval_query": plan_query,
+                    "retrieval_purpose": item.get("purpose", ""),
+                    "relation_to_goal": item.get("relation_to_goal", ""),
+                    "retrieval_priority": priority,
+                    "branch_status": "missing",
+                    "weak_reason": "no_docs",
+                    "best_rerank_score": 0.0,
+                    "needs_supplement": True,
+                    "content": "No effective local course material was retrieved for this subject branch.",
+                    "source": "local_rag_diagnostic",
+                    "score": 0.0,
+                })
+                continue
+
+            for doc in used_docs:
+                local_docs.append({
+                    "type": "rag",
+                    "retrieval_subject": plan_subject,
+                    "retrieval_role": role,
+                    "retrieval_query": plan_query,
+                    "retrieval_purpose": item.get("purpose", ""),
+                    "relation_to_goal": item.get("relation_to_goal", ""),
+                    "retrieval_priority": priority,
+                    "coverage_hint": item.get("coverage_hint", ""),
+                    "expected_coverage": item.get("expected_coverage", []),
+                    "branch_status": branch_eval["branch_status"],
+                    "weak_reason": branch_eval["weak_reason"],
+                    "best_rerank_score": branch_eval["best_rerank_score"],
+                    "needs_supplement": branch_eval["needs_supplement"],
+                    **doc,
+                })
+
+        targets, decision_debug = await _decide_web_supplement_with_llm(
+            state=state,
+            retrieval_plan=branches,
+            branch_evals=branch_evals,
+            docs_by_subject=docs_by_subject,
+            branch_mode=branch_mode,
         )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
-            "rag_retrieve_single_subject",
+            "coverage_decision",
             {
-                "subject": subj,
-                "query": query,
-                "query_source": query_source,
-                "raw_doc_count": len(docs),
-                "used_doc_count": len(docs),
-                "doc_count": len(docs),
-                "is_hit": result.get("is_hit", False),
-                "subject_mismatch_count": subject_mismatch_count,
-                "branch_status": branch_eval["branch_status"],
-                "weak_reason": branch_eval["weak_reason"],
-                "best_rerank_score": branch_eval["best_rerank_score"],
-                "top_docs": _top_doc_summaries(docs),
+                "branch_mode": branch_mode,
+                "branch_count": len(branches),
+                "selected_target_count": len(targets),
+                "selected_targets": [
+                    {
+                        "subject": target.get("subject"),
+                        "purposes": target.get("supplement_purposes", []),
+                        "query_count": len(target.get("supplement_queries", [])),
+                    }
+                    for target in targets
+                ],
+                **decision_debug,
             },
             state=state,
-            env_flag="LOG_RAG_RESULT",
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+
+        web_supplement_docs, web_debug = await _run_dynamic_web_supplement(
+            state=state,
+            targets=targets,
+            decision_debug=decision_debug,
+            branch_mode=branch_mode,
+        )
+
+        selected_local_docs, quota_debug = _select_docs_with_subject_quota(
+            local_docs,
+            max_docs,
+            primary_subject=str(state.get("primary_subject") or ""),
+        )
+        selected_docs = selected_local_docs + web_supplement_docs
+        subject_counter = Counter(doc.get("retrieval_subject") for doc in selected_docs)
+        role_counter = Counter(doc.get("retrieval_role") for doc in selected_docs)
+        web_supplement_purposes = Counter(
+            doc.get("supplement_purpose") for doc in web_supplement_docs if doc.get("supplement_purpose")
         )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
             "context_assembly",
             {
-                "mode": "single_subject",
-                "subject": subj,
-                "final_doc_count": len(docs),
+                "mode": "branch_aware",
+                "branch_mode": branch_mode,
+                "branch_count": len(branches),
+                "retrieval_plan_count": len(state.get("retrieval_plan") or []),
+                "raw_doc_count": len(local_docs),
+                "final_doc_count": len(selected_docs),
+                "max_docs": max_docs,
+                "subject_doc_distribution": dict(subject_counter),
+                "role_distribution": dict(role_counter),
+                "web_supplement_count": len(web_supplement_docs),
+                "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplement_docs if doc.get("supplement_for_subject")}),
+                "web_supplement_purposes": dict(web_supplement_purposes),
+                "coverage_decision_summary": decision_debug.get("decision_summary", ""),
+                "dynamic_web_attempts_used": web_debug.get("attempts_used", 0),
+                "dynamic_web_max_total_attempts": web_debug.get("max_total_attempts", 0),
+                **quota_debug,
+                "selected_docs": [
+                    {
+                        "type": doc.get("type"),
+                        "subject": doc.get("retrieval_subject"),
+                        "role": doc.get("retrieval_role"),
+                        "branch_status": doc.get("branch_status"),
+                        "weak_reason": doc.get("weak_reason"),
+                        "supplement_purpose": doc.get("supplement_purpose"),
+                        "source": doc.get("source"),
+                        "score": doc.get("score"),
+                        "rerank_score": doc.get("rerank_score"),
+                    }
+                    for doc in selected_docs
+                ],
             },
             state=state,
             env_flag="LOG_CONTEXT_ASSEMBLY",
         )
-        span.set_attribute("rag.doc_count", len(result.get("docs", [])))
-        span.set_attribute("rag.is_hit", result.get("is_hit", False))
-        if result.get("docs"):
-            span.set_attribute("rag.top_score", result["docs"][0].get("score", 0))
+        span.set_attribute("rag.doc_count", len(selected_docs))
+        span.set_attribute("rag.is_hit", bool(selected_docs))
+        if selected_docs:
+            span.set_attribute("rag.top_score", _score_doc(selected_docs[0]))
 
-    return {"context": [{"type": "rag", **doc} for doc in docs]}
-
-
-# ── Node 2: web search (parallel branch B) ────────────────────────
-
-_SEARCH_TIMEOUT = get_setting("academic.search_timeout", 15)
-
-
-# TEMP A3_TRACE: remove after diagnostics validation.
-def _web_search_diagnostics_from_legacy_result(result, query: str) -> dict:
-    """Normalize old list mocks and new diagnostic dictionaries."""
-    if isinstance(result, dict):
-        return result
-    if isinstance(result, list):
-        return {
-            "provider": "duckduckgo",
-            "query": query,
-            "ok": True,
-            "results": result,
-            "result_count": len(result),
-            "error_type": "",
-            "error_message": "",
-            "raw_type": "legacy_list",
-            "raw_count": len(result),
-            "elapsed_ms": None,
-        }
     return {
-        "provider": "duckduckgo",
-        "query": query,
-        "ok": False,
-        "results": [],
-        "result_count": 0,
-        "error_type": "UnexpectedSearchDiagnosticsType",
-        "error_message": sanitize_error_message(f"Unexpected diagnostics type: {type(result).__name__}"),
-        "raw_type": type(result).__name__,
-        "raw_count": None,
-        "elapsed_ms": None,
+        "context": selected_docs,
+        "web_supplement_decisions": targets,
+        "web_supplement_results": web_supplement_docs,
+        "coverage_decision_summary": decision_debug.get("decision_summary", ""),
+        "retrieval_branch_mode": branch_mode,
     }
 
-
-def _web_search_exception_diagnostics(query: str, exc: Exception, *, elapsed_ms=None) -> dict:
-    return {
-        "provider": "duckduckgo",
-        "query": query,
-        "ok": False,
-        "results": [],
-        "result_count": 0,
-        "error_type": type(exc).__name__,
-        "error_message": sanitize_error_message(exc),
-        "raw_type": "",
-        "raw_count": None,
-        "elapsed_ms": elapsed_ms,
-    }
+_SEARCH_TIMEOUT = _web_timeout_seconds()
 
 
 @traced_node
@@ -957,6 +1608,34 @@ async def web_search(state: TutorState) -> dict:
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
     retrieval_plan = state.get("retrieval_plan") or []
+    if (
+        _web_conditional_enabled()
+        and bool(_web_setting("skip_general_when_conditional", True))
+        and state.get("intent") in {"academic", "planning"}
+    ):
+        branch_mode = "multi_subject_plan" if retrieval_plan else "single_subject_synthetic"
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "web_search",
+            {
+                "query_source": "skipped_conditional_branch_mode",
+                "skipped": True,
+                "skip_reason": "conditional_web_supplement_handled_in_rag_retrieve",
+                "has_retrieval_plan": bool(retrieval_plan),
+                "branch_mode": branch_mode,
+                "retrieval_plan_count": len(retrieval_plan),
+                "result_count": 0,
+                "timed_out": False,
+                "ok": True,
+                "error_type": "",
+                "error_message": "",
+            },
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+        return {"context": []}
+
     selected_subject = ""
     if rewritten:
         query = rewritten
@@ -1044,6 +1723,35 @@ async def web_search(state: TutorState) -> dict:
 def _format_retrieved(docs: list[dict]) -> str:
     if not docs:
         return "无相关参考资料。"
+    if any(doc.get("type") == "web_supplement" for doc in docs):
+        purpose_notes = {
+            "repair": "用于修补本地课程资料不足或相关性较弱的问题。",
+            "coverage_expansion": "用于拓展本地课程资料之外的知识覆盖。",
+            "application_context": "用于补充应用场景、行业落地或实践背景。",
+            "tool_ecosystem": "用于补充工具、框架、库或技术栈生态。",
+            "latest_practice": "用于补充较新的实践、趋势或前沿资料。",
+            "case_example": "用于补充案例、项目或示例。",
+            "implementation_detail": "用于补充代码、步骤或工程流程。",
+            "planning_support": "用于补充学习路线或规划依据。",
+            "resource_enrichment": "用于丰富思维导图、练习题、项目案例等学习资源素材。",
+        }
+        parts = []
+        for d in docs:
+            if d.get("type") != "web_supplement":
+                parts.append(_format_retrieved([d]))
+                continue
+            subject = d.get("supplement_for_subject") or d.get("retrieval_subject", "unknown")
+            role = d.get("supplement_for_role") or d.get("retrieval_role", "supporting_context")
+            purpose = d.get("supplement_purpose", "coverage_expansion")
+            parts.append(
+                f"【{subject}｜{role}｜Web 补充｜{purpose}】\n"
+                "说明：以下资料用于补充该 subject 的覆盖广度、工具生态或实践背景，不属于本地课程知识库。\n"
+                f"用途：{purpose_notes.get(purpose, '仅作为外部补充资料谨慎使用。')}\n"
+                f"补充原因：{d.get('supplement_reason', '')}\n"
+                f"来源：{d.get('title') or d.get('source', 'web_search')} {d.get('url', '')}\n"
+                f"内容：{d.get('content', '')}"
+            )
+        return "\n\n".join(parts)
     if any(doc.get("retrieval_subject") for doc in docs):
         parts = []
         for i, d in enumerate(docs, 1):
@@ -1123,7 +1831,13 @@ async def generate_answer(state: TutorState) -> dict:
     # Split merged context by source type
     context = state.get("context", [])
     rag_docs = [c for c in context if c.get("type") == "rag"]
+    retrieved_docs = [
+        c
+        for c in context
+        if c.get("type") in {"rag", "rag_diagnostic", "web_supplement"}
+    ]
     web_results = [c for c in context if c.get("type") == "web"]
+    web_supplements = [c for c in context if c.get("type") == "web_supplement"]
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -1131,8 +1845,12 @@ async def generate_answer(state: TutorState) -> dict:
         {
             "context_rag_count": len(rag_docs),
             "context_web_count": len(web_results),
+            "context_web_supplement_count": len(web_supplements),
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
+            "branch_mode": state.get("retrieval_branch_mode", ""),
+            "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplements if doc.get("supplement_for_subject")}),
+            "web_supplement_purposes": sorted({doc.get("supplement_purpose") for doc in web_supplements if doc.get("supplement_purpose")}),
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
             "resource_offer": not bool(state.get("requested_resource_type") or state.get("needs_mindmap")),
@@ -1144,7 +1862,7 @@ async def generate_answer(state: TutorState) -> dict:
 
     temperature = get_setting("academic.temperature", 0.7)
     user_prompt = load_prompt("academic_answer").format(
-        retrieved_context=_format_retrieved(rag_docs),
+        retrieved_context=_format_retrieved(retrieved_docs),
         search_context=_format_search(web_results),
         question=question,
         resource_offer_instruction=_resource_offer_instruction(state),
@@ -1384,3 +2102,4 @@ def should_retry_or_end(state: TutorState) -> str:
     ):
         return "retry"
     return "end"
+

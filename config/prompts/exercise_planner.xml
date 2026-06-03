@@ -24,4 +24,11 @@
 
 ## 输出格式
 用分级条目输出蓝图即可，不要输出 JSON、代码块或解释性前后缀。
+## Web supplement usage
+If the reference context contains Web supplement material:
+1. Prefer local RAG strong / usable evidence for core exercise requirements and answers.
+2. Web supplement is external material, not local course knowledge-base evidence.
+3. Use supplement_purpose to decide its role: repair, coverage_expansion, application_context, tool_ecosystem, latest_practice, case_example, implementation_detail, planning_support, or resource_enrichment.
+4. If local RAG and Web supplement differ, mark the difference instead of treating them as one source.
+5. For weak or missing local branches, use Web supplement only as cautious enrichment and do not claim the details come from local course materials.
 ]]></prompt>

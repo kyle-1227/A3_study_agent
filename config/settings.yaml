@@ -3,9 +3,23 @@
 
 academic:
   max_retries: 2                        # Hallucination retry loop limit
-  search_timeout: 15                    # Web search timeout (seconds)
+  search_timeout: 6                     # Legacy/general web search timeout (seconds)
   temperature: 0.7                      # Answer generation temperature
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
+
+web_search:
+  conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
+  skip_general_when_conditional: true     # Skip old fan-out web_search for academic/planning
+  skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
+  timeout_seconds: 6                      # Timeout per dynamic web supplement attempt
+  max_total_attempts: 10                  # Global dynamic web attempts per request
+  max_attempts_per_subject: 3             # Dynamic web attempts per subject branch
+  max_supplement_subjects: 2              # Max subjects selected for web supplement
+  max_results_per_attempt: 5              # Max web results used from one attempt
+  max_query_chars: 180                    # Keep supplement queries short
+  llm_decision_enabled: true              # Use LLM coverage decision before rule fallback
+  max_purposes_per_subject: 4             # Cap purpose labels per subject decision
+  max_plan_items_per_subject: 3           # Cap search queries per subject decision
 
 planner:
   search_timeout: 15                    # Policy search timeout (seconds)
@@ -31,8 +45,8 @@ rag:
   bm25_top_k: 10                        # Candidates from BM25 keyword search
   reranker_top_n: 5                     # Results after reranking
   relevance_threshold: 0.3              # Minimum score for a "hit"
-  reranker_model: "cohere/rerank-4-fast"
-  reranker_base_url: "https://openrouter.ai/api/v1"
+  reranker_model: "BAAI/bge-reranker-v2-m3"
+  reranker_base_url: "https://api.siliconflow.cn/v1"
   multi_subject_per_subject_top_k: 3     # Per-subject docs for retrieval_plan RAG
   multi_subject_max_docs: 8              # Final merged docs across subjects
   multi_subject_subject_max_docs: 3       # Max docs per subject in merged multi-subject context
@@ -58,6 +72,14 @@ query_rewrite:
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic retrieval-query rewriting
   max_tokens: 512
+  streaming: false
+
+web_coverage_decision:
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  temperature: 0.0
+  max_tokens: 1000
   streaming: false
 
 hallucination_eval:

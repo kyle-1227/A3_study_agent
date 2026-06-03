@@ -60,6 +60,10 @@ class TutorState(TypedDict):
     search_query_rewrite_reason: str                                    # Query rewriter rationale
     search_query_rewrite_error: str                                     # Query rewriter failure reason, if any
     search_query_rewrite_raw_preview: str                               # Truncated raw query-rewriter output for diagnostics
+    web_supplement_decisions: list[dict]                                # Dynamic web supplement coverage decisions
+    web_supplement_results: list[dict]                                  # Dynamic web supplement result docs
+    coverage_decision_summary: str                                      # Summary of coverage risk and web supplement decision
+    retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
     plan: str                                                           # Generated plans
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag

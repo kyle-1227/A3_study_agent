@@ -67,4 +67,12 @@
 
 ## 是否追加资源生成建议
 {resource_offer_instruction}
+
+## Web 补充资料使用规则
+如果参考资料包含 “Web 补充”：
+1. 本地 RAG 中 strong / usable 资料优先用于课程核心结论；
+2. Web supplement 不属于本地课程知识库，不要声称它来自本地课程资料；
+3. 按 supplement_purpose 使用外部资料：repair 用于修补缺口，coverage_expansion 用于拓展覆盖，application_context 用于应用场景，tool_ecosystem 用于工具生态，latest_practice 用于较新实践，case_example 用于案例，implementation_detail 用于代码或流程，planning_support 用于规划，resource_enrichment 用于丰富学习资源；
+4. 如果本地 RAG 与 Web supplement 冲突，优先指出差异，不要强行合并；
+5. 回答中可以用“本地课程资料显示...”和“外部补充资料显示...”区分来源。
 ]]></prompt>
