@@ -6,7 +6,7 @@ the full RAG/search stack.
 
 from __future__ import annotations
 
-__all__ = ["rag_retrieve", "get_search_tool", "search"]
+__all__ = ["rag_retrieve", "search"]
 
 
 def __getattr__(name: str):
@@ -14,8 +14,8 @@ def __getattr__(name: str):
         from src.tools.rag_tool import rag_retrieve
 
         return rag_retrieve
-    if name in {"get_search_tool", "search"}:
-        from src.tools.search_tool import get_search_tool, search
+    if name == "search":
+        from src.tools.search_tool import search
 
-        return {"get_search_tool": get_search_tool, "search": search}[name]
+        return search
     raise AttributeError(f"module 'src.tools' has no attribute {name!r}")

@@ -232,6 +232,7 @@ async def mindmap_planner(state: TutorState) -> dict:
             "context_count": len(context),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
             "web_supplement_count": len([item for item in context if item.get("type") == "web_supplement"]),
+            "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
             "web_supplement_partial_failed": bool(state.get("web_supplement_partial_failed")),

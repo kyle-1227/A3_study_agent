@@ -181,6 +181,7 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_results": [],
         "coverage_decision_summary": "",
         "retrieval_branch_mode": "",
+        "web_supplement_provider": "tavily",
         "web_supplement_failed": False,
         "web_supplement_failure_reason": "",
         "web_supplement_status_by_subject": {},
@@ -612,43 +613,23 @@ def _web_timeout_seconds() -> float:
         return 6.0
 
 
-# TEMP A3_TRACE: remove after diagnostics validation.
-def _web_search_diagnostics_from_legacy_result(result, query: str) -> dict:
-    """Normalize old list mocks and new diagnostic dictionaries."""
-    if isinstance(result, dict):
-        return result
-    if isinstance(result, list):
-        return {
-            "provider": "duckduckgo",
-            "query": query,
-            "ok": True,
-            "results": result,
-            "result_count": len(result),
-            "error_type": "",
-            "error_message": "",
-            "raw_type": "legacy_list",
-            "raw_count": len(result),
-            "elapsed_ms": None,
-        }
+def _tavily_exception_diagnostics(
+    query: str,
+    exc: Exception,
+    *,
+    original_user_query: str = "",
+    subject: str = "",
+    role: str = "",
+    purpose: str = "",
+    elapsed_ms=None,
+) -> dict:
     return {
-        "provider": "duckduckgo",
+        "provider": "tavily",
         "query": query,
-        "ok": False,
-        "results": [],
-        "result_count": 0,
-        "error_type": "UnexpectedSearchDiagnosticsType",
-        "error_message": sanitize_error_message(f"Unexpected diagnostics type: {type(result).__name__}"),
-        "raw_type": type(result).__name__,
-        "raw_count": None,
-        "elapsed_ms": None,
-    }
-
-
-# TEMP A3_TRACE: remove after diagnostics validation.
-def _web_search_exception_diagnostics(query: str, exc: Exception, *, elapsed_ms=None) -> dict:
-    return {
-        "provider": "duckduckgo",
-        "query": query,
+        "original_user_query": original_user_query,
+        "subject": subject,
+        "role": role,
+        "purpose": purpose,
         "ok": False,
         "results": [],
         "result_count": 0,
@@ -657,6 +638,7 @@ def _web_search_exception_diagnostics(query: str, exc: Exception, *, elapsed_ms=
         "raw_type": "",
         "raw_count": None,
         "elapsed_ms": elapsed_ms,
+        "status_code": None,
     }
 
 
@@ -945,16 +927,20 @@ def _build_web_attempt_schedule(targets: list[dict]) -> list[dict]:
         )
         for idx, query_item in enumerate(queries):
             purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
+            raw_query = str(query_item.get("query", "") or "")
+            compacted_query = _compact_web_query(
+                raw_query,
+                purpose=purpose,
+                subject=subject,
+                max_chars=max_chars,
+            )
             attempt = {
                 "subject": subject,
                 "role": target.get("role", ""),
                 "purpose": purpose,
-                "query": _compact_web_query(
-                    query_item.get("query", ""),
-                    purpose=purpose,
-                    subject=subject,
-                    max_chars=max_chars,
-                ),
+                "raw_query": raw_query,
+                "query": compacted_query,
+                "query_compacted": raw_query.strip() != compacted_query.strip(),
                 "query_priority": _clamp_priority(query_item.get("priority", 0.5)),
                 "subject_priority": _clamp_priority(target.get("subject_priority", 0.5)),
                 "reason": query_item.get("reason") or target.get("decision_reason", ""),
@@ -1318,6 +1304,7 @@ async def _run_dynamic_web_supplement(
     docs: list[dict] = []
     attempt_logs: list[dict] = []
     schedule = _build_web_attempt_schedule(targets)
+    original_user_query = _last_human_query(state)
     status_by_subject = {
         str(target.get("subject") or ""): _empty_web_subject_status(target)
         for target in targets
@@ -1373,6 +1360,7 @@ async def _run_dynamic_web_supplement(
         attempts_by_subject[subject] += 1
         query = query_item.get("query", "")
         purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
+        raw_query = query_item.get("raw_query", query)
         subject_status = _status(subject, target)
         subject_status["attempts"] = int(subject_status.get("attempts") or 0) + 1
         if purpose not in subject_status["purposes_attempted"]:
@@ -1383,20 +1371,39 @@ async def _run_dynamic_web_supplement(
         diagnostics: dict
         timed_out = False
         try:
-            raw = await asyncio.wait_for(
-                asyncio.to_thread(web_search_fn, query),
+            diagnostics = await asyncio.wait_for(
+                asyncio.to_thread(
+                    web_search_fn,
+                    query,
+                    original_user_query=original_user_query,
+                    subject=subject,
+                    role=str(target.get("role", "")),
+                    purpose=purpose,
+                    max_results=max_results,
+                    timeout_seconds=timeout,
+                ),
                 timeout=timeout,
             )
-            diagnostics = _web_search_diagnostics_from_legacy_result(raw, query)
         except asyncio.TimeoutError:
             timed_out = True
-            diagnostics = _web_search_exception_diagnostics(
+            diagnostics = _tavily_exception_diagnostics(
                 query,
-                TimeoutError(f"web supplement exceeded {timeout}s"),
+                TimeoutError(f"tavily search exceeded {timeout}s"),
+                original_user_query=original_user_query,
+                subject=subject,
+                role=str(target.get("role", "")),
+                purpose=purpose,
                 elapsed_ms=round(timeout * 1000, 2),
             )
         except Exception as exc:
-            diagnostics = _web_search_exception_diagnostics(query, exc)
+            diagnostics = _tavily_exception_diagnostics(
+                query,
+                exc,
+                original_user_query=original_user_query,
+                subject=subject,
+                role=str(target.get("role", "")),
+                purpose=purpose,
+            )
 
         elapsed_ms = diagnostics.get("elapsed_ms")
         if elapsed_ms is None:
@@ -1454,9 +1461,14 @@ async def _run_dynamic_web_supplement(
             "subject_attempt": attempts_by_subject[subject],
             "max_total_attempts": max_total,
             "max_attempts_per_subject": max_per_subject,
+            "provider": diagnostics.get("provider", "tavily"),
+            "original_user_query": original_user_query[:2000],
+            "raw_query": raw_query,
             "query": query,
+            "query_compacted": bool(query_item.get("query_compacted")),
             "ok": diagnostics.get("ok", False),
             "timed_out": timed_out or diagnostics.get("error_type") == "TimeoutError",
+            "status_code": diagnostics.get("status_code"),
             "raw_result_count": len(results),
             "result_count": diagnostics.get("result_count", len(results)),
             "quality_filtered_count": len(quality_results),
@@ -1503,6 +1515,7 @@ async def _run_dynamic_web_supplement(
     )
 
     return docs, {
+        "provider": "tavily",
         "attempts_used": attempts,
         "max_total_attempts": max_total,
         "attempts_by_subject": dict(attempts_by_subject),
@@ -1935,7 +1948,7 @@ async def rag_retrieve(state: TutorState) -> dict:
         web_failed_subjects = web_debug.get("failed_subjects", [])
         web_supplement_failed = web_supplement_needed and not web_success_subjects
         web_supplement_partial_failed = bool(web_success_subjects and web_failed_subjects)
-        web_supplement_failure_reason = "timeout_or_no_results" if web_supplement_failed else ""
+        web_supplement_failure_reason = "tavily_timeout_or_error" if web_supplement_failed else ""
 
         selected_local_docs, quota_debug = _select_docs_with_subject_quota(
             local_docs,
@@ -1966,6 +1979,7 @@ async def rag_retrieve(state: TutorState) -> dict:
                 "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplement_docs if doc.get("supplement_for_subject")}),
                 "web_supplement_purposes": dict(web_supplement_purposes),
                 "web_supplement_needed": web_supplement_needed,
+                "web_supplement_provider": "tavily",
                 "web_supplement_failed": web_supplement_failed,
                 "web_supplement_failure_reason": web_supplement_failure_reason,
                 "web_supplement_partial_failed": web_supplement_partial_failed,
@@ -2006,6 +2020,7 @@ async def rag_retrieve(state: TutorState) -> dict:
         "context": selected_docs,
         "web_supplement_decisions": targets,
         "web_supplement_results": web_supplement_docs,
+        "web_supplement_provider": "tavily",
         "coverage_decision_summary": decision_debug.get("decision_summary", ""),
         "retrieval_branch_mode": branch_mode,
         "web_supplement_failed": web_supplement_failed,
@@ -2044,6 +2059,7 @@ async def web_search(state: TutorState) -> dict:
                 "retrieval_plan_count": len(retrieval_plan),
                 "result_count": 0,
                 "timed_out": False,
+                "provider": "tavily",
                 "ok": True,
                 "error_type": "",
                 "error_message": "",
@@ -2074,8 +2090,9 @@ async def web_search(state: TutorState) -> dict:
 
     with traced_search(query=query, timeout=_SEARCH_TIMEOUT) as span:
         diagnostics: dict = {
-            "provider": "duckduckgo",
+            "provider": "tavily",
             "query": query,
+            "original_user_query": _last_human_query(state),
             "ok": False,
             "results": [],
             "result_count": 0,
@@ -2084,27 +2101,38 @@ async def web_search(state: TutorState) -> dict:
             "raw_type": "",
             "raw_count": None,
             "elapsed_ms": None,
+            "status_code": None,
         }
         try:
-            raw_diagnostics = await asyncio.wait_for(
-                asyncio.to_thread(web_search_fn, query),
+            diagnostics = await asyncio.wait_for(
+                asyncio.to_thread(
+                    web_search_fn,
+                    query,
+                    original_user_query=_last_human_query(state),
+                    max_results=int(_web_setting("tavily.max_results", 5)),
+                    timeout_seconds=_SEARCH_TIMEOUT,
+                ),
                 timeout=_SEARCH_TIMEOUT,
             )
-            diagnostics = _web_search_diagnostics_from_legacy_result(raw_diagnostics, query)
             search_results = diagnostics.get("results", [])
             span.set_attribute("search.result_count", len(search_results))
             span.set_attribute("search.timed_out", False)
         except asyncio.TimeoutError:
-            diagnostics = _web_search_exception_diagnostics(
+            diagnostics = _tavily_exception_diagnostics(
                 query,
-                TimeoutError(f"web search exceeded {_SEARCH_TIMEOUT}s"),
+                TimeoutError(f"tavily search exceeded {_SEARCH_TIMEOUT}s"),
+                original_user_query=_last_human_query(state),
                 elapsed_ms=round(_SEARCH_TIMEOUT * 1000, 2),
             )
             search_results = []
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", True)
         except Exception as exc:
-            diagnostics = _web_search_exception_diagnostics(query, exc)
+            diagnostics = _tavily_exception_diagnostics(
+                query,
+                exc,
+                original_user_query=_last_human_query(state),
+            )
             search_results = []
             span.set_attribute("search.result_count", 0)
             span.set_attribute("search.timed_out", False)
@@ -2116,15 +2144,17 @@ async def web_search(state: TutorState) -> dict:
         {
             "query_source": query_source,
             "query": query,
+            "original_user_query": _last_human_query(state)[:2000],
             "retrieval_plan_count": len(retrieval_plan),
             "selected_subject": selected_subject,
             "result_count": len(search_results),
             "timed_out": diagnostics.get("error_type") == "TimeoutError",
-            "provider": diagnostics.get("provider", "duckduckgo"),
+            "provider": diagnostics.get("provider", "tavily"),
             "ok": diagnostics.get("ok", False),
             "raw_type": diagnostics.get("raw_type", ""),
             "raw_count": diagnostics.get("raw_count"),
             "elapsed_ms": diagnostics.get("elapsed_ms"),
+            "status_code": diagnostics.get("status_code"),
             "error_type": diagnostics.get("error_type", ""),
             "error_message": diagnostics.get("error_message", ""),
         },
@@ -2269,6 +2299,7 @@ async def generate_answer(state: TutorState) -> dict:
             "context_web_supplement_count": len(web_supplements),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
             "web_supplement_count": len(web_supplements),
+            "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
             "web_supplement_partial_failed": bool(state.get("web_supplement_partial_failed")),

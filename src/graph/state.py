@@ -64,6 +64,7 @@ class TutorState(TypedDict):
     web_supplement_results: list[dict]                                  # Dynamic web supplement result docs
     coverage_decision_summary: str                                      # Summary of coverage risk and web supplement decision
     retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
+    web_supplement_provider: str                                        # Web supplement provider, e.g. tavily
     web_supplement_failed: bool                                         # Dynamic web supplement was needed but produced no usable result
     web_supplement_failure_reason: str                                  # Reason for failed dynamic web supplement
     web_supplement_status_by_subject: dict                              # Per-subject dynamic web supplement status

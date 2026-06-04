@@ -40,7 +40,7 @@ _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
 
 @traced_node
 async def search_policy(state: TutorState) -> dict:
-    """Use DuckDuckGo to fetch the latest Gaokao policy information. Times out after 15s."""
+    """Use the configured Web Search provider to fetch policy information. Times out after 15s."""
     year = datetime.now().year
     query = state.get("search_web_query") or f"{year}年高校课程学习资源 专业入门路径"
 

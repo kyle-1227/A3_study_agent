@@ -16,9 +16,6 @@ dependencies = [
     "pymupdf>=1.27,<2",
     "rank-bm25>=0.2.2,<0.3",
     "jieba>=0.42.1,<0.43",
-    # Web Search
-    "duckduckgo-search>=8.0,<9",
-    "ddgs>=9.0,<10",
     # Mindmap export
     "xmind>=1.2.0,<2",
     # Utilities

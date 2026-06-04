@@ -13,15 +13,27 @@ checkpointer:
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
 web_search:
+  provider: tavily                       # Tavily is the only Web Search provider; no fallback
   conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
   skip_general_when_conditional: true     # Skip old fan-out web_search for academic/planning
   skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
-  timeout_seconds: 4                      # Timeout per dynamic web supplement attempt
+  timeout_seconds: 8                      # Timeout per Tavily web supplement attempt
   max_total_attempts: 3                   # Global dynamic web attempts per request
   max_attempts_per_subject: 2             # Dynamic web attempts per subject branch
   max_supplement_subjects: 2              # Max subjects selected for web supplement
-  max_results_per_attempt: 2              # Max web results used from one attempt
+  max_results_per_attempt: 3              # Max web results used from one attempt
   max_query_chars: 160                    # Keep supplement queries short without breaking key phrases
+  tavily:
+    enabled: true
+    api_key_env: TAVILY_API_KEY
+    search_depth: basic
+    max_results: 5
+    include_answer: false
+    include_raw_content: false
+    include_images: false
+    include_favicon: true
+    topic: general
+    include_usage: true
   preserve_key_phrases: true              # Preserve common complete technical phrases in compacted queries
   retry_failed_subjects_first: true        # Give failed/no-result subjects the next retry opportunity
   stop_subject_after_success: true         # Do not spend more budget once a subject has enough usable Web supplement
