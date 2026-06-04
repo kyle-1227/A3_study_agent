@@ -29,6 +29,11 @@ Return only a valid JSON object. Do not output Markdown, code fences, or explana
 10. If local evidence is enough, avoid unnecessary Web Search.
 11. Do not invent subjects. subject must come from the input branch summaries.
 12. The branch summaries may contain only one subject. That means a single-subject question. You still must judge coverage_risk and Web need.
+13. Each supplement_plan query should contain 4-10 high-value keywords.
+14. Prefer concise English search terms when the domain has common English literature.
+15. Do not stack multiple unrelated purposes into one query.
+16. Do not output broken phrases. Keep phrases such as "deep learning", "machine learning", "scikit-learn", "train test split", and "model evaluation" intact when relevant.
+17. Each query must directly serve its supplement_purpose.
 
 Allowed supplement_purposes:
 - repair

@@ -235,8 +235,19 @@ async def _stream_graph_events(
         return
 
     # ── Check for interrupt after stream completes ─────────────────
-    state_snapshot = await graph.aget_state(config)
-    if state_snapshot.next:
+    try:
+        state_snapshot = await graph.aget_state(config)
+    except ValueError as exc:
+        if "No checkpointer set" not in str(exc):
+            raise
+        state_snapshot = None
+        logger.warning(
+            'A3_TRACE {"stage":"sse_state_snapshot","success":false,'
+            '"fallback":"skip_state_snapshot_no_checkpointer",'
+            '"error_type":"ValueError","error_message":"No checkpointer set"}'
+        )
+
+    if state_snapshot is not None and state_snapshot.next:
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
                 draft = task.interrupts[0].value

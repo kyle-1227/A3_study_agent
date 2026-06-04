@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections import Counter, defaultdict
 from typing import Any
@@ -180,6 +181,12 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_results": [],
         "coverage_decision_summary": "",
         "retrieval_branch_mode": "",
+        "web_supplement_failed": False,
+        "web_supplement_failure_reason": "",
+        "web_supplement_status_by_subject": {},
+        "web_supplement_success_subjects": [],
+        "web_supplement_failed_subjects": [],
+        "web_supplement_partial_failed": False,
     }
 
 
@@ -658,6 +665,108 @@ def _clip_text(value: Any, limit: int) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+_WEB_KEY_PHRASES = (
+    "machine learning",
+    "deep learning",
+    "neural networks",
+    "neural network",
+    "scikit-learn",
+    "TensorFlow",
+    "PyTorch",
+    "practice problems",
+    "coding exercises",
+    "with solutions",
+    "classification regression",
+    "train test split",
+    "model evaluation",
+)
+
+_PURPOSE_QUERY_HINTS = {
+    "resource_enrichment": ("exercises", "with solutions", "practice problems", "quiz"),
+    "coverage_expansion": ("deep learning", "neural networks", "practice problems"),
+    "implementation_detail": ("scikit-learn", "classification regression", "Python"),
+    "tool_ecosystem": ("TensorFlow", "PyTorch", "scikit-learn"),
+    "case_example": ("project example", "case study"),
+}
+
+
+def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_chars: int = 160) -> str:
+    """Compact a bilingual supplement query for faster Web Search."""
+    text = " ".join(str(query or "").replace("\n", " ").split())
+    if len(text) <= max_chars and len(text.split()) <= 8:
+        return text
+
+    lower_text = text.lower()
+    protected_phrases: list[str] = []
+    if bool(_web_setting("preserve_key_phrases", True)):
+        for phrase in _WEB_KEY_PHRASES:
+            if phrase.lower() in lower_text:
+                protected_phrases.append(phrase)
+    for phrase in _PURPOSE_QUERY_HINTS.get(purpose, ()):
+        if phrase.lower() in lower_text and phrase not in protected_phrases:
+            protected_phrases.append(phrase)
+
+    placeholder_text = text
+    for idx, phrase in enumerate(protected_phrases):
+        placeholder_text = re.sub(
+            re.escape(phrase),
+            f" __PHRASE_{idx}__ ",
+            placeholder_text,
+            flags=re.IGNORECASE,
+        )
+
+    raw_tokens = placeholder_text.split()
+    seen: set[str] = set()
+    english_tokens: list[str] = []
+    other_tokens: list[str] = []
+    filler_tokens = {
+        "with",
+        "tutorial",
+        "tutorials",
+        "course",
+        "courses",
+        "notes",
+        "note",
+        "practice",
+        "problem",
+        "problems",
+        "coding",
+        "and",
+        "or",
+    }
+    phrase_by_placeholder = {f"__PHRASE_{idx}__": phrase for idx, phrase in enumerate(protected_phrases)}
+    for token in raw_tokens:
+        cleaned = token.strip(" ,;，；。.!?()[]{}<>\"'`")
+        if not cleaned:
+            continue
+        if cleaned in phrase_by_placeholder:
+            cleaned = phrase_by_placeholder[cleaned]
+        key = cleaned.lower()
+        if key in seen or key in filler_tokens:
+            continue
+        seen.add(key)
+        if any(ch.isascii() and (ch.isalnum() or ch in {"-", "_", ".", "+", "#"}) for ch in cleaned):
+            english_tokens.append(cleaned)
+        else:
+            other_tokens.append(cleaned)
+
+    selected: list[str] = []
+    subject_token = str(subject or "").replace("_", " ").strip()
+    prioritized = []
+    if subject_token and subject_token.lower() not in {item.lower() for item in english_tokens}:
+        prioritized.append(subject_token)
+    prioritized.extend(english_tokens)
+    prioritized.extend(other_tokens[:4])
+    for token in prioritized:
+        candidate = " ".join([*selected, token]).strip()
+        if len(candidate) > max_chars:
+            continue
+        selected.append(token)
+
+    compacted = " ".join(selected).strip()
+    return compacted[:max_chars] if compacted else text[:max_chars]
+
+
 def _build_branch_summaries(
     *,
     retrieval_plan: list[dict],
@@ -713,7 +822,171 @@ def _normalize_purposes(values: list[str]) -> list[str]:
 
 def _normalize_supplement_query(query: str) -> str:
     max_chars = int(_web_setting("max_query_chars", 180))
-    return _clip_text(query, max_chars)
+    return _compact_web_query(query, max_chars=max_chars)
+
+
+def _query_tokens_for_quality(text: str) -> set[str]:
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+#-]*|[\u4e00-\u9fff]{2,}", str(text or "").lower())
+    stop = {"and", "or", "the", "with", "for", "from", "about", "course", "tutorial", "example", "examples"}
+    return {token for token in tokens if token not in stop and len(token) > 1}
+
+
+def _score_web_result_quality(result: dict, query: str, purpose: str, subject: str) -> dict:
+    """Score Web supplement result quality with provider-agnostic signals."""
+    title = str(result.get("title") or "")
+    url = str(result.get("url") or "")
+    content = str(result.get("content") or "")
+    haystack = f"{title} {url} {content}".lower()
+    url_lower = url.lower()
+    query_tokens = _query_tokens_for_quality(query)
+    subject_tokens = _query_tokens_for_quality(subject.replace("_", " "))
+    overlap = query_tokens.intersection(_query_tokens_for_quality(haystack))
+    subject_overlap = subject_tokens.intersection(_query_tokens_for_quality(haystack))
+    score = 0.35
+    reasons: list[str] = []
+
+    if any(signal in url_lower for signal in (".edu", ".ac.", "github.com", "docs.", "documentation", "colab", "kaggle.com")):
+        score += 0.18
+        reasons.append("high_quality_domain")
+    if any(term in haystack for term in ("official", "documentation", "docs", "guide", "manual", "course", "lecture", "notebook", "github")):
+        score += 0.12
+        reasons.append("educational_or_documentation_signal")
+    if query_tokens:
+        overlap_ratio = len(overlap) / max(len(query_tokens), 1)
+        score += min(0.2, overlap_ratio * 0.25)
+        if overlap_ratio >= 0.3:
+            reasons.append("query_keyword_overlap")
+    if subject_tokens and subject_overlap:
+        score += 0.08
+        reasons.append("subject_keyword_overlap")
+
+    purpose_terms = {
+        "tool_ecosystem": ("library", "framework", "tool", "docs", "documentation", "ecosystem"),
+        "case_example": ("case", "project", "example", "notebook", "demo"),
+        "implementation_detail": ("code", "step", "implementation", "github", "notebook"),
+        "application_context": ("application", "use case", "industry", "scenario"),
+        "latest_practice": ("2024", "2025", "2026", "latest", "trend", "current"),
+        "planning_support": ("roadmap", "curriculum", "syllabus", "learning path"),
+        "resource_enrichment": ("exercise", "practice", "assignment", "worksheet"),
+        "repair": ("concept", "definition", "lecture", "notes"),
+    }
+    if any(term in haystack for term in purpose_terms.get(purpose, ())):
+        score += 0.1
+        reasons.append("purpose_match")
+
+    if any(term in haystack for term in (
+        "ultimate quiz", "trivia", "practice-test", "practice test geeks",
+        "practicetestgeeks", "proprofs", "flashcards", "brain dump",
+        "exam prep", "certification dump", "ads",
+    )):
+        score -= 0.28
+        reasons.append("low_quality_quiz_or_exam_site")
+    if len(content.strip()) < 80:
+        score -= 0.12
+        reasons.append("content_too_short")
+    if query_tokens and len(overlap) == 0:
+        score -= 0.16
+        reasons.append("low_query_overlap")
+
+    score = max(0.0, min(1.0, score))
+    label = "high" if score >= 0.7 else ("medium" if score >= float(_web_setting("min_web_quality_score", 0.45)) else "low")
+    return {
+        "quality_score": round(score, 3),
+        "quality_label": label,
+        "quality_reasons": (reasons or ["neutral_signals"])[:5],
+    }
+
+
+def _filter_web_results_by_quality(
+    results: list[dict],
+    *,
+    query: str,
+    purpose: str,
+    subject: str,
+) -> tuple[list[dict], list[dict]]:
+    min_score = float(_web_setting("min_web_quality_score", 0.45))
+    prefer_quality = bool(_web_setting("prefer_quality_over_rank", True))
+    allow_low = bool(_web_setting("allow_low_quality_if_no_alternative", False))
+    accepted: list[dict] = []
+    dropped: list[dict] = []
+    for rank, result in enumerate(results):
+        quality = _score_web_result_quality(result, query, purpose, subject)
+        enriched = {**result, **quality, "_original_rank": rank}
+        if enriched["quality_score"] >= min_score:
+            accepted.append(enriched)
+        else:
+            dropped.append(enriched)
+    if not accepted and allow_low and dropped:
+        accepted = sorted(dropped, key=lambda item: item.get("quality_score", 0), reverse=True)[:1]
+        dropped = [item for item in dropped if item not in accepted]
+    if prefer_quality:
+        accepted.sort(key=lambda item: (item.get("quality_score", 0), -int(item.get("_original_rank", 0))), reverse=True)
+    else:
+        accepted.sort(key=lambda item: int(item.get("_original_rank", 0)))
+    return accepted, dropped
+
+
+def _build_web_attempt_schedule(targets: list[dict]) -> list[dict]:
+    """Build a fair schedule: one first-pass query per subject, then retries."""
+    schedule: list[dict] = []
+    retry_items: list[dict] = []
+    max_chars = int(_web_setting("max_query_chars", 160))
+    sorted_targets = sorted(
+        targets,
+        key=lambda target: _clamp_priority(target.get("subject_priority", 0.5)),
+        reverse=True,
+    )
+    for target in sorted_targets:
+        subject = str(target.get("subject") or "")
+        queries = sorted(
+            target.get("supplement_queries", []) or [],
+            key=lambda item: _clamp_priority(item.get("priority", 0.5)),
+            reverse=True,
+        )
+        for idx, query_item in enumerate(queries):
+            purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
+            attempt = {
+                "subject": subject,
+                "role": target.get("role", ""),
+                "purpose": purpose,
+                "query": _compact_web_query(
+                    query_item.get("query", ""),
+                    purpose=purpose,
+                    subject=subject,
+                    max_chars=max_chars,
+                ),
+                "query_priority": _clamp_priority(query_item.get("priority", 0.5)),
+                "subject_priority": _clamp_priority(target.get("subject_priority", 0.5)),
+                "reason": query_item.get("reason") or target.get("decision_reason", ""),
+                "target": target,
+                "attempt_group": "first_pass" if idx == 0 else "retry_pass",
+            }
+            if not attempt["query"]:
+                continue
+            if idx == 0:
+                schedule.append(attempt)
+            else:
+                retry_items.append(attempt)
+    retry_items.sort(key=lambda item: (item.get("subject_priority", 0), item.get("query_priority", 0)), reverse=True)
+    return schedule + retry_items
+
+
+def _empty_web_subject_status(target: dict) -> dict:
+    return {
+        "subject": target.get("subject", ""),
+        "role": target.get("role", ""),
+        "attempts": 0,
+        "success": False,
+        "used_result_count": 0,
+        "failed_attempts": 0,
+        "last_error_type": "",
+        "last_error_message": "",
+        "purposes": target.get("supplement_purposes", []),
+        "purposes_attempted": [],
+        "purposes_succeeded": [],
+        "queries_attempted": [],
+        "queries_succeeded": [],
+    }
 
 
 def _targets_from_decision(
@@ -737,7 +1010,12 @@ def _targets_from_decision(
         query_items: list[dict] = []
         for item in sorted(decision.supplement_plan or [], key=lambda value: _clamp_priority(value.priority), reverse=True):
             purpose = item.purpose if item.purpose in ALLOWED_SUPPLEMENT_PURPOSES else (purposes[0] if purposes else "coverage_expansion")
-            query = _normalize_supplement_query(item.query)
+            query = _compact_web_query(
+                item.query,
+                purpose=purpose,
+                subject=subject,
+                max_chars=int(_web_setting("max_query_chars", 160)),
+            )
             if not query:
                 continue
             query_items.append({
@@ -754,7 +1032,12 @@ def _targets_from_decision(
                 purpose = purposes[0] if purposes else "coverage_expansion"
                 query_items.append({
                     "purpose": purpose,
-                    "query": _normalize_supplement_query(fallback_query),
+                    "query": _compact_web_query(
+                        fallback_query,
+                        purpose=purpose,
+                        subject=subject,
+                        max_chars=int(_web_setting("max_query_chars", 160)),
+                    ),
                     "priority": _clamp_priority(decision.priority),
                     "reason": decision.reason.strip() or "Fallback query from retrieval branch.",
                 })
@@ -841,7 +1124,12 @@ def _rule_based_web_supplement_targets(
             "supplement_queries": [
                 {
                     "purpose": purposes[0],
-                    "query": _normalize_supplement_query(query),
+                    "query": _compact_web_query(
+                        query,
+                        purpose=purposes[0],
+                        subject=subject,
+                        max_chars=int(_web_setting("max_query_chars", 160)),
+                    ),
                     "priority": _clamp_priority(item.get("priority", 0.5)),
                     "reason": "Rule fallback selected this branch for Web supplement.",
                 }
@@ -1017,109 +1305,215 @@ async def _run_dynamic_web_supplement(
 ) -> tuple[list[dict], dict]:
     """Run dynamic Web supplement with bounded attempts."""
     del decision_debug
-    max_total = int(_web_setting("max_total_attempts", 10))
-    max_per_subject = int(_web_setting("max_attempts_per_subject", 3))
-    max_results = int(_web_setting("max_results_per_attempt", 5))
+    max_total = int(_web_setting("max_total_attempts", 3))
+    max_per_subject = int(_web_setting("max_attempts_per_subject", 2))
+    max_results = int(_web_setting("max_results_per_attempt", 2))
+    min_results_per_subject = int(_web_setting("min_results_per_subject", 1))
+    stop_after_success = bool(_web_setting("stop_subject_after_success", True))
+    retry_failed_first = bool(_web_setting("retry_failed_subjects_first", True))
+    max_dropped_preview = int(_web_setting("max_dropped_results_preview", 3))
     timeout = _web_timeout_seconds()
     attempts = 0
     attempts_by_subject: Counter = Counter()
     docs: list[dict] = []
     attempt_logs: list[dict] = []
+    schedule = _build_web_attempt_schedule(targets)
+    status_by_subject = {
+        str(target.get("subject") or ""): _empty_web_subject_status(target)
+        for target in targets
+        if target.get("subject")
+    }
 
-    for target in targets:
-        subject = target.get("subject", "")
-        if attempts >= max_total:
+    def _status(subject: str, target: dict) -> dict:
+        if subject not in status_by_subject:
+            status_by_subject[subject] = _empty_web_subject_status(target)
+        return status_by_subject[subject]
+
+    while attempts < max_total:
+        candidates = [
+            item for item in schedule
+            if not item.get("_used") and attempts_by_subject[item.get("subject", "")] < max_per_subject
+        ]
+        if not candidates:
             break
-        for query_item in sorted(target.get("supplement_queries", []), key=lambda item: _clamp_priority(item.get("priority")), reverse=True):
-            if attempts >= max_total or attempts_by_subject[subject] >= max_per_subject:
-                break
-            attempts += 1
-            attempts_by_subject[subject] += 1
-            query = _normalize_supplement_query(query_item.get("query", ""))
-            purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
-            started = time.perf_counter()
-            diagnostics: dict
-            timed_out = False
-            try:
-                raw = await asyncio.wait_for(
-                    asyncio.to_thread(web_search_fn, query),
-                    timeout=timeout,
-                )
-                diagnostics = _web_search_diagnostics_from_legacy_result(raw, query)
-            except asyncio.TimeoutError:
-                timed_out = True
-                diagnostics = _web_search_exception_diagnostics(
-                    query,
-                    TimeoutError(f"web supplement exceeded {timeout}s"),
-                    elapsed_ms=round(timeout * 1000, 2),
-                )
-            except Exception as exc:
-                diagnostics = _web_search_exception_diagnostics(query, exc)
-
-            elapsed_ms = diagnostics.get("elapsed_ms")
-            if elapsed_ms is None:
-                elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-            results = diagnostics.get("results", []) or []
-            used_results = results[:max_results]
-            for result in used_results:
-                docs.append({
-                    "type": "web_supplement",
-                    "content": result.get("content", ""),
-                    "title": result.get("title", ""),
-                    "url": result.get("url", ""),
-                    "source": result.get("url") or result.get("title") or "web_search",
-                    "supplement_for_subject": subject,
-                    "supplement_for_role": target.get("role", ""),
-                    "supplement_purpose": purpose,
-                    "supplement_purposes": target.get("supplement_purposes", []),
-                    "supplement_reason": query_item.get("reason") or target.get("decision_reason", ""),
-                    "retrieval_subject": subject,
-                    "retrieval_role": target.get("role", ""),
-                    "retrieval_query": query,
-                    "branch_status": target.get("branch_status", ""),
-                    "coverage_risk": target.get("coverage_risk", ""),
-                    "local_evidence_strength": target.get("local_evidence_strength", ""),
-                })
-            attempt_payload = {
-                "branch_mode": branch_mode,
-                "subject": subject,
-                "role": target.get("role", ""),
-                "purpose": purpose,
-                "attempt": attempts,
-                "subject_attempt": attempts_by_subject[subject],
-                "max_total_attempts": max_total,
-                "max_attempts_per_subject": max_per_subject,
-                "query": query,
-                "ok": diagnostics.get("ok", False),
-                "timed_out": timed_out or diagnostics.get("error_type") == "TimeoutError",
-                "result_count": diagnostics.get("result_count", len(results)),
-                "used_result_count": len(used_results),
-                "elapsed_ms": elapsed_ms,
-                "error_type": diagnostics.get("error_type", ""),
-                "error_message": diagnostics.get("error_message", ""),
-                "top_results": [
-                    {"title": item.get("title", ""), "url": item.get("url", "")}
-                    for item in used_results[:3]
-                ],
-            }
-            attempt_logs.append(attempt_payload)
-            # TEMP A3_TRACE: remove after multi-subject retrieval validation.
-            emit_a3_trace(
-                logger,
-                "dynamic_web_supplement",
-                attempt_payload,
-                state=state,
-                env_flag="LOG_WEB_SEARCH_RESULT",
+        active_candidates = []
+        for item in candidates:
+            status = _status(item.get("subject", ""), item.get("target", {}))
+            if stop_after_success and status.get("success") and int(status.get("used_result_count") or 0) >= min_results_per_subject:
+                continue
+            active_candidates.append(item)
+        if active_candidates:
+            candidates = active_candidates
+        if retry_failed_first:
+            candidates.sort(
+                key=lambda item: (
+                    1 if _status(item.get("subject", ""), item.get("target", {})).get("failed_attempts") else 0,
+                    0 if _status(item.get("subject", ""), item.get("target", {})).get("success") else 1,
+                    1 if item.get("attempt_group") == "first_pass" else 0,
+                    item.get("subject_priority", 0),
+                    item.get("query_priority", 0),
+                ),
+                reverse=True,
             )
-            if used_results:
-                break
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    1 if item.get("attempt_group") == "first_pass" else 0,
+                    item.get("subject_priority", 0),
+                    item.get("query_priority", 0),
+                ),
+                reverse=True,
+            )
+
+        query_item = candidates[0]
+        query_item["_used"] = True
+        target = query_item.get("target", {})
+        subject = query_item.get("subject", "")
+        attempts += 1
+        attempts_by_subject[subject] += 1
+        query = query_item.get("query", "")
+        purpose = query_item.get("purpose") or (target.get("supplement_purposes") or ["coverage_expansion"])[0]
+        subject_status = _status(subject, target)
+        subject_status["attempts"] = int(subject_status.get("attempts") or 0) + 1
+        if purpose not in subject_status["purposes_attempted"]:
+            subject_status["purposes_attempted"].append(purpose)
+        subject_status["queries_attempted"].append(query)
+
+        started = time.perf_counter()
+        diagnostics: dict
+        timed_out = False
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(web_search_fn, query),
+                timeout=timeout,
+            )
+            diagnostics = _web_search_diagnostics_from_legacy_result(raw, query)
+        except asyncio.TimeoutError:
+            timed_out = True
+            diagnostics = _web_search_exception_diagnostics(
+                query,
+                TimeoutError(f"web supplement exceeded {timeout}s"),
+                elapsed_ms=round(timeout * 1000, 2),
+            )
+        except Exception as exc:
+            diagnostics = _web_search_exception_diagnostics(query, exc)
+
+        elapsed_ms = diagnostics.get("elapsed_ms")
+        if elapsed_ms is None:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        results = diagnostics.get("results", []) or []
+        quality_results, dropped_results = _filter_web_results_by_quality(
+            results,
+            query=query,
+            purpose=purpose,
+            subject=subject,
+        )
+        used_results = quality_results[:max_results]
+        for result in used_results:
+            docs.append({
+                "type": "web_supplement",
+                "content": result.get("content", ""),
+                "title": result.get("title", ""),
+                "url": result.get("url", ""),
+                "source": result.get("url") or result.get("title") or "web_search",
+                "supplement_for_subject": subject,
+                "supplement_for_role": target.get("role", ""),
+                "supplement_purpose": purpose,
+                "supplement_purposes": target.get("supplement_purposes", []),
+                "supplement_reason": query_item.get("reason") or target.get("decision_reason", ""),
+                "retrieval_subject": subject,
+                "retrieval_role": target.get("role", ""),
+                "retrieval_query": query,
+                "branch_status": target.get("branch_status", ""),
+                "coverage_risk": target.get("coverage_risk", ""),
+                "local_evidence_strength": target.get("local_evidence_strength", ""),
+                "quality_score": result.get("quality_score", 0.0),
+                "quality_label": result.get("quality_label", "unknown"),
+                "quality_reasons": result.get("quality_reasons", []),
+            })
+        if used_results:
+            subject_status["success"] = True
+            subject_status["used_result_count"] = int(subject_status.get("used_result_count") or 0) + len(used_results)
+            if purpose not in subject_status["purposes_succeeded"]:
+                subject_status["purposes_succeeded"].append(purpose)
+            subject_status["queries_succeeded"].append(query)
+            subject_status["last_error_type"] = ""
+            subject_status["last_error_message"] = ""
+        else:
+            subject_status["failed_attempts"] = int(subject_status.get("failed_attempts") or 0) + 1
+            subject_status["last_error_type"] = diagnostics.get("error_type") or "NoUsableWebResults"
+            subject_status["last_error_message"] = diagnostics.get("error_message") or "no usable results after quality filter"
+
+        attempt_payload = {
+            "branch_mode": branch_mode,
+            "attempt_group": query_item.get("attempt_group", ""),
+            "subject": subject,
+            "role": target.get("role", ""),
+            "purpose": purpose,
+            "attempt": attempts,
+            "subject_attempt": attempts_by_subject[subject],
+            "max_total_attempts": max_total,
+            "max_attempts_per_subject": max_per_subject,
+            "query": query,
+            "ok": diagnostics.get("ok", False),
+            "timed_out": timed_out or diagnostics.get("error_type") == "TimeoutError",
+            "raw_result_count": len(results),
+            "result_count": diagnostics.get("result_count", len(results)),
+            "quality_filtered_count": len(quality_results),
+            "dropped_by_quality_count": len(dropped_results),
+            "used_result_count": len(used_results),
+            "elapsed_ms": elapsed_ms,
+            "error_type": diagnostics.get("error_type", ""),
+            "error_message": diagnostics.get("error_message", ""),
+            "top_results": [
+                {
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "quality_score": item.get("quality_score"),
+                    "quality_label": item.get("quality_label"),
+                    "quality_reasons": item.get("quality_reasons", []),
+                }
+                for item in used_results[:3]
+            ],
+            "dropped_results_preview": [
+                {
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "quality_score": item.get("quality_score"),
+                    "quality_label": item.get("quality_label"),
+                    "quality_reasons": item.get("quality_reasons", []),
+                }
+                for item in dropped_results[:max_dropped_preview]
+            ],
+        }
+        attempt_logs.append(attempt_payload)
+        # TEMP A3_TRACE: remove after multi-subject retrieval validation.
+        emit_a3_trace(
+            logger,
+            "dynamic_web_supplement",
+            attempt_payload,
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+
+    success_subjects = sorted(subject for subject, status in status_by_subject.items() if status.get("success"))
+    failed_subjects = sorted(
+        subject for subject, status in status_by_subject.items()
+        if not status.get("success") and int(status.get("attempts") or 0) > 0
+    )
 
     return docs, {
         "attempts_used": attempts,
         "max_total_attempts": max_total,
         "attempts_by_subject": dict(attempts_by_subject),
         "result_doc_count": len(docs),
+        "timeout_count": sum(1 for item in attempt_logs if item.get("timed_out")),
+        "no_result_count": sum(1 for item in attempt_logs if not item.get("used_result_count")),
         "attempts": attempt_logs,
+        "status_by_subject": status_by_subject,
+        "success_subjects": success_subjects,
+        "failed_subjects": failed_subjects,
+        "partial_failed": bool(success_subjects and failed_subjects),
     }
 
 
@@ -1535,6 +1929,13 @@ async def rag_retrieve(state: TutorState) -> dict:
             decision_debug=decision_debug,
             branch_mode=branch_mode,
         )
+        web_supplement_needed = bool(targets)
+        web_status_by_subject = web_debug.get("status_by_subject", {})
+        web_success_subjects = web_debug.get("success_subjects", [])
+        web_failed_subjects = web_debug.get("failed_subjects", [])
+        web_supplement_failed = web_supplement_needed and not web_success_subjects
+        web_supplement_partial_failed = bool(web_success_subjects and web_failed_subjects)
+        web_supplement_failure_reason = "timeout_or_no_results" if web_supplement_failed else ""
 
         selected_local_docs, quota_debug = _select_docs_with_subject_quota(
             local_docs,
@@ -1564,6 +1965,13 @@ async def rag_retrieve(state: TutorState) -> dict:
                 "web_supplement_count": len(web_supplement_docs),
                 "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplement_docs if doc.get("supplement_for_subject")}),
                 "web_supplement_purposes": dict(web_supplement_purposes),
+                "web_supplement_needed": web_supplement_needed,
+                "web_supplement_failed": web_supplement_failed,
+                "web_supplement_failure_reason": web_supplement_failure_reason,
+                "web_supplement_partial_failed": web_supplement_partial_failed,
+                "web_supplement_status_by_subject": web_status_by_subject,
+                "web_supplement_success_subjects": web_success_subjects,
+                "web_supplement_failed_subjects": web_failed_subjects,
                 "coverage_decision_summary": decision_debug.get("decision_summary", ""),
                 "dynamic_web_attempts_used": web_debug.get("attempts_used", 0),
                 "dynamic_web_max_total_attempts": web_debug.get("max_total_attempts", 0),
@@ -1576,6 +1984,9 @@ async def rag_retrieve(state: TutorState) -> dict:
                         "branch_status": doc.get("branch_status"),
                         "weak_reason": doc.get("weak_reason"),
                         "supplement_purpose": doc.get("supplement_purpose"),
+                        "quality_score": doc.get("quality_score"),
+                        "quality_label": doc.get("quality_label"),
+                        "quality_reasons": doc.get("quality_reasons", []),
                         "source": doc.get("source"),
                         "score": doc.get("score"),
                         "rerank_score": doc.get("rerank_score"),
@@ -1597,6 +2008,12 @@ async def rag_retrieve(state: TutorState) -> dict:
         "web_supplement_results": web_supplement_docs,
         "coverage_decision_summary": decision_debug.get("decision_summary", ""),
         "retrieval_branch_mode": branch_mode,
+        "web_supplement_failed": web_supplement_failed,
+        "web_supplement_failure_reason": web_supplement_failure_reason,
+        "web_supplement_status_by_subject": web_status_by_subject,
+        "web_supplement_success_subjects": web_success_subjects,
+        "web_supplement_failed_subjects": web_failed_subjects,
+        "web_supplement_partial_failed": web_supplement_partial_failed,
     }
 
 _SEARCH_TIMEOUT = _web_timeout_seconds()
@@ -1743,10 +2160,14 @@ def _format_retrieved(docs: list[dict]) -> str:
             subject = d.get("supplement_for_subject") or d.get("retrieval_subject", "unknown")
             role = d.get("supplement_for_role") or d.get("retrieval_role", "supporting_context")
             purpose = d.get("supplement_purpose", "coverage_expansion")
+            quality_label = d.get("quality_label", "unknown")
+            quality_score = d.get("quality_score", "N/A")
+            quality_reasons = ", ".join(str(item) for item in d.get("quality_reasons", [])[:4])
             parts.append(
                 f"【{subject}｜{role}｜Web 补充｜{purpose}】\n"
                 "说明：以下资料用于补充该 subject 的覆盖广度、工具生态或实践背景，不属于本地课程知识库。\n"
                 f"用途：{purpose_notes.get(purpose, '仅作为外部补充资料谨慎使用。')}\n"
+                f"Web quality: {quality_label} ({quality_score}); reasons: {quality_reasons}\n"
                 f"补充原因：{d.get('supplement_reason', '')}\n"
                 f"来源：{d.get('title') or d.get('source', 'web_search')} {d.get('url', '')}\n"
                 f"内容：{d.get('content', '')}"
@@ -1846,6 +2267,14 @@ async def generate_answer(state: TutorState) -> dict:
             "context_rag_count": len(rag_docs),
             "context_web_count": len(web_results),
             "context_web_supplement_count": len(web_supplements),
+            "web_supplement_needed": bool(state.get("web_supplement_decisions")),
+            "web_supplement_count": len(web_supplements),
+            "web_supplement_failed": bool(state.get("web_supplement_failed")),
+            "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
+            "web_supplement_partial_failed": bool(state.get("web_supplement_partial_failed")),
+            "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
+            "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
+            "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),
@@ -1868,7 +2297,11 @@ async def generate_answer(state: TutorState) -> dict:
         resource_offer_instruction=_resource_offer_instruction(state),
     )
 
-    fallback = get_fallback_llm(temperature=temperature)
+    max_tokens = get_setting("academic.max_tokens", None)
+    fallback_kwargs = {"temperature": temperature}
+    if max_tokens is not None:
+        fallback_kwargs["max_tokens"] = max_tokens
+    fallback = get_fallback_llm(**fallback_kwargs)
     messages = [
         SystemMessage(content=load_prompt("academic_system")),
         HumanMessage(content=user_prompt),

@@ -64,6 +64,12 @@ class TutorState(TypedDict):
     web_supplement_results: list[dict]                                  # Dynamic web supplement result docs
     coverage_decision_summary: str                                      # Summary of coverage risk and web supplement decision
     retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
+    web_supplement_failed: bool                                         # Dynamic web supplement was needed but produced no usable result
+    web_supplement_failure_reason: str                                  # Reason for failed dynamic web supplement
+    web_supplement_status_by_subject: dict                              # Per-subject dynamic web supplement status
+    web_supplement_success_subjects: list[str]                          # Subjects with usable web supplement
+    web_supplement_failed_subjects: list[str]                           # Subjects that needed but failed web supplement
+    web_supplement_partial_failed: bool                                 # At least one subject failed while another succeeded
     plan: str                                                           # Generated plans
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag

@@ -75,4 +75,10 @@
 3. 按 supplement_purpose 使用外部资料：repair 用于修补缺口，coverage_expansion 用于拓展覆盖，application_context 用于应用场景，tool_ecosystem 用于工具生态，latest_practice 用于较新实践，case_example 用于案例，implementation_detail 用于代码或流程，planning_support 用于规划，resource_enrichment 用于丰富学习资源；
 4. 如果本地 RAG 与 Web supplement 冲突，优先指出差异，不要强行合并；
 5. 回答中可以用“本地课程资料显示...”和“外部补充资料显示...”区分来源。
+## Web supplement quality rules
+If Web supplement material includes quality_label / quality_score / quality_reasons:
+- high or medium quality Web supplement may be used cautiously for applications, tool ecosystem, cases, implementation detail, or resource enrichment.
+- low quality Web supplement must not be used as core evidence.
+- quiz, trivia, practice-test, flashcard, or exam-prep style pages may only inspire question format, not rigorous knowledge claims.
+- Always prefer local RAG strong / usable evidence for core course conclusions.
 ]]></prompt>

@@ -36,4 +36,10 @@ If the reference context contains Web supplement material:
 3. Use supplement_purpose to decide its role: repair, coverage_expansion, application_context, tool_ecosystem, latest_practice, case_example, implementation_detail, planning_support, or resource_enrichment.
 4. If local RAG and Web supplement differ, mark the difference instead of merging them as one source.
 5. For weak or missing local branches, use Web supplement only as cautious enrichment.
+## Web supplement quality rules
+If Web supplement material includes quality_label / quality_score / quality_reasons:
+- high or medium quality Web supplement may be used cautiously for applications, tool ecosystem, cases, implementation detail, or resource enrichment.
+- low quality Web supplement must not be used as core structure evidence.
+- quiz, trivia, practice-test, flashcard, or exam-prep style pages may only inspire learning-task format, not rigorous knowledge structure.
+- Always prefer local RAG strong / usable evidence for the main mindmap branches.
 ]]></prompt>
