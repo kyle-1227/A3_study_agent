@@ -8,6 +8,10 @@ academic:
   max_tokens: 4096                      # Answer bubble output budget (doubled)
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
 
+checkpointer:
+  enabled: true                         # Enable LangGraph state snapshots for SSE final state
+  type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
+
 web_search:
   conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
   skip_general_when_conditional: true     # Skip old fan-out web_search for academic/planning

@@ -10,6 +10,8 @@ import logging
 import os
 import uuid
 
+from src.config import get_setting
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,27 @@ def get_db_uri() -> str | None:
     if uri and uri.startswith("postgresql+"):
         uri = "postgresql" + uri[uri.index("://"):]
     return uri
+
+
+def _env_bool(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def checkpointer_enabled() -> bool:
+    """Return whether LangGraph checkpointer support should be enabled."""
+    env_value = _env_bool("CHECKPOINTER_ENABLED")
+    if env_value is not None:
+        return env_value
+    return bool(get_setting("checkpointer.enabled", True))
+
+
+def checkpointer_type() -> str:
+    """Return configured checkpointer type."""
+    value = os.getenv("CHECKPOINTER_TYPE") or get_setting("checkpointer.type", "memory")
+    return str(value or "memory").strip().lower()
 
 
 def make_thread_config(thread_id: str | None = None) -> dict:

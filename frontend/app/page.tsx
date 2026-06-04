@@ -310,6 +310,34 @@ export default function Home() {
       return
     }
 
+    if (data.type === "resource_final") {
+      const finalAnswer = typeof data.answer === "string" ? data.answer : ""
+      const mindmap = data.resource_type === "mindmap" ? data.mindmap : null
+      const xmindUrl =
+        mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
+          ? `${API_BASE_URL}${mindmap.xmind_url}`
+          : mindmap?.xmind_url
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === asstId
+            ? {
+                ...msg,
+                content: finalAnswer || msg.content,
+                mindmap: mindmap
+                  ? {
+                      title: mindmap.title || "鐭ヨ瘑鐐规€濈淮瀵煎浘",
+                      tree: mindmap.tree,
+                      xmindUrl: xmindUrl || "",
+                    }
+                  : msg.mindmap,
+              }
+            : msg
+        )
+      )
+      return
+    }
+
     if (data.type === "done") {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
