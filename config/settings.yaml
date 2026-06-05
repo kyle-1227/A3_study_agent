@@ -38,13 +38,22 @@ web_search:
   retry_failed_subjects_first: true        # Give failed/no-result subjects the next retry opportunity
   stop_subject_after_success: true         # Do not spend more budget once a subject has enough usable Web supplement
   min_results_per_subject: 1               # Minimum usable results before a subject is considered successful
-  min_web_quality_score: 0.45              # Drop low-quality Web results below this score
-  prefer_quality_over_rank: true           # Sort Web results by quality before original rank
-  allow_low_quality_if_no_alternative: false # Keep low-quality results out of context by default
-  max_dropped_results_preview: 3           # A3_TRACE preview count for dropped low-quality results
   llm_decision_enabled: true              # Use LLM coverage decision before rule fallback
   max_purposes_per_subject: 4             # Cap purpose labels per subject decision
   max_plan_items_per_subject: 3           # Cap search queries per subject decision
+
+llm:
+  search_result_judge:
+    provider: openrouter
+    model: "openrouter/owl-alpha"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    streaming: false
+    structured_output: true
+    strict_schema: true
+    include_raw: true
 
 planner:
   search_timeout: 15                    # Policy search timeout (seconds)

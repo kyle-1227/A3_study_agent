@@ -71,6 +71,10 @@ class TutorState(TypedDict):
     web_supplement_success_subjects: list[str]                          # Subjects with usable web supplement
     web_supplement_failed_subjects: list[str]                           # Subjects that needed but failed web supplement
     web_supplement_partial_failed: bool                                 # At least one subject failed while another succeeded
+    web_judge_provider: str                                             # Search Result Judge provider
+    web_judge_model: str                                                # Search Result Judge model
+    web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
+    web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
     plan: str                                                           # Generated plans
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag

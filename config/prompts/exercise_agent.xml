@@ -49,4 +49,8 @@
     }
   ]
 }
+## Strict JSON key completeness
+- Every object in items must include exactly these keys: level, question, answer, explanation, pitfall, tags.
+- Do not omit explanation. Do not merge explanation into answer or pitfall.
+- If a field is short, still keep the key and use an empty string only as a last resort.
 ]]></prompt>

@@ -16,10 +16,11 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Literal
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
@@ -109,6 +110,51 @@ class CoverageDecisionOutput(BaseModel):
     subject_decisions: list[SubjectCoverageDecision] = Field(default_factory=list)
 
 
+class SearchResultJudgeItem(BaseModel):
+    """Strict judgment for one Tavily search result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(..., description="Index of the Tavily result in the input list.")
+    title: str = ""
+    url: str = ""
+    keep: bool = Field(..., description="Whether this result should enter context.")
+    final_quality: Literal["high", "medium", "low"] = "low"
+    relevance: Literal["high", "medium", "low"] = "low"
+    authority: Literal["high", "medium", "low"] = "low"
+    usefulness: Literal["high", "medium", "low"] = "low"
+    risk: Literal["high", "medium", "low"] = "low"
+    evidence_type: Literal[
+        "university_course_pdf",
+        "textbook_or_notes",
+        "official_documentation",
+        "open_exercise_set",
+        "github_or_notebook",
+        "educational_platform",
+        "quiz_or_practice_site",
+        "video",
+        "blog_or_article",
+        "unknown",
+    ] = "unknown"
+    use_case: Literal[
+        "core_evidence",
+        "exercise_material",
+        "implementation_reference",
+        "background_context",
+        "inspiration_only",
+        "discard",
+    ] = "discard"
+    reason: str = Field(..., description="Specific reason for keep/drop decision.")
+
+
+class SearchResultJudgeOutput(BaseModel):
+    """Strict Search Result Judge response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    judged_results: list[SearchResultJudgeItem] = Field(default_factory=list)
+
+
 ALLOWED_SUPPLEMENT_PURPOSES = {
     "repair",
     "coverage_expansion",
@@ -188,6 +234,10 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_success_subjects": [],
         "web_supplement_failed_subjects": [],
         "web_supplement_partial_failed": False,
+        "web_judge_provider": "openrouter",
+        "web_judge_model": "openrouter/owl-alpha",
+        "web_judge_failed_subjects": [],
+        "web_judge_rejected_all_subjects": [],
     }
 
 
@@ -642,6 +692,46 @@ def _tavily_exception_diagnostics(
     }
 
 
+def _coerce_web_search_diagnostics(
+    value: Any,
+    *,
+    query: str,
+    original_user_query: str = "",
+    subject: str = "",
+    role: str = "",
+    purpose: str = "",
+) -> dict:
+    """Normalize older list-style mocks into Tavily diagnostics shape."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {
+            "provider": "tavily",
+            "query": query,
+            "original_user_query": original_user_query,
+            "subject": subject,
+            "role": role,
+            "purpose": purpose,
+            "ok": True,
+            "results": value,
+            "result_count": len(value),
+            "error_type": "",
+            "error_message": "",
+            "raw_type": "list",
+            "raw_count": len(value),
+            "elapsed_ms": None,
+            "status_code": None,
+        }
+    return _tavily_exception_diagnostics(
+        query,
+        TypeError(f"Unexpected web search diagnostics type: {type(value).__name__}"),
+        original_user_query=original_user_query,
+        subject=subject,
+        role=role,
+        purpose=purpose,
+    )
+
+
 def _clip_text(value: Any, limit: int) -> str:
     text = str(value or "").replace("\n", " ").strip()
     return text[:limit] + ("..." if len(text) > limit else "")
@@ -805,107 +895,6 @@ def _normalize_purposes(values: list[str]) -> list[str]:
 def _normalize_supplement_query(query: str) -> str:
     max_chars = int(_web_setting("max_query_chars", 180))
     return _compact_web_query(query, max_chars=max_chars)
-
-
-def _query_tokens_for_quality(text: str) -> set[str]:
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+#-]*|[\u4e00-\u9fff]{2,}", str(text or "").lower())
-    stop = {"and", "or", "the", "with", "for", "from", "about", "course", "tutorial", "example", "examples"}
-    return {token for token in tokens if token not in stop and len(token) > 1}
-
-
-def _score_web_result_quality(result: dict, query: str, purpose: str, subject: str) -> dict:
-    """Score Web supplement result quality with provider-agnostic signals."""
-    title = str(result.get("title") or "")
-    url = str(result.get("url") or "")
-    content = str(result.get("content") or "")
-    haystack = f"{title} {url} {content}".lower()
-    url_lower = url.lower()
-    query_tokens = _query_tokens_for_quality(query)
-    subject_tokens = _query_tokens_for_quality(subject.replace("_", " "))
-    overlap = query_tokens.intersection(_query_tokens_for_quality(haystack))
-    subject_overlap = subject_tokens.intersection(_query_tokens_for_quality(haystack))
-    score = 0.35
-    reasons: list[str] = []
-
-    if any(signal in url_lower for signal in (".edu", ".ac.", "github.com", "docs.", "documentation", "colab", "kaggle.com")):
-        score += 0.18
-        reasons.append("high_quality_domain")
-    if any(term in haystack for term in ("official", "documentation", "docs", "guide", "manual", "course", "lecture", "notebook", "github")):
-        score += 0.12
-        reasons.append("educational_or_documentation_signal")
-    if query_tokens:
-        overlap_ratio = len(overlap) / max(len(query_tokens), 1)
-        score += min(0.2, overlap_ratio * 0.25)
-        if overlap_ratio >= 0.3:
-            reasons.append("query_keyword_overlap")
-    if subject_tokens and subject_overlap:
-        score += 0.08
-        reasons.append("subject_keyword_overlap")
-
-    purpose_terms = {
-        "tool_ecosystem": ("library", "framework", "tool", "docs", "documentation", "ecosystem"),
-        "case_example": ("case", "project", "example", "notebook", "demo"),
-        "implementation_detail": ("code", "step", "implementation", "github", "notebook"),
-        "application_context": ("application", "use case", "industry", "scenario"),
-        "latest_practice": ("2024", "2025", "2026", "latest", "trend", "current"),
-        "planning_support": ("roadmap", "curriculum", "syllabus", "learning path"),
-        "resource_enrichment": ("exercise", "practice", "assignment", "worksheet"),
-        "repair": ("concept", "definition", "lecture", "notes"),
-    }
-    if any(term in haystack for term in purpose_terms.get(purpose, ())):
-        score += 0.1
-        reasons.append("purpose_match")
-
-    if any(term in haystack for term in (
-        "ultimate quiz", "trivia", "practice-test", "practice test geeks",
-        "practicetestgeeks", "proprofs", "flashcards", "brain dump",
-        "exam prep", "certification dump", "ads",
-    )):
-        score -= 0.28
-        reasons.append("low_quality_quiz_or_exam_site")
-    if len(content.strip()) < 80:
-        score -= 0.12
-        reasons.append("content_too_short")
-    if query_tokens and len(overlap) == 0:
-        score -= 0.16
-        reasons.append("low_query_overlap")
-
-    score = max(0.0, min(1.0, score))
-    label = "high" if score >= 0.7 else ("medium" if score >= float(_web_setting("min_web_quality_score", 0.45)) else "low")
-    return {
-        "quality_score": round(score, 3),
-        "quality_label": label,
-        "quality_reasons": (reasons or ["neutral_signals"])[:5],
-    }
-
-
-def _filter_web_results_by_quality(
-    results: list[dict],
-    *,
-    query: str,
-    purpose: str,
-    subject: str,
-) -> tuple[list[dict], list[dict]]:
-    min_score = float(_web_setting("min_web_quality_score", 0.45))
-    prefer_quality = bool(_web_setting("prefer_quality_over_rank", True))
-    allow_low = bool(_web_setting("allow_low_quality_if_no_alternative", False))
-    accepted: list[dict] = []
-    dropped: list[dict] = []
-    for rank, result in enumerate(results):
-        quality = _score_web_result_quality(result, query, purpose, subject)
-        enriched = {**result, **quality, "_original_rank": rank}
-        if enriched["quality_score"] >= min_score:
-            accepted.append(enriched)
-        else:
-            dropped.append(enriched)
-    if not accepted and allow_low and dropped:
-        accepted = sorted(dropped, key=lambda item: item.get("quality_score", 0), reverse=True)[:1]
-        dropped = [item for item in dropped if item not in accepted]
-    if prefer_quality:
-        accepted.sort(key=lambda item: (item.get("quality_score", 0), -int(item.get("_original_rank", 0))), reverse=True)
-    else:
-        accepted.sort(key=lambda item: int(item.get("_original_rank", 0)))
-    return accepted, dropped
 
 
 def _build_web_attempt_schedule(targets: list[dict]) -> list[dict]:
@@ -1282,6 +1271,429 @@ async def _decide_web_supplement_with_llm(
         }
 
 
+def _judge_setting(key: str, default: Any) -> Any:
+    return get_setting(f"llm.search_result_judge.{key}", default)
+
+
+def _judge_provider() -> str:
+    return os.getenv("SEARCH_RESULT_JUDGE_PROVIDER", str(_judge_setting("provider", "openrouter"))).strip() or "openrouter"
+
+
+def _judge_model() -> str:
+    return os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "openrouter/owl-alpha"))).strip() or "openrouter/owl-alpha"
+
+
+def _judge_base_url() -> str:
+    return str(_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))).rstrip("/")
+
+
+def _judge_api_key_env() -> str:
+    return str(_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
+
+
+def _judge_api_key() -> str:
+    return os.getenv(_judge_api_key_env(), "").strip()
+
+
+def _judge_max_tokens() -> int:
+    try:
+        return int(_judge_setting("max_tokens", 1200))
+    except (TypeError, ValueError):
+        return 1200
+
+
+def _judge_temperature() -> float:
+    try:
+        return float(_judge_setting("temperature", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _judge_result_preview(results: list[dict], *, limit: int = 8) -> list[dict]:
+    previews: list[dict] = []
+    for index, result in enumerate(results[:limit]):
+        previews.append({
+            "index": index,
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "content_preview": str(result.get("content", ""))[:600],
+            "tavily_score": result.get("score"),
+        })
+    return previews
+
+
+def _judge_result_payload(results: list[dict]) -> list[dict]:
+    return [
+        {
+            "index": index,
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "content_preview": str(result.get("content", ""))[:900],
+            "tavily_score": result.get("score"),
+        }
+        for index, result in enumerate(results)
+    ]
+
+
+def _judge_http_headers(api_key: str) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    app_title = os.getenv("OPENROUTER_APP_TITLE", "").strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if app_title:
+        headers["X-Title"] = app_title
+    return headers
+
+
+def _judge_response_schema() -> dict[str, Any]:
+    return SearchResultJudgeOutput.model_json_schema()
+
+
+def _build_judge_messages(
+    *,
+    state: TutorState,
+    subject: str,
+    role: str,
+    purpose: str,
+    search_query: str,
+    raw_query: str,
+    original_user_query: str,
+    tavily_results: list[dict],
+    coverage_risk: str,
+    local_evidence_strength: str,
+) -> list[dict]:
+    prompt = _render_prompt(
+        "search_result_judge",
+        {
+            "original_user_query": original_user_query,
+            "learning_goal": str(state.get("learning_goal", "")),
+            "requested_resource_type": str(state.get("requested_resource_type", "")),
+            "subject": subject,
+            "role": role,
+            "purpose": purpose,
+            "coverage_risk": coverage_risk,
+            "local_evidence_strength": local_evidence_strength,
+            "raw_query": raw_query,
+            "search_query": search_query,
+            "tavily_results": json.dumps(_judge_result_payload(tavily_results), ensure_ascii=False),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict Web Search Result Judge. Return only a valid JSON object "
+                "matching the provided JSON schema. Do not answer the user."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    return {
+        "model": _judge_model(),
+        "messages": messages,
+        "temperature": _judge_temperature(),
+        "max_tokens": _judge_max_tokens(),
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "search_result_judge_output",
+                "strict": True,
+                "schema": _judge_response_schema(),
+            },
+        },
+    }
+
+
+def _openrouter_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    api_key = _judge_api_key()
+    if not api_key:
+        raise RuntimeError(f"{_judge_api_key_env()} is not configured")
+    timeout = max(5.0, _web_timeout_seconds() + 8.0)
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(
+            f"{_judge_base_url()}/chat/completions",
+            headers=_judge_http_headers(api_key),
+            json=payload,
+        )
+        status_code = response.status_code
+        response.raise_for_status()
+        return response.json(), status_code
+
+
+def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
+    choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
+    if not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    return _message_content_to_text(message.get("content", ""))
+
+
+def _judge_failure_debug(
+    *,
+    failure_phase: str,
+    original_user_query: str,
+    raw_query: str,
+    search_query: str,
+    subject: str,
+    role: str,
+    purpose: str,
+    tavily_results: list[dict],
+    error_type: str = "",
+    error_message: str = "",
+    status_code: Any = None,
+    parsing_error: str = "",
+    validation_error: str = "",
+    raw_output: str = "",
+) -> dict:
+    return {
+        "provider": _judge_provider(),
+        "model": _judge_model(),
+        "success": False,
+        "search_result_judge_failed": True,
+        "failure_phase": failure_phase,
+        "original_user_query": original_user_query,
+        "raw_query": raw_query,
+        "search_query": search_query,
+        "subject": subject,
+        "role": role,
+        "purpose": purpose,
+        "input_result_count": len(tavily_results),
+        "input_results_preview": _judge_result_preview(tavily_results),
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "error_type": error_type,
+        "error_message": sanitize_error_message(error_message, max_chars=2000),
+        "status_code": status_code,
+        "parsing_error": sanitize_error_message(parsing_error, max_chars=2000),
+        "validation_error": sanitize_error_message(validation_error, max_chars=4000),
+        "raw_output": raw_output[:12000],
+    }
+
+
+async def _judge_tavily_search_results_with_llm(
+    *,
+    state: TutorState,
+    subject: str,
+    role: str,
+    purpose: str,
+    search_query: str,
+    raw_query: str,
+    original_user_query: str,
+    tavily_results: list[dict],
+    coverage_risk: str = "",
+    local_evidence_strength: str = "",
+) -> tuple[list[dict], dict]:
+    """Judge Tavily results with OpenRouter strict schema. No rule fallback."""
+    if not tavily_results:
+        debug = {
+            "provider": _judge_provider(),
+            "model": _judge_model(),
+            "success": True,
+            "search_result_judge_failed": False,
+            "judge_rejected_all": False,
+            "original_user_query": original_user_query,
+            "raw_query": raw_query,
+            "search_query": search_query,
+            "subject": subject,
+            "role": role,
+            "purpose": purpose,
+            "input_result_count": 0,
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "judged_results": [],
+            "raw_preview": "",
+            "parsing_error": None,
+            "validation_error": None,
+        }
+        return [], debug
+
+    messages = _build_judge_messages(
+        state=state,
+        subject=subject,
+        role=role,
+        purpose=purpose,
+        search_query=search_query,
+        raw_query=raw_query,
+        original_user_query=original_user_query,
+        tavily_results=tavily_results,
+        coverage_risk=coverage_risk,
+        local_evidence_strength=local_evidence_strength,
+    )
+    request_payload = _judge_request_payload(messages)
+    raw_output = ""
+    status_code = None
+    try:
+        raw_response, status_code = await asyncio.to_thread(_openrouter_chat_completion, request_payload)
+        raw_output = _extract_openrouter_content(raw_response)
+        if not raw_output:
+            debug = _judge_failure_debug(
+                failure_phase="missing_judged_results",
+                original_user_query=original_user_query,
+                raw_query=raw_query,
+                search_query=search_query,
+                subject=subject,
+                role=role,
+                purpose=purpose,
+                tavily_results=tavily_results,
+                error_type="EmptyRawOutput",
+                error_message="Search Result Judge returned empty content",
+                status_code=status_code,
+                raw_output=json.dumps(raw_response, ensure_ascii=False, default=str)[:12000],
+            )
+            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return [], debug
+        try:
+            parsed_json = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            debug = _judge_failure_debug(
+                failure_phase="parsing_error",
+                original_user_query=original_user_query,
+                raw_query=raw_query,
+                search_query=search_query,
+                subject=subject,
+                role=role,
+                purpose=purpose,
+                tavily_results=tavily_results,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                parsing_error=str(exc),
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return [], debug
+        try:
+            parsed = SearchResultJudgeOutput.model_validate(parsed_json)
+        except ValidationError as exc:
+            debug = _judge_failure_debug(
+                failure_phase="validation_error",
+                original_user_query=original_user_query,
+                raw_query=raw_query,
+                search_query=search_query,
+                subject=subject,
+                role=role,
+                purpose=purpose,
+                tavily_results=tavily_results,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                validation_error=str(exc),
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return [], debug
+
+        judged = parsed.judged_results or []
+        indexes = [item.index for item in judged]
+        expected_indexes = set(range(len(tavily_results)))
+        if not judged:
+            failure_phase = "missing_judged_results"
+        elif len(indexes) != len(set(indexes)) or set(indexes) != expected_indexes:
+            failure_phase = "index_mismatch"
+        else:
+            failure_phase = ""
+        if failure_phase:
+            debug = _judge_failure_debug(
+                failure_phase=failure_phase,
+                original_user_query=original_user_query,
+                raw_query=raw_query,
+                search_query=search_query,
+                subject=subject,
+                role=role,
+                purpose=purpose,
+                tavily_results=tavily_results,
+                error_type="InvalidJudgedResults",
+                error_message=f"Expected indexes {sorted(expected_indexes)}, got {indexes}",
+                status_code=status_code,
+                validation_error=f"Expected indexes {sorted(expected_indexes)}, got {indexes}",
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return [], debug
+
+        judged_by_index = {item.index: item for item in judged}
+        accepted_results: list[dict] = []
+        judged_payload: list[dict] = []
+        for index, tavily_result in enumerate(tavily_results):
+            item = judged_by_index[index]
+            item_payload = item.model_dump()
+            judged_payload.append(item_payload)
+            if not item.keep:
+                continue
+            accepted_results.append({
+                **tavily_result,
+                "judge_keep": True,
+                "judge_quality": item.final_quality,
+                "judge_relevance": item.relevance,
+                "judge_authority": item.authority,
+                "judge_usefulness": item.usefulness,
+                "judge_risk": item.risk,
+                "evidence_type": item.evidence_type,
+                "use_case": item.use_case,
+                "judge_reason": item.reason,
+                "judge_index": index,
+                "judge_title": item.title,
+                "judge_url": item.url,
+            })
+
+        debug = {
+            "provider": _judge_provider(),
+            "model": _judge_model(),
+            "success": True,
+            "search_result_judge_failed": False,
+            "judge_rejected_all": not bool(accepted_results),
+            "original_user_query": original_user_query,
+            "raw_query": raw_query,
+            "search_query": search_query,
+            "subject": subject,
+            "role": role,
+            "purpose": purpose,
+            "input_result_count": len(tavily_results),
+            "accepted_count": len(accepted_results),
+            "rejected_count": len(tavily_results) - len(accepted_results),
+            "judged_results": judged_payload,
+            "raw_preview": raw_output[:4000],
+            "parsing_error": None,
+            "validation_error": None,
+            "status_code": status_code,
+        }
+        emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+        return accepted_results, debug
+    except Exception as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            error_message = exc.response.text or str(exc)
+        else:
+            error_message = str(exc)
+        error_type = "MissingApiKey" if _judge_api_key_env() in str(exc) else type(exc).__name__
+        failure_phase = "missing_api_key" if error_type == "MissingApiKey" else "structured_output_request_failed"
+        debug = _judge_failure_debug(
+            failure_phase=failure_phase,
+            original_user_query=original_user_query,
+            raw_query=raw_query,
+            search_query=search_query,
+            subject=subject,
+            role=role,
+            purpose=purpose,
+            tavily_results=tavily_results,
+            error_type=error_type,
+            error_message=error_message,
+            status_code=status_code,
+            raw_output=raw_output,
+        )
+        emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+        return [], debug
+
+
 async def _run_dynamic_web_supplement(
     *,
     state: TutorState,
@@ -1297,7 +1709,6 @@ async def _run_dynamic_web_supplement(
     min_results_per_subject = int(_web_setting("min_results_per_subject", 1))
     stop_after_success = bool(_web_setting("stop_subject_after_success", True))
     retry_failed_first = bool(_web_setting("retry_failed_subjects_first", True))
-    max_dropped_preview = int(_web_setting("max_dropped_results_preview", 3))
     timeout = _web_timeout_seconds()
     attempts = 0
     attempts_by_subject: Counter = Counter()
@@ -1384,6 +1795,14 @@ async def _run_dynamic_web_supplement(
                 ),
                 timeout=timeout,
             )
+            diagnostics = _coerce_web_search_diagnostics(
+                diagnostics,
+                query=query,
+                original_user_query=original_user_query,
+                subject=subject,
+                role=str(target.get("role", "")),
+                purpose=purpose,
+            )
         except asyncio.TimeoutError:
             timed_out = True
             diagnostics = _tavily_exception_diagnostics(
@@ -1409,20 +1828,38 @@ async def _run_dynamic_web_supplement(
         if elapsed_ms is None:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         results = diagnostics.get("results", []) or []
-        quality_results, dropped_results = _filter_web_results_by_quality(
-            results,
-            query=query,
-            purpose=purpose,
-            subject=subject,
-        )
-        used_results = quality_results[:max_results]
+        accepted_results: list[dict] = []
+        judge_debug: dict = {
+            "success": False,
+            "search_result_judge_failed": False,
+            "judge_rejected_all": False,
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "failure_phase": "",
+        }
+        if results:
+            accepted_results, judge_debug = await _judge_tavily_search_results_with_llm(
+                state=state,
+                subject=subject,
+                role=str(target.get("role", "")),
+                purpose=purpose,
+                search_query=query,
+                raw_query=raw_query,
+                original_user_query=original_user_query,
+                tavily_results=results,
+                coverage_risk=str(target.get("coverage_risk", "")),
+                local_evidence_strength=str(target.get("local_evidence_strength", "")),
+            )
+        used_results = accepted_results[:max_results]
         for result in used_results:
             docs.append({
                 "type": "web_supplement",
+                "source_type": "web",
+                "provider": "tavily",
                 "content": result.get("content", ""),
                 "title": result.get("title", ""),
                 "url": result.get("url", ""),
-                "source": result.get("url") or result.get("title") or "web_search",
+                "source": result.get("url") or result.get("title") or "tavily",
                 "supplement_for_subject": subject,
                 "supplement_for_role": target.get("role", ""),
                 "supplement_purpose": purpose,
@@ -1434,9 +1871,16 @@ async def _run_dynamic_web_supplement(
                 "branch_status": target.get("branch_status", ""),
                 "coverage_risk": target.get("coverage_risk", ""),
                 "local_evidence_strength": target.get("local_evidence_strength", ""),
-                "quality_score": result.get("quality_score", 0.0),
-                "quality_label": result.get("quality_label", "unknown"),
-                "quality_reasons": result.get("quality_reasons", []),
+                "judge_keep": True,
+                "judge_quality": result.get("judge_quality", "low"),
+                "judge_relevance": result.get("judge_relevance", "low"),
+                "judge_authority": result.get("judge_authority", "low"),
+                "judge_usefulness": result.get("judge_usefulness", "low"),
+                "judge_risk": result.get("judge_risk", "low"),
+                "evidence_type": result.get("evidence_type", "unknown"),
+                "use_case": result.get("use_case", "discard"),
+                "judge_reason": result.get("judge_reason", ""),
+                "tavily_score": result.get("score"),
             })
         if used_results:
             subject_status["success"] = True
@@ -1448,8 +1892,18 @@ async def _run_dynamic_web_supplement(
             subject_status["last_error_message"] = ""
         else:
             subject_status["failed_attempts"] = int(subject_status.get("failed_attempts") or 0) + 1
-            subject_status["last_error_type"] = diagnostics.get("error_type") or "NoUsableWebResults"
-            subject_status["last_error_message"] = diagnostics.get("error_message") or "no usable results after quality filter"
+            if judge_debug.get("search_result_judge_failed"):
+                subject_status["last_error_type"] = "SearchResultJudgeFailed"
+                subject_status["last_failure_reason"] = judge_debug.get("failure_phase", "search_result_judge_failed")
+                subject_status["last_error_message"] = judge_debug.get("error_message", "")
+            elif judge_debug.get("judge_rejected_all"):
+                subject_status["last_error_type"] = "JudgeRejectedAll"
+                subject_status["last_failure_reason"] = "judge_rejected_all"
+                subject_status["last_error_message"] = "search result judge rejected all Tavily results"
+            else:
+                subject_status["last_error_type"] = diagnostics.get("error_type") or "NoWebResults"
+                subject_status["last_failure_reason"] = diagnostics.get("error_type") or "timeout_or_no_results"
+                subject_status["last_error_message"] = diagnostics.get("error_message") or "no Tavily results"
 
         attempt_payload = {
             "branch_mode": branch_mode,
@@ -1471,8 +1925,14 @@ async def _run_dynamic_web_supplement(
             "status_code": diagnostics.get("status_code"),
             "raw_result_count": len(results),
             "result_count": diagnostics.get("result_count", len(results)),
-            "quality_filtered_count": len(quality_results),
-            "dropped_by_quality_count": len(dropped_results),
+            "search_result_judge_enabled": True,
+            "search_result_judge_success": bool(judge_debug.get("success")),
+            "search_result_judge_failed": bool(judge_debug.get("search_result_judge_failed")),
+            "judge_rejected_all": bool(judge_debug.get("judge_rejected_all")),
+            "judge_failure_phase": judge_debug.get("failure_phase", ""),
+            "judge_accepted_count": judge_debug.get("accepted_count", 0),
+            "judge_rejected_count": judge_debug.get("rejected_count", 0),
+            "legacy_quality_filter_disabled": True,
             "used_result_count": len(used_results),
             "elapsed_ms": elapsed_ms,
             "error_type": diagnostics.get("error_type", ""),
@@ -1481,21 +1941,14 @@ async def _run_dynamic_web_supplement(
                 {
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "quality_score": item.get("quality_score"),
-                    "quality_label": item.get("quality_label"),
-                    "quality_reasons": item.get("quality_reasons", []),
+                    "judge_quality": item.get("judge_quality"),
+                    "judge_relevance": item.get("judge_relevance"),
+                    "judge_authority": item.get("judge_authority"),
+                    "evidence_type": item.get("evidence_type"),
+                    "use_case": item.get("use_case"),
+                    "judge_reason": item.get("judge_reason", ""),
                 }
                 for item in used_results[:3]
-            ],
-            "dropped_results_preview": [
-                {
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "quality_score": item.get("quality_score"),
-                    "quality_label": item.get("quality_label"),
-                    "quality_reasons": item.get("quality_reasons", []),
-                }
-                for item in dropped_results[:max_dropped_preview]
             ],
         }
         attempt_logs.append(attempt_payload)
@@ -1526,6 +1979,14 @@ async def _run_dynamic_web_supplement(
         "status_by_subject": status_by_subject,
         "success_subjects": success_subjects,
         "failed_subjects": failed_subjects,
+        "judge_failed_subjects": sorted(
+            subject for subject, status in status_by_subject.items()
+            if status.get("last_error_type") == "SearchResultJudgeFailed"
+        ),
+        "judge_rejected_all_subjects": sorted(
+            subject for subject, status in status_by_subject.items()
+            if status.get("last_error_type") == "JudgeRejectedAll"
+        ),
         "partial_failed": bool(success_subjects and failed_subjects),
     }
 
@@ -1946,9 +2407,16 @@ async def rag_retrieve(state: TutorState) -> dict:
         web_status_by_subject = web_debug.get("status_by_subject", {})
         web_success_subjects = web_debug.get("success_subjects", [])
         web_failed_subjects = web_debug.get("failed_subjects", [])
+        web_judge_failed_subjects = web_debug.get("judge_failed_subjects", [])
+        web_judge_rejected_all_subjects = web_debug.get("judge_rejected_all_subjects", [])
         web_supplement_failed = web_supplement_needed and not web_success_subjects
         web_supplement_partial_failed = bool(web_success_subjects and web_failed_subjects)
-        web_supplement_failure_reason = "tavily_timeout_or_error" if web_supplement_failed else ""
+        if web_supplement_failed and web_judge_failed_subjects:
+            web_supplement_failure_reason = "search_result_judge_failed"
+        elif web_supplement_failed and web_judge_rejected_all_subjects:
+            web_supplement_failure_reason = "judge_rejected_all"
+        else:
+            web_supplement_failure_reason = "tavily_timeout_or_error" if web_supplement_failed else ""
 
         selected_local_docs, quota_debug = _select_docs_with_subject_quota(
             local_docs,
@@ -1960,6 +2428,12 @@ async def rag_retrieve(state: TutorState) -> dict:
         role_counter = Counter(doc.get("retrieval_role") for doc in selected_docs)
         web_supplement_purposes = Counter(
             doc.get("supplement_purpose") for doc in web_supplement_docs if doc.get("supplement_purpose")
+        )
+        web_evidence_use_cases = Counter(
+            doc.get("use_case") for doc in web_supplement_docs if doc.get("use_case")
+        )
+        web_evidence_types = Counter(
+            doc.get("evidence_type") for doc in web_supplement_docs if doc.get("evidence_type")
         )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
@@ -1986,6 +2460,16 @@ async def rag_retrieve(state: TutorState) -> dict:
                 "web_supplement_status_by_subject": web_status_by_subject,
                 "web_supplement_success_subjects": web_success_subjects,
                 "web_supplement_failed_subjects": web_failed_subjects,
+                "web_evidence_count": len(web_supplement_docs),
+                "web_evidence_provider": "tavily",
+                "web_judge_provider": _judge_provider(),
+                "web_judge_model": _judge_model(),
+                "web_judge_failed": bool(web_judge_failed_subjects),
+                "web_judge_failed_subjects": web_judge_failed_subjects,
+                "web_judge_rejected_all_subjects": web_judge_rejected_all_subjects,
+                "web_evidence_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplement_docs if doc.get("supplement_for_subject")}),
+                "web_evidence_use_cases": dict(web_evidence_use_cases),
+                "web_evidence_types": dict(web_evidence_types),
                 "coverage_decision_summary": decision_debug.get("decision_summary", ""),
                 "dynamic_web_attempts_used": web_debug.get("attempts_used", 0),
                 "dynamic_web_max_total_attempts": web_debug.get("max_total_attempts", 0),
@@ -1998,9 +2482,10 @@ async def rag_retrieve(state: TutorState) -> dict:
                         "branch_status": doc.get("branch_status"),
                         "weak_reason": doc.get("weak_reason"),
                         "supplement_purpose": doc.get("supplement_purpose"),
-                        "quality_score": doc.get("quality_score"),
-                        "quality_label": doc.get("quality_label"),
-                        "quality_reasons": doc.get("quality_reasons", []),
+                        "judge_quality": doc.get("judge_quality"),
+                        "judge_relevance": doc.get("judge_relevance"),
+                        "evidence_type": doc.get("evidence_type"),
+                        "use_case": doc.get("use_case"),
                         "source": doc.get("source"),
                         "score": doc.get("score"),
                         "rerank_score": doc.get("rerank_score"),
@@ -2029,6 +2514,10 @@ async def rag_retrieve(state: TutorState) -> dict:
         "web_supplement_success_subjects": web_success_subjects,
         "web_supplement_failed_subjects": web_failed_subjects,
         "web_supplement_partial_failed": web_supplement_partial_failed,
+        "web_judge_provider": _judge_provider(),
+        "web_judge_model": _judge_model(),
+        "web_judge_failed_subjects": web_judge_failed_subjects,
+        "web_judge_rejected_all_subjects": web_judge_rejected_all_subjects,
     }
 
 _SEARCH_TIMEOUT = _web_timeout_seconds()
@@ -2114,6 +2603,11 @@ async def web_search(state: TutorState) -> dict:
                 ),
                 timeout=_SEARCH_TIMEOUT,
             )
+            diagnostics = _coerce_web_search_diagnostics(
+                diagnostics,
+                query=query,
+                original_user_query=_last_human_query(state),
+            )
             search_results = diagnostics.get("results", [])
             span.set_attribute("search.result_count", len(search_results))
             span.set_attribute("search.timed_out", False)
@@ -2190,14 +2684,17 @@ def _format_retrieved(docs: list[dict]) -> str:
             subject = d.get("supplement_for_subject") or d.get("retrieval_subject", "unknown")
             role = d.get("supplement_for_role") or d.get("retrieval_role", "supporting_context")
             purpose = d.get("supplement_purpose", "coverage_expansion")
-            quality_label = d.get("quality_label", "unknown")
-            quality_score = d.get("quality_score", "N/A")
-            quality_reasons = ", ".join(str(item) for item in d.get("quality_reasons", [])[:4])
+            judge_quality = d.get("judge_quality", "unknown")
+            judge_relevance = d.get("judge_relevance", "unknown")
+            evidence_type = d.get("evidence_type", "unknown")
+            use_case = d.get("use_case", "unknown")
+            judge_reason = d.get("judge_reason", "")
             parts.append(
                 f"【{subject}｜{role}｜Web 补充｜{purpose}】\n"
                 "说明：以下资料用于补充该 subject 的覆盖广度、工具生态或实践背景，不属于本地课程知识库。\n"
                 f"用途：{purpose_notes.get(purpose, '仅作为外部补充资料谨慎使用。')}\n"
-                f"Web quality: {quality_label} ({quality_score}); reasons: {quality_reasons}\n"
+                f"Judge: quality={judge_quality}, relevance={judge_relevance}, evidence_type={evidence_type}, use_case={use_case}\n"
+                f"Judge reason: {judge_reason}\n"
                 f"补充原因：{d.get('supplement_reason', '')}\n"
                 f"来源：{d.get('title') or d.get('source', 'web_search')} {d.get('url', '')}\n"
                 f"内容：{d.get('content', '')}"
@@ -2306,6 +2803,14 @@ async def generate_answer(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
+            "web_evidence_count": len(web_supplements),
+            "web_evidence_provider": "tavily",
+            "web_judge_provider": state.get("web_judge_provider", _judge_provider()),
+            "web_judge_model": state.get("web_judge_model", _judge_model()),
+            "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
+            "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
+            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_supplements if doc.get("use_case")}),
+            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_supplements if doc.get("evidence_type")}),
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),

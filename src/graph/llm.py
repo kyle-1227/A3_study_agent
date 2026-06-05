@@ -48,12 +48,31 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     from ``settings.yaml``.  Falls back to ``DEEPSEEK_*`` env vars when a
     node has no explicit override in settings.
     """
-    model = get_setting(f"{node_name}.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
-    api_key_env = get_setting(f"{node_name}.api_key_env", "DEEPSEEK_API_KEY")
-    base_url = get_setting(f"{node_name}.base_url", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-    temperature = get_setting(f"{node_name}.temperature", 0.7)
-    max_tokens = get_setting(f"{node_name}.max_tokens", None)
-    streaming = get_setting(f"{node_name}.streaming", None)
+    nested_prefix = f"llm.{node_name}"
+    model = get_setting(
+        f"{nested_prefix}.model",
+        get_setting(f"{node_name}.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+    )
+    api_key_env = get_setting(
+        f"{nested_prefix}.api_key_env",
+        get_setting(f"{node_name}.api_key_env", "DEEPSEEK_API_KEY"),
+    )
+    base_url = get_setting(
+        f"{nested_prefix}.base_url",
+        get_setting(f"{node_name}.base_url", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")),
+    )
+    temperature = get_setting(
+        f"{nested_prefix}.temperature",
+        get_setting(f"{node_name}.temperature", 0.7),
+    )
+    max_tokens = get_setting(
+        f"{nested_prefix}.max_tokens",
+        get_setting(f"{node_name}.max_tokens", None),
+    )
+    streaming = get_setting(
+        f"{nested_prefix}.streaming",
+        get_setting(f"{node_name}.streaming", None),
+    )
 
     defaults = dict(
         model=model,
@@ -65,6 +84,16 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
         defaults["max_tokens"] = max_tokens
     if streaming is not None:
         defaults["streaming"] = streaming
+    if "openrouter.ai" in str(base_url).lower():
+        headers = {}
+        referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+        app_title = os.getenv("OPENROUTER_APP_TITLE", "").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if app_title:
+            headers["X-Title"] = app_title
+        if headers:
+            defaults["default_headers"] = headers
     defaults.update(overrides)
     return ChatOpenAI(**defaults)
 

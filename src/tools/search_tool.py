@@ -181,7 +181,12 @@ def search_with_diagnostics(
                 json=_request_payload(query, result_limit),
             )
             status_code = response.status_code
-            response.raise_for_status()
+            if status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"HTTP {status_code}",
+                    request=response.request,
+                    response=response,
+                )
             raw = response.json()
     except httpx.TimeoutException:
         return _empty_diagnostics(

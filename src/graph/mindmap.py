@@ -219,6 +219,7 @@ async def mindmap_planner(state: TutorState) -> dict:
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     context = state.get("context", [])
+    web_supplements = [item for item in context if item.get("type") == "web_supplement"]
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -231,7 +232,7 @@ async def mindmap_planner(state: TutorState) -> dict:
             "subject_relation_summary": state.get("subject_relation_summary", ""),
             "context_count": len(context),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
-            "web_supplement_count": len([item for item in context if item.get("type") == "web_supplement"]),
+            "web_supplement_count": len(web_supplements),
             "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
@@ -239,6 +240,14 @@ async def mindmap_planner(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
+            "web_evidence_count": len(web_supplements),
+            "web_evidence_provider": "tavily",
+            "web_judge_provider": state.get("web_judge_provider", "openrouter"),
+            "web_judge_model": state.get("web_judge_model", "openrouter/owl-alpha"),
+            "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
+            "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
+            "web_evidence_use_cases": sorted({item.get("use_case") for item in web_supplements if item.get("use_case")}),
+            "web_evidence_types": sorted({item.get("evidence_type") for item in web_supplements if item.get("evidence_type")}),
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
