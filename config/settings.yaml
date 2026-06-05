@@ -17,7 +17,7 @@ web_search:
   conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
   skip_general_when_conditional: true     # Skip old fan-out web_search for academic/planning
   skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
-  timeout_seconds: 8                      # Timeout per Tavily web supplement attempt
+  timeout_seconds: 30                      # Timeout per Tavily web supplement attempt
   max_total_attempts: 3                   # Global dynamic web attempts per request
   max_attempts_per_subject: 2             # Dynamic web attempts per subject branch
   max_supplement_subjects: 2              # Max subjects selected for web supplement

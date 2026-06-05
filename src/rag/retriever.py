@@ -149,7 +149,8 @@ def _bm25_search(
         results.append({
             "content": doc["content"],
             "source": doc["source"],
-            "score": round(float(score), 4),
+            "bm25_score": round(float(score), 4),
+            "bm25_score_direction": "higher_is_better",
             "metadata": doc["metadata"],
         })
         if len(results) >= top_k:
@@ -170,7 +171,7 @@ def _merge_and_dedup(
     seen: set[str] = set()
     merged: list[dict[str, Any]] = []
 
-    # Vector results first (they have calibrated relevance scores)
+    # Vector results first; raw vector scores are backend-specific diagnostics.
     for doc in vector_results:
         h = _content_hash(doc["content"])
         if h not in seen:
@@ -224,18 +225,20 @@ def retrieve(
     elif len(conditions) > 1:
         where_filter = {"$and": conditions}
 
-    results = vectorstore.similarity_search_with_relevance_scores(
+    results = vectorstore.similarity_search_with_score(
         query,
         k=vector_top_k,
         filter=where_filter,
     )
 
     vector_docs: list[dict[str, Any]] = []
-    for doc, score in results:
+    for doc, raw_score in results:
         vector_docs.append({
             "content": doc.page_content,
             "source": doc.metadata.get("source_file", "unknown"),
-            "score": round(score, 4),
+            "raw_vector_score": round(float(raw_score), 4),
+            "raw_vector_score_source": "chroma_similarity_search_with_score",
+            "raw_vector_score_direction": "backend_specific",
             "metadata": doc.metadata,
         })
 
@@ -253,9 +256,18 @@ def retrieve(
 
     # --- 5. Determine hit ---
     is_hit = False
+    reranker_failed = False
     if ranked:
-        # Use rerank_score if available, else original score
-        best_score = ranked[0].get("rerank_score", ranked[0].get("score", 0))
-        is_hit = best_score >= threshold
+        rerank_scores = [
+            doc.get("rerank_score")
+            for doc in ranked
+            if doc.get("rerank_score") is not None
+        ]
+        reranker_failed = not bool(rerank_scores)
+        if rerank_scores:
+            try:
+                is_hit = float(rerank_scores[0]) >= float(threshold)
+            except (TypeError, ValueError):
+                is_hit = False
 
-    return {"docs": ranked, "is_hit": is_hit}
+    return {"docs": ranked, "is_hit": is_hit, "reranker_failed": reranker_failed}

@@ -273,7 +273,11 @@ def _top_doc_summaries(docs: list[dict], limit: int = 5) -> list[dict]:
             "rank": i + 1,
             "source": doc.get("source"),
             "metadata_subject": _doc_subject(doc),
-            "score": doc.get("score"),
+            "raw_vector_score": doc.get("raw_vector_score"),
+            "raw_vector_score_source": doc.get("raw_vector_score_source"),
+            "raw_vector_score_direction": doc.get("raw_vector_score_direction"),
+            "bm25_score": doc.get("bm25_score"),
+            "bm25_score_direction": doc.get("bm25_score_direction"),
             "rerank_score": doc.get("rerank_score"),
         }
         for i, doc in enumerate(docs[:limit])
@@ -290,7 +294,12 @@ def _roles_used(docs: list[dict]) -> list[str]:
 
 def _score_doc(doc: dict) -> float:
     """Best available score for sorting retrieved docs."""
-    value = doc.get("rerank_score", doc.get("score", 0))
+    if doc.get("rerank_score") is not None:
+        value = doc.get("rerank_score")
+    elif doc.get("bm25_score") is not None:
+        value = doc.get("bm25_score")
+    else:
+        value = 0
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -298,10 +307,25 @@ def _score_doc(doc: dict) -> float:
 
 
 def _best_doc_score(docs: list[dict]) -> float:
-    """Return the best rerank/score value available for a doc list."""
+    """Return the best rerank score, or a non-authoritative fallback signal."""
     if not docs:
         return 0.0
+    rerank_scores = [
+        _score_doc(doc)
+        for doc in docs
+        if doc.get("rerank_score") is not None
+    ]
+    if rerank_scores:
+        return max(rerank_scores)
     return max(_score_doc(doc) for doc in docs)
+
+
+def _has_rerank_score(docs: list[dict]) -> bool:
+    return any(doc.get("rerank_score") is not None for doc in docs)
+
+
+def _branch_status_score_source(docs: list[dict]) -> str:
+    return "rerank_score" if _has_rerank_score(docs) else "fallback_raw_retrieval_signal"
 
 
 def _evaluate_retrieval_branch(
@@ -311,6 +335,7 @@ def _evaluate_retrieval_branch(
     docs: list[dict],
     is_hit: bool,
     subject_mismatch_count: int,
+    reranker_failed: bool = False,
 ) -> dict:
     """
     Classify one retrieval_plan branch by local evidence quality.
@@ -320,7 +345,10 @@ def _evaluate_retrieval_branch(
     """
     del subject, role
     doc_count = len(docs)
+    score_source = _branch_status_score_source(docs)
+    has_rerank_score = score_source == "rerank_score"
     best_score = _best_doc_score(docs)
+    best_rerank_score = best_score if has_rerank_score else 0.0
     usable_threshold = float(get_setting("rag.branch_usable_threshold", 0.45))
     strong_threshold = float(get_setting("rag.branch_strong_threshold", 0.7))
 
@@ -330,6 +358,9 @@ def _evaluate_retrieval_branch(
     elif subject_mismatch_count > 0:
         branch_status = "weak"
         weak_reason = "subject_mismatch"
+    elif not has_rerank_score:
+        branch_status = "weak" if reranker_failed or not is_hit else "usable"
+        weak_reason = "reranker_failed" if reranker_failed else ("retrieve_is_hit_false" if not is_hit else "")
     elif not is_hit:
         branch_status = "weak"
         weak_reason = "retrieve_is_hit_false"
@@ -346,7 +377,10 @@ def _evaluate_retrieval_branch(
     return {
         "branch_status": branch_status,
         "weak_reason": weak_reason,
-        "best_rerank_score": best_score,
+        "best_rerank_score": best_rerank_score,
+        "best_retrieval_score": best_score,
+        "branch_status_score_source": score_source,
+        "reranker_failed": bool(reranker_failed),
         "doc_count": doc_count,
         "should_use_in_generation": branch_status in {"strong", "usable", "weak"},
         "needs_supplement": branch_status in {"weak", "missing"},
@@ -858,13 +892,16 @@ def _build_branch_summaries(
             "branch_status": branch_eval.get("branch_status", "unknown"),
             "weak_reason": branch_eval.get("weak_reason", ""),
             "best_rerank_score": branch_eval.get("best_rerank_score", 0.0),
+            "branch_status_score_source": branch_eval.get("branch_status_score_source", ""),
+            "reranker_failed": branch_eval.get("reranker_failed", False),
             "used_doc_count": len(docs),
             "top_docs": [
                 {
                     "source": doc.get("source"),
                     "metadata_subject": _doc_subject(doc),
                     "rerank_score": doc.get("rerank_score"),
-                    "score": doc.get("score"),
+                    "raw_vector_score": doc.get("raw_vector_score"),
+                    "bm25_score": doc.get("bm25_score"),
                     "preview": _clip_text(doc.get("content", ""), 160),
                 }
                 for doc in docs[:3]
@@ -2241,6 +2278,7 @@ async def rag_retrieve(state: TutorState) -> dict:
                 docs=raw_docs,
                 is_hit=result.get("is_hit", False),
                 subject_mismatch_count=mismatch_count,
+                reranker_failed=bool(result.get("reranker_failed")),
             )
             # TEMP A3_TRACE: remove after multi-subject retrieval validation.
             emit_a3_trace(
@@ -2258,6 +2296,8 @@ async def rag_retrieve(state: TutorState) -> dict:
                     "branch_status": branch_eval["branch_status"],
                     "weak_reason": branch_eval["weak_reason"],
                     "best_rerank_score": branch_eval["best_rerank_score"],
+                    "branch_status_score_source": branch_eval["branch_status_score_source"],
+                    "reranker_failed": branch_eval["reranker_failed"],
                     "top_docs": _top_doc_summaries(raw_docs),
                 },
                 state=state,
@@ -2302,6 +2342,7 @@ async def rag_retrieve(state: TutorState) -> dict:
                 docs=used_docs,
                 is_hit=result.get("is_hit", False),
                 subject_mismatch_count=subject_mismatch_count,
+                reranker_failed=bool(result.get("reranker_failed")),
             )
             branch_evals[plan_subject] = branch_eval
 
@@ -2324,6 +2365,8 @@ async def rag_retrieve(state: TutorState) -> dict:
                     "branch_status": branch_eval["branch_status"],
                     "weak_reason": branch_eval["weak_reason"],
                     "best_rerank_score": branch_eval["best_rerank_score"],
+                    "branch_status_score_source": branch_eval["branch_status_score_source"],
+                    "reranker_failed": branch_eval["reranker_failed"],
                     "needs_supplement": branch_eval["needs_supplement"],
                     "top_docs": _top_doc_summaries(used_docs),
                 },
@@ -2343,10 +2386,11 @@ async def rag_retrieve(state: TutorState) -> dict:
                     "branch_status": "missing",
                     "weak_reason": "no_docs",
                     "best_rerank_score": 0.0,
+                    "branch_status_score_source": "fallback_raw_retrieval_signal",
+                    "reranker_failed": bool(result.get("reranker_failed")),
                     "needs_supplement": True,
                     "content": "No effective local course material was retrieved for this subject branch.",
                     "source": "local_rag_diagnostic",
-                    "score": 0.0,
                 })
                 continue
 
@@ -2364,6 +2408,8 @@ async def rag_retrieve(state: TutorState) -> dict:
                     "branch_status": branch_eval["branch_status"],
                     "weak_reason": branch_eval["weak_reason"],
                     "best_rerank_score": branch_eval["best_rerank_score"],
+                    "branch_status_score_source": branch_eval["branch_status_score_source"],
+                    "reranker_failed": branch_eval["reranker_failed"],
                     "needs_supplement": branch_eval["needs_supplement"],
                     **doc,
                 })
@@ -2487,8 +2533,14 @@ async def rag_retrieve(state: TutorState) -> dict:
                         "evidence_type": doc.get("evidence_type"),
                         "use_case": doc.get("use_case"),
                         "source": doc.get("source"),
-                        "score": doc.get("score"),
+                        "raw_vector_score": doc.get("raw_vector_score"),
+                        "raw_vector_score_source": doc.get("raw_vector_score_source"),
+                        "raw_vector_score_direction": doc.get("raw_vector_score_direction"),
+                        "bm25_score": doc.get("bm25_score"),
+                        "bm25_score_direction": doc.get("bm25_score_direction"),
                         "rerank_score": doc.get("rerank_score"),
+                        "branch_status_score_source": doc.get("branch_status_score_source"),
+                        "reranker_failed": doc.get("reranker_failed"),
                     }
                     for doc in selected_docs
                 ],
@@ -2499,7 +2551,7 @@ async def rag_retrieve(state: TutorState) -> dict:
         span.set_attribute("rag.doc_count", len(selected_docs))
         span.set_attribute("rag.is_hit", bool(selected_docs))
         if selected_docs:
-            span.set_attribute("rag.top_score", _score_doc(selected_docs[0]))
+            span.set_attribute("rag.top_retrieval_sort_score", _score_doc(selected_docs[0]))
 
     return {
         "context": selected_docs,
@@ -2661,6 +2713,19 @@ async def web_search(state: TutorState) -> dict:
 
 # ── Node 3: generate answer ──────────────────────────────────────
 
+def _format_retrieval_score_note(doc: dict) -> str:
+    """Format retrieval diagnostics without treating raw Chroma scores as relevance."""
+    if doc.get("rerank_score") is not None:
+        return f"rerank_score={doc.get('rerank_score')}"
+    if doc.get("bm25_score") is not None:
+        return f"bm25_score={doc.get('bm25_score')} (higher_is_better)"
+    if doc.get("raw_vector_score") is not None:
+        source = doc.get("raw_vector_score_source") or "chroma_similarity_search_with_score"
+        direction = doc.get("raw_vector_score_direction") or "backend_specific"
+        return f"raw_vector_score={doc.get('raw_vector_score')} ({source}; {direction}; not normalized relevance)"
+    return "score unavailable"
+
+
 def _format_retrieved(docs: list[dict]) -> str:
     if not docs:
         return "无相关参考资料。"
@@ -2720,7 +2785,7 @@ def _format_retrieved(docs: list[dict]) -> str:
             parts.append(
                 f"【{subject}｜{role}｜依据】\n"
                 f"{evidence_note}\n"
-                f"[{i}] 来源：{d.get('source', '未知')}（相关度：{d.get('score', 'N/A')}）\n"
+                f"[{i}] 来源：{d.get('source', '未知')}（检索分数诊断：{_format_retrieval_score_note(d)}）\n"
                 f"用途：{purpose}\n"
                 f"关系：{relation}\n"
                 f"检索 query：{d.get('retrieval_query', '')}\n"
@@ -2730,7 +2795,7 @@ def _format_retrieved(docs: list[dict]) -> str:
 
     parts = []
     for i, d in enumerate(docs, 1):
-        parts.append(f"[{i}] 来源：{d.get('source', '未知')}（相关度：{d.get('score', 'N/A')}）\n{d.get('content', '')}")
+        parts.append(f"[{i}] 来源：{d.get('source', '未知')}（检索分数诊断：{_format_retrieval_score_note(d)}）\n{d.get('content', '')}")
     return "\n\n".join(parts)
 
 

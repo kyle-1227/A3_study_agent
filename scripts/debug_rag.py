@@ -135,7 +135,11 @@ def print_docs(docs: list[dict[str, Any]], expected_subject: str, rank_prefix: s
         print(f"{rank_prefix} {i}")
         print(f"subject: {_subject_of(doc)}")
         print(f"source: {_source_of(doc)}")
-        print(f"score: {doc.get('score')}")
+        print(f"raw_vector_score: {doc.get('raw_vector_score')}")
+        print(f"raw_vector_score_source: {doc.get('raw_vector_score_source')}")
+        print(f"raw_vector_score_direction: {doc.get('raw_vector_score_direction')}")
+        print(f"bm25_score: {doc.get('bm25_score')}")
+        print(f"bm25_score_direction: {doc.get('bm25_score_direction')}")
         print(f"rerank_score: {doc.get('rerank_score')}")
         print(f"metadata: {meta}")
 
@@ -162,7 +166,7 @@ def run_full_retrieve(subject: str, label: str, query: str, expected_terms: list
 
 def run_vector_only(subject: str, label: str, query: str, expected_terms: list[str]) -> None:
     print("\n" + "=" * 140)
-    print("MODE: vector only Chroma similarity_search_with_relevance_scores")
+    print("MODE: vector only Chroma similarity_search_with_score")
     print(f"SUBJECT: {subject}")
     print(f"LABEL: {label}")
     print(f"QUERY: {query}")
@@ -170,19 +174,21 @@ def run_vector_only(subject: str, label: str, query: str, expected_terms: list[s
     vs = load_index()
     where_filter = {"subject": {"$eq": subject}}
 
-    results = vs.similarity_search_with_relevance_scores(
+    results = vs.similarity_search_with_score(
         query,
         k=TOP_K,
         filter=where_filter,
     )
 
     docs = []
-    for doc, score in results:
+    for doc, raw_score in results:
         docs.append(
             {
                 "content": doc.page_content,
                 "source": doc.metadata.get("source_file", "unknown"),
-                "score": round(float(score), 4),
+                "raw_vector_score": round(float(raw_score), 4),
+                "raw_vector_score_source": "chroma_similarity_search_with_score",
+                "raw_vector_score_direction": "backend_specific",
                 "metadata": doc.metadata,
             }
         )
