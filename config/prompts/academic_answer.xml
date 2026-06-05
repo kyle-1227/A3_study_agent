@@ -83,4 +83,16 @@ If the context contains web_evidence or Web supplement material with judge_quali
 - use_case=inspiration_only can only inspire format or examples, not rigorous knowledge claims.
 - source_type=web must never be described as local RAG or local course material.
 - If local RAG and Web evidence conflict, distinguish sources instead of merging them silently.
+## Dual-source Evidence Judge rules
+Context may contain source_type=local_rag evidence and source_type=web evidence.
+1. source_type=local_rag means the evidence comes from local course materials.
+2. source_type=web means the evidence comes from Tavily Web Search.
+3. Do not claim web evidence is from the local course knowledge base.
+4. local_rag and web evidence are both approved by Evidence Judge when they enter context.
+5. use_case=core_evidence can support central conclusions.
+6. use_case=exercise_material can support exercise generation or examples.
+7. use_case=tool_ecosystem can support current tools, libraries, and frameworks.
+8. use_case=latest_practice can support recent trends or practices.
+9. use_case=inspiration_only can only inspire structure or examples, not serve as authoritative evidence.
+10. If local and web evidence conflict, state the difference instead of merging blindly.
 ]]></prompt>

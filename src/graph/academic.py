@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import get_setting, load_prompt
+from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
 from src.observability.a3_trace import emit_a3_trace
@@ -181,7 +182,7 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
     """Render named placeholders without interpreting JSON braces in prompts."""
     prompt = load_prompt(prompt_name)
     for key, value in replacements.items():
-        prompt = prompt.replace("{" + key + "}", value)
+        prompt = prompt.replace("{" + key + "}", str(value))
     return prompt
 
 
@@ -238,6 +239,21 @@ def _clear_retrieval_plan_state() -> dict:
         "web_judge_model": "openrouter/owl-alpha",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
+        "evidence_candidates": [],
+        "evidence_judge_output": {},
+        "evidence_judge_rounds": 0,
+        "evidence_judge_state": "",
+        "evidence_coverage_gaps": [],
+        "search_refinement_needed": False,
+        "search_refinement_deferred": False,
+        "search_refinement_deferred_reason": "",
+        "proposed_followup_search_queries": [],
+        "search_optimization_reserved": True,
+        "search_optimization_status": "reserved_not_implemented",
+        "dual_source_mode": False,
+        "evidence_judge_failed": False,
+        "degraded_generation": False,
+        "degraded_reason": "",
     }
 
 
@@ -1731,6 +1747,553 @@ async def _judge_tavily_search_results_with_llm(
         return [], debug
 
 
+def _retrieval_setting(key: str, default: Any) -> Any:
+    return get_setting(f"retrieval.{key}", default)
+
+
+def _dual_source_enabled() -> bool:
+    return str(_retrieval_setting("mode", "")).strip() == "dual_source_evidence"
+
+
+def _evidence_judge_setting(key: str, default: Any) -> Any:
+    return get_setting(f"llm.evidence_judge.{key}", default)
+
+
+def _evidence_judge_provider() -> str:
+    return str(_evidence_judge_setting("provider", "openrouter") or "openrouter").strip()
+
+
+def _evidence_judge_model() -> str:
+    return str(_evidence_judge_setting("model", "openrouter/owl-alpha") or "openrouter/owl-alpha").strip()
+
+
+def _evidence_judge_base_url() -> str:
+    return str(
+        _evidence_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
+    ).rstrip("/")
+
+
+def _evidence_judge_api_key_env() -> str:
+    return str(_evidence_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
+
+
+def _evidence_judge_api_key() -> str:
+    return os.getenv(_evidence_judge_api_key_env(), "").strip()
+
+
+def _evidence_judge_max_tokens() -> int:
+    try:
+        return int(_evidence_judge_setting("max_tokens", 1800))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _evidence_judge_temperature() -> float:
+    try:
+        return float(_evidence_judge_setting("temperature", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _candidate_preview(candidates: list[EvidenceCandidate], *, limit: int = 10) -> list[dict]:
+    previews: list[dict] = []
+    for candidate in candidates[:limit]:
+        item = candidate.model_dump(mode="json")
+        item["content_preview"] = str(item.get("content_preview", ""))[:300]
+        previews.append(item)
+    return previews
+
+
+def _evidence_judge_response_schema() -> dict[str, Any]:
+    return EvidenceJudgeOutput.model_json_schema()
+
+
+def _build_evidence_judge_messages(
+    *,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    round_index: int,
+) -> list[dict]:
+    payload = [candidate.model_dump(mode="json") for candidate in candidates]
+    prompt = _render_prompt(
+        "evidence_judge",
+        {
+            "original_user_query": original_user_query,
+            "learning_goal": learning_goal,
+            "requested_resource_type": requested_resource_type,
+            "round_index": round_index,
+            "evidence_candidates": json.dumps(payload, ensure_ascii=False),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict Evidence Judge. Return only valid JSON matching the "
+                "provided JSON schema. Do not answer the user or perform search."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _evidence_judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    return {
+        "model": _evidence_judge_model(),
+        "messages": messages,
+        "temperature": _evidence_judge_temperature(),
+        "max_tokens": _evidence_judge_max_tokens(),
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "evidence_judge_output",
+                "strict": True,
+                "schema": _evidence_judge_response_schema(),
+            },
+        },
+    }
+
+
+def _openrouter_evidence_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    api_key = _evidence_judge_api_key()
+    if not api_key:
+        raise RuntimeError(f"{_evidence_judge_api_key_env()} is not configured")
+    with httpx.Client(timeout=max(10.0, _web_timeout_seconds() + 12.0)) as client:
+        response = client.post(
+            f"{_evidence_judge_base_url()}/chat/completions",
+            headers=_judge_http_headers(api_key),
+            json=payload,
+        )
+        status_code = response.status_code
+        response.raise_for_status()
+        return response.json(), status_code
+
+
+def _evidence_judge_failure_debug(
+    *,
+    failure_phase: str,
+    original_user_query: str,
+    candidates: list[EvidenceCandidate],
+    error_type: str = "",
+    error_message: str = "",
+    status_code: Any = None,
+    parsing_error: str = "",
+    validation_error: str = "",
+    raw_output: str = "",
+) -> dict:
+    return {
+        "provider": _evidence_judge_provider(),
+        "model": _evidence_judge_model(),
+        "round_index": 1,
+        "success": False,
+        "failure_phase": failure_phase,
+        "original_user_query": original_user_query,
+        "input_candidate_count": len(candidates),
+        "candidate_preview": _candidate_preview(candidates),
+        "error_type": error_type,
+        "error_message": sanitize_error_message(error_message, max_chars=2000),
+        "status_code": status_code,
+        "raw_output": raw_output[:12000],
+        "parsing_error": sanitize_error_message(parsing_error, max_chars=2000),
+        "validation_error": sanitize_error_message(validation_error, max_chars=4000),
+    }
+
+
+async def _judge_evidence_candidates_with_llm(
+    *,
+    state: TutorState,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    round_index: int,
+) -> tuple[EvidenceJudgeOutput | None, dict]:
+    """Judge local RAG and Web evidence with OpenRouter strict JSON schema. No fallback."""
+    if not candidates:
+        parsed = EvidenceJudgeOutput(
+            overall_evidence_state="insufficient",
+            need_more_web_search=False,
+            judged_evidence=[],
+            coverage_gaps=[],
+            decision_summary="No evidence candidates were available.",
+        )
+        debug = {
+            "provider": _evidence_judge_provider(),
+            "model": _evidence_judge_model(),
+            "round_index": round_index,
+            "success": True,
+            "overall_evidence_state": parsed.overall_evidence_state,
+            "need_more_web_search": False,
+            "input_candidate_count": 0,
+            "kept_count": 0,
+            "rejected_count": 0,
+            "kept_source_distribution": {},
+            "coverage_gap_count": 0,
+            "coverage_gaps": [],
+            "raw_preview": "",
+            "parsing_error": None,
+            "validation_error": None,
+        }
+        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT")
+        return parsed, debug
+
+    messages = _build_evidence_judge_messages(
+        candidates=candidates,
+        original_user_query=original_user_query,
+        learning_goal=learning_goal,
+        requested_resource_type=requested_resource_type,
+        round_index=round_index,
+    )
+    payload = _evidence_judge_request_payload(messages)
+    raw_output = ""
+    status_code = None
+    try:
+        raw_response, status_code = await asyncio.to_thread(_openrouter_evidence_chat_completion, payload)
+        raw_output = _extract_openrouter_content(raw_response)
+        if not raw_output:
+            debug = _evidence_judge_failure_debug(
+                failure_phase="missing_judged_evidence",
+                original_user_query=original_user_query,
+                candidates=candidates,
+                error_type="EmptyRawOutput",
+                error_message="Evidence Judge returned empty content",
+                status_code=status_code,
+                raw_output=json.dumps(raw_response, ensure_ascii=False, default=str)[:12000],
+            )
+            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return None, debug
+        try:
+            parsed_json = json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            debug = _evidence_judge_failure_debug(
+                failure_phase="parsing_error",
+                original_user_query=original_user_query,
+                candidates=candidates,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                parsing_error=str(exc),
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return None, debug
+        try:
+            parsed = EvidenceJudgeOutput.model_validate(parsed_json)
+        except ValidationError as exc:
+            debug = _evidence_judge_failure_debug(
+                failure_phase="validation_error",
+                original_user_query=original_user_query,
+                candidates=candidates,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                validation_error=str(exc),
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return None, debug
+
+        input_ids = [candidate.evidence_id for candidate in candidates]
+        judged_ids = [item.evidence_id for item in parsed.judged_evidence]
+        if len(judged_ids) != len(set(judged_ids)) or set(judged_ids) != set(input_ids) or len(judged_ids) != len(input_ids):
+            debug = _evidence_judge_failure_debug(
+                failure_phase="evidence_id_mismatch",
+                original_user_query=original_user_query,
+                candidates=candidates,
+                error_type="InvalidEvidenceIds",
+                error_message=f"Expected evidence ids {input_ids}, got {judged_ids}",
+                status_code=status_code,
+                validation_error=f"Expected evidence ids {input_ids}, got {judged_ids}",
+                raw_output=raw_output,
+            )
+            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+            return None, debug
+
+        candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+        kept = [item for item in parsed.judged_evidence if item.keep]
+        kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
+        debug = {
+            "provider": _evidence_judge_provider(),
+            "model": _evidence_judge_model(),
+            "round_index": round_index,
+            "success": True,
+            "overall_evidence_state": parsed.overall_evidence_state,
+            "need_more_web_search": parsed.need_more_web_search,
+            "input_candidate_count": len(candidates),
+            "kept_count": len(kept),
+            "rejected_count": len(candidates) - len(kept),
+            "kept_source_distribution": dict(kept_distribution),
+            "coverage_gap_count": len(parsed.coverage_gaps),
+            "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
+            "raw_preview": raw_output[:4000],
+            "parsing_error": None,
+            "validation_error": None,
+        }
+        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+        return parsed, debug
+    except Exception as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            error_message = exc.response.text or str(exc)
+        else:
+            error_message = str(exc)
+        error_type = "MissingApiKey" if _evidence_judge_api_key_env() in str(exc) else type(exc).__name__
+        phase = "missing_api_key" if error_type == "MissingApiKey" else "structured_output_request_failed"
+        debug = _evidence_judge_failure_debug(
+            failure_phase=phase,
+            original_user_query=original_user_query,
+            candidates=candidates,
+            error_type=error_type,
+            error_message=error_message,
+            status_code=status_code,
+            raw_output=raw_output,
+        )
+        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+        return None, debug
+
+
+def _evidence_quality_rank(value: str) -> int:
+    return {"high": 3, "medium": 2, "low": 1}.get(str(value), 0)
+
+
+def _candidate_rank(candidate: EvidenceCandidate) -> float:
+    if candidate.source_type == "local_rag":
+        return float(candidate.rerank_score or 0)
+    return float(candidate.tavily_score or 0)
+
+
+def _build_local_evidence_candidates(
+    *,
+    docs: list[dict],
+    subject: str,
+    role: str,
+    branch_status: str,
+    branch_status_score_source: str,
+) -> list[EvidenceCandidate]:
+    candidates: list[EvidenceCandidate] = []
+    for rank, doc in enumerate(docs):
+        metadata = dict(doc.get("metadata") or {})
+        source = str(doc.get("source") or metadata.get("source") or "")
+        content = str(doc.get("content") or doc.get("page_content") or "")
+        candidates.append(EvidenceCandidate(
+            evidence_id=f"local:{subject or 'other'}:{rank}",
+            source_type="local_rag",
+            provider="chroma_rag",
+            subject=subject,
+            role=role,
+            purpose=str(doc.get("retrieval_purpose") or "local_course_retrieval"),
+            title=source,
+            source=source,
+            content_preview=_clip_text(content, 800),
+            raw_vector_score=doc.get("raw_vector_score"),
+            raw_vector_score_source=doc.get("raw_vector_score_source"),
+            raw_vector_score_direction=doc.get("raw_vector_score_direction"),
+            rerank_score=doc.get("rerank_score"),
+            branch_status=branch_status,
+            branch_status_score_source=branch_status_score_source,
+            metadata={
+                "metadata": metadata,
+                "retrieval_query": doc.get("retrieval_query", ""),
+                "weak_reason": doc.get("weak_reason", ""),
+                "relation_to_goal": doc.get("relation_to_goal", ""),
+                "retrieval_priority": doc.get("retrieval_priority", 0),
+            },
+        ))
+    return candidates
+
+
+def _build_web_evidence_candidates(
+    *,
+    tavily_results: list[dict],
+    subject: str,
+    role: str,
+    purpose: str,
+    query: str,
+    attempt_index: int = 0,
+) -> list[EvidenceCandidate]:
+    candidates: list[EvidenceCandidate] = []
+    for rank, result in enumerate(tavily_results):
+        candidates.append(EvidenceCandidate(
+            evidence_id=f"web:{subject or 'other'}:{attempt_index}:{rank}",
+            source_type="web",
+            provider="tavily",
+            subject=subject,
+            role=role,
+            purpose=purpose,
+            title=str(result.get("title") or ""),
+            source=str(result.get("url") or result.get("title") or "tavily"),
+            url=str(result.get("url") or ""),
+            content_preview=_clip_text(str(result.get("content") or ""), 800),
+            tavily_score=result.get("score"),
+            tavily_query=query,
+            metadata={"favicon": result.get("favicon", "")},
+        ))
+    return candidates
+
+
+def _cap_evidence_candidates(candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
+    max_candidates = int(_retrieval_setting("fusion.max_evidence_candidates", 16))
+    max_local = int(_retrieval_setting("fusion.max_local_candidates", 8))
+    max_web = int(_retrieval_setting("fusion.max_web_candidates", 8))
+    local = sorted(
+        [candidate for candidate in candidates if candidate.source_type == "local_rag"],
+        key=_candidate_rank,
+        reverse=True,
+    )[:max_local]
+    web = sorted(
+        [candidate for candidate in candidates if candidate.source_type == "web"],
+        key=_candidate_rank,
+        reverse=True,
+    )[:max_web]
+    combined = local + web
+    if len(combined) <= max_candidates:
+        return combined
+    preserve_balance = bool(_retrieval_setting("fusion.preserve_source_type_balance", True))
+    if not preserve_balance:
+        return sorted(combined, key=_candidate_rank, reverse=True)[:max_candidates]
+    selected: list[EvidenceCandidate] = []
+    if local and max_candidates > 0:
+        selected.append(local[0])
+    if web and len(selected) < max_candidates:
+        selected.append(web[0])
+    seen = {candidate.evidence_id for candidate in selected}
+    for candidate in sorted(combined, key=_candidate_rank, reverse=True):
+        if candidate.evidence_id in seen:
+            continue
+        selected.append(candidate)
+        seen.add(candidate.evidence_id)
+        if len(selected) >= max_candidates:
+            break
+    return selected
+
+
+def _judge_context_rank(item: dict) -> tuple[int, int, int, float]:
+    return (
+        _evidence_quality_rank(item.get("judge_quality", "")),
+        _evidence_quality_rank(item.get("judge_relevance", "")),
+        _evidence_quality_rank(item.get("judge_usefulness", "")),
+        float(item.get("rerank_score") or item.get("tavily_score") or 0),
+    )
+
+
+def _context_item_from_evidence(
+    *,
+    candidate: EvidenceCandidate,
+    judge_item: Any,
+    original: dict,
+) -> dict:
+    judge_fields = {
+        "evidence_id": candidate.evidence_id,
+        "judge_keep": True,
+        "judge_quality": judge_item.final_quality,
+        "judge_relevance": judge_item.relevance,
+        "judge_authority": judge_item.authority,
+        "judge_usefulness": judge_item.usefulness,
+        "judge_risk": judge_item.risk,
+        "evidence_type": judge_item.evidence_type,
+        "use_case": judge_item.use_case,
+        "coverage_contribution": judge_item.coverage_contribution,
+        "judge_reason": judge_item.reason,
+    }
+    if candidate.source_type == "local_rag":
+        return {
+            **original,
+            "type": "rag",
+            "source_type": "local_rag",
+            "provider": "chroma_rag",
+            "subject": candidate.subject,
+            "role": candidate.role,
+            "retrieval_subject": candidate.subject,
+            "retrieval_role": candidate.role,
+            "branch_status_score_source": candidate.branch_status_score_source,
+            **judge_fields,
+        }
+    return {
+        "type": "web_evidence",
+        "type_legacy": "web_supplement",
+        "source_type": "web",
+        "provider": "tavily",
+        "title": original.get("title", candidate.title),
+        "url": original.get("url", candidate.url),
+        "content": original.get("content", ""),
+        "source": original.get("url") or original.get("title") or candidate.source,
+        "subject": candidate.subject,
+        "role": candidate.role,
+        "supplement_for_subject": candidate.subject,
+        "supplement_for_role": candidate.role,
+        "supplement_purpose": candidate.purpose,
+        "supplement_purposes": [candidate.purpose] if candidate.purpose else [],
+        "retrieval_subject": candidate.subject,
+        "retrieval_role": candidate.role,
+        "retrieval_query": candidate.tavily_query,
+        "tavily_score": candidate.tavily_score,
+        **judge_fields,
+    }
+
+
+def _select_judged_context(
+    *,
+    parsed: EvidenceJudgeOutput,
+    candidates: list[EvidenceCandidate],
+    originals: dict[str, dict],
+) -> list[dict]:
+    candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    items: list[dict] = []
+    for judge_item in parsed.judged_evidence:
+        if not judge_item.keep:
+            continue
+        candidate = candidate_by_id.get(judge_item.evidence_id)
+        if not candidate:
+            continue
+        items.append(_context_item_from_evidence(
+            candidate=candidate,
+            judge_item=judge_item,
+            original=originals.get(candidate.evidence_id, {}),
+        ))
+    max_docs = int(_retrieval_setting("fusion.max_context_docs", 8))
+    preserve_balance = bool(_retrieval_setting("fusion.preserve_source_type_balance", True))
+    if len(items) <= max_docs:
+        return sorted(items, key=_judge_context_rank, reverse=True)
+    sorted_items = sorted(items, key=_judge_context_rank, reverse=True)
+    if not preserve_balance:
+        return sorted_items[:max_docs]
+    selected: list[dict] = []
+    local = [item for item in sorted_items if item.get("source_type") == "local_rag"]
+    web = [item for item in sorted_items if item.get("source_type") == "web"]
+    if local:
+        selected.append(local[0])
+    if web and len(selected) < max_docs:
+        selected.append(web[0])
+    seen = {item.get("evidence_id") for item in selected}
+    for item in sorted_items:
+        if item.get("evidence_id") in seen:
+            continue
+        selected.append(item)
+        seen.add(item.get("evidence_id"))
+        if len(selected) >= max_docs:
+            break
+    return selected
+
+
+def _followups_from_coverage_gaps(parsed: EvidenceJudgeOutput) -> list[dict]:
+    followups: list[dict] = []
+    for gap in parsed.coverage_gaps:
+        followups.append({
+            "subject": gap.subject,
+            "role": gap.role,
+            "gap": gap.gap,
+            "suggested_search_query": gap.suggested_search_query,
+            "purpose": gap.purpose,
+            "priority": gap.priority,
+            "source": "evidence_judge_coverage_gap",
+            "status": "reserved_not_executed",
+        })
+    return followups
+
+
 async def _run_dynamic_web_supplement(
     *,
     state: TutorState,
@@ -2030,6 +2593,386 @@ async def _run_dynamic_web_supplement(
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
 
+def _dual_source_web_query(state: TutorState, branch: dict) -> tuple[str, str]:
+    if branch.get("web_search_query"):
+        return str(branch.get("web_search_query")), "retrieval_branch_web_search_query"
+    if state.get("search_web_query"):
+        return str(state.get("search_web_query")), "search_web_query"
+    if branch.get("rag_query"):
+        return str(branch.get("rag_query")), "retrieval_branch_rag_query"
+    return _last_human_query(state), "original_user_query"
+
+
+def _source_distribution(items: list[dict]) -> dict:
+    return dict(Counter(str(item.get("source_type") or item.get("type") or "unknown") for item in items))
+
+
+async def _run_dual_source_first_round_web(
+    *,
+    state: TutorState,
+    branch: dict,
+    query: str,
+    original_user_query: str,
+) -> tuple[list[dict], dict]:
+    max_results = int(_retrieval_setting("web.max_results_per_query", 3))
+    timeout = float(_retrieval_setting("web.timeout_seconds", _web_timeout_seconds()))
+    subject = str(branch.get("subject") or "")
+    role = str(branch.get("role") or "")
+    purpose = str(branch.get("purpose") or "first_round_dual_source")
+    started = time.perf_counter()
+    try:
+        diagnostics = await asyncio.wait_for(
+            asyncio.to_thread(
+                web_search_fn,
+                query,
+                original_user_query=original_user_query,
+                subject=subject,
+                role=role,
+                purpose=purpose,
+                max_results=max_results,
+                timeout_seconds=timeout,
+            ),
+            timeout=timeout,
+        )
+        diagnostics = _coerce_web_search_diagnostics(
+            diagnostics,
+            query=query,
+            original_user_query=original_user_query,
+            subject=subject,
+            role=role,
+            purpose=purpose,
+        )
+    except asyncio.TimeoutError:
+        diagnostics = _tavily_exception_diagnostics(
+            query,
+            TimeoutError(f"tavily search exceeded {timeout}s"),
+            original_user_query=original_user_query,
+            subject=subject,
+            role=role,
+            purpose=purpose,
+            elapsed_ms=round(timeout * 1000, 2),
+        )
+    except Exception as exc:
+        diagnostics = _tavily_exception_diagnostics(
+            query,
+            exc,
+            original_user_query=original_user_query,
+            subject=subject,
+            role=role,
+            purpose=purpose,
+        )
+    diagnostics.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000, 2))
+    return (diagnostics.get("results") or [])[:max_results], diagnostics
+
+
+async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], branch_debug: dict) -> dict:
+    original_user_query = _last_human_query(state)
+    per_subject_top_k = int(_retrieval_setting("local_rag.per_subject_top_k", get_setting("rag.multi_subject_per_subject_top_k", 3)))
+    local_enabled = bool(_retrieval_setting("local_rag.enabled", True))
+    web_enabled = bool(_retrieval_setting("web.enabled", True))
+    all_candidates: list[EvidenceCandidate] = []
+    originals: dict[str, dict] = {}
+    web_candidate_count_raw = 0
+
+    # TEMP A3_TRACE: remove after multi-source evidence validation.
+    emit_a3_trace(
+        logger,
+        "coverage_decision",
+        {
+            "skipped": True,
+            "skip_reason": "dual_source_evidence_mode_uses_evidence_judge",
+            "branch_mode": branch_debug.get("mode", ""),
+            "branch_count": len(branches),
+        },
+        state=state,
+        env_flag="LOG_RETRIEVAL_PLAN",
+    )
+
+    with traced_retrieval(
+        query=original_user_query,
+        subject=str(state.get("subject", "")),
+        top_k=per_subject_top_k,
+    ) as span:
+        span.set_attribute("rag.mode", "dual_source_evidence")
+        span.set_attribute("rag.branch_count", len(branches))
+        for branch_index, branch in enumerate(branches):
+            subject = str(branch.get("subject") or "")
+            role = str(branch.get("role") or "supporting_context")
+            rag_query = str(branch.get("rag_query") or original_user_query)
+            retrieve_subject = None if subject == "other" else subject
+
+            if local_enabled:
+                result = retrieve(query=rag_query, subject=retrieve_subject, top_k=per_subject_top_k)
+                raw_docs = result.get("docs", []) or []
+                used_docs = raw_docs[:per_subject_top_k]
+                subject_mismatch_count = _subject_mismatch_count(used_docs, retrieve_subject)
+                branch_eval = _evaluate_retrieval_branch(
+                    subject=subject,
+                    role=role,
+                    docs=used_docs,
+                    is_hit=bool(result.get("is_hit", False)),
+                    subject_mismatch_count=subject_mismatch_count,
+                    reranker_failed=bool(result.get("reranker_failed")),
+                )
+                local_docs: list[dict] = []
+                for doc in used_docs:
+                    local_docs.append({
+                        "type": "rag",
+                        **doc,
+                        "retrieval_subject": subject,
+                        "retrieval_role": role,
+                        "retrieval_query": rag_query,
+                        "retrieval_purpose": branch.get("purpose", ""),
+                        "relation_to_goal": branch.get("relation_to_goal", ""),
+                        "retrieval_priority": _clamp_priority(branch.get("priority", 0.5)),
+                        "branch_status": branch_eval["branch_status"],
+                        "weak_reason": branch_eval["weak_reason"],
+                        "best_rerank_score": branch_eval["best_rerank_score"],
+                        "needs_supplement": branch_eval["needs_supplement"],
+                        "branch_status_score_source": branch_eval["branch_status_score_source"],
+                        "reranker_failed": branch_eval["reranker_failed"],
+                    })
+                local_candidates = _build_local_evidence_candidates(
+                    docs=local_docs,
+                    subject=subject,
+                    role=role,
+                    branch_status=branch_eval["branch_status"],
+                    branch_status_score_source=branch_eval["branch_status_score_source"],
+                )
+                for candidate, original in zip(local_candidates, local_docs):
+                    all_candidates.append(candidate)
+                    originals[candidate.evidence_id] = original
+                emit_a3_trace(
+                    logger,
+                    "rag_retrieve_plan_item",
+                    {
+                        "branch_mode": "dual_source_evidence",
+                        "subject": subject,
+                        "role": role,
+                        "priority": branch.get("priority", 0.5),
+                        "query": rag_query,
+                        "top_k": per_subject_top_k,
+                        "raw_doc_count": len(raw_docs),
+                        "used_doc_count": len(used_docs),
+                        "doc_count": len(used_docs),
+                        "is_hit": result.get("is_hit", False),
+                        "subject_mismatch_count": subject_mismatch_count,
+                        "branch_status": branch_eval["branch_status"],
+                        "weak_reason": branch_eval["weak_reason"],
+                        "best_rerank_score": branch_eval["best_rerank_score"],
+                        "needs_supplement": branch_eval["needs_supplement"],
+                        "branch_status_score_source": branch_eval["branch_status_score_source"],
+                        "reranker_failed": branch_eval["reranker_failed"],
+                        "top_docs": _top_doc_summaries(used_docs),
+                    },
+                    state=state,
+                    env_flag="LOG_RAG_RESULT",
+                )
+
+            if web_enabled:
+                web_query, query_source = _dual_source_web_query(state, branch)
+                web_results, diagnostics = await _run_dual_source_first_round_web(
+                    state=state,
+                    branch=branch,
+                    query=web_query,
+                    original_user_query=original_user_query,
+                )
+                web_candidate_count_raw += len(web_results)
+                emit_a3_trace(
+                    logger,
+                    "dual_source_web_search",
+                    {
+                        "branch_mode": "dual_source_evidence",
+                        "subject": subject,
+                        "role": role,
+                        "query_source": query_source,
+                        "query": web_query,
+                        "provider": diagnostics.get("provider", "tavily"),
+                        "ok": diagnostics.get("ok", False),
+                        "result_count": diagnostics.get("result_count", len(web_results)),
+                        "used_result_count": len(web_results),
+                        "status_code": diagnostics.get("status_code"),
+                        "elapsed_ms": diagnostics.get("elapsed_ms"),
+                        "error_type": diagnostics.get("error_type", ""),
+                        "error_message": diagnostics.get("error_message", ""),
+                        "search_result_judge_disabled_by_dual_source": True,
+                    },
+                    state=state,
+                    env_flag="LOG_WEB_SEARCH_RESULT",
+                )
+                web_candidates = _build_web_evidence_candidates(
+                    tavily_results=web_results,
+                    subject=subject,
+                    role=role,
+                    purpose=str(branch.get("purpose") or "first_round_dual_source"),
+                    query=web_query,
+                    attempt_index=branch_index,
+                )
+                for candidate, original in zip(web_candidates, web_results):
+                    all_candidates.append(candidate)
+                    originals[candidate.evidence_id] = original
+
+    candidates = _cap_evidence_candidates(all_candidates)
+    originals = {candidate.evidence_id: originals[candidate.evidence_id] for candidate in candidates if candidate.evidence_id in originals}
+    emit_a3_trace(
+        logger,
+        "evidence_candidate_build",
+        {
+            "branch_mode": "dual_source_evidence",
+            "candidate_count": len(candidates),
+            "local_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "local_rag"),
+            "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
+            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "source_type_distribution": dict(Counter(candidate.source_type for candidate in candidates)),
+            "candidate_preview": [
+                {
+                    "evidence_id": candidate.evidence_id,
+                    "source_type": candidate.source_type,
+                    "subject": candidate.subject,
+                    "rerank_score": candidate.rerank_score,
+                    "tavily_score": candidate.tavily_score,
+                    "source": candidate.source,
+                    "url": candidate.url,
+                }
+                for candidate in candidates[:10]
+            ],
+        },
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
+
+    parsed, judge_debug = await _judge_evidence_candidates_with_llm(
+        state=state,
+        candidates=candidates,
+        original_user_query=original_user_query,
+        learning_goal=str(state.get("learning_goal", "")),
+        requested_resource_type=str(state.get("requested_resource_type", "")),
+        round_index=1,
+    )
+
+    if parsed is None:
+        emit_a3_trace(
+            logger,
+            "context_assembly",
+            {
+                "mode": "dual_source_evidence",
+                "final_doc_count": 0,
+                "evidence_judge_failed": True,
+                "degraded_generation": True,
+                "degraded_reason": "evidence_judge_failed",
+                "source_type_distribution": {},
+                "web_evidence_count": 0,
+                "web_supplement_count": 0,
+            },
+            state=state,
+            env_flag="LOG_CONTEXT_ASSEMBLY",
+        )
+        return {
+            "context": [],
+            "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+            "evidence_judge_output": judge_debug,
+            "evidence_judge_rounds": 1,
+            "evidence_judge_state": "failed",
+            "evidence_coverage_gaps": [],
+            "search_refinement_needed": False,
+            "search_refinement_deferred": False,
+            "search_refinement_deferred_reason": "",
+            "proposed_followup_search_queries": [],
+            "search_optimization_reserved": True,
+            "search_optimization_status": "reserved_not_implemented",
+            "dual_source_mode": True,
+            "evidence_judge_failed": True,
+            "degraded_generation": True,
+            "degraded_reason": "evidence_judge_failed",
+            "web_supplement_provider": "tavily",
+            "web_supplement_results": [],
+            "web_supplement_failed": bool(web_candidate_count_raw),
+            "web_supplement_failure_reason": "evidence_judge_failed",
+            "web_judge_provider": _evidence_judge_provider(),
+            "web_judge_model": _evidence_judge_model(),
+        }
+
+    context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
+    followups = _followups_from_coverage_gaps(parsed)
+    refinement_needed = bool(parsed.need_more_web_search or followups)
+    refinement_deferred = refinement_needed and bool(_retrieval_setting("evidence_refinement.reserved", True))
+    deferred_reason = "search_optimization_loop_not_implemented_in_this_phase" if refinement_deferred else ""
+    emit_a3_trace(
+        logger,
+        "evidence_refinement_reserved",
+        {
+            "reserved": True,
+            "search_refinement_needed": refinement_needed,
+            "search_refinement_deferred": refinement_deferred,
+            "deferred_reason": deferred_reason,
+            "evidence_judge_state": parsed.overall_evidence_state,
+            "coverage_gap_count": len(parsed.coverage_gaps),
+            "proposed_followup_search_queries": followups,
+        },
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
+
+    web_context_docs = [doc for doc in context_docs if doc.get("source_type") == "web"]
+    local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
+    web_failed = bool(web_enabled and web_candidate_count_raw and not web_context_docs)
+    emit_a3_trace(
+        logger,
+        "context_assembly",
+        {
+            "mode": "dual_source_evidence",
+            "final_doc_count": len(context_docs),
+            "local_rag_context_count": len(local_context_docs),
+            "web_context_count": len(web_context_docs),
+            "evidence_judge_state": parsed.overall_evidence_state,
+            "evidence_judge_rounds": 1,
+            "source_type_distribution": _source_distribution(context_docs),
+            "search_refinement_needed": refinement_needed,
+            "search_refinement_deferred": refinement_deferred,
+            "search_optimization_reserved": True,
+            "web_evidence_count": len(web_context_docs),
+            "web_supplement_count": len(web_context_docs),
+            "web_supplement_provider": "tavily",
+            "web_supplement_failed": web_failed,
+            "evidence_candidate_count": len(candidates),
+        },
+        state=state,
+        env_flag="LOG_CONTEXT_ASSEMBLY",
+    )
+
+    return {
+        "context": context_docs,
+        "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "evidence_judge_output": parsed.model_dump(mode="json"),
+        "evidence_judge_rounds": 1,
+        "evidence_judge_state": parsed.overall_evidence_state,
+        "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
+        "search_refinement_needed": refinement_needed,
+        "search_refinement_deferred": refinement_deferred,
+        "search_refinement_deferred_reason": deferred_reason,
+        "proposed_followup_search_queries": followups,
+        "search_optimization_reserved": True,
+        "search_optimization_status": "reserved_not_implemented",
+        "dual_source_mode": True,
+        "evidence_judge_failed": False,
+        "degraded_generation": False,
+        "degraded_reason": "",
+        "web_supplement_provider": "tavily",
+        "web_supplement_results": web_context_docs,
+        "web_supplement_failed": web_failed,
+        "web_supplement_failure_reason": "judge_rejected_all_or_no_web_kept" if web_failed else "",
+        "web_supplement_status_by_subject": {},
+        "web_supplement_success_subjects": sorted({doc.get("subject") for doc in web_context_docs if doc.get("subject")}),
+        "web_supplement_failed_subjects": [],
+        "web_supplement_partial_failed": False,
+        "web_judge_provider": _evidence_judge_provider(),
+        "web_judge_model": _evidence_judge_model(),
+        "web_judge_failed_subjects": [],
+        "web_judge_rejected_all_subjects": [],
+        "coverage_decision_summary": parsed.decision_summary,
+    }
+
+
 @traced_node
 async def academic_router(state: TutorState) -> dict:
     """Router node for parallel fan-out. Clears context on retry path."""
@@ -2264,6 +3207,9 @@ async def rag_retrieve(state: TutorState) -> dict:
         state=state,
         env_flag="LOG_RAG_RESULT",
     )
+
+    if _dual_source_enabled():
+        return await _rag_retrieve_dual_source(state, branches, branch_debug)
 
     if not branches:
         query, query_source = _query_source(state)
@@ -2729,7 +3675,7 @@ def _format_retrieval_score_note(doc: dict) -> str:
 def _format_retrieved(docs: list[dict]) -> str:
     if not docs:
         return "无相关参考资料。"
-    if any(doc.get("type") == "web_supplement" for doc in docs):
+    if any(doc.get("type") in {"web_supplement", "web_evidence"} or doc.get("source_type") == "web" for doc in docs):
         purpose_notes = {
             "repair": "用于修补本地课程资料不足或相关性较弱的问题。",
             "coverage_expansion": "用于拓展本地课程资料之外的知识覆盖。",
@@ -2743,7 +3689,7 @@ def _format_retrieved(docs: list[dict]) -> str:
         }
         parts = []
         for d in docs:
-            if d.get("type") != "web_supplement":
+            if d.get("type") not in {"web_supplement", "web_evidence"} and d.get("source_type") != "web":
                 parts.append(_format_retrieved([d]))
                 continue
             subject = d.get("supplement_for_subject") or d.get("retrieval_subject", "unknown")
@@ -2847,10 +3793,15 @@ async def generate_answer(state: TutorState) -> dict:
     retrieved_docs = [
         c
         for c in context
-        if c.get("type") in {"rag", "rag_diagnostic", "web_supplement"}
+        if c.get("type") in {"rag", "rag_diagnostic", "web_supplement", "web_evidence"}
+        or c.get("source_type") == "web"
     ]
     web_results = [c for c in context if c.get("type") == "web"]
-    web_supplements = [c for c in context if c.get("type") == "web_supplement"]
+    web_supplements = [
+        c
+        for c in context
+        if c.get("type") in {"web_supplement", "web_evidence"} or c.get("source_type") == "web"
+    ]
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -2876,6 +3827,10 @@ async def generate_answer(state: TutorState) -> dict:
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
             "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_supplements if doc.get("use_case")}),
             "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_supplements if doc.get("evidence_type")}),
+            "dual_source_mode": bool(state.get("dual_source_mode")),
+            "evidence_judge_state": state.get("evidence_judge_state", ""),
+            "search_refinement_needed": bool(state.get("search_refinement_needed")),
+            "search_refinement_deferred": bool(state.get("search_refinement_deferred")),
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),

@@ -75,6 +75,21 @@ class TutorState(TypedDict):
     web_judge_model: str                                                # Search Result Judge model
     web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
     web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
+    evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
+    evidence_judge_output: dict                                          # Raw structured Evidence Judge output
+    evidence_judge_rounds: int                                           # Evidence Judge rounds executed
+    evidence_judge_state: str                                            # sufficient / partially_sufficient / insufficient
+    evidence_coverage_gaps: list[dict]                                   # Coverage gaps reserved for future search optimization
+    search_refinement_needed: bool                                       # Evidence Judge requested more search
+    search_refinement_deferred: bool                                     # Follow-up search is intentionally deferred
+    search_refinement_deferred_reason: str                               # Why refinement was not executed
+    proposed_followup_search_queries: list[dict]                         # Reserved future search queries from coverage gaps
+    search_optimization_reserved: bool                                   # Search optimization hook is reserved
+    search_optimization_status: str                                      # reserved_not_implemented / disabled
+    dual_source_mode: bool                                               # rag_retrieve used dual_source_evidence mode
+    evidence_judge_failed: bool                                          # Evidence Judge failed and no evidence was admitted
+    degraded_generation: bool                                            # Generation proceeds without approved evidence
+    degraded_reason: str                                                 # Reason for degraded generation
     plan: str                                                           # Generated plans
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag

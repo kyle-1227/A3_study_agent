@@ -42,6 +42,30 @@ web_search:
   max_purposes_per_subject: 4             # Cap purpose labels per subject decision
   max_plan_items_per_subject: 3           # Cap search queries per subject decision
 
+retrieval:
+  mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
+  local_rag:
+    enabled: true
+    per_subject_top_k: 3
+  web:
+    enabled: true
+    provider: tavily
+    max_results_per_query: 3
+    timeout_seconds: 30
+  fusion:
+    max_context_docs: 8
+    max_evidence_candidates: 16
+    max_local_candidates: 8
+    max_web_candidates: 8
+    preserve_source_type_balance: true
+    min_local_docs_if_available: 1
+    min_web_docs_if_available: 1
+  evidence_refinement:
+    enabled: false
+    reserved: true
+    max_rounds: 1
+    search_optimization_reserved: true
+
 llm:
   search_result_judge:
     provider: openrouter
@@ -50,6 +74,17 @@ llm:
     api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1200
+    streaming: false
+    structured_output: true
+    strict_schema: true
+    include_raw: true
+  evidence_judge:
+    provider: openrouter
+    model: "openrouter/owl-alpha"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1800
     streaming: false
     structured_output: true
     strict_schema: true

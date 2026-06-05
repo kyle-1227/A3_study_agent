@@ -186,7 +186,11 @@ async def exercise_planner(state: TutorState) -> dict:
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     context = state.get("context", [])
-    web_supplements = [item for item in context if item.get("type") == "web_supplement"]
+    web_supplements = [
+        item
+        for item in context
+        if item.get("type") in {"web_supplement", "web_evidence"} or item.get("source_type") == "web"
+    ]
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -214,6 +218,10 @@ async def exercise_planner(state: TutorState) -> dict:
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
             "web_evidence_use_cases": sorted({item.get("use_case") for item in web_supplements if item.get("use_case")}),
             "web_evidence_types": sorted({item.get("evidence_type") for item in web_supplements if item.get("evidence_type")}),
+            "dual_source_mode": bool(state.get("dual_source_mode")),
+            "evidence_judge_state": state.get("evidence_judge_state", ""),
+            "search_refinement_needed": bool(state.get("search_refinement_needed")),
+            "search_refinement_deferred": bool(state.get("search_refinement_deferred")),
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
