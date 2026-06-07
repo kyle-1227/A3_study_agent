@@ -72,6 +72,19 @@ def _roles_used(context: list[dict]) -> list[str]:
     return sorted({str(item.get("retrieval_role")) for item in context if item.get("retrieval_role")})
 
 
+def _is_web_evidence(item: dict) -> bool:
+    return (
+        item.get("source_type") == "web"
+        or item.get("type") in {"web_evidence", "web_supplement"}
+        or item.get("legacy_type") == "web_supplement"
+        or item.get("type_legacy") == "web_supplement"
+    )
+
+
+def _web_evidence_items(context: list[dict]) -> list[dict]:
+    return [item for item in context if _is_web_evidence(item)]
+
+
 def _format_context(context: list[dict]) -> str:
     if not context:
         return (
@@ -186,11 +199,7 @@ async def exercise_planner(state: TutorState) -> dict:
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     context = state.get("context", [])
-    web_supplements = [
-        item
-        for item in context
-        if item.get("type") in {"web_supplement", "web_evidence"} or item.get("source_type") == "web"
-    ]
+    web_evidence = _web_evidence_items(context)
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -201,8 +210,9 @@ async def exercise_planner(state: TutorState) -> dict:
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
             "context_count": len(context),
+            "context_web_count": len(web_evidence),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
-            "web_supplement_count": len(web_supplements),
+            "web_supplement_count": len(web_evidence),
             "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
@@ -210,14 +220,14 @@ async def exercise_planner(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
-            "web_evidence_count": len(web_supplements),
+            "web_evidence_count": len(web_evidence),
             "web_evidence_provider": "tavily",
-            "web_judge_provider": state.get("web_judge_provider", "openrouter"),
-            "web_judge_model": state.get("web_judge_model", "openrouter/owl-alpha"),
+            "web_judge_provider": state.get("web_judge_provider", "nvidia_build"),
+            "web_judge_model": state.get("web_judge_model", "deepseek-ai/deepseek-v4-flash"),
             "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
-            "web_evidence_use_cases": sorted({item.get("use_case") for item in web_supplements if item.get("use_case")}),
-            "web_evidence_types": sorted({item.get("evidence_type") for item in web_supplements if item.get("evidence_type")}),
+            "web_evidence_use_cases": sorted({item.get("use_case") for item in web_evidence if item.get("use_case")}),
+            "web_evidence_types": sorted({item.get("evidence_type") for item in web_evidence if item.get("evidence_type")}),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
             "search_refinement_needed": bool(state.get("search_refinement_needed")),

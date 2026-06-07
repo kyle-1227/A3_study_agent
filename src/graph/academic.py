@@ -26,6 +26,7 @@ from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.llm.structured_output import StructuredLLMResult, invoke_structured_llm
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
@@ -235,10 +236,12 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_success_subjects": [],
         "web_supplement_failed_subjects": [],
         "web_supplement_partial_failed": False,
-        "web_judge_provider": "openrouter",
-        "web_judge_model": "openrouter/owl-alpha",
+        "web_judge_provider": "nvidia_build",
+        "web_judge_model": "deepseek-ai/deepseek-v4-flash",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
+        "web_evidence_count": 0,
+        "web_supplement_count": 0,
         "evidence_candidates": [],
         "evidence_judge_output": {},
         "evidence_judge_rounds": 0,
@@ -306,6 +309,19 @@ def _subjects_used(docs: list[dict]) -> list[str]:
 
 def _roles_used(docs: list[dict]) -> list[str]:
     return sorted({str(doc.get("retrieval_role")) for doc in docs if doc.get("retrieval_role")})
+
+
+def _is_web_evidence(item: dict) -> bool:
+    return (
+        item.get("source_type") == "web"
+        or item.get("type") in {"web_evidence", "web_supplement"}
+        or item.get("legacy_type") == "web_supplement"
+        or item.get("type_legacy") == "web_supplement"
+    )
+
+
+def _web_evidence_items(items: list[dict]) -> list[dict]:
+    return [item for item in items if _is_web_evidence(item)]
 
 
 def _score_doc(doc: dict) -> float:
@@ -1329,19 +1345,22 @@ def _judge_setting(key: str, default: Any) -> Any:
 
 
 def _judge_provider() -> str:
-    return os.getenv("SEARCH_RESULT_JUDGE_PROVIDER", str(_judge_setting("provider", "openrouter"))).strip() or "openrouter"
+    return os.getenv("SEARCH_RESULT_JUDGE_PROVIDER", str(_judge_setting("provider", "nvidia_build"))).strip() or "nvidia_build"
 
 
 def _judge_model() -> str:
-    return os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "openrouter/owl-alpha"))).strip() or "openrouter/owl-alpha"
+    return (
+        os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "deepseek-ai/deepseek-v4-flash"))).strip()
+        or "deepseek-ai/deepseek-v4-flash"
+    )
 
 
 def _judge_base_url() -> str:
-    return str(_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))).rstrip("/")
+    return str(_judge_setting("base_url", "https://integrate.api.nvidia.com/v1")).rstrip("/")
 
 
 def _judge_api_key_env() -> str:
-    return str(_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
+    return str(_judge_setting("api_key_env", "NVIDIA_API_KEY") or "NVIDIA_API_KEY")
 
 
 def _judge_api_key() -> str:
@@ -1481,13 +1500,24 @@ def _openrouter_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any]
         return response.json(), status_code
 
 
-def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
+def _extract_openrouter_response_meta(raw_response: dict[str, Any]) -> tuple[str, str, int, int]:
+    """Return (content, finish_reason, prompt_tokens, completion_tokens) from OpenRouter response."""
     choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
     if not choices:
-        return ""
+        return "", "", 0, 0
     first = choices[0] if isinstance(choices[0], dict) else {}
     message = first.get("message") if isinstance(first.get("message"), dict) else {}
-    return _message_content_to_text(message.get("content", ""))
+    content = _message_content_to_text(message.get("content", ""))
+    finish_reason = str(first.get("finish_reason", ""))
+    usage = raw_response.get("usage") if isinstance(raw_response, dict) else {}
+    prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+    completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+    return content, finish_reason, prompt_tokens, completion_tokens
+
+
+def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
+    content, _, _, _ = _extract_openrouter_response_meta(raw_response)
+    return content
 
 
 def _judge_failure_debug(
@@ -1755,26 +1785,41 @@ def _dual_source_enabled() -> bool:
     return str(_retrieval_setting("mode", "")).strip() == "dual_source_evidence"
 
 
+def _block_generation_when_evidence_judge_failed() -> bool:
+    return bool(_retrieval_setting("dual_source_evidence.block_generation_when_evidence_judge_failed", True))
+
+
+def _evidence_failure_phase(state: TutorState) -> str:
+    output = state.get("evidence_judge_output") or {}
+    if isinstance(output, dict):
+        return str(output.get("failure_phase") or output.get("degraded_reason") or "")
+    return ""
+
+
 def _evidence_judge_setting(key: str, default: Any) -> Any:
     return get_setting(f"llm.evidence_judge.{key}", default)
 
 
+def _evidence_judge_output_setting(key: str, default: Any) -> Any:
+    return get_setting(f"llm_outputs.evidence_judge.{key}", default)
+
+
 def _evidence_judge_provider() -> str:
-    return str(_evidence_judge_setting("provider", "openrouter") or "openrouter").strip()
+    return str(_evidence_judge_setting("provider", "nvidia_build") or "nvidia_build").strip()
 
 
 def _evidence_judge_model() -> str:
-    return str(_evidence_judge_setting("model", "openrouter/owl-alpha") or "openrouter/owl-alpha").strip()
+    return str(_evidence_judge_setting("model", "deepseek-ai/deepseek-v4-flash") or "deepseek-ai/deepseek-v4-flash").strip()
 
 
 def _evidence_judge_base_url() -> str:
     return str(
-        _evidence_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
+        _evidence_judge_setting("base_url", "https://integrate.api.nvidia.com/v1")
     ).rstrip("/")
 
 
 def _evidence_judge_api_key_env() -> str:
-    return str(_evidence_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
+    return str(_evidence_judge_setting("api_key_env", "NVIDIA_API_KEY") or "NVIDIA_API_KEY")
 
 
 def _evidence_judge_api_key() -> str:
@@ -1857,6 +1902,101 @@ def _evidence_judge_request_payload(messages: list[dict]) -> dict[str, Any]:
     }
 
 
+def _evidence_judge_schema_size_chars() -> int:
+    return len(json.dumps(_evidence_judge_response_schema(), ensure_ascii=False))
+
+
+def _messages_chars(messages: list[dict]) -> int:
+    return sum(len(_message_content_to_text(message.get("content", ""))) for message in messages)
+
+
+def _provider_name_from_error_body(raw_body: str) -> str:
+    try:
+        parsed = json.loads(raw_body)
+    except Exception:
+        return ""
+
+    def _walk(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("provider_name", "provider", "providerName"):
+                if value.get(key):
+                    return str(value.get(key))
+            for nested in value.values():
+                found = _walk(nested)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for nested in value:
+                found = _walk(nested)
+                if found:
+                    return found
+        return ""
+
+    return _walk(parsed)
+
+
+def _classify_evidence_judge_failure(
+    *,
+    status_code: Any,
+    raw_error_body: str,
+    candidate_count: int,
+    schema_size_chars: int,
+    prompt_chars: int,
+    default_phase: str,
+) -> tuple[str, str, str]:
+    text = str(raw_error_body or "").lower()
+    if status_code == 404 and ("no endpoints found" in text or "can handle the requested parameters" in text):
+        return (
+            "structured_output_unsupported_by_provider",
+            "OpenRouter routing layer rejected the request: no provider supports the required parameters (likely json_schema response_format).",
+            "switch_to_prompt_json_pydantic_or_choose_another_model",
+        )
+    if status_code == 400:
+        if any(term in text for term in ("unsupported", "not support", "does not support")) and any(
+            term in text for term in ("json_schema", "response_format", "structured")
+        ):
+            return (
+                "structured_output_unsupported_by_provider",
+                "Provider rejected strict json_schema response_format.",
+                "switch_to_prompt_json_pydantic_or_choose_another_model",
+            )
+        if any(term in text for term in ("too large", "context length", "maximum context", "token", "payload")):
+            return (
+                "payload_too_large_or_rejected",
+                "Provider rejected the request size, prompt size, or candidate payload.",
+                "reduce_candidate_count_or_preview_size",
+            )
+        if any(term in text for term in ("schema", "json_schema", "response_format", "strict")):
+            return (
+                "schema_too_complex_or_rejected",
+                "Provider rejected the strict schema shape or response_format payload.",
+                "simplify_schema_or_split_judge_batch",
+            )
+        if "provider returned error" in text or "provider_name" in text:
+            return (
+                "structured_output_unsupported_by_provider",
+                "OpenRouter upstream provider rejected the strict structured-output request.",
+                "run_schema_probe_then_change_model_or_explicitly_approve_prompt_json_mode",
+            )
+        if candidate_count > 8 or prompt_chars > 20000:
+            return (
+                "payload_too_large_or_rejected",
+                "HTTP 400 occurred with a large candidate/prompt payload.",
+                "reduce_candidate_count_or_preview_size",
+            )
+        if schema_size_chars > 8000:
+            return (
+                "schema_too_complex_or_rejected",
+                "HTTP 400 occurred with a large strict schema.",
+                "simplify_schema_or_split_judge_batch",
+            )
+    return (
+        default_phase,
+        "Evidence Judge request failed before producing valid judged evidence.",
+        "inspect_provider_error_body",
+    )
+
+
 def _openrouter_evidence_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     api_key = _evidence_judge_api_key()
     if not api_key:
@@ -1883,13 +2023,51 @@ def _evidence_judge_failure_debug(
     parsing_error: str = "",
     validation_error: str = "",
     raw_output: str = "",
+    raw_error_body: str = "",
+    provider_error_body: str = "",
+    provider_name: str = "",
+    prompt_chars: int = 0,
+    schema_size_chars: int = 0,
+    message_count: int = 0,
+    inferred_failure_reason: str = "",
+    action_needed: str = "",
+    finish_reason: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
 ) -> dict:
+    schema_size = schema_size_chars or _evidence_judge_schema_size_chars()
+    output_mode = str(
+        _evidence_judge_output_setting(
+            "output_mode",
+            _evidence_judge_setting("output_mode", "native_json_schema_pydantic"),
+        )
+        or "native_json_schema_pydantic"
+    )
+    recommendation = ""
+    if failure_phase == "structured_output_unsupported_by_provider":
+        recommendation = "switch_evidence_judge_output_mode_to_prompt_json_pydantic"
     return {
+        "stage": "evidence_judge",
         "provider": _evidence_judge_provider(),
         "model": _evidence_judge_model(),
         "round_index": 1,
         "success": False,
         "failure_phase": failure_phase,
+        "inferred_failure_reason": inferred_failure_reason,
+        "action_needed": action_needed,
+        "recommendation": recommendation,
+        "structured_output_method": output_mode,
+        "output_mode": output_mode,
+        "using_langchain_with_structured_output": False,
+        "using_direct_openrouter_http": False,
+        "candidate_count": len(candidates),
+        "schema_name": "EvidenceJudgeOutput",
+        "schema_size_chars": schema_size,
+        "prompt_chars": prompt_chars,
+        "message_count": message_count,
+        "provider_error_body": sanitize_error_message(provider_error_body or raw_error_body, max_chars=12000),
+        "raw_error_body": sanitize_error_message(raw_error_body or provider_error_body, max_chars=12000),
+        "provider_name": provider_name,
         "original_user_query": original_user_query,
         "input_candidate_count": len(candidates),
         "candidate_preview": _candidate_preview(candidates),
@@ -1899,7 +2077,67 @@ def _evidence_judge_failure_debug(
         "raw_output": raw_output[:12000],
         "parsing_error": sanitize_error_message(parsing_error, max_chars=2000),
         "validation_error": sanitize_error_message(validation_error, max_chars=4000),
+        "finish_reason": finish_reason,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
     }
+
+
+def _validate_evidence_judge_business_result(
+    parsed: BaseModel,
+    *,
+    expected_ids: list[str],
+) -> str:
+    if not isinstance(parsed, EvidenceJudgeOutput):
+        return "parsed result is not EvidenceJudgeOutput"
+    judged_ids = [item.evidence_id for item in parsed.judged_evidence]
+    problems: list[str] = []
+    if len(judged_ids) != len(set(judged_ids)):
+        problems.append("duplicate evidence_id values in judged_evidence")
+    missing = [evidence_id for evidence_id in expected_ids if evidence_id not in judged_ids]
+    extra = [evidence_id for evidence_id in judged_ids if evidence_id not in expected_ids]
+    if missing:
+        problems.append(f"missing evidence_id values: {missing}")
+    if extra:
+        problems.append(f"unknown evidence_id values: {extra}")
+    if len(judged_ids) != len(expected_ids):
+        problems.append(f"expected {len(expected_ids)} judged evidence items, got {len(judged_ids)}")
+    return "; ".join(problems)
+
+
+def _structured_result_to_evidence_failure_debug(
+    *,
+    result: StructuredLLMResult,
+    original_user_query: str,
+    candidates: list[EvidenceCandidate],
+) -> dict:
+    failure_phase = result.failure_phase or "structured_llm_failed"
+    if result.business_validation_error and "evidence_id" in result.business_validation_error:
+        failure_phase = "evidence_id_mismatch"
+    return _evidence_judge_failure_debug(
+        failure_phase=failure_phase,
+        original_user_query=original_user_query,
+        candidates=candidates,
+        error_type=result.error_type,
+        error_message=result.error_message,
+        status_code=result.status_code,
+        parsing_error=result.parsing_error,
+        validation_error=result.validation_error or result.business_validation_error,
+        raw_output=result.raw_output,
+        raw_error_body=result.provider_error_body,
+        provider_error_body=result.provider_error_body,
+        prompt_chars=0,
+        schema_size_chars=_evidence_judge_schema_size_chars(),
+        message_count=0,
+        inferred_failure_reason=(
+            result.business_validation_error
+            or result.validation_error
+            or result.parsing_error
+            or result.error_message
+            or "Structured Evidence Judge call failed."
+        ),
+        action_needed="inspect_structured_llm_output_trace",
+    )
 
 
 async def _judge_evidence_candidates_with_llm(
@@ -1911,7 +2149,7 @@ async def _judge_evidence_candidates_with_llm(
     requested_resource_type: str,
     round_index: int,
 ) -> tuple[EvidenceJudgeOutput | None, dict]:
-    """Judge local RAG and Web evidence with OpenRouter strict JSON schema. No fallback."""
+    """Judge local RAG and Web evidence through the unified structured runtime."""
     if not candidates:
         parsed = EvidenceJudgeOutput(
             overall_evidence_state="insufficient",
@@ -1947,112 +2185,64 @@ async def _judge_evidence_candidates_with_llm(
         requested_resource_type=requested_resource_type,
         round_index=round_index,
     )
-    payload = _evidence_judge_request_payload(messages)
-    raw_output = ""
-    status_code = None
-    try:
-        raw_response, status_code = await asyncio.to_thread(_openrouter_evidence_chat_completion, payload)
-        raw_output = _extract_openrouter_content(raw_response)
-        if not raw_output:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="missing_judged_evidence",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type="EmptyRawOutput",
-                error_message="Evidence Judge returned empty content",
-                status_code=status_code,
-                raw_output=json.dumps(raw_response, ensure_ascii=False, default=str)[:12000],
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-        try:
-            parsed_json = json.loads(raw_output)
-        except json.JSONDecodeError as exc:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="parsing_error",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                parsing_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-        try:
-            parsed = EvidenceJudgeOutput.model_validate(parsed_json)
-        except ValidationError as exc:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="validation_error",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                validation_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
+    expected_ids = [candidate.evidence_id for candidate in candidates]
+    output_mode = str(_evidence_judge_output_setting("output_mode", "native_json_schema_pydantic") or "native_json_schema_pydantic")
+    fallback_modes = _evidence_judge_output_setting("fallback_modes", [])
+    if not isinstance(fallback_modes, list):
+        fallback_modes = []
 
-        input_ids = [candidate.evidence_id for candidate in candidates]
-        judged_ids = [item.evidence_id for item in parsed.judged_evidence]
-        if len(judged_ids) != len(set(judged_ids)) or set(judged_ids) != set(input_ids) or len(judged_ids) != len(input_ids):
-            debug = _evidence_judge_failure_debug(
-                failure_phase="evidence_id_mismatch",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type="InvalidEvidenceIds",
-                error_message=f"Expected evidence ids {input_ids}, got {judged_ids}",
-                status_code=status_code,
-                validation_error=f"Expected evidence ids {input_ids}, got {judged_ids}",
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
+    structured_result = await invoke_structured_llm(
+        node_name="evidence_judge",
+        schema=EvidenceJudgeOutput,
+        messages=messages,
+        output_mode=output_mode,
+        fallback_modes=[str(mode) for mode in fallback_modes],
+        business_validator=lambda parsed: _validate_evidence_judge_business_result(parsed, expected_ids=expected_ids),
+        state=state,
+        max_raw_chars=int(_evidence_judge_output_setting("max_raw_chars", 12000) or 12000),
+    )
 
-        candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
-        kept = [item for item in parsed.judged_evidence if item.keep]
-        kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
-        debug = {
-            "provider": _evidence_judge_provider(),
-            "model": _evidence_judge_model(),
-            "round_index": round_index,
-            "success": True,
-            "overall_evidence_state": parsed.overall_evidence_state,
-            "need_more_web_search": parsed.need_more_web_search,
-            "input_candidate_count": len(candidates),
-            "kept_count": len(kept),
-            "rejected_count": len(candidates) - len(kept),
-            "kept_source_distribution": dict(kept_distribution),
-            "coverage_gap_count": len(parsed.coverage_gaps),
-            "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
-            "raw_preview": raw_output[:4000],
-            "parsing_error": None,
-            "validation_error": None,
-        }
-        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
-        return parsed, debug
-    except Exception as exc:
-        if isinstance(exc, httpx.HTTPStatusError):
-            status_code = exc.response.status_code
-            error_message = exc.response.text or str(exc)
-        else:
-            error_message = str(exc)
-        error_type = "MissingApiKey" if _evidence_judge_api_key_env() in str(exc) else type(exc).__name__
-        phase = "missing_api_key" if error_type == "MissingApiKey" else "structured_output_request_failed"
-        debug = _evidence_judge_failure_debug(
-            failure_phase=phase,
+    if not structured_result.success or not isinstance(structured_result.parsed, EvidenceJudgeOutput):
+        debug = _structured_result_to_evidence_failure_debug(
+            result=structured_result,
             original_user_query=original_user_query,
             candidates=candidates,
-            error_type=error_type,
-            error_message=error_message,
-            status_code=status_code,
-            raw_output=raw_output,
         )
         emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
         return None, debug
+
+    parsed = structured_result.parsed
+    candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    kept = [item for item in parsed.judged_evidence if item.keep]
+    kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
+    debug = {
+        "stage": "evidence_judge",
+        "provider": _evidence_judge_provider(),
+        "model": _evidence_judge_model(),
+        "round_index": round_index,
+        "success": True,
+        "output_mode": structured_result.output_mode,
+        "fallback_modes": structured_result.fallback_modes,
+        "overall_evidence_state": parsed.overall_evidence_state,
+        "need_more_web_search": parsed.need_more_web_search,
+        "input_candidate_count": len(candidates),
+        "kept_count": len(kept),
+        "rejected_count": len(candidates) - len(kept),
+        "kept_source_distribution": dict(kept_distribution),
+        "coverage_gap_count": len(parsed.coverage_gaps),
+        "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
+        "raw_preview": structured_result.raw_output[:4000],
+        "parsing_error": None,
+        "validation_error": None,
+        "structured_output_method": structured_result.output_mode,
+        "using_direct_openrouter_http": False,
+        "schema_name": "EvidenceJudgeOutput",
+        "schema_size_chars": _evidence_judge_schema_size_chars(),
+        "prompt_chars": _messages_chars(messages),
+        "message_count": len(messages),
+    }
+    emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+    return parsed, debug
 
 
 def _evidence_quality_rank(value: str) -> int:
@@ -2213,6 +2403,7 @@ def _context_item_from_evidence(
         }
     return {
         "type": "web_evidence",
+        "legacy_type": "web_supplement",
         "type_legacy": "web_supplement",
         "source_type": "web",
         "provider": "tavily",
@@ -2913,8 +3104,9 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         env_flag="LOG_RAG_RESULT",
     )
 
-    web_context_docs = [doc for doc in context_docs if doc.get("source_type") == "web"]
+    web_context_docs = _web_evidence_items(context_docs)
     local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
+    web_evidence_count = len(web_context_docs)
     web_failed = bool(web_enabled and web_candidate_count_raw and not web_context_docs)
     emit_a3_trace(
         logger,
@@ -2923,15 +3115,15 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
             "mode": "dual_source_evidence",
             "final_doc_count": len(context_docs),
             "local_rag_context_count": len(local_context_docs),
-            "web_context_count": len(web_context_docs),
+            "web_context_count": web_evidence_count,
             "evidence_judge_state": parsed.overall_evidence_state,
             "evidence_judge_rounds": 1,
             "source_type_distribution": _source_distribution(context_docs),
             "search_refinement_needed": refinement_needed,
             "search_refinement_deferred": refinement_deferred,
             "search_optimization_reserved": True,
-            "web_evidence_count": len(web_context_docs),
-            "web_supplement_count": len(web_context_docs),
+            "web_evidence_count": web_evidence_count,
+            "web_supplement_count": web_evidence_count,
             "web_supplement_provider": "tavily",
             "web_supplement_failed": web_failed,
             "evidence_candidate_count": len(candidates),
@@ -2959,6 +3151,8 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         "degraded_reason": "",
         "web_supplement_provider": "tavily",
         "web_supplement_results": web_context_docs,
+        "web_evidence_count": web_evidence_count,
+        "web_supplement_count": web_evidence_count,
         "web_supplement_failed": web_failed,
         "web_supplement_failure_reason": "judge_rejected_all_or_no_web_kept" if web_failed else "",
         "web_supplement_status_by_subject": {},
@@ -3533,6 +3727,11 @@ async def web_search(state: TutorState) -> dict:
         and state.get("intent") in {"academic", "planning"}
     ):
         branch_mode = "multi_subject_plan" if retrieval_plan else "single_subject_synthetic"
+        skip_reason = (
+            "dual_source_evidence_web_search_handled_in_rag_retrieve"
+            if _dual_source_enabled()
+            else "conditional_web_supplement_handled_in_rag_retrieve"
+        )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
@@ -3540,7 +3739,8 @@ async def web_search(state: TutorState) -> dict:
             {
                 "query_source": "skipped_conditional_branch_mode",
                 "skipped": True,
-                "skip_reason": "conditional_web_supplement_handled_in_rag_retrieve",
+                "skip_reason": skip_reason,
+                "legacy_node": True,
                 "has_retrieval_plan": bool(retrieval_plan),
                 "branch_mode": branch_mode,
                 "retrieval_plan_count": len(retrieval_plan),
@@ -3783,9 +3983,49 @@ def _resource_offer_instruction(state: TutorState) -> str:
 @traced_node
 async def generate_answer(state: TutorState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
-    llm = get_node_llm("academic")
-
     question = _last_human_query(state)
+    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+        failure_output = state.get("evidence_judge_output") or {}
+        failure_phase = _evidence_failure_phase(state)
+        error_type = failure_output.get("error_type", "") if isinstance(failure_output, dict) else ""
+        status_code = failure_output.get("status_code", "") if isinstance(failure_output, dict) else ""
+        action_needed = failure_output.get("action_needed", "") if isinstance(failure_output, dict) else ""
+        recommendation = failure_output.get("recommendation", "") if isinstance(failure_output, dict) else ""
+
+        if action_needed is None:
+            action_needed = ""
+
+        if recommendation is None:
+            recommendation = ""
+
+        emit_a3_trace(
+            logger,
+            "generation_blocked",
+            {
+                "reason": "evidence_judge_failed",
+                "evidence_judge_failure_phase": failure_phase,
+                "error_type": error_type,
+                "status_code": status_code,
+                "action_needed": action_needed,
+                "recommendation": recommendation,
+                "context_count": len(state.get("context", [])),
+                "question_preview": question[:500],
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+            max_chars=2000,
+        )
+        diagnostic = (
+            "[开发诊断] Evidence Judge 失败，已按配置阻断普通回答生成。\n\n"
+            f"- failure_phase: {failure_phase or 'unknown'}\n"
+            f"- error_type: {error_type or 'unknown'}\n"
+            f"- status_code: {status_code or 'unknown'}\n"
+            f"- action_needed: {action_needed or 'inspect evidence_judge A3_TRACE logs'}\n\n"
+            "本次未使用未裁决的 local RAG 或 Tavily Web evidence 生成普通答案。"
+        )
+        return {"messages": [AIMessage(content=diagnostic)]}
+
+    llm = get_node_llm("academic")
 
     # Split merged context by source type
     context = state.get("context", [])
@@ -3797,21 +4037,17 @@ async def generate_answer(state: TutorState) -> dict:
         or c.get("source_type") == "web"
     ]
     web_results = [c for c in context if c.get("type") == "web"]
-    web_supplements = [
-        c
-        for c in context
-        if c.get("type") in {"web_supplement", "web_evidence"} or c.get("source_type") == "web"
-    ]
+    web_evidence = _web_evidence_items(context)
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
         "generate_answer",
         {
             "context_rag_count": len(rag_docs),
-            "context_web_count": len(web_results),
-            "context_web_supplement_count": len(web_supplements),
+            "context_web_count": len(web_evidence),
+            "context_web_supplement_count": len(web_evidence),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
-            "web_supplement_count": len(web_supplements),
+            "web_supplement_count": len(web_evidence),
             "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
@@ -3819,14 +4055,14 @@ async def generate_answer(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
-            "web_evidence_count": len(web_supplements),
+            "web_evidence_count": len(web_evidence),
             "web_evidence_provider": "tavily",
             "web_judge_provider": state.get("web_judge_provider", _judge_provider()),
             "web_judge_model": state.get("web_judge_model", _judge_model()),
             "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
-            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_supplements if doc.get("use_case")}),
-            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_supplements if doc.get("evidence_type")}),
+            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_evidence if doc.get("use_case")}),
+            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_evidence if doc.get("evidence_type")}),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
             "search_refinement_needed": bool(state.get("search_refinement_needed")),
@@ -3834,8 +4070,8 @@ async def generate_answer(state: TutorState) -> dict:
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),
-            "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplements if doc.get("supplement_for_subject")}),
-            "web_supplement_purposes": sorted({doc.get("supplement_purpose") for doc in web_supplements if doc.get("supplement_purpose")}),
+            "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_evidence if doc.get("supplement_for_subject")}),
+            "web_supplement_purposes": sorted({doc.get("supplement_purpose") for doc in web_evidence if doc.get("supplement_purpose")}),
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
             "resource_offer": not bool(state.get("requested_resource_type") or state.get("needs_mindmap")),
@@ -3946,6 +4182,28 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     increments retry_count to signal the conditional edge for re-retrieval.
     Defaults to valid on any parsing/model failure (safe fallback).
     """
+    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+        emit_a3_trace(
+            logger,
+            "hallucination_eval",
+            {
+                "skipped": True,
+                "skip_reason": "skipped_due_to_evidence_judge_failed",
+                "evidence_judge_failure_phase": _evidence_failure_phase(state),
+                "context_count": len(state.get("context", [])),
+                "success": False,
+                "defaulted_to_valid": False,
+                "is_faithful": None,
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+            max_chars=1000,
+        )
+        return {
+            "hallucination_detected": False,
+            "hallucination_reason": "skipped_due_to_evidence_judge_failed",
+        }
+
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
     eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
     llm = get_node_llm(
@@ -3989,7 +4247,7 @@ async def evaluate_hallucination(state: TutorState) -> dict:
         HumanMessage(content=eval_prompt),
     ]
     rag_docs = [d for d in docs if d.get("type") == "rag"]
-    web_results = [d for d in docs if d.get("type") == "web"]
+    web_evidence = _web_evidence_items(docs)
     primary_diag: dict = {"called": False}
     fallback_diag: dict = {"called": False}
     fallback_called = False
@@ -4062,7 +4320,7 @@ async def evaluate_hallucination(state: TutorState) -> dict:
             "eval_model": eval_model,
             "fallback_model": os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "")),
             "context_rag_count": len(rag_docs),
-            "context_web_count": len(web_results),
+            "context_web_count": len(web_evidence),
             "answer_chars": len(str(answer)),
             "prompt_chars": len(eval_prompt),
         },
@@ -4091,4 +4349,3 @@ def should_retry_or_end(state: TutorState) -> str:
     ):
         return "retry"
     return "end"
-

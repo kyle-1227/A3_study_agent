@@ -44,6 +44,8 @@ web_search:
 
 retrieval:
   mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
+  dual_source_evidence:
+    block_generation_when_evidence_judge_failed: true
   local_rag:
     enabled: true
     per_subject_top_k: 3
@@ -68,10 +70,10 @@ retrieval:
 
 llm:
   search_result_judge:
-    provider: openrouter
-    model: "openrouter/owl-alpha"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
     temperature: 0.0
     max_tokens: 1200
     streaming: false
@@ -79,16 +81,26 @@ llm:
     strict_schema: true
     include_raw: true
   evidence_judge:
-    provider: openrouter
-    model: "openrouter/owl-alpha"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
     temperature: 0.0
-    max_tokens: 1800
+    max_tokens: 4096
     streaming: false
     structured_output: true
     strict_schema: true
     include_raw: true
+
+llm_outputs:
+  evidence_judge:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    max_raw_chars: 12000
+  search_result_judge:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    max_raw_chars: 12000
 
 planner:
   search_timeout: 15                    # Policy search timeout (seconds)

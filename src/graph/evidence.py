@@ -62,6 +62,7 @@ class EvidenceJudgeItem(BaseModel):
         "commercial_study_site",
         "video",
         "blog_or_article",
+        "web_article",
         "unknown",
     ] = "unknown"
 
@@ -73,6 +74,7 @@ class EvidenceJudgeItem(BaseModel):
         "tool_ecosystem",
         "latest_practice",
         "inspiration_only",
+        "redundant",
         "discard",
     ] = "discard"
 
