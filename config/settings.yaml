@@ -8,6 +8,9 @@ academic:
   max_tokens: 4096                      # Answer bubble output budget (doubled)
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
 
+development:
+  fail_fast_structured_output: true      # Structured Pydantic calls fail visibly in development
+
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
@@ -69,6 +72,62 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  supervisor:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    streaming: false
+  query_rewrite:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    streaming: false
+  hallucination_eval:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.0
+    max_tokens: 800
+    streaming: false
+  mindmap:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    streaming: false
+  exercise:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    streaming: false
+  planner:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    streaming: false
+  web_coverage_decision:
+    provider: nvidia_build
+    model: "deepseek-ai/deepseek-v4-flash"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    streaming: false
   search_result_judge:
     provider: nvidia_build
     model: "deepseek-ai/deepseek-v4-flash"
@@ -93,13 +152,89 @@ llm:
     include_raw: true
 
 llm_outputs:
+  default:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  supervisor:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  search_query_rewriter:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  exercise_agent:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  exercise_reviewer:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  mindmap_agent:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  mindmap_reviewer:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  reviewer_academic:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  reviewer_emotional:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  feedback_router:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  hallucination_eval:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  web_coverage_decision:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
   evidence_judge:
     output_mode: native_json_schema_pydantic
     fallback_modes: []
+    failure_policy: block
+    max_retries: 0
     max_raw_chars: 12000
   search_result_judge:
     output_mode: native_json_schema_pydantic
     fallback_modes: []
+    failure_policy: block
+    max_retries: 0
     max_raw_chars: 12000
 
 planner:

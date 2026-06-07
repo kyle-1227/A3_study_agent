@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from src.config import get_setting
@@ -57,6 +57,7 @@ class StructuredLLMResult:
     success: bool
     parsed: BaseModel | None
     node_name: str
+    llm_node: str
     schema_name: str
     provider: str
     model: str
@@ -72,15 +73,26 @@ class StructuredLLMResult:
     parsing_error: str = ""
     validation_error: str = ""
     business_validation_error: str = ""
+    fail_fast: bool = False
+    fallback_used: bool = False
+    default_used: bool = False
+    retry_count: int = 0
+    failure_policy: str = ""
 
     def to_debug_payload(self, *, max_raw_chars: int = 4000) -> dict[str, Any]:
         return {
             "node_name": self.node_name,
+            "llm_node": self.llm_node,
             "schema_name": self.schema_name,
             "provider": self.provider,
             "model": self.model,
             "output_mode": self.output_mode,
             "fallback_modes": self.fallback_modes,
+            "fail_fast": self.fail_fast,
+            "fallback_used": self.fallback_used,
+            "default_used": self.default_used,
+            "retry_count": self.retry_count,
+            "failure_policy": self.failure_policy,
             "success": self.success,
             "failure_phase": self.failure_phase,
             "error_type": self.error_type,
@@ -106,12 +118,60 @@ class StructuredLLMResult:
         }
 
 
+class StructuredOutputError(RuntimeError):
+    """Raised when a structured-output call fails under fail-fast policy."""
+
+    def __init__(self, result: StructuredLLMResult):
+        self.result = result
+        super().__init__(
+            f"{result.node_name} failed to produce valid {result.schema_name}: "
+            f"{result.failure_phase or result.error_type or 'structured_output_failed'}"
+        )
+
+
 def _setting(node_name: str, key: str, default: Any = None) -> Any:
     return get_setting(f"llm.{node_name}.{key}", default)
 
 
 def _output_setting(node_name: str, key: str, default: Any = None) -> Any:
-    return get_setting(f"llm_outputs.{node_name}.{key}", default)
+    value = get_setting(f"llm_outputs.{node_name}.{key}", None)
+    if value is not None:
+        return value
+    return get_setting(f"llm_outputs.default.{key}", default)
+
+
+def _fail_fast_enabled() -> bool:
+    return bool(get_setting("development.fail_fast_structured_output", True))
+
+
+def get_llm_output_mode(node_name: str) -> str:
+    """Return the configured provider-neutral output mode for a structured node."""
+    mode = str(_output_setting(node_name, "output_mode", "native_json_schema_pydantic") or "")
+    _validate_mode(mode)
+    return mode
+
+
+def get_fallback_modes(node_name: str) -> list[str]:
+    """Return configured fallback modes; always empty in fail-fast development mode."""
+    if _fail_fast_enabled():
+        return []
+    raw = _output_setting(node_name, "fallback_modes", [])
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"llm_outputs.{node_name}.fallback_modes must be a list[str]")
+    modes = [str(mode) for mode in raw]
+    for mode in modes:
+        _validate_mode(mode)
+    return modes
+
+
+def get_max_raw_chars(node_name: str) -> int:
+    return int(_output_setting(node_name, "max_raw_chars", 12000) or 12000)
+
+
+def _failure_policy(node_name: str) -> str:
+    return str(_output_setting(node_name, "failure_policy", "block") or "block")
 
 
 def _provider(node_name: str) -> str:
@@ -204,6 +264,26 @@ def _validate_mode(mode: str) -> None:
         )
 
 
+def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
+    return (
+        "Structured output contract for this call:\n"
+        f"- Node: {node_name}\n"
+        f"- Schema: {schema.__name__}\n"
+        f"- Output mode: {mode}\n"
+        "- Return exactly one valid JSON object matching the configured Pydantic schema.\n"
+        "- Do not output markdown, code fences, comments, explanations, or extra text.\n"
+        "- Do not omit required fields. Use only schema-compatible enum values.\n"
+        "- If unsure, still return the best schema-valid JSON object; never answer in prose."
+    )
+
+
+def _inject_json_contract(messages: list, *, schema: type[BaseModel], node_name: str, mode: str) -> list:
+    contract = _json_output_contract(schema, node_name, mode)
+    if messages and isinstance(messages[0], dict):
+        return [{"role": "system", "content": contract}, *messages]
+    return [SystemMessage(content=contract), *messages]
+
+
 def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
     return {
         "type": "function",
@@ -218,11 +298,13 @@ def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
 async def _invoke_one_mode(
     *,
     node_name: str,
+    llm_node: str,
     schema: type[BaseModel],
     messages: list,
     mode: str,
 ) -> tuple[BaseModel, str]:
-    llm = get_node_llm(node_name)
+    llm = get_node_llm(llm_node)
+    messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
 
     if mode == "constrained_decoding":
         raise NotImplementedError("constrained_decoding is reserved but not implemented")
@@ -278,6 +360,7 @@ async def _invoke_one_mode(
 async def invoke_structured_llm(
     *,
     node_name: str,
+    llm_node: str | None = None,
     schema: type[BaseModel],
     messages: list,
     output_mode: str,
@@ -286,14 +369,37 @@ async def invoke_structured_llm(
     state: dict | None = None,
     max_raw_chars: int | None = None,
 ) -> StructuredLLMResult:
-    """Invoke a structured-output LLM with explicit fallback modes only."""
-    fallback_modes = list(fallback_modes or [])
-    modes = [output_mode, *fallback_modes]
-    provider = _provider(node_name)
-    model = _model(node_name)
+    """Invoke a structured-output LLM.
+
+    In development fail-fast mode, the first failure raises
+    :class:`StructuredOutputError`; fallback modes remain configuration-only
+    and are not executed.
+    """
+    llm_node = llm_node or node_name
+    fail_fast = _fail_fast_enabled()
+    requested_fallback_modes = list(fallback_modes or [])
+    effective_fallback_modes = [] if fail_fast else requested_fallback_modes
+    modes = [output_mode, *effective_fallback_modes]
+    provider = _provider(llm_node)
+    model = _model(llm_node)
     schema_name = schema.__name__
-    raw_limit = int(max_raw_chars or _output_setting(node_name, "max_raw_chars", 8000) or 8000)
+    raw_limit = int(max_raw_chars or get_max_raw_chars(node_name))
+    failure_policy = _failure_policy(node_name)
     attempts: list[StructuredLLMAttempt] = []
+
+    def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
+        emit_a3_trace(
+            logger,
+            "structured_llm_output",
+            result.to_debug_payload(max_raw_chars=raw_limit),
+            state=state,
+            env_flag="LOG_STRUCTURED_LLM_OUTPUT",
+            max_chars=raw_limit,
+        )
+        if fail_fast and not result.success:
+            if exc is not None:
+                raise StructuredOutputError(result) from exc
+            raise StructuredOutputError(result)
 
     for mode in modes:
         last_raw_output = ""
@@ -312,22 +418,29 @@ async def invoke_structured_llm(
                 success=False,
                 parsed=None,
                 node_name=node_name,
+                llm_node=llm_node,
                 schema_name=schema_name,
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=fallback_modes,
+                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 failure_phase=attempt.failure_phase,
                 error_type=attempt.error_type,
                 error_message=attempt.error_message,
+                fail_fast=fail_fast,
+                fallback_used=False,
+                default_used=False,
+                retry_count=0,
+                failure_policy=failure_policy,
             )
-            emit_a3_trace(logger, "structured_llm_output", result.to_debug_payload(max_raw_chars=raw_limit), state=state, env_flag="LOG_STRUCTURED_LLM_OUTPUT", max_chars=raw_limit)
+            _emit_and_maybe_raise(result, exc=exc)
             continue
 
         try:
             parsed, raw_output = await _invoke_one_mode(
                 node_name=node_name,
+                llm_node=llm_node,
                 schema=schema,
                 messages=messages,
                 mode=mode,
@@ -349,15 +462,21 @@ async def invoke_structured_llm(
                 success=True,
                 parsed=parsed,
                 node_name=node_name,
+                llm_node=llm_node,
                 schema_name=schema_name,
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=fallback_modes,
+                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 raw_output=raw_output,
+                fail_fast=fail_fast,
+                fallback_used=(mode != output_mode),
+                default_used=False,
+                retry_count=0,
+                failure_policy=failure_policy,
             )
-            emit_a3_trace(logger, "structured_llm_output", result.to_debug_payload(max_raw_chars=raw_limit), state=state, env_flag="LOG_STRUCTURED_LLM_OUTPUT", max_chars=raw_limit)
+            _emit_and_maybe_raise(result)
             return result
         except Exception as exc:
             status_code = _extract_status_code(exc)
@@ -389,11 +508,12 @@ async def invoke_structured_llm(
                 success=False,
                 parsed=None,
                 node_name=node_name,
+                llm_node=llm_node,
                 schema_name=schema_name,
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=fallback_modes,
+                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 provider_error_body=provider_error_body,
                 failure_phase=phase,
@@ -406,24 +526,37 @@ async def invoke_structured_llm(
                 business_validation_error=str(exc).replace("business_validation_error:", "").strip()
                 if phase == "business_validation_error"
                 else "",
+                fail_fast=fail_fast,
+                fallback_used=(mode != output_mode),
+                default_used=False,
+                retry_count=0,
+                failure_policy=failure_policy,
             )
-            emit_a3_trace(logger, "structured_llm_output", result.to_debug_payload(max_raw_chars=raw_limit), state=state, env_flag="LOG_STRUCTURED_LLM_OUTPUT", max_chars=raw_limit)
+            _emit_and_maybe_raise(result, exc=exc)
             continue
 
     last = attempts[-1] if attempts else StructuredLLMAttempt(output_mode=output_mode, failure_phase="no_attempts")
-    return StructuredLLMResult(
+    result = StructuredLLMResult(
         success=False,
         parsed=None,
         node_name=node_name,
+        llm_node=llm_node,
         schema_name=schema_name,
         provider=provider,
         model=model,
         output_mode=last.output_mode or output_mode,
-        fallback_modes=fallback_modes,
+        fallback_modes=effective_fallback_modes,
         attempts=attempts,
         failure_phase=last.failure_phase,
         error_type=last.error_type,
         error_message=last.error_message,
         status_code=last.status_code,
         provider_error_body=last.provider_error_body,
+        fail_fast=fail_fast,
+        fallback_used=False,
+        default_used=False,
+        retry_count=0,
+        failure_policy=failure_policy,
     )
+    _emit_and_maybe_raise(result)
+    return result

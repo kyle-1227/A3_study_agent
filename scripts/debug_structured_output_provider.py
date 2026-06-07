@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.llm.structured_output import ALLOWED_OUTPUT_MODES, invoke_structured_llm  # noqa: E402
+from src.llm.structured_output import ALLOWED_OUTPUT_MODES, StructuredOutputError, invoke_structured_llm  # noqa: E402
 
 
 class ProbeOutput(BaseModel):
@@ -39,14 +39,17 @@ def _messages() -> list:
 
 
 async def _run(mode: str, fallback_modes: list[str]) -> None:
-    result = await invoke_structured_llm(
-        node_name="evidence_judge",
-        schema=ProbeOutput,
-        messages=_messages(),
-        output_mode=mode,
-        fallback_modes=fallback_modes,
-        max_raw_chars=12000,
-    )
+    try:
+        result = await invoke_structured_llm(
+            node_name="evidence_judge",
+            schema=ProbeOutput,
+            messages=_messages(),
+            output_mode=mode,
+            fallback_modes=fallback_modes,
+            max_raw_chars=12000,
+        )
+    except StructuredOutputError as exc:
+        result = exc.result
     payload = {
         "node_name": result.node_name,
         "provider": result.provider,
@@ -88,4 +91,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

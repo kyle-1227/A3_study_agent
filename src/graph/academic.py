@@ -26,7 +26,14 @@ from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
-from src.llm.structured_output import StructuredLLMResult, invoke_structured_llm
+from src.llm.structured_output import (
+    StructuredLLMResult,
+    StructuredOutputError,
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
@@ -79,6 +86,36 @@ class SearchQueryRewriteOutput(BaseModel):
         default_factory=list,
         description="Per-subject retrieval plan",
     )
+
+
+def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
+    """Business validation for retrieval query rewriting."""
+    if not isinstance(parsed, SearchQueryRewriteOutput):
+        return "root expected SearchQueryRewriteOutput"
+    if not str(parsed.rag_query or "").strip():
+        return "rag_query must be non-empty"
+    if not str(parsed.web_search_query or "").strip():
+        return "web_search_query must be non-empty"
+    for idx, item in enumerate(parsed.retrieval_plan or []):
+        prefix = f"retrieval_plan.{idx}"
+        if item.priority < 0 or item.priority > 1:
+            return f"{prefix}.priority must be between 0 and 1"
+        if item.subject and not str(item.subject).strip():
+            return f"{prefix}.subject must be a string"
+        if item.role and not str(item.role).strip():
+            return f"{prefix}.role must be a string"
+    return ""
+
+
+def validate_hallucination_eval(parsed: BaseModel) -> str:
+    """Business validation for hallucination evaluation."""
+    if not isinstance(parsed, HallucinationEvaluation):
+        return "root expected HallucinationEvaluation"
+    if not isinstance(parsed.is_faithful, bool):
+        return "is_faithful must be a boolean"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
 
 
 class SupplementPlanItem(BaseModel):
@@ -1110,89 +1147,6 @@ def _targets_from_decision(
     return targets[:max_subjects]
 
 
-_OPEN_APPLICATION_TERMS = (
-    "应用", "怎么用", "案例", "项目", "实践", "路线", "规划", "最新", "工具", "框架",
-    "场景", "扩展", "行业", "前沿", "发展", "趋势", "真实", "落地",
-    "apply", "application", "case", "project", "practice", "tool", "framework",
-    "latest", "trend", "industry", "roadmap", "plan", "ecosystem",
-)
-
-
-def _question_has_any(question: str, terms: tuple[str, ...]) -> bool:
-    lower = question.lower()
-    return any(term.lower() in lower for term in terms)
-
-
-def _rule_based_web_supplement_targets(
-    *,
-    state: TutorState,
-    retrieval_plan: list[dict],
-    branch_evals: dict[str, dict],
-) -> tuple[list[dict], dict]:
-    """Fallback when LLM coverage decision fails."""
-    question = _last_human_query(state)
-    open_application = _question_has_any(question, _OPEN_APPLICATION_TERMS)
-    requested_resource = bool(state.get("requested_resource_type") or state.get("needs_mindmap"))
-    intent = state.get("intent", "")
-    targets: list[dict] = []
-    for item in retrieval_plan:
-        subject = str(item.get("subject") or "")
-        branch_eval = branch_evals.get(subject, {})
-        status = str(branch_eval.get("branch_status") or "unknown")
-        purposes: list[str] = []
-        if status in {"weak", "missing"}:
-            purposes.append("repair")
-        if open_application:
-            purposes.extend(["coverage_expansion", "application_context"])
-        if _question_has_any(question, ("工具", "框架", "库", "技术栈", "tool", "framework", "library", "ecosystem")):
-            purposes.append("tool_ecosystem")
-        if _question_has_any(question, ("案例", "项目", "实践", "示例", "case", "project", "example", "practice")):
-            purposes.extend(["case_example", "implementation_detail"])
-        if _question_has_any(question, ("最新", "前沿", "趋势", "当前", "latest", "trend", "current")):
-            purposes.append("latest_practice")
-        if intent == "planning":
-            purposes.append("planning_support")
-        if requested_resource:
-            purposes.append("resource_enrichment")
-
-        purposes = _normalize_purposes(purposes)
-        if not purposes:
-            continue
-        query = item.get("web_search_query") or item.get("rag_query") or question
-        targets.append({
-            "subject": subject,
-            "role": item.get("role", "supporting_context"),
-            "coverage_risk": "high" if open_application or requested_resource else ("medium" if status in {"weak", "missing"} else "low"),
-            "local_evidence_strength": status,
-            "supplement_purposes": purposes,
-            "supplement_queries": [
-                {
-                    "purpose": purposes[0],
-                    "query": _compact_web_query(
-                        query,
-                        purpose=purposes[0],
-                        subject=subject,
-                        max_chars=int(_web_setting("max_query_chars", 160)),
-                    ),
-                    "priority": _clamp_priority(item.get("priority", 0.5)),
-                    "reason": "Rule fallback selected this branch for Web supplement.",
-                }
-            ],
-            "decision_reason": "Rule fallback based on branch status and task wording.",
-            "subject_priority": _clamp_priority(item.get("priority", 0.5)),
-            "branch_status": status,
-        })
-
-    max_subjects = int(_web_setting("max_supplement_subjects", 2))
-    targets.sort(key=lambda target: _clamp_priority(target.get("subject_priority")), reverse=True)
-    return targets[:max_subjects], {
-        "fallback_reason": "rule_based_coverage_decision",
-        "open_application": open_application,
-        "requested_resource": requested_resource,
-        "target_count": len(targets[:max_subjects]),
-    }
-
-
 async def _decide_web_supplement_with_llm(
     *,
     state: TutorState,
@@ -1204,22 +1158,7 @@ async def _decide_web_supplement_with_llm(
     """Return selected Web supplement targets and diagnostics."""
     enabled = bool(_web_setting("llm_decision_enabled", True))
     if not enabled:
-        targets, fallback_debug = _rule_based_web_supplement_targets(
-            state=state,
-            retrieval_plan=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        return targets, {
-            "enabled": False,
-            "llm_used": False,
-            "success": True,
-            "fallback_used": True,
-            "overall_need_web": bool(targets),
-            "decision_summary": "LLM coverage decision disabled; used rule fallback.",
-            "subject_decisions": [],
-            "selected_targets": targets,
-            **fallback_debug,
-        }
+        raise RuntimeError("web coverage decision disabled and rule fallback is not allowed")
 
     branch_summaries = _build_branch_summaries(
         retrieval_plan=retrieval_plan,
@@ -1246,98 +1185,56 @@ async def _decide_web_supplement_with_llm(
             "web_budget": json.dumps(web_budget, ensure_ascii=False),
         },
     )
-    raw_preview = ""
-    parsing_error = ""
-    try:
-        llm = get_node_llm(
-            "web_coverage_decision",
-            temperature=0.0,
-            max_tokens=1000,
-            streaming=False,
-        )
-        structured_llm = llm.with_structured_output(
-            CoverageDecisionOutput,
-            method="json_mode",
-            include_raw=True,
-        )
-        fallback = get_fallback_llm(temperature=0.0, max_tokens=1000, streaming=False)
-        structured_fallback = fallback.with_structured_output(
-            CoverageDecisionOutput,
-            method="json_mode",
-            include_raw=True,
-        )
-        messages = [
-            SystemMessage(content="You are a coverage decision agent. Return only valid JSON."),
-            HumanMessage(content=prompt),
-        ]
-        result_pack = await async_invoke_with_fallback(
-            structured_llm,
-            messages,
-            fallback=structured_fallback,
-        )
-        raw_message = result_pack.get("raw") if isinstance(result_pack, dict) else None
-        parsed = result_pack.get("parsed") if isinstance(result_pack, dict) else result_pack
-        parsing_error = str(result_pack.get("parsing_error") or "") if isinstance(result_pack, dict) else ""
-        raw_preview = _message_content_to_text(getattr(raw_message, "content", raw_message))[:500] if raw_message else ""
-        if parsing_error:
-            raise ValueError(f"coverage decision parsing_error: {parsing_error}")
-        if parsed is None:
-            raise ValueError("coverage decision parsed result is None")
-        if not isinstance(parsed, CoverageDecisionOutput):
-            parsed = CoverageDecisionOutput.model_validate(parsed)
-        targets = _targets_from_decision(
-            parsed=parsed,
-            branches=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        subject_decisions = [
-            {
-                "subject": decision.subject,
-                "role": decision.role,
-                "local_evidence_strength": decision.local_evidence_strength,
-                "coverage_risk": decision.coverage_risk,
-                "web_supplement_needed": decision.web_supplement_needed,
-                "supplement_purposes": decision.supplement_purposes,
-                "supplement_plan_count": len(decision.supplement_plan),
-                "priority": decision.priority,
-                "reason": decision.reason,
-            }
-            for decision in parsed.subject_decisions
-        ]
-        return targets, {
-            "enabled": True,
-            "llm_used": True,
-            "success": True,
-            "fallback_used": False,
-            "overall_need_web": parsed.overall_need_web,
-            "decision_summary": parsed.decision_summary,
-            "subject_decisions": subject_decisions,
-            "selected_targets": targets,
-            "error_type": "",
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
+    messages = [
+        SystemMessage(content="You are a coverage decision agent. Return only schema-valid JSON."),
+        HumanMessage(content=prompt),
+    ]
+
+    structured_result = await invoke_structured_llm(
+        node_name="web_coverage_decision",
+        llm_node="web_coverage_decision",
+        schema=CoverageDecisionOutput,
+        messages=messages,
+        output_mode=get_llm_output_mode("web_coverage_decision"),
+        fallback_modes=get_fallback_modes("web_coverage_decision"),
+        state=state,
+        max_raw_chars=get_max_raw_chars("web_coverage_decision"),
+    )
+    parsed = structured_result.parsed
+    if not isinstance(parsed, CoverageDecisionOutput):
+        raise TypeError("web_coverage_decision parsed result is not CoverageDecisionOutput")
+    targets = _targets_from_decision(
+        parsed=parsed,
+        branches=retrieval_plan,
+        branch_evals=branch_evals,
+    )
+    subject_decisions = [
+        {
+            "subject": decision.subject,
+            "role": decision.role,
+            "local_evidence_strength": decision.local_evidence_strength,
+            "coverage_risk": decision.coverage_risk,
+            "web_supplement_needed": decision.web_supplement_needed,
+            "supplement_purposes": decision.supplement_purposes,
+            "supplement_plan_count": len(decision.supplement_plan),
+            "priority": decision.priority,
+            "reason": decision.reason,
         }
-    except Exception as exc:
-        targets, fallback_debug = _rule_based_web_supplement_targets(
-            state=state,
-            retrieval_plan=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        return targets, {
-            "enabled": True,
-            "llm_used": True,
-            "success": False,
-            "fallback_used": True,
-            "overall_need_web": bool(targets),
-            "decision_summary": "Coverage decision LLM failed; used rule fallback.",
-            "subject_decisions": [],
-            "selected_targets": targets,
-            "error_type": type(exc).__name__,
-            "error_message": sanitize_error_message(exc),
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
-            **fallback_debug,
-        }
+        for decision in parsed.subject_decisions
+    ]
+    return targets, {
+        "enabled": True,
+        "llm_used": True,
+        "success": True,
+        "fallback_used": False,
+        "overall_need_web": parsed.overall_need_web,
+        "decision_summary": parsed.decision_summary,
+        "subject_decisions": subject_decisions,
+        "selected_targets": targets,
+        "error_type": "",
+        "parsing_error": "",
+        "raw_preview": structured_result.raw_output[:500],
+    }
 
 
 def _judge_setting(key: str, default: Any) -> Any:
@@ -2191,16 +2088,26 @@ async def _judge_evidence_candidates_with_llm(
     if not isinstance(fallback_modes, list):
         fallback_modes = []
 
-    structured_result = await invoke_structured_llm(
-        node_name="evidence_judge",
-        schema=EvidenceJudgeOutput,
-        messages=messages,
-        output_mode=output_mode,
-        fallback_modes=[str(mode) for mode in fallback_modes],
-        business_validator=lambda parsed: _validate_evidence_judge_business_result(parsed, expected_ids=expected_ids),
-        state=state,
-        max_raw_chars=int(_evidence_judge_output_setting("max_raw_chars", 12000) or 12000),
-    )
+    try:
+        structured_result = await invoke_structured_llm(
+            node_name="evidence_judge",
+            llm_node="evidence_judge",
+            schema=EvidenceJudgeOutput,
+            messages=messages,
+            output_mode=output_mode,
+            fallback_modes=[str(mode) for mode in fallback_modes],
+            business_validator=lambda parsed: _validate_evidence_judge_business_result(parsed, expected_ids=expected_ids),
+            state=state,
+            max_raw_chars=int(_evidence_judge_output_setting("max_raw_chars", 12000) or 12000),
+        )
+    except StructuredOutputError as exc:
+        debug = _structured_result_to_evidence_failure_debug(
+            result=exc.result,
+            original_user_query=original_user_query,
+            candidates=candidates,
+        )
+        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+        return None, debug
 
     if not structured_result.success or not isinstance(structured_result.parsed, EvidenceJudgeOutput):
         debug = _structured_result_to_evidence_failure_debug(
@@ -3242,47 +3149,34 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "available_subjects": "、".join(available_subjects) if available_subjects else "无",
         },
     )
-
-    llm = get_node_llm("query_rewrite", temperature=0.0)
     messages = [
-        SystemMessage(content="你是高校个性化学习资源系统中的检索查询改写智能体，只输出结构化查询结果。"),
+        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON."),
         HumanMessage(content=prompt),
     ]
 
-    structured_llm = llm.with_structured_output(
-        SearchQueryRewriteOutput,
-        method="json_mode",
-        include_raw=True,
-    )
-    fallback_llm = get_fallback_llm(temperature=0.0)
-    structured_fallback = fallback_llm.with_structured_output(
-        SearchQueryRewriteOutput,
-        method="json_mode",
-        include_raw=True,
-    )
-
+    raw_preview = ""
+    parsing_error = None
     try:
         with traced_llm_call(
             model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
             node_name="search_query_rewriter",
             temperature=0.0,
-        ) as span:
-            result_pack = await async_invoke_with_fallback(
-                structured_llm,
-                messages,
-                fallback=structured_fallback,
-                span=span,
+        ):
+            structured_result = await invoke_structured_llm(
+                node_name="search_query_rewriter",
+                llm_node="query_rewrite",
+                schema=SearchQueryRewriteOutput,
+                messages=messages,
+                output_mode=get_llm_output_mode("search_query_rewriter"),
+                fallback_modes=get_fallback_modes("search_query_rewriter"),
+                business_validator=validate_search_query_rewrite_output,
+                state=state,
+                max_raw_chars=get_max_raw_chars("search_query_rewriter"),
             )
-        raw_message = result_pack.get("raw")
-        parsed = result_pack.get("parsed")
-        parsing_error = result_pack.get("parsing_error")
-        raw_text = _message_content_to_text(getattr(raw_message, "content", raw_message))
-        raw_preview = raw_text[:2000] if raw_text else ""
-
-        if parsing_error is not None:
-            raise ValueError(f"search_query_rewriter parsing_error: {parsing_error}")
-        if parsed is None:
-            raise ValueError("search_query_rewriter parsed result is None")
+        parsed = structured_result.parsed
+        if not isinstance(parsed, SearchQueryRewriteOutput):
+            raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
+        raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
 
         result_payload = {
             "rag_query": parsed.rag_query.strip(),
@@ -3345,32 +3239,25 @@ async def search_query_rewriter(state: TutorState) -> dict:
             env_flag="LOG_RETRIEVAL_PLAN",
         )
     except Exception as exc:
-        logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
+        logger.exception("Initial search query rewrite failed; fallback disabled")
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
             "query_rewrite_failed",
             {
                 "error": str(exc),
-                "fallback": "empty_retrieval_plan_and_single_query_fallback",
+                "fallback": "disabled_fail_fast_structured_output",
                 "retrieval_plan": [],
                 "learning_goal": "",
                 "primary_subject": "",
                 "subject_relation_summary": "",
-                "raw_preview": raw_preview if "raw_preview" in locals() else "",
+                "raw_preview": raw_preview,
             },
             state=state,
             env_flag="LOG_QUERY_REWRITE_RESULT",
         )
-        return {
-            "search_query_rewrite_error": str(exc),
-            "search_rag_query": "",
-            "search_web_query": "",
-            "expanded_keypoints": [],
-            "search_query_rewrite_reason": "",
-            "search_query_rewrite_raw_preview": raw_preview if "raw_preview" in locals() else "",
-            **_clear_retrieval_plan_state(),
-        }
+        raise
+
 
     return {
         "search_rag_query": result_payload["rag_query"],
@@ -4135,52 +4022,13 @@ def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation
     return parsed, result_pack.get("parsing_error"), raw_text[:500] if raw_text else ""
 
 
-async def _invoke_hallucination_eval(
-    structured_llm,
-    messages: list,
-    *,
-    label: str,
-) -> tuple[HallucinationEvaluation | None, dict]:
-    """Invoke one hallucination evaluator and expose parsing diagnostics."""
-    diagnostics = {
-        "called": True,
-        "error_type": "",
-        "error_message": "",
-        "parsing_error": None,
-        "parsed_is_none": False,
-        "raw_preview": "",
-        "failure_phase": "",
-    }
-    try:
-        result_pack = await structured_llm.ainvoke(messages)
-        parsed, parsing_error, raw_preview = _hallucination_pack_parts(result_pack)
-        diagnostics["raw_preview"] = raw_preview
-        if parsing_error is not None:
-            diagnostics["parsing_error"] = sanitize_error_message(parsing_error)
-            diagnostics["failure_phase"] = (
-                "structured_parsing_error"
-                if label == "primary"
-                else "fallback_structured_parsing_error"
-            )
-            return None, diagnostics
-        if parsed is None:
-            diagnostics["parsed_is_none"] = True
-            diagnostics["failure_phase"] = "parsed_none" if label == "primary" else "fallback_parsed_none"
-            return None, diagnostics
-        return parsed, diagnostics
-    except Exception as exc:
-        diagnostics["error_type"] = type(exc).__name__
-        diagnostics["error_message"] = sanitize_error_message(exc)
-        diagnostics["failure_phase"] = f"{label}_call_failed"
-        return None, diagnostics
-
 @traced_node
 async def evaluate_hallucination(state: TutorState) -> dict:
     """Evaluate whether the generated answer hallucinates beyond retrieved context.
 
-    Uses structured LLM output to judge faithfulness. On detection,
+    Uses fail-fast structured LLM output to judge faithfulness. On detection,
     increments retry_count to signal the conditional edge for re-retrieval.
-    Defaults to valid on any parsing/model failure (safe fallback).
+    Structured-output failures are surfaced instead of being treated as faithful.
     """
     if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
         emit_a3_trace(
@@ -4192,7 +4040,6 @@ async def evaluate_hallucination(state: TutorState) -> dict:
                 "evidence_judge_failure_phase": _evidence_failure_phase(state),
                 "context_count": len(state.get("context", [])),
                 "success": False,
-                "defaulted_to_valid": False,
                 "is_faithful": None,
             },
             state=state,
@@ -4206,28 +4053,6 @@ async def evaluate_hallucination(state: TutorState) -> dict:
 
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
     eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
-    llm = get_node_llm(
-        "hallucination_eval",
-        temperature=0.0,
-        max_tokens=256,
-        streaming=False,
-    )
-    structured_primary = llm.with_structured_output(
-        HallucinationEvaluation,
-        method="json_mode",
-        include_raw=True,
-    )
-
-    fallback_llm = get_fallback_llm(
-        temperature=0.0,
-        max_tokens=256,
-        streaming=False,
-    )
-    structured_fallback = fallback_llm.with_structured_output(
-        HallucinationEvaluation,
-        method="json_mode",
-        include_raw=True,
-    )
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content
@@ -4248,77 +4073,74 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     ]
     rag_docs = [d for d in docs if d.get("type") == "rag"]
     web_evidence = _web_evidence_items(docs)
-    primary_diag: dict = {"called": False}
-    fallback_diag: dict = {"called": False}
-    fallback_called = False
-    fallback_used = False
-    defaulted_to_valid = False
-    failure_phase = ""
 
-    with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        node_name="evaluate_hallucination",
-        temperature=eval_temp,
-    ) as span:
-        evaluation, primary_diag = await _invoke_hallucination_eval(
-            structured_primary,
-            eval_messages,
-            label="primary",
+    try:
+        with traced_llm_call(
+            model_name=eval_model,
+            node_name="evaluate_hallucination",
+            temperature=eval_temp,
+        ):
+            structured_result = await invoke_structured_llm(
+                node_name="hallucination_eval",
+                llm_node="hallucination_eval",
+                schema=HallucinationEvaluation,
+                messages=eval_messages,
+                output_mode=get_llm_output_mode("hallucination_eval"),
+                fallback_modes=get_fallback_modes("hallucination_eval"),
+                business_validator=validate_hallucination_eval,
+                state=state,
+                max_raw_chars=get_max_raw_chars("hallucination_eval"),
+            )
+    except StructuredOutputError as exc:
+        emit_a3_trace(
+            logger,
+            "hallucination_eval",
+            {
+                "success": False,
+                "hallucination_eval_failed": True,
+                "failure_phase": exc.result.failure_phase,
+                "error_type": exc.result.error_type,
+                "error_message": exc.result.error_message,
+                "retry_count": retry_count,
+                "model_group": "academic",
+                "eval_model": eval_model,
+                "context_rag_count": len(rag_docs),
+                "context_web_count": len(web_evidence),
+                "answer_chars": len(str(answer)),
+                "prompt_chars": len(eval_prompt),
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+            max_chars=12000,
         )
-        if evaluation is None:
-            fallback_called = True
-            evaluation, fallback_diag = await _invoke_hallucination_eval(
-                structured_fallback,
-                eval_messages,
-                label="fallback",
-            )
-            fallback_used = evaluation is not None
+        raise
 
-        if evaluation is None:
-            logger.warning("Hallucination evaluation failed, defaulting to valid")
-            defaulted_to_valid = True
-            failure_phase = (
-                fallback_diag.get("failure_phase")
-                or primary_diag.get("failure_phase")
-                or "primary_and_fallback_failed"
-            )
-            evaluation = HallucinationEvaluation(
-                is_faithful=True,
-                reason="evaluation_failed",
-            )
-            is_faithful = True
-        else:
-            failure_phase = primary_diag.get("failure_phase", "")
-            is_faithful = evaluation.is_faithful
+    evaluation = structured_result.parsed
+    if not isinstance(evaluation, HallucinationEvaluation):
+        raise TypeError("hallucination_eval parsed result is not HallucinationEvaluation")
+    is_faithful = evaluation.is_faithful
+    failure_phase = ""
 
     hallucination_detected = not is_faithful
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
-    raw_preview = primary_diag.get("raw_preview") or fallback_diag.get("raw_preview") or ""
-    parsing_error = primary_diag.get("parsing_error") or fallback_diag.get("parsing_error")
     emit_a3_trace(
         logger,
         "hallucination_eval",
         {
-            "success": not defaulted_to_valid,
-            "defaulted_to_valid": defaulted_to_valid,
+            "success": True,
             "is_faithful": is_faithful,
             "retry_count": retry_count,
             "reason": evaluation.reason,
             "failure_phase": failure_phase,
-            "primary_called": primary_diag.get("called", False),
-            "fallback_called": fallback_called,
-            "fallback_used": fallback_used,
-            "primary_error_type": primary_diag.get("error_type", ""),
-            "primary_error_message": primary_diag.get("error_message", ""),
-            "fallback_error_type": fallback_diag.get("error_type", ""),
-            "fallback_error_message": fallback_diag.get("error_message", ""),
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
-            "parsed_is_none": primary_diag.get("parsed_is_none", False)
-            or fallback_diag.get("parsed_is_none", False),
+            "primary_called": True,
+            "fallback_called": False,
+            "fallback_used": False,
+            "parsing_error": "",
+            "raw_preview": structured_result.raw_output[:2000],
+            "parsed_is_none": False,
             "model_group": "academic",
             "eval_model": eval_model,
-            "fallback_model": os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "")),
+            "fallback_model": "",
             "context_rag_count": len(rag_docs),
             "context_web_count": len(web_evidence),
             "answer_chars": len(str(answer)),

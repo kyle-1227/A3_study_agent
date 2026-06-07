@@ -11,9 +11,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
-from src.graph.json_output import ainvoke_strict_json
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
+from src.llm.structured_output import (
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.observability.a3_trace import emit_a3_trace
 from src.tools.mindmap_tool import create_xmind_artifact, normalize_mindmap_tree
 from src.tracing import traced_llm_call, traced_node
@@ -53,6 +58,32 @@ class MindmapReviewVerdict(BaseModel):
 
     verdict: Literal["approve", "reject"]
     reason: str
+
+
+def validate_mindmap_artifact(parsed: BaseModel) -> str:
+    """Business validation for generated mindmap artifacts."""
+    if not isinstance(parsed, MindmapArtifact):
+        return "root expected MindmapArtifact"
+    if not str(parsed.title or "").strip():
+        return "title must be non-empty"
+    if parsed.tree is None:
+        return "tree must be present"
+    if not str(parsed.tree.title or "").strip():
+        return "tree.title must be non-empty"
+    if not parsed.tree.children:
+        return "tree.children must contain at least one child"
+    return ""
+
+
+def validate_review_verdict(parsed: BaseModel) -> str:
+    """Business validation for mindmap reviewer verdicts."""
+    if not isinstance(parsed, MindmapReviewVerdict):
+        return "root expected MindmapReviewVerdict"
+    if parsed.verdict not in {"approve", "reject"}:
+        return "verdict must be approve or reject"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
 
 
 if hasattr(MindmapNode, "model_rebuild"):
@@ -341,27 +372,29 @@ async def mindmap_agent(state: TutorState) -> dict:
         },
     )
 
-    llm = get_node_llm("mindmap")
     temperature = get_setting("mindmap.temperature", 0.2)
     model_name = get_setting("mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
-    try:
-        with traced_llm_call(model_name=model_name, node_name="mindmap_agent", temperature=temperature) as span:
-            result = await ainvoke_strict_json(
-                llm,
-                [
-                    SystemMessage(content="你是 JSON Tree 生成智能体。只输出一个 JSON 对象，不要输出 Mermaid、Markdown、代码块或解释文本。"),
-                    HumanMessage(content=prompt),
-                ],
-                schema=MindmapArtifact,
-                node_name="mindmap_agent",
-                span=span,
-            )
-        title = result.title.strip() or "知识点思维导图"
-        raw_tree = _model_to_dict(result.tree)
-    except Exception as exc:
-        logger.exception("mindmap_agent structured output failed; fallback disabled")
-        raise RuntimeError(f"mindmap_agent structured output failed; fallback disabled: {exc}") from exc
+    with traced_llm_call(model_name=model_name, node_name="mindmap_agent", temperature=temperature):
+        structured_result = await invoke_structured_llm(
+            node_name="mindmap_agent",
+            llm_node="mindmap",
+            schema=MindmapArtifact,
+            messages=[
+                SystemMessage(content="You are a JSON Tree generator. Return only valid JSON for the MindmapArtifact schema."),
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("mindmap_agent"),
+            fallback_modes=get_fallback_modes("mindmap_agent"),
+            business_validator=validate_mindmap_artifact,
+            state=state,
+            max_raw_chars=get_max_raw_chars("mindmap_agent"),
+        )
+    result = structured_result.parsed
+    if not isinstance(result, MindmapArtifact):
+        raise TypeError("mindmap_agent parsed result is not MindmapArtifact")
+    title = result.title.strip() or "Knowledge mindmap"
+    raw_tree = _model_to_dict(result.tree)
 
     tree = normalize_mindmap_tree(raw_tree)
     if not tree.get("title"):
@@ -407,29 +440,28 @@ async def mindmap_reviewer(state: TutorState) -> dict:
         },
     )
 
-    llm = get_node_llm("mindmap", temperature=get_setting("mindmap.reviewer_temperature", 0.0))
-    structured_llm = llm.with_structured_output(MindmapReviewVerdict, method="json_mode")
-    fallback = get_fallback_llm(temperature=get_setting("mindmap.reviewer_temperature", 0.0))
-    structured_fallback = fallback.with_structured_output(MindmapReviewVerdict, method="json_mode")
     model_name = get_setting("mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
-    try:
-        with traced_llm_call(model_name=model_name, node_name="mindmap_reviewer", temperature=0.0) as span:
-            result = await async_invoke_with_fallback(
-                structured_llm,
-                [
-                    SystemMessage(content="你是高校课程资源质量审查智能体，只返回 JSON 审查结论。"),
-                    HumanMessage(content=prompt),
-                ],
-                fallback=structured_fallback,
-                span=span,
-            )
-        verdict = result.verdict
-        reason = result.reason.strip()
-    except Exception:
-        logger.warning("Mindmap reviewer failed, approving tree that passed local checks", exc_info=True)
-        verdict = "approve"
-        reason = "已通过本地结构质量检查。"
+    with traced_llm_call(model_name=model_name, node_name="mindmap_reviewer", temperature=0.0):
+        structured_result = await invoke_structured_llm(
+            node_name="mindmap_reviewer",
+            llm_node="mindmap",
+            schema=MindmapReviewVerdict,
+            messages=[
+                SystemMessage(content="You are a course resource quality reviewer. Return only valid JSON for the MindmapReviewVerdict schema."),
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("mindmap_reviewer"),
+            fallback_modes=get_fallback_modes("mindmap_reviewer"),
+            business_validator=validate_review_verdict,
+            state=state,
+            max_raw_chars=get_max_raw_chars("mindmap_reviewer"),
+        )
+    result = structured_result.parsed
+    if not isinstance(result, MindmapReviewVerdict):
+        raise TypeError("mindmap_reviewer parsed result is not MindmapReviewVerdict")
+    verdict = result.verdict
+    reason = result.reason.strip()
 
     return {
         "mindmap_review_verdict": verdict,
