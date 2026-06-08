@@ -306,10 +306,10 @@ const markdownComponents: Components = {
   h1: ({ children }) => <h1 className="text-lg font-bold mt-4 mb-2 text-[#3D5A40]">{children}</h1>,
   h2: ({ children }) => <h2 className="text-base font-bold mt-3 mb-1.5 text-[#3D5A40]">{children}</h2>,
   h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1 text-[#3D5A40]">{children}</h3>,
-  p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
-  ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-1">{children}</ul>,
-  ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed break-words">{children}</p>,
+  ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-1 break-words">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1 break-words">{children}</ol>,
+  li: ({ children }) => <li className="leading-relaxed break-words">{children}</li>,
   strong: ({ children }) => <strong className="font-semibold text-[#3D5A40]">{children}</strong>,
   blockquote: ({ children }) => (
     <blockquote className="border-l-3 border-[#7A9E7E] pl-3 my-2 text-muted-foreground italic">
@@ -328,12 +328,12 @@ const markdownComponents: Components = {
     }
     // Inline code
     return (
-      <code className="bg-[#F5F3E8] rounded px-1.5 py-0.5 text-xs font-mono text-[#5C3D2E]">
+      <code className="bg-[#F5F3E8] rounded px-1.5 py-0.5 text-xs font-mono text-[#5C3D2E] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
         {children}
       </code>
     )
   },
-  pre: ({ children }) => <pre className="my-2">{children}</pre>,
+  pre: ({ children }) => <pre className="my-2 max-w-full overflow-x-auto">{children}</pre>,
   table: ({ children }) => (
     <div className="overflow-x-auto my-2">
       <table className="min-w-full text-xs border-collapse">{children}</table>
@@ -360,7 +360,7 @@ function MessageBubble({ message }: { message: Message }) {
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className={cn(
-        "max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed overflow-hidden",
+        "max-w-[80%] min-w-0 rounded-2xl px-4 py-3 text-sm leading-relaxed",
         isUser
           ? "bg-[#3D5A40] text-white rounded-tr-sm"
           : "bg-white border border-[#C8D6C9] text-[#2D2D2D] rounded-tl-sm"
@@ -369,16 +369,18 @@ function MessageBubble({ message }: { message: Message }) {
           // User messages render as plain text
           <div className="whitespace-pre-wrap">{message.content}</div>
         ) : (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             {message.resourceStatus && (
               <ResourceGenerationStatusPanel status={message.resourceStatus} />
             )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.content ? (
               // Assistant messages render as Markdown
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {message.content}
-              </ReactMarkdown>
+              <div className="min-w-0 max-w-full break-words">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                  {message.content}
+                </ReactMarkdown>
+              </div>
             ) : (
               <p className="text-muted-foreground">正在生成个性化学习资源...</p>
             )}

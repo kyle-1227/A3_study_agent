@@ -21,6 +21,12 @@ from pydantic import BaseModel
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
+from src.llm.structured_output import (
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
@@ -40,6 +46,28 @@ class FeedbackClassification(BaseModel):
     """Classify user feedback on a study plan."""
     route: Literal["tweak", "rewrite"]
     reason: str
+
+
+def validate_review_verdict(parsed: BaseModel) -> str:
+    """Business validation for planning reviewer verdicts."""
+    if not isinstance(parsed, ReviewVerdict):
+        return "root expected ReviewVerdict"
+    if parsed.verdict not in {"approve", "reject"}:
+        return "verdict must be approve or reject"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
+
+
+def validate_feedback_classification(parsed: BaseModel) -> str:
+    """Business validation for HIL feedback routing."""
+    if not isinstance(parsed, FeedbackClassification):
+        return "root expected FeedbackClassification"
+    if parsed.route not in {"tweak", "rewrite"}:
+        return "route must be tweak or rewrite"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +142,10 @@ async def _run_reviewer(
 ) -> ReviewVerdict:
     """Shared logic for academic and emotional reviewers."""
     reviewer_temp = get_setting("planner.reviewer_temperature", 0.0)
-    llm = get_node_llm("planner", temperature=reviewer_temp)
-    structured_primary = llm.with_structured_output(ReviewVerdict, method="json_mode")
-
-    fallback_llm = get_fallback_llm(temperature=reviewer_temp)
-    structured_fallback = fallback_llm.with_structured_output(ReviewVerdict, method="json_mode")
-
     review_prompt = (
-        f"## 个性化学习路径\n\n{state.get('draft', '')}\n\n"
-        f"## 学习者情况\n\n{state.get('intel_summary', '')}\n\n"
-        f"请以 json 格式返回你的审查结论。"
+        f"## Current personalized study plan\n\n{state.get('draft', '')}\n\n"
+        f"## Learner context\n\n{state.get('intel_summary', '')}\n\n"
+        "Return a JSON review verdict for this plan."
     )
     messages = [
         SystemMessage(content=load_prompt(system_prompt_name)),
@@ -134,16 +156,22 @@ async def _run_reviewer(
         model_name=get_setting("planner.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
         node_name=node_name,
         temperature=reviewer_temp,
-    ) as span:
-        try:
-            verdict = await async_invoke_with_fallback(
-                structured_primary, messages,
-                fallback=structured_fallback, span=span,
-            )
-            return verdict
-        except Exception:
-            logger.warning("Reviewer %s failed, defaulting to approve", node_name, exc_info=True)
-            return ReviewVerdict(verdict="approve", reason="审查异常，默认通过")
+    ):
+        structured_result = await invoke_structured_llm(
+            node_name=node_name,
+            llm_node="planner",
+            schema=ReviewVerdict,
+            messages=messages,
+            output_mode=get_llm_output_mode(node_name),
+            fallback_modes=get_fallback_modes(node_name),
+            business_validator=validate_review_verdict,
+            state=state,
+            max_raw_chars=get_max_raw_chars(node_name),
+        )
+    verdict = structured_result.parsed
+    if not isinstance(verdict, ReviewVerdict):
+        raise TypeError(f"{node_name} parsed result is not ReviewVerdict")
+    return verdict
 
 
 @traced_node
@@ -252,33 +280,35 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
     Uses the supervisor's fast model for quick classification.
     Also updates hil_summary: compresses old summary + new feedback into one string.
     """
-    llm = get_node_llm("supervisor")
-    structured_llm = llm.with_structured_output(FeedbackClassification, method="json_mode")
-
     feedback = state.get("hil_feedback", "")
     draft = state.get("draft", "")
     old_summary = state.get("hil_summary", "")
 
-    # ── Step 1: Classify feedback ──
     classify_prompt = (
-        f"学习者对以下个性化学习路径或资源生成方案提出了修改意见。\n\n"
-        f"## 当前计划(前500字)\n{draft[:500]}\n\n"
-        f"## 学习者反馈\n{feedback}\n\n"
-        f"判断这个反馈需要的修改程度：\n"
-        f"- tweak: 只需要局部微调（如调整某天科目、修改时间、增删某个小项）\n"
-        f"- rewrite: 需要重新规划（如整体思路不对、完全不符合需求、需要换方向）\n\n"
-        f"请以 json 格式返回你的分类结果。"
+        f"A learner gave feedback on the following personalized study plan.\n\n"
+        f"## Current plan preview\n{draft[:500]}\n\n"
+        f"## Learner feedback\n{feedback}\n\n"
+        "Classify whether the feedback requires tweak (minor/local changes) or rewrite (full replanning)."
     )
 
-    try:
-        result = await structured_llm.ainvoke([
-            SystemMessage(content="你是一个个性化学习路径修改分类器。请根据学习者反馈判断当前方案需要局部微调还是整体重构。"),
+    structured_result = await invoke_structured_llm(
+        node_name="feedback_router",
+        llm_node="planner",
+        schema=FeedbackClassification,
+        messages=[
+            SystemMessage(content="You classify human feedback for a personalized study plan. Return only valid JSON for the FeedbackClassification schema."),
             HumanMessage(content=classify_prompt),
-        ])
-        route = result.route
-    except Exception:
-        logger.warning("Feedback classification failed, defaulting to tweak")
-        route = "tweak"
+        ],
+        output_mode=get_llm_output_mode("feedback_router"),
+        fallback_modes=get_fallback_modes("feedback_router"),
+        business_validator=validate_feedback_classification,
+        state=state,
+        max_raw_chars=get_max_raw_chars("feedback_router"),
+    )
+    result = structured_result.parsed
+    if not isinstance(result, FeedbackClassification):
+        raise TypeError("feedback_router parsed result is not FeedbackClassification")
+    route = result.route
 
     # ── Step 2: Compress summary (overwrite, not append) ──
     if old_summary:

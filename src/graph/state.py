@@ -60,6 +60,38 @@ class TutorState(TypedDict):
     search_query_rewrite_reason: str                                    # Query rewriter rationale
     search_query_rewrite_error: str                                     # Query rewriter failure reason, if any
     search_query_rewrite_raw_preview: str                               # Truncated raw query-rewriter output for diagnostics
+    web_supplement_decisions: list[dict]                                # Dynamic web supplement coverage decisions
+    web_supplement_results: list[dict]                                  # Dynamic web supplement result docs
+    coverage_decision_summary: str                                      # Summary of coverage risk and web supplement decision
+    retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
+    web_supplement_provider: str                                        # Web supplement provider, e.g. tavily
+    web_supplement_failed: bool                                         # Dynamic web supplement was needed but produced no usable result
+    web_supplement_failure_reason: str                                  # Reason for failed dynamic web supplement
+    web_supplement_status_by_subject: dict                              # Per-subject dynamic web supplement status
+    web_supplement_success_subjects: list[str]                          # Subjects with usable web supplement
+    web_supplement_failed_subjects: list[str]                           # Subjects that needed but failed web supplement
+    web_supplement_partial_failed: bool                                 # At least one subject failed while another succeeded
+    web_evidence_count: int                                             # Approved source_type=web evidence count
+    web_supplement_count: int                                           # Legacy-compatible alias for web_evidence_count
+    web_judge_provider: str                                             # Search Result Judge provider
+    web_judge_model: str                                                # Search Result Judge model
+    web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
+    web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
+    evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
+    evidence_judge_output: dict                                          # Raw structured Evidence Judge output
+    evidence_judge_rounds: int                                           # Evidence Judge rounds executed
+    evidence_judge_state: str                                            # sufficient / partially_sufficient / insufficient
+    evidence_coverage_gaps: list[dict]                                   # Coverage gaps reserved for future search optimization
+    search_refinement_needed: bool                                       # Evidence Judge requested more search
+    search_refinement_deferred: bool                                     # Follow-up search is intentionally deferred
+    search_refinement_deferred_reason: str                               # Why refinement was not executed
+    proposed_followup_search_queries: list[dict]                         # Reserved future search queries from coverage gaps
+    search_optimization_reserved: bool                                   # Search optimization hook is reserved
+    search_optimization_status: str                                      # reserved_not_implemented / disabled
+    dual_source_mode: bool                                               # rag_retrieve used dual_source_evidence mode
+    evidence_judge_failed: bool                                          # Evidence Judge failed and no evidence was admitted
+    degraded_generation: bool                                            # Generation proceeds without approved evidence
+    degraded_reason: str                                                 # Reason for degraded generation
     plan: str                                                           # Generated plans
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag

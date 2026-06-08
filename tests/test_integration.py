@@ -210,12 +210,10 @@ def test_rag_miss_fallback(graph):
 
 
 def test_search_unavailable(graph):
-    """Edge case: simulate DuckDuckGo unavailable by resetting the search tool singleton."""
-    import src.tools.search_tool as st_mod
+    """Edge case: simulate Web Search unavailable."""
+    import os
 
-    # Save and replace the tool with None to force re-init
-    original_tool = st_mod._search_tool
-    st_mod._search_tool = None
+    original_key = os.environ.pop("TAVILY_API_KEY", None)
 
     try:
         result = _invoke(graph, "2026年高考最新政策有什么变化？帮我做个规划")
@@ -223,7 +221,8 @@ def test_search_unavailable(graph):
         _assert(len(ai_text) > 20, "Should still generate response when search is unavailable")
         return f"response_len={len(ai_text)} (graceful degradation)"
     finally:
-        st_mod._search_tool = original_tool
+        if original_key is not None:
+            os.environ["TAVILY_API_KEY"] = original_key
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +369,7 @@ def main() -> None:
     _run_test("Short greeting ('你好')", lambda: test_short_greeting(graph))
     _run_test("Long input (解析几何大题)", lambda: test_long_input(graph), skip=quick)
     _run_test("RAG miss fallback (量子纠缠)", lambda: test_rag_miss_fallback(graph), skip=quick)
-    _run_test("Search unavailable (DuckDuckGo)", lambda: test_search_unavailable(graph), skip=quick)
+    _run_test("Search unavailable (Web Search)", lambda: test_search_unavailable(graph), skip=quick)
 
     # ── Summary ───────────────────────────────────────────────
     print("\n" + "=" * 60)

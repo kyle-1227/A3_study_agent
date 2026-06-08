@@ -32,7 +32,7 @@ class TestContextReducer:
         """Simulates LangGraph fan-in: merge rag + web context lists."""
         from src.graph.state import context_reducer
 
-        branch_a = [{"type": "rag", "content": "doc1", "source": "f.pdf", "score": 0.9}]
+        branch_a = [{"type": "rag", "content": "doc1", "source": "f.pdf", "rerank_score": 0.9}]
         branch_b = [{"type": "web", "content": "web1", "title": "T", "url": "http://x"}]
 
         merged = context_reducer(branch_a, branch_b)
@@ -112,7 +112,7 @@ class TestRagRetrieveParallelOutput:
     @patch("src.graph.academic.retrieve")
     async def test_returns_context_with_rag_type(self, mock_retrieve):
         mock_retrieve.return_value = {
-            "docs": [{"content": "判别式", "source": "math.pdf", "score": 0.9}],
+            "docs": [{"content": "判别式", "source": "math.pdf", "rerank_score": 0.9}],
         }
 
         state = {
@@ -224,7 +224,7 @@ class TestGenerateAnswerFromMergedContext:
         state = {
             "messages": [HumanMessage(content="判别式")],
             "context": [
-                {"type": "rag", "content": "Δ=b²-4ac", "source": "math.pdf", "score": 0.9},
+                {"type": "rag", "content": "Δ=b²-4ac", "source": "math.pdf", "rerank_score": 0.9},
                 {"type": "web", "content": "判别式用法", "title": "高考数学", "url": "http://x"},
             ],
         }

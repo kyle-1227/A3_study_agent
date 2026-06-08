@@ -17,9 +17,9 @@ from src.config import get_setting
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_DEFAULT_RERANKER_API_KEY_ENV = "OPENROUTER_API_KEY"
-_DEFAULT_RERANKER_MODEL = "cohere/rerank-4-fast"
+_DEFAULT_RERANKER_BASE_URL = "https://api.siliconflow.cn/v1"
+_DEFAULT_RERANKER_API_KEY_ENV = "SILICONFLOW_API_KEY"
+_DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 _TIMEOUT = 15  # seconds
 
 
@@ -37,7 +37,7 @@ def _reranker_api_key() -> str | None:
         logger.warning(
             "RERANKER_API_KEY_ENV appears to contain an API key value instead "
             "of an environment variable name. Prefer "
-            "RERANKER_API_KEY_ENV=OPENROUTER_API_KEY."
+            "RERANKER_API_KEY_ENV=SILICONFLOW_API_KEY."
         )
         return api_key_env
 
@@ -47,7 +47,7 @@ def _reranker_api_key() -> str | None:
 def _reranker_base_url() -> str:
     return os.getenv(
         "RERANKER_BASE_URL",
-        get_setting("rag.reranker_base_url", os.getenv("OPENROUTER_BASE_URL", _DEFAULT_OPENROUTER_BASE_URL)),
+        get_setting("rag.reranker_base_url", _DEFAULT_RERANKER_BASE_URL),
     )
 
 

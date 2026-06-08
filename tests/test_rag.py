@@ -268,15 +268,9 @@ class TestBM25Search:
         """BM25 search with no index returns empty list."""
         import src.rag.retriever as ret
 
-        old_idx, old_corpus, old_count = ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count
-        try:
-            ret._bm25_index = None
-            ret._bm25_corpus = []
-            ret._bm25_doc_count = 0
+        with patch.object(ret, "_get_bm25", return_value=(None, [])):
             results = ret._bm25_search("test")
             assert results == []
-        finally:
-            ret._bm25_index, ret._bm25_corpus, ret._bm25_doc_count = old_idx, old_corpus, old_count
 
 
 # ===========================================================================
@@ -445,8 +439,8 @@ class TestMergeAndDedup:
     def test_deduplicates_by_content(self):
         from src.rag.retriever import _merge_and_dedup
 
-        vec = [{"content": "same text", "source": "a.pdf", "score": 0.9}]
-        bm25 = [{"content": "same text", "source": "a.pdf", "score": 5.0}]
+        vec = [{"content": "same text", "source": "a.pdf", "raw_vector_score": 0.9}]
+        bm25 = [{"content": "same text", "source": "a.pdf", "bm25_score": 5.0}]
 
         merged = _merge_and_dedup(vec, bm25)
         assert len(merged) == 1
@@ -454,8 +448,8 @@ class TestMergeAndDedup:
     def test_merges_unique_docs(self):
         from src.rag.retriever import _merge_and_dedup
 
-        vec = [{"content": "vector doc", "source": "a.pdf", "score": 0.9}]
-        bm25 = [{"content": "keyword doc", "source": "b.pdf", "score": 5.0}]
+        vec = [{"content": "vector doc", "source": "a.pdf", "raw_vector_score": 0.9}]
+        bm25 = [{"content": "keyword doc", "source": "b.pdf", "bm25_score": 5.0}]
 
         merged = _merge_and_dedup(vec, bm25)
         assert len(merged) == 2
@@ -463,8 +457,8 @@ class TestMergeAndDedup:
     def test_vector_results_first(self):
         from src.rag.retriever import _merge_and_dedup
 
-        vec = [{"content": "vec", "source": "a.pdf", "score": 0.9}]
-        bm25 = [{"content": "bm25", "source": "b.pdf", "score": 5.0}]
+        vec = [{"content": "vec", "source": "a.pdf", "raw_vector_score": 0.9}]
+        bm25 = [{"content": "bm25", "source": "b.pdf", "bm25_score": 5.0}]
 
         merged = _merge_and_dedup(vec, bm25)
         assert merged[0]["content"] == "vec"
@@ -493,25 +487,27 @@ class TestHybridRetrieve:
         mock_doc = MagicMock()
         mock_doc.page_content = "vector result"
         mock_doc.metadata = {"source_file": "v.pdf"}
-        mock_vs.return_value.similarity_search_with_relevance_scores.return_value = [
+        mock_vs.return_value.similarity_search_with_score.return_value = [
             (mock_doc, 0.85),
         ]
 
         # Mock BM25
         mock_bm25.return_value = [
-            {"content": "bm25 result", "source": "b.pdf", "score": 3.5, "metadata": {}},
+            {"content": "bm25 result", "source": "b.pdf", "bm25_score": 3.5, "metadata": {}},
         ]
 
         # Mock reranker
         mock_rerank.return_value = [
-            {"content": "vector result", "source": "v.pdf", "score": 0.85, "rerank_score": 0.95},
-            {"content": "bm25 result", "source": "b.pdf", "score": 3.5, "rerank_score": 0.70},
+            {"content": "vector result", "source": "v.pdf", "raw_vector_score": 0.85, "rerank_score": 0.95},
+            {"content": "bm25 result", "source": "b.pdf", "bm25_score": 3.5, "rerank_score": 0.70},
         ]
 
         result = ret.retrieve("test query", subject="math")
 
         assert result["is_hit"] is True
+        assert result["reranker_failed"] is False
         assert len(result["docs"]) == 2
+        assert result["docs"][0]["raw_vector_score"] == 0.85
         mock_rerank.assert_called_once()
 
     @patch("src.rag.retriever.rerank")
@@ -524,20 +520,22 @@ class TestHybridRetrieve:
         mock_doc = MagicMock()
         mock_doc.page_content = "doc"
         mock_doc.metadata = {"source_file": "f.pdf"}
-        mock_vs.return_value.similarity_search_with_relevance_scores.return_value = [
+        mock_vs.return_value.similarity_search_with_score.return_value = [
             (mock_doc, 0.5),
         ]
         mock_bm25.return_value = []
 
         # Reranker returns original (degraded)
         mock_rerank.return_value = [
-            {"content": "doc", "source": "f.pdf", "score": 0.5, "metadata": {"source_file": "f.pdf"}},
+            {"content": "doc", "source": "f.pdf", "raw_vector_score": 0.5, "metadata": {"source_file": "f.pdf"}},
         ]
 
         result = ret.retrieve("test")
 
         assert len(result["docs"]) == 1
-        assert result["is_hit"] is True
+        assert result["is_hit"] is False
+        assert result["reranker_failed"] is True
+        assert result["docs"][0]["raw_vector_score"] == 0.5
 
     @patch("src.rag.retriever.rerank")
     @patch("src.rag.retriever._bm25_search")
@@ -546,7 +544,7 @@ class TestHybridRetrieve:
         """No results from either source → empty docs, is_hit=False."""
         import src.rag.retriever as ret
 
-        mock_vs.return_value.similarity_search_with_relevance_scores.return_value = []
+        mock_vs.return_value.similarity_search_with_score.return_value = []
         mock_bm25.return_value = []
 
         result = ret.retrieve("nothing")
@@ -559,6 +557,41 @@ class TestHybridRetrieve:
 # ===========================================================================
 # TestSettingsIntegration — rag config values
 # ===========================================================================
+
+class TestRawVectorScoreSemantics:
+
+    @patch("src.rag.retriever.rerank")
+    @patch("src.rag.retriever._bm25_search")
+    @patch("src.rag.retriever._get_vectorstore")
+    def test_raw_vector_scores_are_backend_specific(self, mock_vs, mock_bm25, mock_rerank):
+        """Chroma raw scores are preserved without assuming 0-1 relevance semantics."""
+        import src.rag.retriever as ret
+
+        vector_results = []
+        for i, raw_score in enumerate([-0.003, 0.036, 57.7]):
+            mock_doc = MagicMock()
+            mock_doc.page_content = f"doc {i}"
+            mock_doc.metadata = {"source_file": f"{i}.pdf"}
+            vector_results.append((mock_doc, raw_score))
+        mock_vs.return_value.similarity_search_with_score.return_value = vector_results
+        mock_bm25.return_value = []
+
+        def fake_rerank(query, documents, top_n):
+            return [
+                {**doc, "rerank_score": 0.97 - (idx * 0.1)}
+                for idx, doc in enumerate(documents[:top_n])
+            ]
+
+        mock_rerank.side_effect = fake_rerank
+
+        result = ret.retrieve("test")
+
+        assert result["is_hit"] is True
+        assert result["reranker_failed"] is False
+        assert [doc["raw_vector_score"] for doc in result["docs"][:3]] == [-0.003, 0.036, 57.7]
+        assert result["docs"][0]["raw_vector_score_source"] == "chroma_similarity_search_with_score"
+        assert result["docs"][0]["raw_vector_score_direction"] == "backend_specific"
+
 
 class TestRagSettings:
 

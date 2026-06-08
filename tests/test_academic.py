@@ -482,8 +482,8 @@ class TestSearchQueryRewriter:
 class TestRetrievalBranchQuality:
     def test_best_doc_score_prefers_rerank_score(self):
         assert _best_doc_score([
-            {"score": 0.9, "rerank_score": 0.2},
-            {"score": 0.4, "rerank_score": 0.8},
+            {"raw_vector_score": 0.9, "rerank_score": 0.2},
+            {"raw_vector_score": 0.4, "rerank_score": 0.8},
         ]) == 0.8
 
     def test_evaluates_strong_usable_weak_missing(self):
@@ -523,12 +523,27 @@ class TestRetrievalBranchQuality:
         assert missing["branch_status"] == "missing"
         assert missing["weak_reason"] == "no_docs"
 
+    def test_evaluate_branch_marks_reranker_failure_as_fallback(self):
+        result = _evaluate_retrieval_branch(
+            subject="python",
+            role="core_concept",
+            docs=[{"raw_vector_score": 57.7}],
+            is_hit=False,
+            subject_mismatch_count=0,
+            reranker_failed=True,
+        )
+
+        assert result["branch_status"] == "weak"
+        assert result["weak_reason"] == "reranker_failed"
+        assert result["branch_status_score_source"] == "fallback_raw_retrieval_signal"
+        assert result["reranker_failed"] is True
+
     def test_select_docs_with_subject_quota_caps_subject_and_weak_docs(self):
         docs = [
             {
                 "content": f"ml {i}",
                 "source": f"ml{i}.pdf",
-                "score": 0.9 - i * 0.01,
+                "rerank_score": 0.9 - i * 0.01,
                 "retrieval_subject": "machine_learning",
                 "retrieval_priority": 0.9,
                 "branch_status": "strong",
@@ -538,7 +553,7 @@ class TestRetrievalBranchQuality:
             {
                 "content": "python weak",
                 "source": "py.pdf",
-                "score": 0.2,
+                "rerank_score": 0.2,
                 "retrieval_subject": "python",
                 "retrieval_priority": 0.6,
                 "branch_status": "weak",
@@ -640,15 +655,15 @@ class TestRagRetrieveWithRewrittenQuery:
         def fake_retrieve(query, subject, top_k):
             docs_by_subject = {
                 "python": [
-                    {"content": f"Python doc {i}", "source": f"py{i}.pdf", "score": 0.8, "metadata": {"subject": "python"}}
+                    {"content": f"Python doc {i}", "source": f"py{i}.pdf", "rerank_score": 0.8, "metadata": {"subject": "python"}}
                     for i in range(1, 6)
                 ],
                 "machine_learning": [
-                    {"content": f"ML doc {i}", "source": f"ml{i}.pdf", "score": 0.9, "metadata": {"subject": "machine_learning"}}
+                    {"content": f"ML doc {i}", "source": f"ml{i}.pdf", "rerank_score": 0.9, "metadata": {"subject": "machine_learning"}}
                     for i in range(1, 6)
                 ],
             }
-            return {"docs": docs_by_subject[subject], "is_hit": True}
+            return {"docs": docs_by_subject[subject], "is_hit": True, "reranker_failed": False}
 
         mock_retrieve.side_effect = fake_retrieve
 
@@ -818,7 +833,11 @@ class TestRagRetrieve:
 
     @patch("src.graph.academic.retrieve")
     async def test_uses_keypoints_as_query(self, mock_retrieve):
-        mock_retrieve.return_value = {"docs": [{"content": "test", "source": "f.pdf", "score": 0.9}]}
+        mock_retrieve.return_value = {
+            "docs": [{"content": "test", "source": "f.pdf", "rerank_score": 0.9}],
+            "is_hit": True,
+            "reranker_failed": False,
+        }
 
         state = {
             "messages": [HumanMessage(content="什么是判别式")],
@@ -895,7 +914,7 @@ class TestFormatHelpers:
             {
                 "content": "Overfitting means poor generalization.",
                 "source": "ml.pdf",
-                "score": 0.9,
+                "rerank_score": 0.9,
                 "retrieval_subject": "machine_learning",
                 "retrieval_role": "core_concept",
                 "retrieval_purpose": "解释核心概念",
@@ -916,7 +935,7 @@ class TestFormatHelpers:
             {
                 "content": "Weak Python material.",
                 "source": "py.pdf",
-                "score": 0.1,
+                "rerank_score": 0.1,
                 "retrieval_subject": "python",
                 "retrieval_role": "implementation_tool",
                 "branch_status": "weak",
@@ -959,7 +978,7 @@ class TestGenerateAnswer:
 
         state = {
             "messages": [HumanMessage(content="判别式怎么用")],
-            "context": [{"type": "rag", "content": "Δ=b²-4ac", "source": "test.pdf", "score": 0.9}],
+            "context": [{"type": "rag", "content": "Δ=b²-4ac", "source": "test.pdf", "rerank_score": 0.9}],
         }
         result = await generate_answer(state)
 
@@ -996,7 +1015,7 @@ class TestGenerateAnswer:
         state = {
             "messages": [HumanMessage(content="机器学习里的过拟合是什么意思？")],
             "context": [
-                {"type": "rag", "content": "过拟合是泛化不足", "source": "ml.md", "score": 0.9},
+                {"type": "rag", "content": "过拟合是泛化不足", "source": "ml.md", "rerank_score": 0.9},
                 {"type": "web", "content": "正则化可缓解过拟合", "title": "ML", "url": "https://example.com"},
             ],
             "requested_resource_type": "",

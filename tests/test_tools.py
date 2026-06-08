@@ -2,23 +2,52 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import httpx
 
-import pytest
+from src.tools.search_tool import search
 
-from src.tools.search_tool import get_search_tool, search
+
+class _FakeClient:
+    def __init__(self, *, response: httpx.Response | None = None, exc: Exception | None = None, **kwargs):
+        self.response = response
+        self.exc = exc
+        self.kwargs = kwargs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, *args, **kwargs):
+        if self.exc:
+            raise self.exc
+        return self.response
+
+
+def _patch_client(monkeypatch, *, response: httpx.Response | None = None, exc: Exception | None = None):
+    monkeypatch.setattr(
+        "src.tools.search_tool.httpx.Client",
+        lambda **kwargs: _FakeClient(response=response, exc=exc, **kwargs),
+    )
 
 
 class TestSearchFunction:
 
-    @patch("src.tools.search_tool.get_search_tool")
-    def test_returns_normalized_results(self, mock_get_tool):
-        mock_tool = MagicMock()
-        mock_tool.invoke.return_value = [
-            {"snippet": "content1", "title": "title1", "link": "url1"},
-            {"snippet": "content2", "title": "title2", "link": "url2"},
-        ]
-        mock_get_tool.return_value = mock_tool
+    def test_returns_normalized_results(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+        _patch_client(
+            monkeypatch,
+            response=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"content": "content1", "title": "title1", "url": "url1"},
+                        {"content": "content2", "title": "title2", "url": "url2"},
+                    ]
+                },
+            ),
+        )
 
         results = search("test query")
 
@@ -27,57 +56,28 @@ class TestSearchFunction:
         assert results[0]["title"] == "title1"
         assert results[0]["url"] == "url1"
 
-    @patch("src.tools.search_tool.get_search_tool")
-    def test_handles_string_response(self, mock_get_tool):
-        mock_tool = MagicMock()
-        mock_tool.invoke.return_value = "plain text result"
-        mock_get_tool.return_value = mock_tool
-
-        results = search("test query")
-
-        assert len(results) == 1
-        assert results[0]["content"] == "plain text result"
-
-    @patch("src.tools.search_tool.get_search_tool")
-    def test_returns_empty_on_exception(self, mock_get_tool):
-        mock_tool = MagicMock()
-        mock_tool.invoke.side_effect = Exception("API error")
-        mock_get_tool.return_value = mock_tool
+    def test_returns_empty_without_api_key(self, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
         results = search("test query")
 
         assert results == []
 
-    @patch("src.tools.search_tool.get_search_tool")
-    def test_handles_alternate_key_names(self, mock_get_tool):
-        mock_tool = MagicMock()
-        mock_tool.invoke.return_value = [
-            {"content": "c1", "title": "t1", "url": "u1"},
-        ]
-        mock_get_tool.return_value = mock_tool
+    def test_returns_empty_on_exception(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+        _patch_client(monkeypatch, exc=RuntimeError("API error"))
+
+        results = search("test query")
+
+        assert results == []
+
+    def test_handles_empty_results(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+        _patch_client(monkeypatch, response=httpx.Response(200, json={"results": []}))
 
         results = search("test")
 
-        assert results[0]["content"] == "c1"
-        assert results[0]["url"] == "u1"
-
-
-class TestGetSearchTool:
-
-    def test_creates_singleton(self):
-        try:
-            import ddgs  # noqa: F401
-        except ImportError:
-            pytest.skip("ddgs package not installed")
-
-        import src.tools.search_tool as mod
-        mod._search_tool = None
-
-        tool = get_search_tool()
-        assert tool is not None
-
-        tool2 = get_search_tool()
-        assert tool is tool2
+        assert results == []
 
 
 class TestPrompts:

@@ -20,13 +20,51 @@ from langgraph.types import Command
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from src.database.checkpointer import get_db_uri, make_thread_config
+from src.database.checkpointer import (
+    checkpointer_enabled,
+    checkpointer_type,
+    get_db_uri,
+    make_thread_config,
+)
+from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.schemas import ChatRequest, ResumeRequest
+from src.observability.a3_trace import emit_a3_trace
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+
+
+def _graph_checkpointer_type(graph) -> str:
+    configured_type = getattr(graph, "_a3_checkpointer_type", "")
+    configured_enabled = getattr(graph, "_a3_checkpointer_enabled", None)
+    if configured_enabled is False:
+        return "none"
+    if configured_type:
+        return str(configured_type)
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is None:
+        return "none"
+    return type(checkpointer).__name__
+
+
+def _emit_graph_config_trace(graph, config: dict, state: dict) -> None:
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    checkpointer_type = _graph_checkpointer_type(graph)
+    # TEMP A3_TRACE: remove after state snapshot validation.
+    emit_a3_trace(
+        logger,
+        "graph_config",
+        {
+            "checkpointer_enabled": checkpointer_type != "none",
+            "checkpointer_type": checkpointer_type,
+            "thread_id": configurable.get("thread_id", ""),
+            "has_thread_id": bool(configurable.get("thread_id")),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
 
 
 @asynccontextmanager
@@ -36,9 +74,11 @@ async def lifespan(app: FastAPI):
 
     async with AsyncExitStack() as stack:
         checkpointer = None
+        enabled = checkpointer_enabled()
+        ckp_type = checkpointer_type()
         db_uri = get_db_uri()
 
-        if db_uri:
+        if enabled and ckp_type == "postgres" and db_uri:
             try:
                 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -49,13 +89,29 @@ async def lifespan(app: FastAPI):
                 logger.info("PostgreSQL checkpointer initialized")
             except Exception:
                 logger.exception(
-                    "Failed to initialize PostgreSQL checkpointer, running stateless"
+                    "Failed to initialize PostgreSQL checkpointer, falling back to MemorySaver"
                 )
-                checkpointer = None
-        else:
-            logger.info("DB_URI not set, running without persistent state")
+                from langgraph.checkpoint.memory import MemorySaver
 
-        app.state.graph = get_compiled_graph(checkpointer=checkpointer)
+                checkpointer = MemorySaver()
+                ckp_type = "memory"
+        elif enabled:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            checkpointer = MemorySaver()
+            ckp_type = "memory"
+            if db_uri and checkpointer_type() == "postgres":
+                logger.warning("DB_URI is set but PostgreSQL checkpointer was unavailable; using MemorySaver")
+        else:
+            logger.warning("LangGraph checkpointer disabled by configuration")
+            ckp_type = "disabled"
+
+        app.state.checkpointer_enabled = bool(checkpointer)
+        app.state.checkpointer_type = ckp_type
+        graph = get_compiled_graph(checkpointer=checkpointer)
+        setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
+        setattr(graph, "_a3_checkpointer_type", ckp_type)
+        app.state.graph = graph
         yield
 
     shutdown_tracing()
@@ -114,6 +170,64 @@ GRAPH_NODES = {
     "emotional_response",
     "handle_unknown",
 }
+
+
+def _state_values(state_snapshot) -> dict:
+    values = getattr(state_snapshot, "values", None)
+    return values if isinstance(values, dict) else {}
+
+
+def _last_ai_message_content(final_state: dict) -> str:
+    for msg in reversed(final_state.get("messages") or []):
+        content = getattr(msg, "content", "")
+        if content:
+            return str(content)
+    return ""
+
+
+def _resource_final_payload(final_state: dict) -> dict | None:
+    resource_type = str(final_state.get("requested_resource_type") or "")
+    mindmap_artifact = final_state.get("mindmap_artifact") or {}
+    mindmap_tree = final_state.get("mindmap_tree") or {}
+    exercise_items = final_state.get("exercise_items") or []
+    exercise_artifact = final_state.get("exercise_artifact") or {}
+
+    if resource_type not in {"mindmap", "quiz"}:
+        if mindmap_artifact or mindmap_tree:
+            resource_type = "mindmap"
+        elif exercise_items or exercise_artifact:
+            resource_type = "quiz"
+        else:
+            return None
+
+    answer = _last_ai_message_content(final_state)
+    payload: dict = {
+        "type": "resource_final",
+        "resource_type": resource_type,
+        "answer": answer,
+    }
+
+    if resource_type == "mindmap" and (mindmap_artifact or mindmap_tree):
+        payload["mindmap"] = {
+            "title": mindmap_artifact.get("title", "知识点思维导图"),
+            "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
+            "xmind_url": mindmap_artifact.get("xmind_url", ""),
+        }
+
+    if resource_type == "quiz":
+        if (not answer or len(answer.strip()) < 40) and exercise_items:
+            title = str(exercise_artifact.get("title") or "分层练习题")
+            answer = _render_exercise_markdown(
+                title,
+                exercise_items,
+                review_reason=str(exercise_artifact.get("review_reason") or final_state.get("exercise_review_reason") or ""),
+                quality_warning=bool(exercise_artifact.get("quality_warning")),
+            )
+            payload["answer"] = answer
+        payload["exercise_items"] = exercise_items
+        payload["exercise_artifact"] = exercise_artifact
+
+    return payload
 
 
 async def _stream_graph_events(
@@ -235,7 +349,30 @@ async def _stream_graph_events(
         return
 
     # ── Check for interrupt after stream completes ─────────────────
-    state_snapshot = await graph.aget_state(config)
+    try:
+        state_snapshot = await graph.aget_state(config)
+    except Exception:
+        logger.exception("Failed to read graph state snapshot after stream")
+        raise
+
+    final_state = _state_values(state_snapshot)
+    # TEMP A3_TRACE: remove after state snapshot validation.
+    emit_a3_trace(
+        logger,
+        "sse_state_snapshot",
+        {
+            "success": True,
+            "final_state_keys": sorted(final_state.keys()),
+            "has_mindmap_artifact": bool(final_state.get("mindmap_artifact")),
+            "has_mindmap_tree": bool(final_state.get("mindmap_tree")),
+            "has_exercise_items": bool(final_state.get("exercise_items")),
+            "exercise_items_count": len(final_state.get("exercise_items") or []),
+            "requested_resource_type": final_state.get("requested_resource_type", ""),
+        },
+        state=final_state,
+        env_flag="LOG_A3_TRACE",
+    )
+
     if state_snapshot.next:
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
@@ -246,6 +383,24 @@ async def _stream_graph_events(
                 )
                 yield f"data: {payload}\n\n"
                 return
+
+    resource_payload = _resource_final_payload(final_state)
+    if resource_payload:
+        # TEMP A3_TRACE: remove after resource final payload validation.
+        emit_a3_trace(
+            logger,
+            "sse_resource_final",
+            {
+                "sent": True,
+                "resource_type": resource_payload.get("resource_type", ""),
+                "answer_chars": len(str(resource_payload.get("answer") or "")),
+                "has_mindmap": bool(resource_payload.get("mindmap")),
+                "exercise_items_count": len(resource_payload.get("exercise_items") or []),
+            },
+            state=final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield f"data: {json.dumps(resource_payload, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
@@ -283,6 +438,7 @@ async def generate_sse(
         "session_id": thread_id,
         "thread_id": thread_id,
     }
+    _emit_graph_config_trace(graph, config, state_input)
 
     # Emit thread_id so frontend can use it for /resume
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
@@ -313,6 +469,11 @@ async def generate_resume_sse(
         resume_value = edited_plan
 
     resume_input = Command(resume=resume_value)
+    _emit_graph_config_trace(
+        graph,
+        config,
+        {"request_id": str(uuid.uuid4()), "session_id": thread_id, "thread_id": thread_id},
+    )
 
     async for chunk in _stream_graph_events(graph, resume_input, config, thread_id):
         yield chunk
