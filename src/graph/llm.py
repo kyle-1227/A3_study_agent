@@ -54,10 +54,6 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
     default_api_key_env = "DEEPSEEK_API_KEY"
     default_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    if provider_name == "nvidia_build":
-        default_model = "deepseek-ai/deepseek-v4-flash"
-        default_api_key_env = "NVIDIA_API_KEY"
-        default_base_url = "https://integrate.api.nvidia.com/v1"
 
     model = get_setting(
         f"{nested_prefix}.model",

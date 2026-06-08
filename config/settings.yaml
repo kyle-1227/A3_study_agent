@@ -73,66 +73,66 @@ retrieval:
 
 llm:
   supervisor:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1200
     streaming: false
   query_rewrite:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1600
     streaming: false
   hallucination_eval:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 800
     streaming: false
   mindmap:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.2
     max_tokens: 4096
     streaming: false
   exercise:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.2
     max_tokens: 4096
     streaming: false
   planner:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1200
     streaming: false
   web_coverage_decision:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1600
     streaming: false
   search_result_judge:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 1200
     streaming: false
@@ -140,10 +140,10 @@ llm:
     strict_schema: true
     include_raw: true
   evidence_judge:
-    provider: nvidia_build
-    model: "deepseek-ai/deepseek-v4-flash"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    api_key_env: "NVIDIA_API_KEY"
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
     max_tokens: 4096
     streaming: false

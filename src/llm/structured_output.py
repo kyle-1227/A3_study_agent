@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -41,6 +42,36 @@ _SECRET_PATTERNS = (
 )
 
 
+class _BusinessValidationError(Exception):
+    """Raised when business_validator rejects a parsed result."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
+@dataclass
+class _InvokeMetrics:
+    """Diagnostics for one structured output attempt."""
+    total_elapsed_ms: float = 0.0
+    llm_elapsed_ms: float = 0.0
+    json_pydantic_elapsed_ms: float = 0.0
+    business_validate_elapsed_ms: float = 0.0
+    parse_validate_elapsed_ms: float = 0.0
+    prompt_chars: int = 0
+    raw_output_chars: int = 0
+
+
+class _InvokeOneModeError(Exception):
+    """Wraps _invoke_one_mode exception with metrics + raw_output."""
+
+    def __init__(self, cause: Exception, metrics: _InvokeMetrics, raw_output: str = ""):
+        self.cause = cause
+        self.metrics = metrics
+        self.raw_output = raw_output
+        super().__init__(str(cause))
+        self.__cause__ = cause
+
+
 @dataclass
 class StructuredLLMAttempt:
     output_mode: str
@@ -50,6 +81,15 @@ class StructuredLLMAttempt:
     error_message: str = ""
     status_code: Any = None
     provider_error_body: str = ""
+    # diagnostics
+    total_elapsed_ms: float = 0.0
+    llm_elapsed_ms: float = 0.0
+    json_pydantic_elapsed_ms: float = 0.0
+    business_validate_elapsed_ms: float = 0.0
+    parse_validate_elapsed_ms: float = 0.0
+    prompt_chars: int = 0
+    raw_output_chars: int = 0
+    schema_size_chars: int = 0
 
 
 @dataclass
@@ -78,6 +118,15 @@ class StructuredLLMResult:
     default_used: bool = False
     retry_count: int = 0
     failure_policy: str = ""
+    # diagnostics
+    total_elapsed_ms: float = 0.0
+    llm_elapsed_ms: float = 0.0
+    json_pydantic_elapsed_ms: float = 0.0
+    business_validate_elapsed_ms: float = 0.0
+    parse_validate_elapsed_ms: float = 0.0
+    prompt_chars: int = 0
+    raw_output_chars: int = 0
+    schema_size_chars: int = 0
 
     def to_debug_payload(self, *, max_raw_chars: int = 4000) -> dict[str, Any]:
         return {
@@ -93,6 +142,15 @@ class StructuredLLMResult:
             "default_used": self.default_used,
             "retry_count": self.retry_count,
             "failure_policy": self.failure_policy,
+            # diagnostics
+            "total_elapsed_ms": self.total_elapsed_ms,
+            "llm_elapsed_ms": self.llm_elapsed_ms,
+            "json_pydantic_elapsed_ms": self.json_pydantic_elapsed_ms,
+            "business_validate_elapsed_ms": self.business_validate_elapsed_ms,
+            "parse_validate_elapsed_ms": self.parse_validate_elapsed_ms,
+            "prompt_chars": self.prompt_chars,
+            "raw_output_chars": self.raw_output_chars,
+            "schema_size_chars": self.schema_size_chars,
             "success": self.success,
             "failure_phase": self.failure_phase,
             "error_type": self.error_type,
@@ -112,6 +170,15 @@ class StructuredLLMResult:
                     "error_message": _sanitize(attempt.error_message, max_chars=1200),
                     "status_code": attempt.status_code,
                     "provider_error_body": _sanitize(attempt.provider_error_body, max_chars=3000),
+                    # diagnostics
+                    "total_elapsed_ms": attempt.total_elapsed_ms,
+                    "llm_elapsed_ms": attempt.llm_elapsed_ms,
+                    "json_pydantic_elapsed_ms": attempt.json_pydantic_elapsed_ms,
+                    "business_validate_elapsed_ms": attempt.business_validate_elapsed_ms,
+                    "parse_validate_elapsed_ms": attempt.parse_validate_elapsed_ms,
+                    "prompt_chars": attempt.prompt_chars,
+                    "raw_output_chars": attempt.raw_output_chars,
+                    "schema_size_chars": attempt.schema_size_chars,
                 }
                 for attempt in self.attempts
             ],
@@ -217,6 +284,44 @@ def _raw_output_from_response(response: Any) -> str:
     return _message_text(content)
 
 
+def _compute_prompt_chars(messages: list) -> int:
+    """Total characters in message list after _inject_json_contract. Never raise."""
+    total = 0
+    for msg in messages or []:
+        try:
+            if hasattr(msg, "model_dump"):
+                total += len(json.dumps(msg.model_dump(), ensure_ascii=False, default=str))
+            elif isinstance(msg, dict):
+                total += len(json.dumps(msg, ensure_ascii=False, default=str))
+            else:
+                total += len(str(msg))
+        except Exception:
+            total += len(str(msg))
+    return total
+
+
+def _safe_schema_size_chars(schema: type[BaseModel]) -> int:
+    """Return JSON Schema size for diagnostics. Never raise."""
+    try:
+        return len(json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str))
+    except Exception:
+        return 0
+
+
+def _round_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 2)
+
+
+def _refresh_parse_validate_total(metrics: _InvokeMetrics) -> None:
+    """Unified recompute of parse_validate_elapsed_ms and total_elapsed_ms."""
+    metrics.parse_validate_elapsed_ms = (
+        metrics.json_pydantic_elapsed_ms + metrics.business_validate_elapsed_ms
+    )
+    metrics.total_elapsed_ms = (
+        metrics.llm_elapsed_ms + metrics.parse_validate_elapsed_ms
+    )
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -248,6 +353,23 @@ def _extract_provider_error_body(exc: Exception) -> str:
         return str(response.text)
     except Exception:
         return ""
+
+
+def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None) -> str:
+    """Classify failure phase for a structured output attempt."""
+    if isinstance(exc, NotImplementedError):
+        return f"second_layer_{mode}_unsupported"
+    if _is_second_layer_unsupported(exc, mode):
+        return f"second_layer_{mode}_unsupported"
+    if isinstance(exc, _BusinessValidationError):
+        return "business_validation_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "parsing_error"
+    if isinstance(exc, ValidationError):
+        return "validation_error"
+    if isinstance(exc, ValueError):
+        return "validation_error"
+    return "llm_exception"
 
 
 def _is_second_layer_unsupported(exc: Exception, mode: str) -> bool:
@@ -302,59 +424,151 @@ async def _invoke_one_mode(
     schema: type[BaseModel],
     messages: list,
     mode: str,
-) -> tuple[BaseModel, str]:
+) -> tuple[BaseModel, str, _InvokeMetrics]:
     llm = get_node_llm(llm_node)
     messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
+    prompt_chars = _compute_prompt_chars(messages)
+    metrics = _InvokeMetrics(prompt_chars=prompt_chars)
 
+    # ── constrained_decoding (reserved) ──
     if mode == "constrained_decoding":
-        raise NotImplementedError("constrained_decoding is reserved but not implemented")
+        raise _InvokeOneModeError(
+            NotImplementedError("constrained_decoding is reserved but not implemented"),
+            metrics,
+            raw_output="",
+        )
 
+    # ── native_json_schema_pydantic ──
     if mode == "native_json_schema_pydantic":
-        runnable = llm.bind(
-            response_format={
+        bind_kwargs: dict[str, Any] = {
+            "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema.__name__,
                     "strict": True,
                     "schema": schema.model_json_schema(),
                 },
-            }
-        )
-        response = await runnable.ainvoke(messages)
-        raw_output = _raw_output_from_response(response)
-        return schema.model_validate(_extract_json_object(raw_output)), raw_output
+            },
+        }
+        runnable = llm.bind(**bind_kwargs)
+        llm_started = time.perf_counter()
+        try:
+            response = await runnable.ainvoke(messages)
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+        except Exception as exc:
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+            raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
+        raw_output = _raw_output_from_response(response)
+        metrics.raw_output_chars = len(raw_output or "")
+
+        parse_started = time.perf_counter()
+        try:
+            parsed = schema.model_validate(_extract_json_object(raw_output))
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        except Exception as exc:
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+            _refresh_parse_validate_total(metrics)
+            raise _InvokeOneModeError(exc, metrics, raw_output=raw_output) from exc
+
+        _refresh_parse_validate_total(metrics)
+        return parsed, raw_output, metrics
+
+    # ── json_mode_pydantic ──
     if mode == "json_mode_pydantic":
         runnable = llm.bind(response_format={"type": "json_object"})
-        response = await runnable.ainvoke(messages)
-        raw_output = _raw_output_from_response(response)
-        return schema.model_validate(_extract_json_object(raw_output)), raw_output
+        llm_started = time.perf_counter()
+        try:
+            response = await runnable.ainvoke(messages)
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+        except Exception as exc:
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+            raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
+        raw_output = _raw_output_from_response(response)
+        metrics.raw_output_chars = len(raw_output or "")
+
+        parse_started = time.perf_counter()
+        try:
+            parsed = schema.model_validate(_extract_json_object(raw_output))
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        except Exception as exc:
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+            _refresh_parse_validate_total(metrics)
+            raise _InvokeOneModeError(exc, metrics, raw_output=raw_output) from exc
+
+        _refresh_parse_validate_total(metrics)
+        return parsed, raw_output, metrics
+
+    # ── tool_call_pydantic ──
     if mode == "tool_call_pydantic":
         runnable = llm.bind(tools=[_tool_schema(schema)], tool_choice={"type": "function", "function": {"name": schema.__name__}})
-        response = await runnable.ainvoke(messages)
-        raw_output = _raw_output_from_response(response)
-        tool_calls = getattr(response, "tool_calls", None) or []
-        if not tool_calls and isinstance(response, AIMessage):
-            raw_calls = (response.additional_kwargs or {}).get("tool_calls") or []
-            for raw_call in raw_calls:
-                function = raw_call.get("function") or {}
-                args = function.get("arguments") or "{}"
-                tool_calls.append({"name": function.get("name", ""), "args": args})
-        if not tool_calls:
-            raise ValueError("No tool call returned")
-        args = tool_calls[0].get("args") if isinstance(tool_calls[0], dict) else getattr(tool_calls[0], "args", None)
-        parsed_args = json.loads(args) if isinstance(args, str) else args
-        if not isinstance(parsed_args, dict):
-            raise ValueError("Tool call arguments must be a JSON object")
-        return schema.model_validate(parsed_args), raw_output or json.dumps(parsed_args, ensure_ascii=False)
+        llm_started = time.perf_counter()
+        try:
+            response = await runnable.ainvoke(messages)
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+        except Exception as exc:
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+            raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
+        raw_output = _raw_output_from_response(response)
+        metrics.raw_output_chars = len(raw_output or "")
+
+        parse_started = time.perf_counter()
+        try:
+            tool_calls = getattr(response, "tool_calls", None) or []
+            if not tool_calls and isinstance(response, AIMessage):
+                raw_calls = (response.additional_kwargs or {}).get("tool_calls") or []
+                for raw_call in raw_calls:
+                    function = raw_call.get("function") or {}
+                    args = function.get("arguments") or "{}"
+                    tool_calls.append({"name": function.get("name", ""), "args": args})
+            if not tool_calls:
+                raise ValueError("No tool call returned")
+            args = tool_calls[0].get("args") if isinstance(tool_calls[0], dict) else getattr(tool_calls[0], "args", None)
+            parsed_args = json.loads(args) if isinstance(args, str) else args
+            if not isinstance(parsed_args, dict):
+                raise ValueError("Tool call arguments must be a JSON object")
+            parsed = schema.model_validate(parsed_args)
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        except Exception as exc:
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+            _refresh_parse_validate_total(metrics)
+            raise _InvokeOneModeError(exc, metrics, raw_output=raw_output or json.dumps(parsed_args if 'parsed_args' in dir() else {}, ensure_ascii=False)) from exc
+
+        _refresh_parse_validate_total(metrics)
+        return parsed, raw_output or json.dumps(parsed_args, ensure_ascii=False), metrics
+
+    # ── prompt_json_pydantic ──
     if mode == "prompt_json_pydantic":
-        response = await llm.ainvoke(messages)
-        raw_output = _raw_output_from_response(response)
-        return schema.model_validate(_extract_json_object(raw_output)), raw_output
+        llm_started = time.perf_counter()
+        try:
+            response = await llm.ainvoke(messages)
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+        except Exception as exc:
+            metrics.llm_elapsed_ms = _round_ms(llm_started)
+            raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
-    raise ValueError(f"Unsupported output mode {mode!r}")
+        raw_output = _raw_output_from_response(response)
+        metrics.raw_output_chars = len(raw_output or "")
+
+        parse_started = time.perf_counter()
+        try:
+            parsed = schema.model_validate(_extract_json_object(raw_output))
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        except Exception as exc:
+            metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+            _refresh_parse_validate_total(metrics)
+            raise _InvokeOneModeError(exc, metrics, raw_output=raw_output) from exc
+
+        _refresh_parse_validate_total(metrics)
+        return parsed, raw_output, metrics
+
+    raise _InvokeOneModeError(
+        ValueError(f"Unsupported output mode {mode!r}"),
+        metrics,
+        raw_output="",
+    )
 
 
 async def invoke_structured_llm(
@@ -385,7 +599,19 @@ async def invoke_structured_llm(
     schema_name = schema.__name__
     raw_limit = int(max_raw_chars or get_max_raw_chars(node_name))
     failure_policy = _failure_policy(node_name)
+    schema_size_chars = _safe_schema_size_chars(schema)
     attempts: list[StructuredLLMAttempt] = []
+
+    def _make_metrics_from_attempt(attempt: StructuredLLMAttempt) -> _InvokeMetrics:
+        return _InvokeMetrics(
+            total_elapsed_ms=attempt.total_elapsed_ms,
+            llm_elapsed_ms=attempt.llm_elapsed_ms,
+            json_pydantic_elapsed_ms=attempt.json_pydantic_elapsed_ms,
+            business_validate_elapsed_ms=attempt.business_validate_elapsed_ms,
+            parse_validate_elapsed_ms=attempt.parse_validate_elapsed_ms,
+            prompt_chars=attempt.prompt_chars,
+            raw_output_chars=attempt.raw_output_chars,
+        )
 
     def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
         emit_a3_trace(
@@ -402,16 +628,20 @@ async def invoke_structured_llm(
             raise StructuredOutputError(result)
 
     for mode in modes:
-        last_raw_output = ""
+        attempt_started = time.perf_counter()
+        metrics = _InvokeMetrics()
         try:
             _validate_mode(mode)
         except Exception as exc:
+            metrics.total_elapsed_ms = _round_ms(attempt_started)
             attempt = StructuredLLMAttempt(
                 output_mode=mode,
                 success=False,
                 failure_phase="invalid_output_mode",
                 error_type=type(exc).__name__,
                 error_message=str(exc),
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                schema_size_chars=schema_size_chars,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -428,6 +658,8 @@ async def invoke_structured_llm(
                 failure_phase=attempt.failure_phase,
                 error_type=attempt.error_type,
                 error_message=attempt.error_message,
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
                 fallback_used=False,
                 default_used=False,
@@ -437,15 +669,17 @@ async def invoke_structured_llm(
             _emit_and_maybe_raise(result, exc=exc)
             continue
 
+        # ── success path ──
         try:
-            parsed, raw_output = await _invoke_one_mode(
+            parsed, raw_output, metrics = await _invoke_one_mode(
                 node_name=node_name,
                 llm_node=llm_node,
                 schema=schema,
                 messages=messages,
                 mode=mode,
             )
-            last_raw_output = raw_output
+            # business validation with timing
+            business_started = time.perf_counter()
             business_error = ""
             if business_validator is not None:
                 validation_result = business_validator(parsed)
@@ -453,10 +687,72 @@ async def invoke_structured_llm(
                     business_error = "; ".join(str(item) for item in validation_result if item)
                 elif validation_result:
                     business_error = str(validation_result)
-            if business_error:
-                raise ValueError(f"business_validation_error: {business_error}")
+            metrics.business_validate_elapsed_ms = _round_ms(business_started)
+            _refresh_parse_validate_total(metrics)
 
-            attempt = StructuredLLMAttempt(output_mode=mode, success=True)
+            if business_error:
+                attempt = StructuredLLMAttempt(
+                    output_mode=mode,
+                    success=False,
+                    failure_phase="business_validation_error",
+                    error_type="BusinessValidationError",
+                    error_message=business_error,
+                    total_elapsed_ms=metrics.total_elapsed_ms,
+                    llm_elapsed_ms=metrics.llm_elapsed_ms,
+                    json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                    business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                    parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                    prompt_chars=metrics.prompt_chars,
+                    raw_output_chars=metrics.raw_output_chars,
+                    schema_size_chars=schema_size_chars,
+                )
+                attempts.append(attempt)
+                result = StructuredLLMResult(
+                    success=False,
+                    parsed=None,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    schema_name=schema_name,
+                    provider=provider,
+                    model=model,
+                    output_mode=mode,
+                    fallback_modes=effective_fallback_modes,
+                    attempts=attempts,
+                    raw_output=raw_output,
+                    failure_phase="business_validation_error",
+                    error_type="BusinessValidationError",
+                    error_message=business_error,
+                    business_validation_error=business_error,
+                    total_elapsed_ms=metrics.total_elapsed_ms,
+                    llm_elapsed_ms=metrics.llm_elapsed_ms,
+                    json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                    business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                    parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                    prompt_chars=metrics.prompt_chars,
+                    raw_output_chars=metrics.raw_output_chars,
+                    schema_size_chars=schema_size_chars,
+                    fail_fast=fail_fast,
+                    fallback_used=(mode != output_mode),
+                    default_used=False,
+                    retry_count=0,
+                    failure_policy=failure_policy,
+                )
+                _emit_and_maybe_raise(result, exc=_BusinessValidationError(business_error))
+                continue
+
+            # success
+            attempt = StructuredLLMAttempt(
+                output_mode=mode,
+                success=True,
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                llm_elapsed_ms=metrics.llm_elapsed_ms,
+                json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=metrics.raw_output_chars,
+                schema_size_chars=schema_size_chars,
+            )
             attempts.append(attempt)
             result = StructuredLLMResult(
                 success=True,
@@ -470,6 +766,14 @@ async def invoke_structured_llm(
                 fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 raw_output=raw_output,
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                llm_elapsed_ms=metrics.llm_elapsed_ms,
+                json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=metrics.raw_output_chars,
+                schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
                 fallback_used=(mode != output_mode),
                 default_used=False,
@@ -478,21 +782,17 @@ async def invoke_structured_llm(
             )
             _emit_and_maybe_raise(result)
             return result
-        except Exception as exc:
+
+        except _InvokeOneModeError as wrapper:
+            exc = wrapper.cause
+            metrics = wrapper.metrics
+            last_raw_output = wrapper.raw_output
+            if metrics.total_elapsed_ms <= 0:
+                metrics.total_elapsed_ms = _round_ms(attempt_started)
+
             status_code = _extract_status_code(exc)
             provider_error_body = _extract_provider_error_body(exc)
-            if isinstance(exc, NotImplementedError):
-                phase = f"second_layer_{mode}_unsupported"
-            elif _is_second_layer_unsupported(exc, mode):
-                phase = f"second_layer_{mode}_unsupported"
-            elif isinstance(exc, (json.JSONDecodeError, ValueError)) and "business_validation_error:" not in str(exc):
-                phase = "parsing_error" if isinstance(exc, json.JSONDecodeError) else "validation_error"
-            elif isinstance(exc, ValidationError):
-                phase = "validation_error"
-            elif "business_validation_error:" in str(exc):
-                phase = "business_validation_error"
-            else:
-                phase = "llm_exception"
+            phase = _classify_failure_phase(exc, mode, metrics)
 
             attempt = StructuredLLMAttempt(
                 output_mode=mode,
@@ -502,6 +802,14 @@ async def invoke_structured_llm(
                 error_message=str(exc),
                 status_code=status_code,
                 provider_error_body=provider_error_body,
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                llm_elapsed_ms=metrics.llm_elapsed_ms,
+                json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=metrics.raw_output_chars,
+                schema_size_chars=schema_size_chars,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -523,9 +831,75 @@ async def invoke_structured_llm(
                 raw_output=last_raw_output,
                 parsing_error=str(exc) if phase == "parsing_error" else "",
                 validation_error=str(exc) if phase == "validation_error" else "",
-                business_validation_error=str(exc).replace("business_validation_error:", "").strip()
-                if phase == "business_validation_error"
-                else "",
+                business_validation_error="",
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                llm_elapsed_ms=metrics.llm_elapsed_ms,
+                json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=metrics.raw_output_chars,
+                schema_size_chars=schema_size_chars,
+                fail_fast=fail_fast,
+                fallback_used=(mode != output_mode),
+                default_used=False,
+                retry_count=0,
+                failure_policy=failure_policy,
+            )
+            _emit_and_maybe_raise(result, exc=exc)
+            continue
+
+        except StructuredOutputError:
+            raise
+
+        except Exception as exc:
+            metrics.total_elapsed_ms = _round_ms(attempt_started)
+            status_code = _extract_status_code(exc)
+            provider_error_body = _extract_provider_error_body(exc)
+            phase = _classify_failure_phase(exc, mode, metrics)
+
+            attempt = StructuredLLMAttempt(
+                output_mode=mode,
+                success=False,
+                failure_phase=phase,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                provider_error_body=provider_error_body,
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=0,
+                schema_size_chars=schema_size_chars,
+            )
+            attempts.append(attempt)
+            result = StructuredLLMResult(
+                success=False,
+                parsed=None,
+                node_name=node_name,
+                llm_node=llm_node,
+                schema_name=schema_name,
+                provider=provider,
+                model=model,
+                output_mode=mode,
+                fallback_modes=effective_fallback_modes,
+                attempts=attempts,
+                provider_error_body=provider_error_body,
+                failure_phase=phase,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                status_code=status_code,
+                raw_output=getattr(exc, "raw_output", ""),
+                parsing_error=str(exc) if phase == "parsing_error" else "",
+                validation_error=str(exc) if phase == "validation_error" else "",
+                business_validation_error="",
+                total_elapsed_ms=metrics.total_elapsed_ms,
+                llm_elapsed_ms=metrics.llm_elapsed_ms,
+                json_pydantic_elapsed_ms=metrics.json_pydantic_elapsed_ms,
+                business_validate_elapsed_ms=metrics.business_validate_elapsed_ms,
+                parse_validate_elapsed_ms=metrics.parse_validate_elapsed_ms,
+                prompt_chars=metrics.prompt_chars,
+                raw_output_chars=metrics.raw_output_chars,
+                schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
                 fallback_used=(mode != output_mode),
                 default_used=False,
@@ -552,6 +926,14 @@ async def invoke_structured_llm(
         error_message=last.error_message,
         status_code=last.status_code,
         provider_error_body=last.provider_error_body,
+        total_elapsed_ms=last.total_elapsed_ms,
+        llm_elapsed_ms=last.llm_elapsed_ms,
+        json_pydantic_elapsed_ms=last.json_pydantic_elapsed_ms,
+        business_validate_elapsed_ms=last.business_validate_elapsed_ms,
+        parse_validate_elapsed_ms=last.parse_validate_elapsed_ms,
+        prompt_chars=last.prompt_chars,
+        raw_output_chars=last.raw_output_chars,
+        schema_size_chars=schema_size_chars,
         fail_fast=fail_fast,
         fallback_used=False,
         default_used=False,

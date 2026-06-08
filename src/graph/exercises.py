@@ -29,19 +29,19 @@ REQUIRED_LEVELS = {"基础题", "进阶题", "应用题", "自我检查题"}
 class ExerciseItem(BaseModel):
     """A single exercise item with answer and teaching feedback."""
 
-    level: str = Field(description="One of 基础题, 进阶题, 应用题, 自我检查题")
-    question: str = Field(default="", description="Exercise question")
-    answer: str = Field(default="", description="Concise reference answer")
-    explanation: str = Field(default="", description="Step-by-step explanation")
-    pitfall: str = Field(default="", description="Common mistake or reminder")
-    tags: list[str] = Field(default_factory=list, description="Related knowledge points")
+    level: str = Field(..., min_length=1, description="One of 基础题, 进阶题, 应用题, 自我检查题")
+    question: str = Field(..., min_length=1, description="Exercise question")
+    answer: str = Field(..., min_length=1, description="Concise reference answer")
+    explanation: str = Field(..., min_length=1, description="Step-by-step explanation")
+    pitfall: str = Field(..., min_length=1, description="Common mistake or reminder")
+    tags: list[str] = Field(..., min_length=1, description="Related knowledge points")
 
 
 class ExerciseArtifact(BaseModel):
     """Structured exercise resource produced by exercise_agent."""
 
-    title: str
-    items: list[ExerciseItem]
+    title: str = Field(..., min_length=1)
+    items: list[ExerciseItem] = Field(..., min_length=1)
 
 
 class ExerciseReviewVerdict(BaseModel):
@@ -52,25 +52,29 @@ class ExerciseReviewVerdict(BaseModel):
 
 
 def validate_exercise_artifact(parsed: BaseModel) -> str:
-    """Business validation for generated exercise artifacts."""
+    """Business validation for generated exercise artifacts.
+
+    Non-empty checks for level/question/answer/explanation/pitfall/tags
+    are now enforced by Pydantic Field(...).  This validator focuses on
+    semantic quality rules that Pydantic cannot express.
+    """
     if not isinstance(parsed, ExerciseArtifact):
         return "root expected ExerciseArtifact"
-    if not str(parsed.title or "").strip():
-        return "title must be non-empty"
+    # semantic rules
     if len(parsed.items or []) < 4:
         return f"items expected at least 4, got {len(parsed.items or [])}"
+    levels_found = {item.level for item in (parsed.items or [])}
+    missing_levels = REQUIRED_LEVELS - levels_found
+    if missing_levels:
+        return f"missing required levels: {sorted(missing_levels)}"
+    # check for duplicate questions
+    questions = [item.question.strip() for item in (parsed.items or [])]
+    if len(questions) != len(set(questions)):
+        return "duplicate questions detected"
     for idx, item in enumerate(parsed.items or []):
         prefix = f"items.{idx}"
-        if not str(item.level or "").strip():
-            return f"{prefix}.level must be non-empty"
-        if not str(item.question or "").strip():
-            return f"{prefix}.question must be non-empty"
-        if not str(item.answer or "").strip():
-            return f"{prefix}.answer must be non-empty"
-        if not str(item.explanation or "").strip():
-            return f"{prefix}.explanation must be non-empty"
-        if not str(item.pitfall or "").strip():
-            return f"{prefix}.pitfall must be non-empty"
+        if len(item.tags or []) == 0:
+            return f"{prefix}.tags must have at least 1 tag"
     return ""
 
 
@@ -261,8 +265,8 @@ async def exercise_planner(state: TutorState) -> dict:
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
             "web_evidence_count": len(web_evidence),
             "web_evidence_provider": "tavily",
-            "web_judge_provider": state.get("web_judge_provider", "nvidia_build"),
-            "web_judge_model": state.get("web_judge_model", "deepseek-ai/deepseek-v4-flash"),
+            "web_judge_provider": state.get("web_judge_provider", "openrouter"),
+            "web_judge_model": state.get("web_judge_model", "deepseek/deepseek-v4-flash"),
             "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
             "web_evidence_use_cases": sorted({item.get("use_case") for item in web_evidence if item.get("use_case")}),

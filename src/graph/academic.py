@@ -273,8 +273,8 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_success_subjects": [],
         "web_supplement_failed_subjects": [],
         "web_supplement_partial_failed": False,
-        "web_judge_provider": "nvidia_build",
-        "web_judge_model": "deepseek-ai/deepseek-v4-flash",
+        "web_judge_provider": "openrouter",
+        "web_judge_model": "deepseek/deepseek-v4-flash",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
         "web_evidence_count": 0,
@@ -1242,22 +1242,22 @@ def _judge_setting(key: str, default: Any) -> Any:
 
 
 def _judge_provider() -> str:
-    return os.getenv("SEARCH_RESULT_JUDGE_PROVIDER", str(_judge_setting("provider", "nvidia_build"))).strip() or "nvidia_build"
+    return os.getenv("SEARCH_RESULT_JUDGE_PROVIDER", str(_judge_setting("provider", "openrouter"))).strip() or "openrouter"
 
 
 def _judge_model() -> str:
     return (
-        os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "deepseek-ai/deepseek-v4-flash"))).strip()
-        or "deepseek-ai/deepseek-v4-flash"
+        os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "deepseek/deepseek-v4-flash"))).strip()
+        or "deepseek/deepseek-v4-flash"
     )
 
 
 def _judge_base_url() -> str:
-    return str(_judge_setting("base_url", "https://integrate.api.nvidia.com/v1")).rstrip("/")
+    return str(_judge_setting("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
 
 
 def _judge_api_key_env() -> str:
-    return str(_judge_setting("api_key_env", "NVIDIA_API_KEY") or "NVIDIA_API_KEY")
+    return str(_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
 
 
 def _judge_api_key() -> str:
@@ -1702,21 +1702,21 @@ def _evidence_judge_output_setting(key: str, default: Any) -> Any:
 
 
 def _evidence_judge_provider() -> str:
-    return str(_evidence_judge_setting("provider", "nvidia_build") or "nvidia_build").strip()
+    return str(_evidence_judge_setting("provider", "openrouter") or "openrouter").strip()
 
 
 def _evidence_judge_model() -> str:
-    return str(_evidence_judge_setting("model", "deepseek-ai/deepseek-v4-flash") or "deepseek-ai/deepseek-v4-flash").strip()
+    return str(_evidence_judge_setting("model", "deepseek/deepseek-v4-flash") or "deepseek/deepseek-v4-flash").strip()
 
 
 def _evidence_judge_base_url() -> str:
     return str(
-        _evidence_judge_setting("base_url", "https://integrate.api.nvidia.com/v1")
+        _evidence_judge_setting("base_url", "https://openrouter.ai/api/v1")
     ).rstrip("/")
 
 
 def _evidence_judge_api_key_env() -> str:
-    return str(_evidence_judge_setting("api_key_env", "NVIDIA_API_KEY") or "NVIDIA_API_KEY")
+    return str(_evidence_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
 
 
 def _evidence_judge_api_key() -> str:
