@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.llm.http_messages import normalize_openai_messages, validate_openai_messages
 
 
 # ── Inlined schemas (avoid heavy src.graph import chain) ──────────────
@@ -249,9 +253,11 @@ def _messages(candidates: list[dict[str, Any]], *, minimal: bool) -> list[dict[s
 
 def _payload(model: str, schema_model: type[BaseModel], messages: list[dict[str, str]]) -> dict[str, Any]:
     schema = schema_model.model_json_schema()
+    openai_messages = normalize_openai_messages(messages)
+    validate_openai_messages(openai_messages)
     return {
         "model": model,
-        "messages": messages,
+        "messages": openai_messages,
         "temperature": 0,
         "max_tokens": 1800,
         "stream": False,

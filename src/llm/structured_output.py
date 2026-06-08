@@ -22,6 +22,12 @@ from pydantic import BaseModel, ValidationError
 
 from src.config import get_setting
 from src.graph.llm import get_node_llm
+from src.llm.http_messages import (
+    _InvalidHttpMessageFormatError,
+    normalize_openai_messages,
+    preview_openai_messages,
+    validate_openai_messages,
+)
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,9 @@ class _InvokeMetrics:
     parse_validate_elapsed_ms: float = 0.0
     prompt_chars: int = 0
     raw_output_chars: int = 0
+    using_direct_openrouter_http: bool = False
+    provider_request_mode: str = ""
+    http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
 
 
 class _InvokeOneModeError(Exception):
@@ -93,6 +102,9 @@ class StructuredLLMAttempt:
     prompt_chars: int = 0
     raw_output_chars: int = 0
     schema_size_chars: int = 0
+    using_direct_openrouter_http: bool = False
+    provider_request_mode: str = ""
+    http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -130,8 +142,23 @@ class StructuredLLMResult:
     prompt_chars: int = 0
     raw_output_chars: int = 0
     schema_size_chars: int = 0
+    using_direct_openrouter_http: bool = False
+    provider_request_mode: str = ""
+    http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
 
     def to_debug_payload(self, *, max_raw_chars: int = 4000) -> dict[str, Any]:
+        using_direct_openrouter_http = (
+            self.using_direct_openrouter_http
+            or any(attempt.using_direct_openrouter_http for attempt in self.attempts)
+        )
+        provider_request_mode = self.provider_request_mode or next(
+            (attempt.provider_request_mode for attempt in reversed(self.attempts) if attempt.provider_request_mode),
+            "",
+        )
+        http_messages_preview = self.http_messages_preview or next(
+            (attempt.http_messages_preview for attempt in reversed(self.attempts) if attempt.http_messages_preview),
+            [],
+        )
         return {
             "node_name": self.node_name,
             "llm_node": self.llm_node,
@@ -154,6 +181,9 @@ class StructuredLLMResult:
             "prompt_chars": self.prompt_chars,
             "raw_output_chars": self.raw_output_chars,
             "schema_size_chars": self.schema_size_chars,
+            "using_direct_openrouter_http": using_direct_openrouter_http,
+            "provider_request_mode": provider_request_mode,
+            "http_messages_preview": http_messages_preview,
             "success": self.success,
             "failure_phase": self.failure_phase,
             "error_type": self.error_type,
@@ -182,6 +212,9 @@ class StructuredLLMResult:
                     "prompt_chars": attempt.prompt_chars,
                     "raw_output_chars": attempt.raw_output_chars,
                     "schema_size_chars": attempt.schema_size_chars,
+                    "using_direct_openrouter_http": attempt.using_direct_openrouter_http,
+                    "provider_request_mode": attempt.provider_request_mode,
+                    "http_messages_preview": attempt.http_messages_preview,
                 }
                 for attempt in self.attempts
             ],
@@ -360,6 +393,8 @@ def _extract_provider_error_body(exc: Exception) -> str:
 
 def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None) -> str:
     """Classify failure phase for a structured output attempt."""
+    if isinstance(exc, _InvalidHttpMessageFormatError):
+        return "invalid_http_message_format"
     if isinstance(exc, _BusinessValidationError):
         return "business_validation_error"
     if isinstance(exc, json.JSONDecodeError):
@@ -377,8 +412,6 @@ def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics 
 
 def _is_second_layer_unsupported(exc: Exception, mode: str) -> bool:
     text = f"{type(exc).__name__} {exc} {_extract_provider_error_body(exc)}".lower()
-    if _extract_status_code(exc) in {400, 404, 422}:
-        return True
     return any(
         term in text
         for term in (
@@ -443,6 +476,8 @@ async def _invoke_openrouter_native(
 
     Bypasses ChatOpenAI defaults that break require_parameters=true.
     """
+    metrics.using_direct_openrouter_http = True
+    metrics.provider_request_mode = "openrouter_direct_http"
     base_url = str(_setting(llm_node, "base_url", "https://openrouter.ai/api/v1")).rstrip("/")
     api_key_env = str(_setting(llm_node, "api_key_env", "OPENROUTER_API_KEY"))
     api_key = os.getenv(api_key_env, "")
@@ -452,14 +487,16 @@ async def _invoke_openrouter_native(
             metrics,
         )
 
+    openai_messages = normalize_openai_messages(messages)
+    metrics.http_messages_preview = preview_openai_messages(openai_messages)
+    try:
+        validate_openai_messages(openai_messages)
+    except Exception as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
     payload: dict[str, Any] = {
         "model": _model(llm_node),
-        "messages": [
-            msg.model_dump(mode="json") if hasattr(msg, "model_dump")
-            else msg if isinstance(msg, dict)
-            else {"role": "user", "content": str(msg)}
-            for msg in messages
-        ],
+        "messages": openai_messages,
         "temperature": 0,
         "max_tokens": int(_setting(llm_node, "max_tokens", 4096) or 4096),
         "stream": False,
@@ -487,12 +524,12 @@ async def _invoke_openrouter_native(
 
     llm_started = time.perf_counter()
     try:
-        response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60.0,
-        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
         metrics.llm_elapsed_ms = _round_ms(llm_started)
     except Exception as exc:
         metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -505,7 +542,11 @@ async def _invoke_openrouter_native(
         err.response = response  # for _extract_status_code / _extract_provider_error_body
         raise _InvokeOneModeError(err, metrics, raw_output="")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception as exc:
+        metrics.raw_output_chars = len(response.text or "")
+        raise _InvokeOneModeError(exc, metrics, raw_output=response.text) from exc
     choices = data.get("choices", [])
     raw_output = ""
     if choices and isinstance(choices[0], dict):
@@ -561,6 +602,8 @@ async def _invoke_one_mode(
             # presence_penalty, top_p, n) that break require_parameters=true.
             return await _invoke_openrouter_native(schema, messages, metrics, llm_node)
 
+        metrics.using_direct_openrouter_http = False
+        metrics.provider_request_mode = "langchain_bind_native_schema"
         runnable = llm.bind(
             response_format={
                 "type": "json_schema",
@@ -596,6 +639,8 @@ async def _invoke_one_mode(
 
     # ── json_mode_pydantic ──
     if mode == "json_mode_pydantic":
+        metrics.using_direct_openrouter_http = False
+        metrics.provider_request_mode = "langchain_json_mode"
         runnable = llm.bind(response_format={"type": "json_object"})
         llm_started = time.perf_counter()
         try:
@@ -622,6 +667,8 @@ async def _invoke_one_mode(
 
     # ── tool_call_pydantic ──
     if mode == "tool_call_pydantic":
+        metrics.using_direct_openrouter_http = False
+        metrics.provider_request_mode = "langchain_tool_call"
         runnable = llm.bind(tools=[_tool_schema(schema)], tool_choice={"type": "function", "function": {"name": schema.__name__}})
         llm_started = time.perf_counter()
         try:
@@ -661,6 +708,8 @@ async def _invoke_one_mode(
 
     # ── prompt_json_pydantic ──
     if mode == "prompt_json_pydantic":
+        metrics.using_direct_openrouter_http = False
+        metrics.provider_request_mode = "langchain_prompt_json"
         llm_started = time.perf_counter()
         try:
             response = await llm.ainvoke(messages)
@@ -731,6 +780,9 @@ async def invoke_structured_llm(
             parse_validate_elapsed_ms=attempt.parse_validate_elapsed_ms,
             prompt_chars=attempt.prompt_chars,
             raw_output_chars=attempt.raw_output_chars,
+            using_direct_openrouter_http=attempt.using_direct_openrouter_http,
+            provider_request_mode=attempt.provider_request_mode,
+            http_messages_preview=attempt.http_messages_preview,
         )
 
     def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
@@ -762,6 +814,9 @@ async def invoke_structured_llm(
                 error_message=str(exc),
                 total_elapsed_ms=metrics.total_elapsed_ms,
                 schema_size_chars=schema_size_chars,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -785,6 +840,9 @@ async def invoke_structured_llm(
                 default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -825,6 +883,9 @@ async def invoke_structured_llm(
                     prompt_chars=metrics.prompt_chars,
                     raw_output_chars=metrics.raw_output_chars,
                     schema_size_chars=schema_size_chars,
+                    using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                    provider_request_mode=metrics.provider_request_mode,
+                    http_messages_preview=metrics.http_messages_preview,
                 )
                 attempts.append(attempt)
                 result = StructuredLLMResult(
@@ -856,6 +917,9 @@ async def invoke_structured_llm(
                     default_used=False,
                     retry_count=0,
                     failure_policy=failure_policy,
+                    using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                    provider_request_mode=metrics.provider_request_mode,
+                    http_messages_preview=metrics.http_messages_preview,
                 )
                 _emit_and_maybe_raise(result, exc=_BusinessValidationError(business_error))
                 continue
@@ -872,6 +936,9 @@ async def invoke_structured_llm(
                 prompt_chars=metrics.prompt_chars,
                 raw_output_chars=metrics.raw_output_chars,
                 schema_size_chars=schema_size_chars,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -899,6 +966,9 @@ async def invoke_structured_llm(
                 default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             _emit_and_maybe_raise(result)
             return result
@@ -930,6 +1000,9 @@ async def invoke_structured_llm(
                 prompt_chars=metrics.prompt_chars,
                 raw_output_chars=metrics.raw_output_chars,
                 schema_size_chars=schema_size_chars,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -965,6 +1038,9 @@ async def invoke_structured_llm(
                 default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -990,6 +1066,9 @@ async def invoke_structured_llm(
                 prompt_chars=metrics.prompt_chars,
                 raw_output_chars=0,
                 schema_size_chars=schema_size_chars,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -1025,6 +1104,9 @@ async def invoke_structured_llm(
                 default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
+                using_direct_openrouter_http=metrics.using_direct_openrouter_http,
+                provider_request_mode=metrics.provider_request_mode,
+                http_messages_preview=metrics.http_messages_preview,
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -1059,6 +1141,9 @@ async def invoke_structured_llm(
         default_used=False,
         retry_count=0,
         failure_policy=failure_policy,
+        using_direct_openrouter_http=last.using_direct_openrouter_http,
+        provider_request_mode=last.provider_request_mode,
+        http_messages_preview=last.http_messages_preview,
     )
     _emit_and_maybe_raise(result)
     return result

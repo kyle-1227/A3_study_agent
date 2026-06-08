@@ -34,6 +34,7 @@ from src.llm.structured_output import (
     get_max_raw_chars,
     invoke_structured_llm,
 )
+from src.llm.http_messages import normalize_openai_messages, validate_openai_messages
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
@@ -1364,9 +1365,11 @@ def _build_judge_messages(
 
 
 def _judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    openai_messages = normalize_openai_messages(messages)
+    validate_openai_messages(openai_messages)
     return {
         "model": _judge_model(),
-        "messages": messages,
+        "messages": openai_messages,
         "temperature": _judge_temperature(),
         "max_tokens": _judge_max_tokens(),
         "stream": False,
@@ -1786,9 +1789,11 @@ def _build_evidence_judge_messages(
 
 
 def _evidence_judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    openai_messages = normalize_openai_messages(messages)
+    validate_openai_messages(openai_messages)
     return {
         "model": _evidence_judge_model(),
-        "messages": messages,
+        "messages": openai_messages,
         "temperature": _evidence_judge_temperature(),
         "max_tokens": _evidence_judge_max_tokens(),
         "stream": False,
@@ -1935,6 +1940,8 @@ def _evidence_judge_failure_debug(
     finish_reason: str = "",
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    using_direct_openrouter_http: bool = False,
+    provider_request_mode: str = "",
 ) -> dict:
     schema_size = schema_size_chars or _evidence_judge_schema_size_chars()
     output_mode = str(
@@ -1960,7 +1967,8 @@ def _evidence_judge_failure_debug(
         "structured_output_method": output_mode,
         "output_mode": output_mode,
         "using_langchain_with_structured_output": False,
-        "using_direct_openrouter_http": False,
+        "using_direct_openrouter_http": using_direct_openrouter_http,
+        "provider_request_mode": provider_request_mode,
         "candidate_count": len(candidates),
         "schema_name": "EvidenceJudgeOutput",
         "schema_size_chars": schema_size,
@@ -2038,6 +2046,13 @@ def _structured_result_to_evidence_failure_debug(
             or "Structured Evidence Judge call failed."
         ),
         action_needed="inspect_structured_llm_output_trace",
+        using_direct_openrouter_http=result.using_direct_openrouter_http
+        or any(attempt.using_direct_openrouter_http for attempt in result.attempts),
+        provider_request_mode=result.provider_request_mode
+        or next(
+            (attempt.provider_request_mode for attempt in reversed(result.attempts) if attempt.provider_request_mode),
+            "",
+        ),
     )
 
 
@@ -2146,7 +2161,13 @@ async def _judge_evidence_candidates_with_llm(
         "parsing_error": None,
         "validation_error": None,
         "structured_output_method": structured_result.output_mode,
-        "using_direct_openrouter_http": False,
+        "using_direct_openrouter_http": structured_result.using_direct_openrouter_http
+        or any(attempt.using_direct_openrouter_http for attempt in structured_result.attempts),
+        "provider_request_mode": structured_result.provider_request_mode
+        or next(
+            (attempt.provider_request_mode for attempt in reversed(structured_result.attempts) if attempt.provider_request_mode),
+            "",
+        ),
         "schema_name": "EvidenceJudgeOutput",
         "schema_size_chars": _evidence_judge_schema_size_chars(),
         "prompt_chars": _messages_chars(messages),
