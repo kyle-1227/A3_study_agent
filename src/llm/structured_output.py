@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
+
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -357,16 +360,16 @@ def _extract_provider_error_body(exc: Exception) -> str:
 
 def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None) -> str:
     """Classify failure phase for a structured output attempt."""
-    if isinstance(exc, NotImplementedError):
-        return f"second_layer_{mode}_unsupported"
-    if _is_second_layer_unsupported(exc, mode):
-        return f"second_layer_{mode}_unsupported"
     if isinstance(exc, _BusinessValidationError):
         return "business_validation_error"
     if isinstance(exc, json.JSONDecodeError):
         return "parsing_error"
     if isinstance(exc, ValidationError):
         return "validation_error"
+    if isinstance(exc, NotImplementedError):
+        return f"second_layer_{mode}_unsupported"
+    if _is_second_layer_unsupported(exc, mode):
+        return f"second_layer_{mode}_unsupported"
     if isinstance(exc, ValueError):
         return "validation_error"
     return "llm_exception"
@@ -376,7 +379,20 @@ def _is_second_layer_unsupported(exc: Exception, mode: str) -> bool:
     text = f"{type(exc).__name__} {exc} {_extract_provider_error_body(exc)}".lower()
     if _extract_status_code(exc) in {400, 404, 422}:
         return True
-    return any(term in text for term in ("unsupported", "not support", "response_format", "tool", "json_schema", "function"))
+    return any(
+        term in text
+        for term in (
+            "unsupported",
+            "not support",
+            "not supported",
+            "response_format",
+            "json_schema",
+            "structured output",
+            "structured outputs",
+            "no endpoints found",
+            "can handle the requested parameters",
+        )
+    )
 
 
 def _validate_mode(mode: str) -> None:
@@ -417,6 +433,106 @@ def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
     }
 
 
+async def _invoke_openrouter_native(
+    schema: type[BaseModel],
+    messages: list,
+    metrics: _InvokeMetrics,
+    llm_node: str,
+) -> tuple[BaseModel, str, _InvokeMetrics]:
+    """Direct httpx call for OpenRouter native json_schema.
+
+    Bypasses ChatOpenAI defaults that break require_parameters=true.
+    """
+    base_url = str(_setting(llm_node, "base_url", "https://openrouter.ai/api/v1")).rstrip("/")
+    api_key_env = str(_setting(llm_node, "api_key_env", "OPENROUTER_API_KEY"))
+    api_key = os.getenv(api_key_env, "")
+    if not api_key:
+        raise _InvokeOneModeError(
+            RuntimeError(f"{api_key_env} is not configured"),
+            metrics,
+        )
+
+    payload: dict[str, Any] = {
+        "model": _model(llm_node),
+        "messages": [
+            msg.model_dump(mode="json") if hasattr(msg, "model_dump")
+            else msg if isinstance(msg, dict)
+            else {"role": "user", "content": str(msg)}
+            for msg in messages
+        ],
+        "temperature": 0,
+        "max_tokens": int(_setting(llm_node, "max_tokens", 4096) or 4096),
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema.__name__,
+                "strict": True,
+                "schema": schema.model_json_schema(),
+            },
+        },
+        "provider": {"require_parameters": True},
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    app_title = os.getenv("OPENROUTER_APP_TITLE", "").strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if app_title:
+        headers["X-Title"] = app_title
+
+    llm_started = time.perf_counter()
+    try:
+        response = httpx.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60.0,
+        )
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+    except Exception as exc:
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
+    if response.status_code >= 400:
+        err = RuntimeError(
+            f"Error code: {response.status_code} - {response.text}"
+        )
+        err.response = response  # for _extract_status_code / _extract_provider_error_body
+        raise _InvokeOneModeError(err, metrics, raw_output="")
+
+    data = response.json()
+    choices = data.get("choices", [])
+    raw_output = ""
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            raw_output = "\n".join(
+                str(item.get("text", item)) if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        else:
+            raw_output = str(content or "")
+    metrics.raw_output_chars = len(raw_output or "")
+
+    parse_started = time.perf_counter()
+    try:
+        parsed = schema.model_validate(_extract_json_object(raw_output))
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+    except Exception as exc:
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        _refresh_parse_validate_total(metrics)
+        raise _InvokeOneModeError(exc, metrics, raw_output=raw_output) from exc
+
+    _refresh_parse_validate_total(metrics)
+    return parsed, raw_output, metrics
+
+
 async def _invoke_one_mode(
     *,
     node_name: str,
@@ -440,8 +556,13 @@ async def _invoke_one_mode(
 
     # ── native_json_schema_pydantic ──
     if mode == "native_json_schema_pydantic":
-        bind_kwargs: dict[str, Any] = {
-            "response_format": {
+        if _provider(llm_node) == "openrouter":
+            # Direct httpx: bypass ChatOpenAI default params (frequency_penalty,
+            # presence_penalty, top_p, n) that break require_parameters=true.
+            return await _invoke_openrouter_native(schema, messages, metrics, llm_node)
+
+        runnable = llm.bind(
+            response_format={
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema.__name__,
@@ -449,8 +570,7 @@ async def _invoke_one_mode(
                     "schema": schema.model_json_schema(),
                 },
             },
-        }
-        runnable = llm.bind(**bind_kwargs)
+        )
         llm_started = time.perf_counter()
         try:
             response = await runnable.ainvoke(messages)

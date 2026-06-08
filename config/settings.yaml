@@ -10,6 +10,7 @@ academic:
 
 development:
   fail_fast_structured_output: true      # Structured Pydantic calls fail visibly in development
+  fail_fast_evidence_judge: true         # Evidence Judge failure interrupts graph in development
 
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state

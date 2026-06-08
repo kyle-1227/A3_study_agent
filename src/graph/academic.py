@@ -1686,6 +1686,10 @@ def _block_generation_when_evidence_judge_failed() -> bool:
     return bool(_retrieval_setting("dual_source_evidence.block_generation_when_evidence_judge_failed", True))
 
 
+def _fail_fast_evidence_judge() -> bool:
+    return bool(get_setting("development.fail_fast_evidence_judge", True))
+
+
 def _evidence_failure_phase(state: TutorState) -> str:
     output = state.get("evidence_judge_output") or {}
     if isinstance(output, dict):
@@ -2939,16 +2943,30 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         env_flag="LOG_RAG_RESULT",
     )
 
-    parsed, judge_debug = await _judge_evidence_candidates_with_llm(
-        state=state,
-        candidates=candidates,
-        original_user_query=original_user_query,
-        learning_goal=str(state.get("learning_goal", "")),
-        requested_resource_type=str(state.get("requested_resource_type", "")),
-        round_index=1,
-    )
+    try:
+        parsed, judge_debug = await _judge_evidence_candidates_with_llm(
+            state=state,
+            candidates=candidates,
+            original_user_query=original_user_query,
+            learning_goal=str(state.get("learning_goal", "")),
+            requested_resource_type=str(state.get("requested_resource_type", "")),
+            round_index=1,
+        )
+    except StructuredOutputError as exc:
+        if _fail_fast_evidence_judge():
+            raise RuntimeError(
+                f"Evidence Judge failed: {exc.result.failure_phase}. "
+                f"Fix the root cause before retrying."
+            ) from exc
+        parsed = None
+        judge_debug = exc.result.to_debug_payload()
 
     if parsed is None:
+        if _fail_fast_evidence_judge():
+            raise RuntimeError(
+                f"Evidence Judge returned no parsed result: "
+                f"{judge_debug.get('failure_phase', 'unknown')}"
+            )
         emit_a3_trace(
             logger,
             "context_assembly",
