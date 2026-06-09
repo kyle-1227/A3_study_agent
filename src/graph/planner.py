@@ -1,4 +1,4 @@
-"""SubGraph B — Study Planner: policy search, then single-call plan generation.
+"""SubGraph B — Study Planner: planning context retrieval, then plan generation.
 
 Notes:
 - 2-step (search → generate)
@@ -39,8 +39,8 @@ _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
 
 
 @traced_node
-async def search_policy(state: TutorState) -> dict:
-    """Use the configured Web Search provider to fetch policy information. Times out after 15s."""
+async def gather_planning_context(state: TutorState) -> dict:
+    """Use the configured Web Search provider to fetch planning context and learning-resource references."""
     year = datetime.now().year
     query = state.get("search_web_query") or f"{year}年高校课程学习资源 专业入门路径"
 

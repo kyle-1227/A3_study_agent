@@ -44,7 +44,7 @@ from src.graph.plan_adversarial import (
     route_feedback,
     should_output_or_revise,
 )
-from src.graph.planner import gather_intel, search_policy
+from src.graph.planner import gather_intel, gather_planning_context
 from src.graph.state import TutorState
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
@@ -68,7 +68,7 @@ def build_graph() -> StateGraph:
     graph.add_node("rewrite_query", rewrite_query)
 
     # Planner (gather intel → flattened adversarial planning)
-    graph.add_node("search_policy", search_policy)
+    graph.add_node("gather_planning_context", gather_planning_context)
     graph.add_node("gather_intel", gather_intel)
     graph.add_node("drafter", drafter_node)
     graph.add_node("reviewer_academic", reviewer_academic_node)
@@ -120,7 +120,7 @@ def build_graph() -> StateGraph:
         route_after_query_rewrite,
         {
             "academic": "academic_router",
-            "planning": "search_policy",
+            "planning": "gather_planning_context",
         },
     )
 
@@ -161,8 +161,8 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("rewrite_query", "academic_router")
 
-    # Planner flow: search_policy → gather_intel → adversarial loop → plan_output → END
-    graph.add_edge("search_policy", "gather_intel")
+    # Planner flow: gather_planning_context → gather_intel → adversarial loop → plan_output → END
+    graph.add_edge("gather_planning_context", "gather_intel")
     graph.add_edge("gather_intel", "drafter")
     graph.add_edge("drafter", "reviewer_academic")
     graph.add_edge("drafter", "reviewer_emotional")

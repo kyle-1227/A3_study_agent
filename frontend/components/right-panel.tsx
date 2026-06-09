@@ -52,7 +52,7 @@ const NODE_LABELS: Record<string, string> = {
   generate_answer: "回答生成",
   evaluate_hallucination: "幻觉评估",
   rewrite_query: "查询改写",
-  search_policy: "政策搜索",
+  gather_planning_context: "规划上下文检索",
   gather_intel: "情报收集",
   drafter: "计划起草",
   reviewer_academic: "学术审查",
@@ -330,7 +330,7 @@ interface DagEdgeDef {
 const DAG_NODE_IDS = [
   "supervisor",
   "academic_router",
-  "search_policy",
+  "gather_planning_context",
   "emotional_response",
   "handle_unknown",
   "search_query_rewriter",
@@ -367,7 +367,7 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "supervisor", to: "handle_unknown" },
   // Shared query rewrite routes to academic or planning
   { from: "search_query_rewriter", to: "academic_router" },
-  { from: "search_query_rewriter", to: "search_policy" },
+  { from: "search_query_rewriter", to: "gather_planning_context" },
   // Academic branch
   { from: "academic_router", to: "rag_retrieve" },
   { from: "academic_router", to: "web_search" },
@@ -391,7 +391,7 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "evaluate_hallucination", to: "rewrite_query" },
   { from: "rewrite_query", to: "academic_router", retry: true },
   // Planning branch
-  { from: "search_policy", to: "gather_intel" },
+  { from: "gather_planning_context", to: "gather_intel" },
   { from: "gather_intel", to: "drafter" },
   { from: "drafter", to: "reviewer_academic" },
   { from: "drafter", to: "reviewer_emotional" },

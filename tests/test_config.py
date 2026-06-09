@@ -331,17 +331,17 @@ class TestPromptRendering:
         assert "A" in rendered
 
     def test_planner_generate_renders(self):
-        """planner_generate prompt renders with user_request, policy_info."""
+        """planner_generate prompt renders with user_request, planning_context."""
         from src.config import load_prompt
 
         prompt = load_prompt("planner_generate")
         rendered = prompt.format(
             user_request="Make a plan",
-            policy_info="New policy info",
+            planning_context="Planning context info",
         )
 
         assert "Make a plan" in rendered
-        assert "New policy info" in rendered
+        assert "Planning context info" in rendered
 
     def test_system_prompts_have_no_variables(self):
         """System prompts should load without needing .format()."""

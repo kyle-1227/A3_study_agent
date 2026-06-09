@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.graph.planner import search_policy
+from src.graph.planner import gather_planning_context
 
 
-class TestSearchPolicy:
+class TestGatherPlanningContext:
 
     @patch("src.graph.planner.web_search_fn")
     async def test_returns_search_results(self, mock_search):
@@ -19,7 +19,7 @@ class TestSearchPolicy:
         ]
 
         state = {"messages": [HumanMessage(content="帮我做课程补基础计划")]}
-        result = await search_policy(state)
+        result = await gather_planning_context(state)
 
         assert "search_results" in result
         assert len(result["search_results"]) == 1
@@ -28,7 +28,7 @@ class TestSearchPolicy:
     @patch("src.graph.planner.web_search_fn", side_effect=Exception("timeout"))
     async def test_returns_empty_on_exception(self, mock_search):
         state = {"messages": [HumanMessage(content="test")]}
-        result = await search_policy(state)
+        result = await gather_planning_context(state)
 
         assert result["search_results"] == []
 
@@ -38,7 +38,7 @@ class TestSearchPolicy:
         from datetime import datetime
 
         state = {"messages": [HumanMessage(content="test")]}
-        await search_policy(state)
+        await gather_planning_context(state)
 
         call_args = mock_search.call_args[0][0]
         assert str(datetime.now().year) in call_args
@@ -51,7 +51,7 @@ class TestSearchPolicy:
             "messages": [HumanMessage(content="帮我规划 Python 学习路径")],
             "search_web_query": "Python learning path course notes roadmap",
         }
-        await search_policy(state)
+        await gather_planning_context(state)
 
         mock_search.assert_called_once_with("Python learning path course notes roadmap")
 

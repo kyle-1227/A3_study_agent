@@ -43,7 +43,7 @@ graph TD
   START([Learner Input]) --> supervisor[Intent Classification]
 
   supervisor -->|academic| academic_router[Academic Router]
-  supervisor -->|planning| search_policy[Planning Intel]
+  supervisor -->|planning| gather_planning_context[Planning Context Retrieval]
   supervisor -->|emotional| emotional_response[Academic Support]
   supervisor -->|unknown| handle_unknown[Unknown Intent]
 
@@ -54,7 +54,7 @@ graph TD
   evaluate_hallucination -->|Retry| rewrite_query[Query Rewrite]
   rewrite_query --> academic_router
 
-  search_policy --> gather_intel[Intel Gathering]
+  gather_planning_context --> gather_intel[Intel Gathering]
   gather_intel --> drafter[Plan Drafter]
   drafter --> reviewer_academic[Academic Reviewer]
   drafter --> reviewer_emotional[Emotional Reviewer]

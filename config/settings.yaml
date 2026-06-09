@@ -239,7 +239,7 @@ llm_outputs:
     max_raw_chars: 12000
 
 planner:
-  search_timeout: 15                    # Policy search timeout (seconds)
+  search_timeout: 15                    # Planning context search timeout (seconds)
   temperature: 0.7                      # Plan generation temperature
   reviewer_temperature: 0.0             # Reviewers need deterministic structured output
   adversarial_max_rounds: 3             # Max drafter-reviewer iterations

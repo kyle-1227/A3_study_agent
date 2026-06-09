@@ -325,7 +325,7 @@ class TestSSEAllGraphNodes:
         "generate_answer",
         "evaluate_hallucination",
         "rewrite_query",
-        "search_policy",
+        "gather_planning_context",
         "gather_intel",
         "drafter",
         "reviewer_academic",

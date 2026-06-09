@@ -43,7 +43,7 @@ graph TD
   START([学习者输入]) --> supervisor[意图识别]
 
   supervisor -->|academic| academic_router[学术学习路由]
-  supervisor -->|planning| search_policy[学习规划情报收集]
+  supervisor -->|planning| gather_planning_context[规划上下文检索]
   supervisor -->|emotional| emotional_response[学业支持回应]
   supervisor -->|unknown| handle_unknown[未知意图处理]
 
@@ -54,7 +54,7 @@ graph TD
   evaluate_hallucination -->|重试| rewrite_query[查询改写]
   rewrite_query --> academic_router
 
-  search_policy --> gather_intel[规划信息收集]
+  gather_planning_context --> gather_intel[规划信息收集]
   gather_intel --> drafter[计划起草]
   drafter --> reviewer_academic[学术审查]
   drafter --> reviewer_emotional[情绪审查]
