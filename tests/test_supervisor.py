@@ -93,7 +93,7 @@ class TestSupervisorNode:
         mock_llm.with_structured_output.return_value = structured_llm
         mock_get_llm.return_value = mock_llm
 
-        state = {"messages": [HumanMessage(content="帮我制定复习计划")]}
+        state = {"messages": [HumanMessage(content="帮我制定学习计划")]}
         result = await supervisor_node(state)
 
         assert result["intent"] == "planning"

@@ -38,10 +38,10 @@ from src.graph.state import TutorState
 def _base_state(**overrides) -> TutorState:
     """Return a TutorState dict with sensible defaults, overridden by kwargs."""
     state: TutorState = {
-        "messages": [HumanMessage(content="帮我做复习计划")],
+        "messages": [HumanMessage(content="帮我做课程补基础计划")],
         "intent": "planning",
         "subject": "math",
-        "keypoints": ["数学", "复习计划"],
+        "keypoints": ["高等数学", "课程补基础计划"],
         "context": [],
         "search_results": [],
         "plan": "",

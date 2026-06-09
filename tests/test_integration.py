@@ -94,7 +94,7 @@ def test_supervisor_routing(graph):
 
     cases = [
         ("二次函数的判别式怎么用？", "academic"),
-        ("帮我制定下周复习计划", "planning"),
+        ("帮我制定下周课程补基础计划", "planning"),
         ("我好焦虑，感觉学不会", "emotional"),
         ("你好", "emotional"),
     ]
@@ -360,7 +360,7 @@ def main() -> None:
     # ── Core scenario tests ───────────────────────────────────
     print("\n[Core Scenarios]")
     _run_test("Academic Q&A (数学-判别式)", lambda: test_academic_scenario(graph))
-    _run_test("Study Planning (复习计划)", lambda: test_planning_scenario(graph))
+    _run_test("Study Planning (学习计划)", lambda: test_planning_scenario(graph))
     _run_test("Emotional Support (压力焦虑)", lambda: test_emotional_scenario(graph))
 
     # ── Edge case tests ───────────────────────────────────────

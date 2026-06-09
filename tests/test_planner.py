@@ -18,7 +18,7 @@ class TestSearchPolicy:
             {"content": "2026年机器学习课程项目实践安排", "title": "课程项目", "url": "https://example.com"},
         ]
 
-        state = {"messages": [HumanMessage(content="帮我做复习计划")]}
+        state = {"messages": [HumanMessage(content="帮我做课程补基础计划")]}
         result = await search_policy(state)
 
         assert "search_results" in result
