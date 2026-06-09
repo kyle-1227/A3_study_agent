@@ -40,7 +40,7 @@ def setup_tracing() -> TracerProvider | None:
 
     Reads configuration from environment variables:
         OTEL_TRACING_ENABLED  -- "true"/"false" kill switch (default "true")
-        OTEL_SERVICE_NAME     -- resource service name (default "gaokao-tutor")
+        OTEL_SERVICE_NAME     -- resource service name (default "a3-study-agent")
         OTEL_TRACES_EXPORTER  -- "otlp", "sqlite", or "none" (default "otlp")
         OTEL_EXPORTER_OTLP_ENDPOINT -- gRPC endpoint (default "localhost:4317")
         OTEL_SQLITE_FALLBACK_PATH   -- SQLite DB path (default "logs/traces.db")
@@ -55,7 +55,7 @@ def setup_tracing() -> TracerProvider | None:
         logger.info("OpenTelemetry tracing is disabled (OTEL_TRACING_ENABLED=%s)", enabled)
         return None
 
-    service_name = os.getenv("OTEL_SERVICE_NAME", "gaokao-tutor")
+    service_name = os.getenv("OTEL_SERVICE_NAME", "a3-study-agent")
     exporter_type = os.getenv("OTEL_TRACES_EXPORTER", "otlp").lower()
 
     resource = Resource.create({SERVICE_NAME: service_name})
@@ -109,7 +109,7 @@ def setup_tracing() -> TracerProvider | None:
     return provider
 
 
-def get_tracer(name: str = "gaokao_tutor") -> trace.Tracer:
+def get_tracer(name: str = "a3_study_agent") -> trace.Tracer:
     """Return a Tracer instance. Safe to call even if tracing is not initialized."""
     return trace.get_tracer(name)
 

@@ -1,4 +1,4 @@
-"""OpenTelemetry tracing for Gaokao Tutor."""
+"""OpenTelemetry tracing for A3 Study Agent."""
 
 from src.tracing.collector import get_tracer, setup_tracing, shutdown_tracing
 from src.tracing.decorators import (

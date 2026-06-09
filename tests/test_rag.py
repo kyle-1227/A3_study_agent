@@ -110,7 +110,7 @@ class TestIndexer:
 
     def test_collection_name(self):
         from src.rag.indexer import COLLECTION_NAME
-        assert COLLECTION_NAME == "gaokao_docs"
+        assert COLLECTION_NAME == "a3_study_docs"
 
 
 class TestRetriever:

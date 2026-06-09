@@ -1,7 +1,7 @@
 [project]
-name = "gaokao-tutor"
+name = "a3-study-agent"
 version = "0.3.0"
-description = "AI-powered tutoring assistant for Chinese Gaokao preparation"
+description = "AI-powered personalized learning resource generation assistant for university students"
 requires-python = ">=3.11"
 dependencies = [
     # Core Framework

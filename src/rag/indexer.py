@@ -20,7 +20,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
-COLLECTION_NAME = "gaokao_docs"
+COLLECTION_NAME = "a3_study_docs"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_EMBEDDING_API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_EMBEDDING_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
