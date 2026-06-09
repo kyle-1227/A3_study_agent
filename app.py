@@ -1,4 +1,4 @@
-"""Gaokao Tutor — AI-powered tutoring assistant for Chinese Gaokao preparation."""
+"""A3 Study Agent — AI-powered university learning resource generation system."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
     shutdown_tracing()
 
 
-app = FastAPI(title="Gaokao Tutor API", lifespan=lifespan)
+app = FastAPI(title="A3 Study Agent API", lifespan=lifespan)
 
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 

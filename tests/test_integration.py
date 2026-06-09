@@ -1,4 +1,4 @@
-"""Local integration tests for Gaokao Tutor.
+"""Local integration tests for A3 Study Agent.
 
 Runs the compiled LangGraph end-to-end against real APIs.
 Requires a valid .env with DEEPSEEK_API_KEY and SILICONFLOW_API_KEY.
@@ -307,7 +307,7 @@ def main() -> None:
     quick = "--quick" in sys.argv
 
     print("=" * 60)
-    print("  Gaokao Tutor — Integration Tests (v0.1)")
+    print("  A3 Study Agent — Integration Tests (v0.1)")
     print("=" * 60)
 
     # ── Pre-flight checks ─────────────────────────────────────

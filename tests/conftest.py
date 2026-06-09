@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for Gaokao Tutor unit tests.
+"""Shared pytest fixtures for A3 Study Agent unit tests.
 
 All unit tests mock external dependencies (LLM APIs, ChromaDB, web search)
 so they run offline without API keys.

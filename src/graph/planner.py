@@ -5,11 +5,11 @@ Notes:
 
 Future Roadmap:
 - [Local RAG] Replace/Augment web search with a VectorDB (ChromaDB) containing
-  official PDF documents from provincial education examination authorities.
-- [Context Filtering] Implement a re-ranking stage to prioritize official
-  .gov.cn domains over social media/marketing content.
-- [Provincial Routing] Automatically inject user's provincial context into
-  search queries to handle diverse Gaokao schemas (e.g., 3+1+2 vs. 3+3).
+  course syllabi, textbooks, lab guides, and project materials.
+- [Context Filtering] Implement a re-ranking stage to prioritize authoritative
+  course materials, official documentation, and high-quality educational resources.
+- [Learning Context Routing] Automatically inject the learner's course, major,
+  background, and target skill context into search queries.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from src.tracing import traced_llm_call, traced_node, traced_search
 logger = logging.getLogger(__name__)
 
 
-# ── Node 1: search latest Gaokao policies ─────────────────────────
+# ── Node 1: search learning resources and planning context ─────────
 
 # Time Limit to prevent search too long
 _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
