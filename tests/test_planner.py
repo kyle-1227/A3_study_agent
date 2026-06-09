@@ -15,7 +15,7 @@ class TestSearchPolicy:
     @patch("src.graph.planner.web_search_fn")
     async def test_returns_search_results(self, mock_search):
         mock_search.return_value = [
-            {"content": "2026年高考6月7日", "title": "高考时间", "url": "https://example.com"},
+            {"content": "2026年机器学习课程项目实践安排", "title": "课程项目", "url": "https://example.com"},
         ]
 
         state = {"messages": [HumanMessage(content="帮我做复习计划")]}

@@ -130,8 +130,8 @@ class TestLearningStyle:
 class TestGoal:
 
     def test_minimal_goal(self):
-        g = Goal(goal="准备高考数学")
-        assert g.goal == "准备高考数学"
+        g = Goal(goal="补强高等数学基础")
+        assert g.goal == "补强高等数学基础"
         assert g.importance == 0.5
         assert g.progress == 0.0
         assert g.created_at == ""
@@ -346,7 +346,7 @@ class TestProfileUpdateResult:
 
     def test_result_with_changes(self):
         p = UserProfile(user_id="u1")
-        changes = ["技能 [python] 首次评估: level=0.30", "新目标: 准备高考"]
+        changes = ["技能 [python] 首次评估: level=0.30", "新目标: 补强机器学习基础"]
         result = ProfileUpdateResult(profile=p, changes=changes, new_observations=3)
         assert len(result.changes) == 2
         assert result.new_observations == 3
@@ -1097,19 +1097,19 @@ class TestUpdateProfile:
     def test_new_goal_added(self):
         p = UserProfile(user_id="u1")
         extracted = ExtractedProfileInfo(
-            goals_observed=[{"goal": "准备高考数学", "importance": 0.9}],
+            goals_observed=[{"goal": "补强高等数学基础", "importance": 0.9}],
         )
         result = update_profile(p, extracted)
         assert len(p.goals) == 1
-        assert p.goals[0].goal == "准备高考数学"
+        assert p.goals[0].goal == "补强高等数学基础"
         assert p.goals[0].importance == 0.9
-        assert any("准备高考数学" in c for c in result.changes)
+        assert any("补强高等数学基础" in c for c in result.changes)
 
     def test_duplicate_goal_updates_importance(self):
         p = UserProfile(user_id="u1")
-        p.goals = [Goal(goal="准备高考", importance=0.5)]
+        p.goals = [Goal(goal="补强机器学习基础", importance=0.5)]
         extracted = ExtractedProfileInfo(
-            goals_observed=[{"goal": "准备高考", "importance": 0.9}],
+            goals_observed=[{"goal": "补强机器学习基础", "importance": 0.9}],
         )
         result = update_profile(p, extracted)
         assert len(p.goals) == 1  # no duplicate

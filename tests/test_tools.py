@@ -113,4 +113,4 @@ class TestPrompts:
         from src.config import load_prompt
         prompt = load_prompt("emotional_system")
         assert len(prompt) > 50
-        assert "班主任" in prompt
+        assert "学业发展导师" in prompt

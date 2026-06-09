@@ -232,14 +232,14 @@ class TestLoadPrompt:
         """Chinese text loads correctly from XML."""
         from src.config.config_manager import load_prompt
 
-        prompt_xml = '<prompt><![CDATA[你是一位经验丰富的高考学科辅导老师]]></prompt>'
+        prompt_xml = '<prompt><![CDATA[你是一位经验丰富的高校课程学习导师]]></prompt>'
         (config_dir / "prompts" / "chinese.xml").write_text(
             prompt_xml, encoding="utf-8",
         )
 
         result = load_prompt("chinese", reload=True)
 
-        assert "高考" in result
+        assert "高校课程" in result
 
 
 # ===========================================================================

@@ -56,4 +56,4 @@ class TestEmotionalResponse:
 
         call_args = mock_llm.ainvoke.call_args[0][0]
         assert isinstance(call_args[0], SystemMessage)
-        assert "班主任" in call_args[0].content
+        assert "学业发展导师" in call_args[0].content

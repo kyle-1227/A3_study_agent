@@ -144,12 +144,12 @@ class TestGatherIntel:
 
         mock_retrieve.return_value = {
             "docs": [
-                {"content": "高考数学重点：函数与导数", "source": "math.pdf", "score": 0.8},
+                {"content": "高等数学课程重点：函数与导数", "source": "math.pdf", "score": 0.8},
             ],
             "is_hit": True,
         }
         mock_web_search.return_value = [
-            {"content": "2026高考政策变化", "title": "政策", "url": "https://example.com"},
+            {"content": "2026数据科学学习路线实践趋势", "title": "学习规划", "url": "https://example.com"},
         ]
 
         state = {
@@ -250,7 +250,7 @@ class TestGatherIntel:
             "is_hit": True,
         }
         mock_web_search.return_value = [
-            {"content": "2026高考6月7日", "title": "高考日期", "url": "https://example.com"},
+            {"content": "2026机器学习课程项目实践安排", "title": "课程项目", "url": "https://example.com"},
         ]
 
         state = {
