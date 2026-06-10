@@ -963,7 +963,7 @@ class TestFormatHelpers:
     def test_format_search_with_results(self, sample_search_results):
         output = _format_search(sample_search_results)
         assert "[1]" in output
-        assert "高考时间" in output
+        assert "课程安排" in output
 
 
 class TestGenerateAnswer:

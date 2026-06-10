@@ -1,15 +1,15 @@
-"""SubGraph B — Study Planner: policy search, then single-call plan generation.
+"""SubGraph B — Study Planner: planning context retrieval, then plan generation.
 
 Notes:
 - 2-step (search → generate)
 
 Future Roadmap:
 - [Local RAG] Replace/Augment web search with a VectorDB (ChromaDB) containing
-  official PDF documents from provincial education examination authorities.
-- [Context Filtering] Implement a re-ranking stage to prioritize official
-  .gov.cn domains over social media/marketing content.
-- [Provincial Routing] Automatically inject user's provincial context into
-  search queries to handle diverse Gaokao schemas (e.g., 3+1+2 vs. 3+3).
+  course syllabi, textbooks, lab guides, and project materials.
+- [Context Filtering] Implement a re-ranking stage to prioritize authoritative
+  course materials, official documentation, and high-quality educational resources.
+- [Learning Context Routing] Automatically inject the learner's course, major,
+  background, and target skill context into search queries.
 """
 
 from __future__ import annotations
@@ -32,15 +32,15 @@ from src.tracing import traced_llm_call, traced_node, traced_search
 logger = logging.getLogger(__name__)
 
 
-# ── Node 1: search latest Gaokao policies ─────────────────────────
+# ── Node 1: search learning resources and planning context ─────────
 
 # Time Limit to prevent search too long
 _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
 
 
 @traced_node
-async def search_policy(state: TutorState) -> dict:
-    """Use the configured Web Search provider to fetch policy information. Times out after 15s."""
+async def gather_planning_context(state: TutorState) -> dict:
+    """Use the configured Web Search provider to fetch planning context and learning-resource references."""
     year = datetime.now().year
     query = state.get("search_web_query") or f"{year}年高校课程学习资源 专业入门路径"
 

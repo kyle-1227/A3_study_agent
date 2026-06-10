@@ -144,19 +144,19 @@ class TestGatherIntel:
 
         mock_retrieve.return_value = {
             "docs": [
-                {"content": "高考数学重点：函数与导数", "source": "math.pdf", "score": 0.8},
+                {"content": "高等数学课程重点：函数与导数", "source": "math.pdf", "score": 0.8},
             ],
             "is_hit": True,
         }
         mock_web_search.return_value = [
-            {"content": "2026高考政策变化", "title": "政策", "url": "https://example.com"},
+            {"content": "2026数据科学学习路线实践趋势", "title": "学习规划", "url": "https://example.com"},
         ]
 
         state = {
-            "messages": [HumanMessage(content="帮我制定数学复习计划")],
+            "messages": [HumanMessage(content="帮我制定高等数学课程补基础计划")],
             "intent": "planning",
             "subject": "math",
-            "keypoints": ["数学", "复习计划"],
+            "keypoints": ["高等数学", "课程补基础计划"],
             "context": [],
             "search_results": [],
             "plan": "",
@@ -196,7 +196,7 @@ class TestGatherIntel:
         """emotional_intel should come from LLM analysis of conversation history."""
         mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(
-            return_value=MagicMock(content="学生表现出考前焦虑。")
+            return_value=MagicMock(content="学习者表现出课程压力和学习焦虑。")
         )
         mock_get_llm.return_value = mock_llm
         mock_get_fallback.return_value = MagicMock()
@@ -205,9 +205,9 @@ class TestGatherIntel:
 
         state = {
             "messages": [
-                HumanMessage(content="我好焦虑，数学总是考不好"),
+                HumanMessage(content="我好焦虑，高等数学作业和测验总是跟不上"),
                 AIMessage(content="我理解你的心情"),
-                HumanMessage(content="帮我制定复习计划吧"),
+                HumanMessage(content="帮我制定课程补基础计划吧"),
             ],
             "intent": "planning",
             "subject": "",
@@ -250,14 +250,14 @@ class TestGatherIntel:
             "is_hit": True,
         }
         mock_web_search.return_value = [
-            {"content": "2026高考6月7日", "title": "高考日期", "url": "https://example.com"},
+            {"content": "2026机器学习课程项目实践安排", "title": "课程项目", "url": "https://example.com"},
         ]
 
         state = {
-            "messages": [HumanMessage(content="帮我做复习计划")],
+            "messages": [HumanMessage(content="帮我做学习计划")],
             "intent": "planning",
             "subject": "math",
-            "keypoints": ["复习计划"],
+            "keypoints": ["学习计划"],
             "context": [],
             "search_results": [],
             "plan": "",

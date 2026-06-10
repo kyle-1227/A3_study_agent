@@ -1,4 +1,4 @@
-"""Local integration tests for Gaokao Tutor.
+"""Local integration tests for A3 Study Agent.
 
 Runs the compiled LangGraph end-to-end against real APIs.
 Requires a valid .env with DEEPSEEK_API_KEY and SILICONFLOW_API_KEY.
@@ -94,7 +94,7 @@ def test_supervisor_routing(graph):
 
     cases = [
         ("二次函数的判别式怎么用？", "academic"),
-        ("帮我制定下周复习计划", "planning"),
+        ("帮我制定下周课程补基础计划", "planning"),
         ("我好焦虑，感觉学不会", "emotional"),
         ("你好", "emotional"),
     ]
@@ -129,7 +129,7 @@ def test_academic_scenario(graph):
 
 def test_planning_scenario(graph):
     """Core scenario 2: study planning end-to-end."""
-    result = _invoke(graph, "我是高三学生，距离高考还有3个月，帮我制定一个每周复习计划")
+    result = _invoke(graph, "我是数据科学大一学生，机器学习课程跟不上，帮我制定一个4周补基础计划")
     intent = result.get("intent")
     ai_text = _extract_ai_text(result)
 
@@ -178,7 +178,7 @@ def test_empty_input(graph):
 def test_long_input(graph):
     """Edge case: long input (simulated verbose question)."""
     long_text = (
-        "我想问一个关于高考数学的问题。"
+        "我想问一个关于大学高等数学或线性代数的问题。"
         "在解析几何中，椭圆的标准方程为 x²/a² + y²/b² = 1，其中 a > b > 0。"
         "已知椭圆经过点 (1, 3/2)，且离心率 e = √2/2。"
         "请问：(1) 求椭圆的标准方程；"
@@ -216,7 +216,7 @@ def test_search_unavailable(graph):
     original_key = os.environ.pop("TAVILY_API_KEY", None)
 
     try:
-        result = _invoke(graph, "2026年高考最新政策有什么变化？帮我做个规划")
+        result = _invoke(graph, "2026年数据科学和机器学习学习路线有什么新的实践趋势？帮我做个学习规划")
         ai_text = _extract_ai_text(result)
         _assert(len(ai_text) > 20, "Should still generate response when search is unavailable")
         return f"response_len={len(ai_text)} (graceful degradation)"
@@ -307,7 +307,7 @@ def main() -> None:
     quick = "--quick" in sys.argv
 
     print("=" * 60)
-    print("  Gaokao Tutor — Integration Tests (v0.1)")
+    print("  A3 Study Agent — Integration Tests (v0.1)")
     print("=" * 60)
 
     # ── Pre-flight checks ─────────────────────────────────────
@@ -360,7 +360,7 @@ def main() -> None:
     # ── Core scenario tests ───────────────────────────────────
     print("\n[Core Scenarios]")
     _run_test("Academic Q&A (数学-判别式)", lambda: test_academic_scenario(graph))
-    _run_test("Study Planning (复习计划)", lambda: test_planning_scenario(graph))
+    _run_test("Study Planning (学习计划)", lambda: test_planning_scenario(graph))
     _run_test("Emotional Support (压力焦虑)", lambda: test_emotional_scenario(graph))
 
     # ── Edge case tests ───────────────────────────────────────

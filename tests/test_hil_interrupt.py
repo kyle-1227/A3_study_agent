@@ -55,7 +55,7 @@ class TestPlanOutputNodeInterrupt:
         from src.graph.plan_adversarial import plan_output_node
 
         state = {
-            "messages": [HumanMessage(content="帮我做复习计划")],
+            "messages": [HumanMessage(content="帮我做课程补基础计划")],
             "intent": "planning",
             "subject": "math",
             "keypoints": [],
@@ -91,7 +91,7 @@ class TestPlanOutputNodeInterrupt:
         from src.graph.plan_adversarial import plan_output_node
 
         state = {
-            "messages": [HumanMessage(content="帮我做复习计划")],
+            "messages": [HumanMessage(content="帮我做课程补基础计划")],
             "intent": "planning",
             "subject": "math",
             "keypoints": [],
@@ -127,7 +127,7 @@ class TestPlanOutputNodeInterrupt:
         from src.graph.plan_adversarial import plan_output_node
 
         state = {
-            "messages": [HumanMessage(content="帮我做复习计划")],
+            "messages": [HumanMessage(content="帮我做课程补基础计划")],
             "intent": "planning",
             "subject": "math",
             "keypoints": [],

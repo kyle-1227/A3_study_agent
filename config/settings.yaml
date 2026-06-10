@@ -1,4 +1,4 @@
-# Gaokao Tutor — System Logic Parameters
+# A3 Study Agent — System Logic Parameters
 # Loaded by src/config/config_manager.py at runtime.
 
 academic:
@@ -7,6 +7,10 @@ academic:
   temperature: 0.7                      # Answer generation temperature
   max_tokens: 4096                      # Answer bubble output budget (doubled)
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
+
+development:
+  fail_fast_structured_output: true      # Structured Pydantic calls fail visibly in development
+  fail_fast_evidence_judge: true         # Evidence Judge failure interrupts graph in development
 
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
@@ -44,6 +48,8 @@ web_search:
 
 retrieval:
   mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
+  dual_source_evidence:
+    block_generation_when_evidence_judge_failed: true
   local_rag:
     enabled: true
     per_subject_top_k: 3
@@ -67,9 +73,65 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  supervisor:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    streaming: false
+  query_rewrite:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    streaming: false
+  hallucination_eval:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 800
+    streaming: false
+  mindmap:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    streaming: false
+  exercise:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    streaming: false
+  planner:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    streaming: false
+  web_coverage_decision:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    streaming: false
   search_result_judge:
     provider: openrouter
-    model: "openrouter/owl-alpha"
+    model: "deepseek/deepseek-v4-flash"
     base_url: "https://openrouter.ai/api/v1"
     api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
@@ -80,18 +142,104 @@ llm:
     include_raw: true
   evidence_judge:
     provider: openrouter
-    model: "openrouter/owl-alpha"
+    model: "deepseek/deepseek-v4-flash"
     base_url: "https://openrouter.ai/api/v1"
     api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.0
-    max_tokens: 1800
+    max_tokens: 4096
     streaming: false
     structured_output: true
     strict_schema: true
     include_raw: true
 
+llm_outputs:
+  default:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  supervisor:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  search_query_rewriter:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  exercise_agent:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  exercise_reviewer:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  mindmap_agent:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  mindmap_reviewer:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  reviewer_academic:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  reviewer_emotional:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  feedback_router:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  hallucination_eval:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  web_coverage_decision:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  evidence_judge:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  search_result_judge:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+
 planner:
-  search_timeout: 15                    # Policy search timeout (seconds)
+  search_timeout: 15                    # Planning context search timeout (seconds)
   temperature: 0.7                      # Plan generation temperature
   reviewer_temperature: 0.0             # Reviewers need deterministic structured output
   adversarial_max_rounds: 3             # Max drafter-reviewer iterations

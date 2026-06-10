@@ -7,7 +7,7 @@ graph TD
   START([用户输入]) --> supervisor[意图分类]
 
   supervisor -->|academic| academic_router[学术路由]
-  supervisor -->|planning| search_policy[政策搜索]
+  supervisor -->|planning| gather_planning_context[规划上下文检索]
   supervisor -->|emotional| emotional_response[情绪支持]
   supervisor -->|unknown| handle_unknown[未知意图]
 
@@ -22,7 +22,7 @@ graph TD
   rewrite_query --> academic_router
 
   %% Planning branch
-  search_policy --> gather_intel[情报收集]
+  gather_planning_context --> gather_intel[情报收集]
   gather_intel --> drafter[计划起草]
   drafter --> reviewer_academic[学术审查]
   drafter --> reviewer_emotional[情绪审查]

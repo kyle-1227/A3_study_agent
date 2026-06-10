@@ -26,6 +26,15 @@ from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.llm.structured_output import (
+    StructuredLLMResult,
+    StructuredOutputError,
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
+from src.llm.http_messages import normalize_openai_messages, validate_openai_messages
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
@@ -78,6 +87,36 @@ class SearchQueryRewriteOutput(BaseModel):
         default_factory=list,
         description="Per-subject retrieval plan",
     )
+
+
+def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
+    """Business validation for retrieval query rewriting."""
+    if not isinstance(parsed, SearchQueryRewriteOutput):
+        return "root expected SearchQueryRewriteOutput"
+    if not str(parsed.rag_query or "").strip():
+        return "rag_query must be non-empty"
+    if not str(parsed.web_search_query or "").strip():
+        return "web_search_query must be non-empty"
+    for idx, item in enumerate(parsed.retrieval_plan or []):
+        prefix = f"retrieval_plan.{idx}"
+        if item.priority < 0 or item.priority > 1:
+            return f"{prefix}.priority must be between 0 and 1"
+        if item.subject and not str(item.subject).strip():
+            return f"{prefix}.subject must be a string"
+        if item.role and not str(item.role).strip():
+            return f"{prefix}.role must be a string"
+    return ""
+
+
+def validate_hallucination_eval(parsed: BaseModel) -> str:
+    """Business validation for hallucination evaluation."""
+    if not isinstance(parsed, HallucinationEvaluation):
+        return "root expected HallucinationEvaluation"
+    if not isinstance(parsed.is_faithful, bool):
+        return "is_faithful must be a boolean"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
 
 
 class SupplementPlanItem(BaseModel):
@@ -236,9 +275,11 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_failed_subjects": [],
         "web_supplement_partial_failed": False,
         "web_judge_provider": "openrouter",
-        "web_judge_model": "openrouter/owl-alpha",
+        "web_judge_model": "deepseek/deepseek-v4-flash",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
+        "web_evidence_count": 0,
+        "web_supplement_count": 0,
         "evidence_candidates": [],
         "evidence_judge_output": {},
         "evidence_judge_rounds": 0,
@@ -306,6 +347,19 @@ def _subjects_used(docs: list[dict]) -> list[str]:
 
 def _roles_used(docs: list[dict]) -> list[str]:
     return sorted({str(doc.get("retrieval_role")) for doc in docs if doc.get("retrieval_role")})
+
+
+def _is_web_evidence(item: dict) -> bool:
+    return (
+        item.get("source_type") == "web"
+        or item.get("type") in {"web_evidence", "web_supplement"}
+        or item.get("legacy_type") == "web_supplement"
+        or item.get("type_legacy") == "web_supplement"
+    )
+
+
+def _web_evidence_items(items: list[dict]) -> list[dict]:
+    return [item for item in items if _is_web_evidence(item)]
 
 
 def _score_doc(doc: dict) -> float:
@@ -1094,89 +1148,6 @@ def _targets_from_decision(
     return targets[:max_subjects]
 
 
-_OPEN_APPLICATION_TERMS = (
-    "应用", "怎么用", "案例", "项目", "实践", "路线", "规划", "最新", "工具", "框架",
-    "场景", "扩展", "行业", "前沿", "发展", "趋势", "真实", "落地",
-    "apply", "application", "case", "project", "practice", "tool", "framework",
-    "latest", "trend", "industry", "roadmap", "plan", "ecosystem",
-)
-
-
-def _question_has_any(question: str, terms: tuple[str, ...]) -> bool:
-    lower = question.lower()
-    return any(term.lower() in lower for term in terms)
-
-
-def _rule_based_web_supplement_targets(
-    *,
-    state: TutorState,
-    retrieval_plan: list[dict],
-    branch_evals: dict[str, dict],
-) -> tuple[list[dict], dict]:
-    """Fallback when LLM coverage decision fails."""
-    question = _last_human_query(state)
-    open_application = _question_has_any(question, _OPEN_APPLICATION_TERMS)
-    requested_resource = bool(state.get("requested_resource_type") or state.get("needs_mindmap"))
-    intent = state.get("intent", "")
-    targets: list[dict] = []
-    for item in retrieval_plan:
-        subject = str(item.get("subject") or "")
-        branch_eval = branch_evals.get(subject, {})
-        status = str(branch_eval.get("branch_status") or "unknown")
-        purposes: list[str] = []
-        if status in {"weak", "missing"}:
-            purposes.append("repair")
-        if open_application:
-            purposes.extend(["coverage_expansion", "application_context"])
-        if _question_has_any(question, ("工具", "框架", "库", "技术栈", "tool", "framework", "library", "ecosystem")):
-            purposes.append("tool_ecosystem")
-        if _question_has_any(question, ("案例", "项目", "实践", "示例", "case", "project", "example", "practice")):
-            purposes.extend(["case_example", "implementation_detail"])
-        if _question_has_any(question, ("最新", "前沿", "趋势", "当前", "latest", "trend", "current")):
-            purposes.append("latest_practice")
-        if intent == "planning":
-            purposes.append("planning_support")
-        if requested_resource:
-            purposes.append("resource_enrichment")
-
-        purposes = _normalize_purposes(purposes)
-        if not purposes:
-            continue
-        query = item.get("web_search_query") or item.get("rag_query") or question
-        targets.append({
-            "subject": subject,
-            "role": item.get("role", "supporting_context"),
-            "coverage_risk": "high" if open_application or requested_resource else ("medium" if status in {"weak", "missing"} else "low"),
-            "local_evidence_strength": status,
-            "supplement_purposes": purposes,
-            "supplement_queries": [
-                {
-                    "purpose": purposes[0],
-                    "query": _compact_web_query(
-                        query,
-                        purpose=purposes[0],
-                        subject=subject,
-                        max_chars=int(_web_setting("max_query_chars", 160)),
-                    ),
-                    "priority": _clamp_priority(item.get("priority", 0.5)),
-                    "reason": "Rule fallback selected this branch for Web supplement.",
-                }
-            ],
-            "decision_reason": "Rule fallback based on branch status and task wording.",
-            "subject_priority": _clamp_priority(item.get("priority", 0.5)),
-            "branch_status": status,
-        })
-
-    max_subjects = int(_web_setting("max_supplement_subjects", 2))
-    targets.sort(key=lambda target: _clamp_priority(target.get("subject_priority")), reverse=True)
-    return targets[:max_subjects], {
-        "fallback_reason": "rule_based_coverage_decision",
-        "open_application": open_application,
-        "requested_resource": requested_resource,
-        "target_count": len(targets[:max_subjects]),
-    }
-
-
 async def _decide_web_supplement_with_llm(
     *,
     state: TutorState,
@@ -1188,22 +1159,7 @@ async def _decide_web_supplement_with_llm(
     """Return selected Web supplement targets and diagnostics."""
     enabled = bool(_web_setting("llm_decision_enabled", True))
     if not enabled:
-        targets, fallback_debug = _rule_based_web_supplement_targets(
-            state=state,
-            retrieval_plan=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        return targets, {
-            "enabled": False,
-            "llm_used": False,
-            "success": True,
-            "fallback_used": True,
-            "overall_need_web": bool(targets),
-            "decision_summary": "LLM coverage decision disabled; used rule fallback.",
-            "subject_decisions": [],
-            "selected_targets": targets,
-            **fallback_debug,
-        }
+        raise RuntimeError("web coverage decision disabled and rule fallback is not allowed")
 
     branch_summaries = _build_branch_summaries(
         retrieval_plan=retrieval_plan,
@@ -1230,98 +1186,56 @@ async def _decide_web_supplement_with_llm(
             "web_budget": json.dumps(web_budget, ensure_ascii=False),
         },
     )
-    raw_preview = ""
-    parsing_error = ""
-    try:
-        llm = get_node_llm(
-            "web_coverage_decision",
-            temperature=0.0,
-            max_tokens=1000,
-            streaming=False,
-        )
-        structured_llm = llm.with_structured_output(
-            CoverageDecisionOutput,
-            method="json_mode",
-            include_raw=True,
-        )
-        fallback = get_fallback_llm(temperature=0.0, max_tokens=1000, streaming=False)
-        structured_fallback = fallback.with_structured_output(
-            CoverageDecisionOutput,
-            method="json_mode",
-            include_raw=True,
-        )
-        messages = [
-            SystemMessage(content="You are a coverage decision agent. Return only valid JSON."),
-            HumanMessage(content=prompt),
-        ]
-        result_pack = await async_invoke_with_fallback(
-            structured_llm,
-            messages,
-            fallback=structured_fallback,
-        )
-        raw_message = result_pack.get("raw") if isinstance(result_pack, dict) else None
-        parsed = result_pack.get("parsed") if isinstance(result_pack, dict) else result_pack
-        parsing_error = str(result_pack.get("parsing_error") or "") if isinstance(result_pack, dict) else ""
-        raw_preview = _message_content_to_text(getattr(raw_message, "content", raw_message))[:500] if raw_message else ""
-        if parsing_error:
-            raise ValueError(f"coverage decision parsing_error: {parsing_error}")
-        if parsed is None:
-            raise ValueError("coverage decision parsed result is None")
-        if not isinstance(parsed, CoverageDecisionOutput):
-            parsed = CoverageDecisionOutput.model_validate(parsed)
-        targets = _targets_from_decision(
-            parsed=parsed,
-            branches=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        subject_decisions = [
-            {
-                "subject": decision.subject,
-                "role": decision.role,
-                "local_evidence_strength": decision.local_evidence_strength,
-                "coverage_risk": decision.coverage_risk,
-                "web_supplement_needed": decision.web_supplement_needed,
-                "supplement_purposes": decision.supplement_purposes,
-                "supplement_plan_count": len(decision.supplement_plan),
-                "priority": decision.priority,
-                "reason": decision.reason,
-            }
-            for decision in parsed.subject_decisions
-        ]
-        return targets, {
-            "enabled": True,
-            "llm_used": True,
-            "success": True,
-            "fallback_used": False,
-            "overall_need_web": parsed.overall_need_web,
-            "decision_summary": parsed.decision_summary,
-            "subject_decisions": subject_decisions,
-            "selected_targets": targets,
-            "error_type": "",
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
+    messages = [
+        SystemMessage(content="You are a coverage decision agent. Return only schema-valid JSON."),
+        HumanMessage(content=prompt),
+    ]
+
+    structured_result = await invoke_structured_llm(
+        node_name="web_coverage_decision",
+        llm_node="web_coverage_decision",
+        schema=CoverageDecisionOutput,
+        messages=messages,
+        output_mode=get_llm_output_mode("web_coverage_decision"),
+        fallback_modes=get_fallback_modes("web_coverage_decision"),
+        state=state,
+        max_raw_chars=get_max_raw_chars("web_coverage_decision"),
+    )
+    parsed = structured_result.parsed
+    if not isinstance(parsed, CoverageDecisionOutput):
+        raise TypeError("web_coverage_decision parsed result is not CoverageDecisionOutput")
+    targets = _targets_from_decision(
+        parsed=parsed,
+        branches=retrieval_plan,
+        branch_evals=branch_evals,
+    )
+    subject_decisions = [
+        {
+            "subject": decision.subject,
+            "role": decision.role,
+            "local_evidence_strength": decision.local_evidence_strength,
+            "coverage_risk": decision.coverage_risk,
+            "web_supplement_needed": decision.web_supplement_needed,
+            "supplement_purposes": decision.supplement_purposes,
+            "supplement_plan_count": len(decision.supplement_plan),
+            "priority": decision.priority,
+            "reason": decision.reason,
         }
-    except Exception as exc:
-        targets, fallback_debug = _rule_based_web_supplement_targets(
-            state=state,
-            retrieval_plan=retrieval_plan,
-            branch_evals=branch_evals,
-        )
-        return targets, {
-            "enabled": True,
-            "llm_used": True,
-            "success": False,
-            "fallback_used": True,
-            "overall_need_web": bool(targets),
-            "decision_summary": "Coverage decision LLM failed; used rule fallback.",
-            "subject_decisions": [],
-            "selected_targets": targets,
-            "error_type": type(exc).__name__,
-            "error_message": sanitize_error_message(exc),
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
-            **fallback_debug,
-        }
+        for decision in parsed.subject_decisions
+    ]
+    return targets, {
+        "enabled": True,
+        "llm_used": True,
+        "success": True,
+        "fallback_used": False,
+        "overall_need_web": parsed.overall_need_web,
+        "decision_summary": parsed.decision_summary,
+        "subject_decisions": subject_decisions,
+        "selected_targets": targets,
+        "error_type": "",
+        "parsing_error": "",
+        "raw_preview": structured_result.raw_output[:500],
+    }
 
 
 def _judge_setting(key: str, default: Any) -> Any:
@@ -1333,11 +1247,14 @@ def _judge_provider() -> str:
 
 
 def _judge_model() -> str:
-    return os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "openrouter/owl-alpha"))).strip() or "openrouter/owl-alpha"
+    return (
+        os.getenv("SEARCH_RESULT_JUDGE_MODEL", str(_judge_setting("model", "deepseek/deepseek-v4-flash"))).strip()
+        or "deepseek/deepseek-v4-flash"
+    )
 
 
 def _judge_base_url() -> str:
-    return str(_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))).rstrip("/")
+    return str(_judge_setting("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
 
 
 def _judge_api_key_env() -> str:
@@ -1448,9 +1365,11 @@ def _build_judge_messages(
 
 
 def _judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    openai_messages = normalize_openai_messages(messages)
+    validate_openai_messages(openai_messages)
     return {
         "model": _judge_model(),
-        "messages": messages,
+        "messages": openai_messages,
         "temperature": _judge_temperature(),
         "max_tokens": _judge_max_tokens(),
         "stream": False,
@@ -1481,13 +1400,24 @@ def _openrouter_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any]
         return response.json(), status_code
 
 
-def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
+def _extract_openrouter_response_meta(raw_response: dict[str, Any]) -> tuple[str, str, int, int]:
+    """Return (content, finish_reason, prompt_tokens, completion_tokens) from OpenRouter response."""
     choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
     if not choices:
-        return ""
+        return "", "", 0, 0
     first = choices[0] if isinstance(choices[0], dict) else {}
     message = first.get("message") if isinstance(first.get("message"), dict) else {}
-    return _message_content_to_text(message.get("content", ""))
+    content = _message_content_to_text(message.get("content", ""))
+    finish_reason = str(first.get("finish_reason", ""))
+    usage = raw_response.get("usage") if isinstance(raw_response, dict) else {}
+    prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+    completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+    return content, finish_reason, prompt_tokens, completion_tokens
+
+
+def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
+    content, _, _, _ = _extract_openrouter_response_meta(raw_response)
+    return content
 
 
 def _judge_failure_debug(
@@ -1755,8 +1685,27 @@ def _dual_source_enabled() -> bool:
     return str(_retrieval_setting("mode", "")).strip() == "dual_source_evidence"
 
 
+def _block_generation_when_evidence_judge_failed() -> bool:
+    return bool(_retrieval_setting("dual_source_evidence.block_generation_when_evidence_judge_failed", True))
+
+
+def _fail_fast_evidence_judge() -> bool:
+    return bool(get_setting("development.fail_fast_evidence_judge", True))
+
+
+def _evidence_failure_phase(state: TutorState) -> str:
+    output = state.get("evidence_judge_output") or {}
+    if isinstance(output, dict):
+        return str(output.get("failure_phase") or output.get("degraded_reason") or "")
+    return ""
+
+
 def _evidence_judge_setting(key: str, default: Any) -> Any:
     return get_setting(f"llm.evidence_judge.{key}", default)
+
+
+def _evidence_judge_output_setting(key: str, default: Any) -> Any:
+    return get_setting(f"llm_outputs.evidence_judge.{key}", default)
 
 
 def _evidence_judge_provider() -> str:
@@ -1764,12 +1713,12 @@ def _evidence_judge_provider() -> str:
 
 
 def _evidence_judge_model() -> str:
-    return str(_evidence_judge_setting("model", "openrouter/owl-alpha") or "openrouter/owl-alpha").strip()
+    return str(_evidence_judge_setting("model", "deepseek/deepseek-v4-flash") or "deepseek/deepseek-v4-flash").strip()
 
 
 def _evidence_judge_base_url() -> str:
     return str(
-        _evidence_judge_setting("base_url", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
+        _evidence_judge_setting("base_url", "https://openrouter.ai/api/v1")
     ).rstrip("/")
 
 
@@ -1840,9 +1789,11 @@ def _build_evidence_judge_messages(
 
 
 def _evidence_judge_request_payload(messages: list[dict]) -> dict[str, Any]:
+    openai_messages = normalize_openai_messages(messages)
+    validate_openai_messages(openai_messages)
     return {
         "model": _evidence_judge_model(),
-        "messages": messages,
+        "messages": openai_messages,
         "temperature": _evidence_judge_temperature(),
         "max_tokens": _evidence_judge_max_tokens(),
         "stream": False,
@@ -1855,6 +1806,101 @@ def _evidence_judge_request_payload(messages: list[dict]) -> dict[str, Any]:
             },
         },
     }
+
+
+def _evidence_judge_schema_size_chars() -> int:
+    return len(json.dumps(_evidence_judge_response_schema(), ensure_ascii=False))
+
+
+def _messages_chars(messages: list[dict]) -> int:
+    return sum(len(_message_content_to_text(message.get("content", ""))) for message in messages)
+
+
+def _provider_name_from_error_body(raw_body: str) -> str:
+    try:
+        parsed = json.loads(raw_body)
+    except Exception:
+        return ""
+
+    def _walk(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("provider_name", "provider", "providerName"):
+                if value.get(key):
+                    return str(value.get(key))
+            for nested in value.values():
+                found = _walk(nested)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for nested in value:
+                found = _walk(nested)
+                if found:
+                    return found
+        return ""
+
+    return _walk(parsed)
+
+
+def _classify_evidence_judge_failure(
+    *,
+    status_code: Any,
+    raw_error_body: str,
+    candidate_count: int,
+    schema_size_chars: int,
+    prompt_chars: int,
+    default_phase: str,
+) -> tuple[str, str, str]:
+    text = str(raw_error_body or "").lower()
+    if status_code == 404 and ("no endpoints found" in text or "can handle the requested parameters" in text):
+        return (
+            "structured_output_unsupported_by_provider",
+            "OpenRouter routing layer rejected the request: no provider supports the required parameters (likely json_schema response_format).",
+            "switch_to_prompt_json_pydantic_or_choose_another_model",
+        )
+    if status_code == 400:
+        if any(term in text for term in ("unsupported", "not support", "does not support")) and any(
+            term in text for term in ("json_schema", "response_format", "structured")
+        ):
+            return (
+                "structured_output_unsupported_by_provider",
+                "Provider rejected strict json_schema response_format.",
+                "switch_to_prompt_json_pydantic_or_choose_another_model",
+            )
+        if any(term in text for term in ("too large", "context length", "maximum context", "token", "payload")):
+            return (
+                "payload_too_large_or_rejected",
+                "Provider rejected the request size, prompt size, or candidate payload.",
+                "reduce_candidate_count_or_preview_size",
+            )
+        if any(term in text for term in ("schema", "json_schema", "response_format", "strict")):
+            return (
+                "schema_too_complex_or_rejected",
+                "Provider rejected the strict schema shape or response_format payload.",
+                "simplify_schema_or_split_judge_batch",
+            )
+        if "provider returned error" in text or "provider_name" in text:
+            return (
+                "structured_output_unsupported_by_provider",
+                "OpenRouter upstream provider rejected the strict structured-output request.",
+                "run_schema_probe_then_change_model_or_explicitly_approve_prompt_json_mode",
+            )
+        if candidate_count > 8 or prompt_chars > 20000:
+            return (
+                "payload_too_large_or_rejected",
+                "HTTP 400 occurred with a large candidate/prompt payload.",
+                "reduce_candidate_count_or_preview_size",
+            )
+        if schema_size_chars > 8000:
+            return (
+                "schema_too_complex_or_rejected",
+                "HTTP 400 occurred with a large strict schema.",
+                "simplify_schema_or_split_judge_batch",
+            )
+    return (
+        default_phase,
+        "Evidence Judge request failed before producing valid judged evidence.",
+        "inspect_provider_error_body",
+    )
 
 
 def _openrouter_evidence_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -1883,13 +1929,54 @@ def _evidence_judge_failure_debug(
     parsing_error: str = "",
     validation_error: str = "",
     raw_output: str = "",
+    raw_error_body: str = "",
+    provider_error_body: str = "",
+    provider_name: str = "",
+    prompt_chars: int = 0,
+    schema_size_chars: int = 0,
+    message_count: int = 0,
+    inferred_failure_reason: str = "",
+    action_needed: str = "",
+    finish_reason: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    using_direct_openrouter_http: bool = False,
+    provider_request_mode: str = "",
 ) -> dict:
+    schema_size = schema_size_chars or _evidence_judge_schema_size_chars()
+    output_mode = str(
+        _evidence_judge_output_setting(
+            "output_mode",
+            _evidence_judge_setting("output_mode", "native_json_schema_pydantic"),
+        )
+        or "native_json_schema_pydantic"
+    )
+    recommendation = ""
+    if failure_phase == "structured_output_unsupported_by_provider":
+        recommendation = "switch_evidence_judge_output_mode_to_prompt_json_pydantic"
     return {
+        "stage": "evidence_judge",
         "provider": _evidence_judge_provider(),
         "model": _evidence_judge_model(),
         "round_index": 1,
         "success": False,
         "failure_phase": failure_phase,
+        "inferred_failure_reason": inferred_failure_reason,
+        "action_needed": action_needed,
+        "recommendation": recommendation,
+        "structured_output_method": output_mode,
+        "output_mode": output_mode,
+        "using_langchain_with_structured_output": False,
+        "using_direct_openrouter_http": using_direct_openrouter_http,
+        "provider_request_mode": provider_request_mode,
+        "candidate_count": len(candidates),
+        "schema_name": "EvidenceJudgeOutput",
+        "schema_size_chars": schema_size,
+        "prompt_chars": prompt_chars,
+        "message_count": message_count,
+        "provider_error_body": sanitize_error_message(provider_error_body or raw_error_body, max_chars=12000),
+        "raw_error_body": sanitize_error_message(raw_error_body or provider_error_body, max_chars=12000),
+        "provider_name": provider_name,
         "original_user_query": original_user_query,
         "input_candidate_count": len(candidates),
         "candidate_preview": _candidate_preview(candidates),
@@ -1899,7 +1986,74 @@ def _evidence_judge_failure_debug(
         "raw_output": raw_output[:12000],
         "parsing_error": sanitize_error_message(parsing_error, max_chars=2000),
         "validation_error": sanitize_error_message(validation_error, max_chars=4000),
+        "finish_reason": finish_reason,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
     }
+
+
+def _validate_evidence_judge_business_result(
+    parsed: BaseModel,
+    *,
+    expected_ids: list[str],
+) -> str:
+    if not isinstance(parsed, EvidenceJudgeOutput):
+        return "parsed result is not EvidenceJudgeOutput"
+    judged_ids = [item.evidence_id for item in parsed.judged_evidence]
+    problems: list[str] = []
+    if len(judged_ids) != len(set(judged_ids)):
+        problems.append("duplicate evidence_id values in judged_evidence")
+    missing = [evidence_id for evidence_id in expected_ids if evidence_id not in judged_ids]
+    extra = [evidence_id for evidence_id in judged_ids if evidence_id not in expected_ids]
+    if missing:
+        problems.append(f"missing evidence_id values: {missing}")
+    if extra:
+        problems.append(f"unknown evidence_id values: {extra}")
+    if len(judged_ids) != len(expected_ids):
+        problems.append(f"expected {len(expected_ids)} judged evidence items, got {len(judged_ids)}")
+    return "; ".join(problems)
+
+
+def _structured_result_to_evidence_failure_debug(
+    *,
+    result: StructuredLLMResult,
+    original_user_query: str,
+    candidates: list[EvidenceCandidate],
+) -> dict:
+    failure_phase = result.failure_phase or "structured_llm_failed"
+    if result.business_validation_error and "evidence_id" in result.business_validation_error:
+        failure_phase = "evidence_id_mismatch"
+    return _evidence_judge_failure_debug(
+        failure_phase=failure_phase,
+        original_user_query=original_user_query,
+        candidates=candidates,
+        error_type=result.error_type,
+        error_message=result.error_message,
+        status_code=result.status_code,
+        parsing_error=result.parsing_error,
+        validation_error=result.validation_error or result.business_validation_error,
+        raw_output=result.raw_output,
+        raw_error_body=result.provider_error_body,
+        provider_error_body=result.provider_error_body,
+        prompt_chars=0,
+        schema_size_chars=_evidence_judge_schema_size_chars(),
+        message_count=0,
+        inferred_failure_reason=(
+            result.business_validation_error
+            or result.validation_error
+            or result.parsing_error
+            or result.error_message
+            or "Structured Evidence Judge call failed."
+        ),
+        action_needed="inspect_structured_llm_output_trace",
+        using_direct_openrouter_http=result.using_direct_openrouter_http
+        or any(attempt.using_direct_openrouter_http for attempt in result.attempts),
+        provider_request_mode=result.provider_request_mode
+        or next(
+            (attempt.provider_request_mode for attempt in reversed(result.attempts) if attempt.provider_request_mode),
+            "",
+        ),
+    )
 
 
 async def _judge_evidence_candidates_with_llm(
@@ -1911,7 +2065,7 @@ async def _judge_evidence_candidates_with_llm(
     requested_resource_type: str,
     round_index: int,
 ) -> tuple[EvidenceJudgeOutput | None, dict]:
-    """Judge local RAG and Web evidence with OpenRouter strict JSON schema. No fallback."""
+    """Judge local RAG and Web evidence through the unified structured runtime."""
     if not candidates:
         parsed = EvidenceJudgeOutput(
             overall_evidence_state="insufficient",
@@ -1947,112 +2101,80 @@ async def _judge_evidence_candidates_with_llm(
         requested_resource_type=requested_resource_type,
         round_index=round_index,
     )
-    payload = _evidence_judge_request_payload(messages)
-    raw_output = ""
-    status_code = None
+    expected_ids = [candidate.evidence_id for candidate in candidates]
+    output_mode = str(_evidence_judge_output_setting("output_mode", "native_json_schema_pydantic") or "native_json_schema_pydantic")
+    fallback_modes = _evidence_judge_output_setting("fallback_modes", [])
+    if not isinstance(fallback_modes, list):
+        fallback_modes = []
+
     try:
-        raw_response, status_code = await asyncio.to_thread(_openrouter_evidence_chat_completion, payload)
-        raw_output = _extract_openrouter_content(raw_response)
-        if not raw_output:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="missing_judged_evidence",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type="EmptyRawOutput",
-                error_message="Evidence Judge returned empty content",
-                status_code=status_code,
-                raw_output=json.dumps(raw_response, ensure_ascii=False, default=str)[:12000],
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-        try:
-            parsed_json = json.loads(raw_output)
-        except json.JSONDecodeError as exc:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="parsing_error",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                parsing_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-        try:
-            parsed = EvidenceJudgeOutput.model_validate(parsed_json)
-        except ValidationError as exc:
-            debug = _evidence_judge_failure_debug(
-                failure_phase="validation_error",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                validation_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-
-        input_ids = [candidate.evidence_id for candidate in candidates]
-        judged_ids = [item.evidence_id for item in parsed.judged_evidence]
-        if len(judged_ids) != len(set(judged_ids)) or set(judged_ids) != set(input_ids) or len(judged_ids) != len(input_ids):
-            debug = _evidence_judge_failure_debug(
-                failure_phase="evidence_id_mismatch",
-                original_user_query=original_user_query,
-                candidates=candidates,
-                error_type="InvalidEvidenceIds",
-                error_message=f"Expected evidence ids {input_ids}, got {judged_ids}",
-                status_code=status_code,
-                validation_error=f"Expected evidence ids {input_ids}, got {judged_ids}",
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return None, debug
-
-        candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
-        kept = [item for item in parsed.judged_evidence if item.keep]
-        kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
-        debug = {
-            "provider": _evidence_judge_provider(),
-            "model": _evidence_judge_model(),
-            "round_index": round_index,
-            "success": True,
-            "overall_evidence_state": parsed.overall_evidence_state,
-            "need_more_web_search": parsed.need_more_web_search,
-            "input_candidate_count": len(candidates),
-            "kept_count": len(kept),
-            "rejected_count": len(candidates) - len(kept),
-            "kept_source_distribution": dict(kept_distribution),
-            "coverage_gap_count": len(parsed.coverage_gaps),
-            "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
-            "raw_preview": raw_output[:4000],
-            "parsing_error": None,
-            "validation_error": None,
-        }
-        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
-        return parsed, debug
-    except Exception as exc:
-        if isinstance(exc, httpx.HTTPStatusError):
-            status_code = exc.response.status_code
-            error_message = exc.response.text or str(exc)
-        else:
-            error_message = str(exc)
-        error_type = "MissingApiKey" if _evidence_judge_api_key_env() in str(exc) else type(exc).__name__
-        phase = "missing_api_key" if error_type == "MissingApiKey" else "structured_output_request_failed"
-        debug = _evidence_judge_failure_debug(
-            failure_phase=phase,
+        structured_result = await invoke_structured_llm(
+            node_name="evidence_judge",
+            llm_node="evidence_judge",
+            schema=EvidenceJudgeOutput,
+            messages=messages,
+            output_mode=output_mode,
+            fallback_modes=[str(mode) for mode in fallback_modes],
+            business_validator=lambda parsed: _validate_evidence_judge_business_result(parsed, expected_ids=expected_ids),
+            state=state,
+            max_raw_chars=int(_evidence_judge_output_setting("max_raw_chars", 12000) or 12000),
+        )
+    except StructuredOutputError as exc:
+        debug = _structured_result_to_evidence_failure_debug(
+            result=exc.result,
             original_user_query=original_user_query,
             candidates=candidates,
-            error_type=error_type,
-            error_message=error_message,
-            status_code=status_code,
-            raw_output=raw_output,
         )
         emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
         return None, debug
+
+    if not structured_result.success or not isinstance(structured_result.parsed, EvidenceJudgeOutput):
+        debug = _structured_result_to_evidence_failure_debug(
+            result=structured_result,
+            original_user_query=original_user_query,
+            candidates=candidates,
+        )
+        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
+        return None, debug
+
+    parsed = structured_result.parsed
+    candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    kept = [item for item in parsed.judged_evidence if item.keep]
+    kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
+    debug = {
+        "stage": "evidence_judge",
+        "provider": _evidence_judge_provider(),
+        "model": _evidence_judge_model(),
+        "round_index": round_index,
+        "success": True,
+        "output_mode": structured_result.output_mode,
+        "fallback_modes": structured_result.fallback_modes,
+        "overall_evidence_state": parsed.overall_evidence_state,
+        "need_more_web_search": parsed.need_more_web_search,
+        "input_candidate_count": len(candidates),
+        "kept_count": len(kept),
+        "rejected_count": len(candidates) - len(kept),
+        "kept_source_distribution": dict(kept_distribution),
+        "coverage_gap_count": len(parsed.coverage_gaps),
+        "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
+        "raw_preview": structured_result.raw_output[:4000],
+        "parsing_error": None,
+        "validation_error": None,
+        "structured_output_method": structured_result.output_mode,
+        "using_direct_openrouter_http": structured_result.using_direct_openrouter_http
+        or any(attempt.using_direct_openrouter_http for attempt in structured_result.attempts),
+        "provider_request_mode": structured_result.provider_request_mode
+        or next(
+            (attempt.provider_request_mode for attempt in reversed(structured_result.attempts) if attempt.provider_request_mode),
+            "",
+        ),
+        "schema_name": "EvidenceJudgeOutput",
+        "schema_size_chars": _evidence_judge_schema_size_chars(),
+        "prompt_chars": _messages_chars(messages),
+        "message_count": len(messages),
+    }
+    emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+    return parsed, debug
 
 
 def _evidence_quality_rank(value: str) -> int:
@@ -2213,6 +2335,7 @@ def _context_item_from_evidence(
         }
     return {
         "type": "web_evidence",
+        "legacy_type": "web_supplement",
         "type_legacy": "web_supplement",
         "source_type": "web",
         "provider": "tavily",
@@ -2841,16 +2964,30 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         env_flag="LOG_RAG_RESULT",
     )
 
-    parsed, judge_debug = await _judge_evidence_candidates_with_llm(
-        state=state,
-        candidates=candidates,
-        original_user_query=original_user_query,
-        learning_goal=str(state.get("learning_goal", "")),
-        requested_resource_type=str(state.get("requested_resource_type", "")),
-        round_index=1,
-    )
+    try:
+        parsed, judge_debug = await _judge_evidence_candidates_with_llm(
+            state=state,
+            candidates=candidates,
+            original_user_query=original_user_query,
+            learning_goal=str(state.get("learning_goal", "")),
+            requested_resource_type=str(state.get("requested_resource_type", "")),
+            round_index=1,
+        )
+    except StructuredOutputError as exc:
+        if _fail_fast_evidence_judge():
+            raise RuntimeError(
+                f"Evidence Judge failed: {exc.result.failure_phase}. "
+                f"Fix the root cause before retrying."
+            ) from exc
+        parsed = None
+        judge_debug = exc.result.to_debug_payload()
 
     if parsed is None:
+        if _fail_fast_evidence_judge():
+            raise RuntimeError(
+                f"Evidence Judge returned no parsed result: "
+                f"{judge_debug.get('failure_phase', 'unknown')}"
+            )
         emit_a3_trace(
             logger,
             "context_assembly",
@@ -2913,8 +3050,9 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         env_flag="LOG_RAG_RESULT",
     )
 
-    web_context_docs = [doc for doc in context_docs if doc.get("source_type") == "web"]
+    web_context_docs = _web_evidence_items(context_docs)
     local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
+    web_evidence_count = len(web_context_docs)
     web_failed = bool(web_enabled and web_candidate_count_raw and not web_context_docs)
     emit_a3_trace(
         logger,
@@ -2923,15 +3061,15 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
             "mode": "dual_source_evidence",
             "final_doc_count": len(context_docs),
             "local_rag_context_count": len(local_context_docs),
-            "web_context_count": len(web_context_docs),
+            "web_context_count": web_evidence_count,
             "evidence_judge_state": parsed.overall_evidence_state,
             "evidence_judge_rounds": 1,
             "source_type_distribution": _source_distribution(context_docs),
             "search_refinement_needed": refinement_needed,
             "search_refinement_deferred": refinement_deferred,
             "search_optimization_reserved": True,
-            "web_evidence_count": len(web_context_docs),
-            "web_supplement_count": len(web_context_docs),
+            "web_evidence_count": web_evidence_count,
+            "web_supplement_count": web_evidence_count,
             "web_supplement_provider": "tavily",
             "web_supplement_failed": web_failed,
             "evidence_candidate_count": len(candidates),
@@ -2959,6 +3097,8 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         "degraded_reason": "",
         "web_supplement_provider": "tavily",
         "web_supplement_results": web_context_docs,
+        "web_evidence_count": web_evidence_count,
+        "web_supplement_count": web_evidence_count,
         "web_supplement_failed": web_failed,
         "web_supplement_failure_reason": "judge_rejected_all_or_no_web_kept" if web_failed else "",
         "web_supplement_status_by_subject": {},
@@ -3048,47 +3188,34 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "available_subjects": "、".join(available_subjects) if available_subjects else "无",
         },
     )
-
-    llm = get_node_llm("query_rewrite", temperature=0.0)
     messages = [
-        SystemMessage(content="你是高校个性化学习资源系统中的检索查询改写智能体，只输出结构化查询结果。"),
+        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON."),
         HumanMessage(content=prompt),
     ]
 
-    structured_llm = llm.with_structured_output(
-        SearchQueryRewriteOutput,
-        method="json_mode",
-        include_raw=True,
-    )
-    fallback_llm = get_fallback_llm(temperature=0.0)
-    structured_fallback = fallback_llm.with_structured_output(
-        SearchQueryRewriteOutput,
-        method="json_mode",
-        include_raw=True,
-    )
-
+    raw_preview = ""
+    parsing_error = None
     try:
         with traced_llm_call(
             model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
             node_name="search_query_rewriter",
             temperature=0.0,
-        ) as span:
-            result_pack = await async_invoke_with_fallback(
-                structured_llm,
-                messages,
-                fallback=structured_fallback,
-                span=span,
+        ):
+            structured_result = await invoke_structured_llm(
+                node_name="search_query_rewriter",
+                llm_node="query_rewrite",
+                schema=SearchQueryRewriteOutput,
+                messages=messages,
+                output_mode=get_llm_output_mode("search_query_rewriter"),
+                fallback_modes=get_fallback_modes("search_query_rewriter"),
+                business_validator=validate_search_query_rewrite_output,
+                state=state,
+                max_raw_chars=get_max_raw_chars("search_query_rewriter"),
             )
-        raw_message = result_pack.get("raw")
-        parsed = result_pack.get("parsed")
-        parsing_error = result_pack.get("parsing_error")
-        raw_text = _message_content_to_text(getattr(raw_message, "content", raw_message))
-        raw_preview = raw_text[:2000] if raw_text else ""
-
-        if parsing_error is not None:
-            raise ValueError(f"search_query_rewriter parsing_error: {parsing_error}")
-        if parsed is None:
-            raise ValueError("search_query_rewriter parsed result is None")
+        parsed = structured_result.parsed
+        if not isinstance(parsed, SearchQueryRewriteOutput):
+            raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
+        raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
 
         result_payload = {
             "rag_query": parsed.rag_query.strip(),
@@ -3151,32 +3278,25 @@ async def search_query_rewriter(state: TutorState) -> dict:
             env_flag="LOG_RETRIEVAL_PLAN",
         )
     except Exception as exc:
-        logger.warning("Initial search query rewrite failed; continuing with original query", exc_info=True)
+        logger.exception("Initial search query rewrite failed; fallback disabled")
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
             "query_rewrite_failed",
             {
                 "error": str(exc),
-                "fallback": "empty_retrieval_plan_and_single_query_fallback",
+                "fallback": "disabled_fail_fast_structured_output",
                 "retrieval_plan": [],
                 "learning_goal": "",
                 "primary_subject": "",
                 "subject_relation_summary": "",
-                "raw_preview": raw_preview if "raw_preview" in locals() else "",
+                "raw_preview": raw_preview,
             },
             state=state,
             env_flag="LOG_QUERY_REWRITE_RESULT",
         )
-        return {
-            "search_query_rewrite_error": str(exc),
-            "search_rag_query": "",
-            "search_web_query": "",
-            "expanded_keypoints": [],
-            "search_query_rewrite_reason": "",
-            "search_query_rewrite_raw_preview": raw_preview if "raw_preview" in locals() else "",
-            **_clear_retrieval_plan_state(),
-        }
+        raise
+
 
     return {
         "search_rag_query": result_payload["rag_query"],
@@ -3533,6 +3653,11 @@ async def web_search(state: TutorState) -> dict:
         and state.get("intent") in {"academic", "planning"}
     ):
         branch_mode = "multi_subject_plan" if retrieval_plan else "single_subject_synthetic"
+        skip_reason = (
+            "dual_source_evidence_web_search_handled_in_rag_retrieve"
+            if _dual_source_enabled()
+            else "conditional_web_supplement_handled_in_rag_retrieve"
+        )
         # TEMP A3_TRACE: remove after multi-subject retrieval validation.
         emit_a3_trace(
             logger,
@@ -3540,7 +3665,8 @@ async def web_search(state: TutorState) -> dict:
             {
                 "query_source": "skipped_conditional_branch_mode",
                 "skipped": True,
-                "skip_reason": "conditional_web_supplement_handled_in_rag_retrieve",
+                "skip_reason": skip_reason,
+                "legacy_node": True,
                 "has_retrieval_plan": bool(retrieval_plan),
                 "branch_mode": branch_mode,
                 "retrieval_plan_count": len(retrieval_plan),
@@ -3783,9 +3909,49 @@ def _resource_offer_instruction(state: TutorState) -> str:
 @traced_node
 async def generate_answer(state: TutorState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
-    llm = get_node_llm("academic")
-
     question = _last_human_query(state)
+    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+        failure_output = state.get("evidence_judge_output") or {}
+        failure_phase = _evidence_failure_phase(state)
+        error_type = failure_output.get("error_type", "") if isinstance(failure_output, dict) else ""
+        status_code = failure_output.get("status_code", "") if isinstance(failure_output, dict) else ""
+        action_needed = failure_output.get("action_needed", "") if isinstance(failure_output, dict) else ""
+        recommendation = failure_output.get("recommendation", "") if isinstance(failure_output, dict) else ""
+
+        if action_needed is None:
+            action_needed = ""
+
+        if recommendation is None:
+            recommendation = ""
+
+        emit_a3_trace(
+            logger,
+            "generation_blocked",
+            {
+                "reason": "evidence_judge_failed",
+                "evidence_judge_failure_phase": failure_phase,
+                "error_type": error_type,
+                "status_code": status_code,
+                "action_needed": action_needed,
+                "recommendation": recommendation,
+                "context_count": len(state.get("context", [])),
+                "question_preview": question[:500],
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+            max_chars=2000,
+        )
+        diagnostic = (
+            "[开发诊断] Evidence Judge 失败，已按配置阻断普通回答生成。\n\n"
+            f"- failure_phase: {failure_phase or 'unknown'}\n"
+            f"- error_type: {error_type or 'unknown'}\n"
+            f"- status_code: {status_code or 'unknown'}\n"
+            f"- action_needed: {action_needed or 'inspect evidence_judge A3_TRACE logs'}\n\n"
+            "本次未使用未裁决的 local RAG 或 Tavily Web evidence 生成普通答案。"
+        )
+        return {"messages": [AIMessage(content=diagnostic)]}
+
+    llm = get_node_llm("academic")
 
     # Split merged context by source type
     context = state.get("context", [])
@@ -3797,21 +3963,17 @@ async def generate_answer(state: TutorState) -> dict:
         or c.get("source_type") == "web"
     ]
     web_results = [c for c in context if c.get("type") == "web"]
-    web_supplements = [
-        c
-        for c in context
-        if c.get("type") in {"web_supplement", "web_evidence"} or c.get("source_type") == "web"
-    ]
+    web_evidence = _web_evidence_items(context)
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
         "generate_answer",
         {
             "context_rag_count": len(rag_docs),
-            "context_web_count": len(web_results),
-            "context_web_supplement_count": len(web_supplements),
+            "context_web_count": len(web_evidence),
+            "context_web_supplement_count": len(web_evidence),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
-            "web_supplement_count": len(web_supplements),
+            "web_supplement_count": len(web_evidence),
             "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
@@ -3819,14 +3981,14 @@ async def generate_answer(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
-            "web_evidence_count": len(web_supplements),
+            "web_evidence_count": len(web_evidence),
             "web_evidence_provider": "tavily",
             "web_judge_provider": state.get("web_judge_provider", _judge_provider()),
             "web_judge_model": state.get("web_judge_model", _judge_model()),
             "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
-            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_supplements if doc.get("use_case")}),
-            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_supplements if doc.get("evidence_type")}),
+            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_evidence if doc.get("use_case")}),
+            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_evidence if doc.get("evidence_type")}),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
             "search_refinement_needed": bool(state.get("search_refinement_needed")),
@@ -3834,8 +3996,8 @@ async def generate_answer(state: TutorState) -> dict:
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),
-            "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_supplements if doc.get("supplement_for_subject")}),
-            "web_supplement_purposes": sorted({doc.get("supplement_purpose") for doc in web_supplements if doc.get("supplement_purpose")}),
+            "web_supplement_subjects": sorted({doc.get("supplement_for_subject") for doc in web_evidence if doc.get("supplement_for_subject")}),
+            "web_supplement_purposes": sorted({doc.get("supplement_purpose") for doc in web_evidence if doc.get("supplement_purpose")}),
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
             "resource_offer": not bool(state.get("requested_resource_type") or state.get("needs_mindmap")),
@@ -3899,77 +4061,37 @@ def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation
     return parsed, result_pack.get("parsing_error"), raw_text[:500] if raw_text else ""
 
 
-async def _invoke_hallucination_eval(
-    structured_llm,
-    messages: list,
-    *,
-    label: str,
-) -> tuple[HallucinationEvaluation | None, dict]:
-    """Invoke one hallucination evaluator and expose parsing diagnostics."""
-    diagnostics = {
-        "called": True,
-        "error_type": "",
-        "error_message": "",
-        "parsing_error": None,
-        "parsed_is_none": False,
-        "raw_preview": "",
-        "failure_phase": "",
-    }
-    try:
-        result_pack = await structured_llm.ainvoke(messages)
-        parsed, parsing_error, raw_preview = _hallucination_pack_parts(result_pack)
-        diagnostics["raw_preview"] = raw_preview
-        if parsing_error is not None:
-            diagnostics["parsing_error"] = sanitize_error_message(parsing_error)
-            diagnostics["failure_phase"] = (
-                "structured_parsing_error"
-                if label == "primary"
-                else "fallback_structured_parsing_error"
-            )
-            return None, diagnostics
-        if parsed is None:
-            diagnostics["parsed_is_none"] = True
-            diagnostics["failure_phase"] = "parsed_none" if label == "primary" else "fallback_parsed_none"
-            return None, diagnostics
-        return parsed, diagnostics
-    except Exception as exc:
-        diagnostics["error_type"] = type(exc).__name__
-        diagnostics["error_message"] = sanitize_error_message(exc)
-        diagnostics["failure_phase"] = f"{label}_call_failed"
-        return None, diagnostics
-
 @traced_node
 async def evaluate_hallucination(state: TutorState) -> dict:
     """Evaluate whether the generated answer hallucinates beyond retrieved context.
 
-    Uses structured LLM output to judge faithfulness. On detection,
+    Uses fail-fast structured LLM output to judge faithfulness. On detection,
     increments retry_count to signal the conditional edge for re-retrieval.
-    Defaults to valid on any parsing/model failure (safe fallback).
+    Structured-output failures are surfaced instead of being treated as faithful.
     """
+    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+        emit_a3_trace(
+            logger,
+            "hallucination_eval",
+            {
+                "skipped": True,
+                "skip_reason": "skipped_due_to_evidence_judge_failed",
+                "evidence_judge_failure_phase": _evidence_failure_phase(state),
+                "context_count": len(state.get("context", [])),
+                "success": False,
+                "is_faithful": None,
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+            max_chars=1000,
+        )
+        return {
+            "hallucination_detected": False,
+            "hallucination_reason": "skipped_due_to_evidence_judge_failed",
+        }
+
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
     eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
-    llm = get_node_llm(
-        "hallucination_eval",
-        temperature=0.0,
-        max_tokens=256,
-        streaming=False,
-    )
-    structured_primary = llm.with_structured_output(
-        HallucinationEvaluation,
-        method="json_mode",
-        include_raw=True,
-    )
-
-    fallback_llm = get_fallback_llm(
-        temperature=0.0,
-        max_tokens=256,
-        streaming=False,
-    )
-    structured_fallback = fallback_llm.with_structured_output(
-        HallucinationEvaluation,
-        method="json_mode",
-        include_raw=True,
-    )
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content
@@ -3989,80 +4111,77 @@ async def evaluate_hallucination(state: TutorState) -> dict:
         HumanMessage(content=eval_prompt),
     ]
     rag_docs = [d for d in docs if d.get("type") == "rag"]
-    web_results = [d for d in docs if d.get("type") == "web"]
-    primary_diag: dict = {"called": False}
-    fallback_diag: dict = {"called": False}
-    fallback_called = False
-    fallback_used = False
-    defaulted_to_valid = False
-    failure_phase = ""
+    web_evidence = _web_evidence_items(docs)
 
-    with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        node_name="evaluate_hallucination",
-        temperature=eval_temp,
-    ) as span:
-        evaluation, primary_diag = await _invoke_hallucination_eval(
-            structured_primary,
-            eval_messages,
-            label="primary",
+    try:
+        with traced_llm_call(
+            model_name=eval_model,
+            node_name="evaluate_hallucination",
+            temperature=eval_temp,
+        ):
+            structured_result = await invoke_structured_llm(
+                node_name="hallucination_eval",
+                llm_node="hallucination_eval",
+                schema=HallucinationEvaluation,
+                messages=eval_messages,
+                output_mode=get_llm_output_mode("hallucination_eval"),
+                fallback_modes=get_fallback_modes("hallucination_eval"),
+                business_validator=validate_hallucination_eval,
+                state=state,
+                max_raw_chars=get_max_raw_chars("hallucination_eval"),
+            )
+    except StructuredOutputError as exc:
+        emit_a3_trace(
+            logger,
+            "hallucination_eval",
+            {
+                "success": False,
+                "hallucination_eval_failed": True,
+                "failure_phase": exc.result.failure_phase,
+                "error_type": exc.result.error_type,
+                "error_message": exc.result.error_message,
+                "retry_count": retry_count,
+                "model_group": "academic",
+                "eval_model": eval_model,
+                "context_rag_count": len(rag_docs),
+                "context_web_count": len(web_evidence),
+                "answer_chars": len(str(answer)),
+                "prompt_chars": len(eval_prompt),
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+            max_chars=12000,
         )
-        if evaluation is None:
-            fallback_called = True
-            evaluation, fallback_diag = await _invoke_hallucination_eval(
-                structured_fallback,
-                eval_messages,
-                label="fallback",
-            )
-            fallback_used = evaluation is not None
+        raise
 
-        if evaluation is None:
-            logger.warning("Hallucination evaluation failed, defaulting to valid")
-            defaulted_to_valid = True
-            failure_phase = (
-                fallback_diag.get("failure_phase")
-                or primary_diag.get("failure_phase")
-                or "primary_and_fallback_failed"
-            )
-            evaluation = HallucinationEvaluation(
-                is_faithful=True,
-                reason="evaluation_failed",
-            )
-            is_faithful = True
-        else:
-            failure_phase = primary_diag.get("failure_phase", "")
-            is_faithful = evaluation.is_faithful
+    evaluation = structured_result.parsed
+    if not isinstance(evaluation, HallucinationEvaluation):
+        raise TypeError("hallucination_eval parsed result is not HallucinationEvaluation")
+    is_faithful = evaluation.is_faithful
+    failure_phase = ""
 
     hallucination_detected = not is_faithful
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
-    raw_preview = primary_diag.get("raw_preview") or fallback_diag.get("raw_preview") or ""
-    parsing_error = primary_diag.get("parsing_error") or fallback_diag.get("parsing_error")
     emit_a3_trace(
         logger,
         "hallucination_eval",
         {
-            "success": not defaulted_to_valid,
-            "defaulted_to_valid": defaulted_to_valid,
+            "success": True,
             "is_faithful": is_faithful,
             "retry_count": retry_count,
             "reason": evaluation.reason,
             "failure_phase": failure_phase,
-            "primary_called": primary_diag.get("called", False),
-            "fallback_called": fallback_called,
-            "fallback_used": fallback_used,
-            "primary_error_type": primary_diag.get("error_type", ""),
-            "primary_error_message": primary_diag.get("error_message", ""),
-            "fallback_error_type": fallback_diag.get("error_type", ""),
-            "fallback_error_message": fallback_diag.get("error_message", ""),
-            "parsing_error": parsing_error,
-            "raw_preview": raw_preview,
-            "parsed_is_none": primary_diag.get("parsed_is_none", False)
-            or fallback_diag.get("parsed_is_none", False),
+            "primary_called": True,
+            "fallback_called": False,
+            "fallback_used": False,
+            "parsing_error": "",
+            "raw_preview": structured_result.raw_output[:2000],
+            "parsed_is_none": False,
             "model_group": "academic",
             "eval_model": eval_model,
-            "fallback_model": os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "")),
+            "fallback_model": "",
             "context_rag_count": len(rag_docs),
-            "context_web_count": len(web_results),
+            "context_web_count": len(web_evidence),
             "answer_chars": len(str(answer)),
             "prompt_chars": len(eval_prompt),
         },
@@ -4091,4 +4210,3 @@ def should_retry_or_end(state: TutorState) -> str:
     ):
         return "retry"
     return "end"
-

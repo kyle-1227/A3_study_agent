@@ -60,9 +60,9 @@ const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
     title: "重写检索问题",
     detail: "根据校验反馈补全查询，准备再次检索关键课程资料。",
   },
-  search_policy: {
-    title: "整理规划约束",
-    detail: "提取学习阶段、画像线索、学习偏好和资源推送约束。",
+  gather_planning_context: {
+    title: "检索规划上下文",
+    detail: "检索课程资料、学习目标、资源约束和学习路径参考。",
   },
   gather_intel: {
     title: "汇总画像与情报",

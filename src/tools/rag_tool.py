@@ -11,7 +11,7 @@ from src.rag.retriever import retrieve
 
 @tool
 def rag_retrieve(query: str, subject: Optional[str] = None) -> dict:
-    """Search the local Gaokao knowledge base (past exams, syllabi, notes).
+    """Search the local university course-material knowledge base.
 
     Returns a dict with:
       - docs: list of matching document chunks with content, source, score

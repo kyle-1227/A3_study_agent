@@ -15,8 +15,13 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
-from src.graph.llm import get_node_llm
 from src.graph.state import TutorState
+from src.llm.structured_output import (
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.observability.a3_trace import emit_a3_trace
 from src.tracing import traced_llm_call, traced_node
@@ -38,21 +43,30 @@ _VALID_INTENTS = set(get_setting(
 ))
 
 
+def validate_supervisor_output(parsed: BaseModel) -> str:
+    """Business validation for supervisor structured routing."""
+    if not isinstance(parsed, SupervisorOutput):
+        return "root expected SupervisorOutput"
+    if parsed.intent not in _VALID_INTENTS:
+        return f"intent invalid: {parsed.intent}"
+    if not 0 <= float(parsed.confidence) <= 1:
+        return "confidence must be between 0 and 1"
+    if not isinstance(parsed.keywords, list):
+        return "keywords must be a list"
+    if not isinstance(parsed.subject_candidates, list):
+        return "subject_candidates must be a list"
+    return ""
+
+
 @traced_node
 async def supervisor_node(state: TutorState) -> dict:
     """Classify intent, detect subject, and extract keypoints in one LLM call.
 
-    Uses ``with_structured_output(SupervisorOutput)`` for reliable parsing.
+    Uses the fail-fast structured-output runtime for reliable parsing.
 
     Returns:
         Dict with ``intent``, ``subject``, and ``keypoints`` for state update.
     """
-    llm = get_node_llm("supervisor")
-    structured_llm = llm.with_structured_output(
-        SupervisorOutput,
-        method="json_mode",
-    )
-
     last_msg = state["messages"][-1]
     user_text = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
     available_subjects = get_available_subjects_from_data()
@@ -76,30 +90,34 @@ async def supervisor_node(state: TutorState) -> dict:
         node_name="supervisor",
         temperature=temperature,
     ):
-        try:
-            result = await structured_llm.ainvoke([
+        structured_result = await invoke_structured_llm(
+            node_name="supervisor",
+            llm_node="supervisor",
+            schema=SupervisorOutput,
+            messages=[
                 SystemMessage(content=load_prompt("supervisor_system")),
                 HumanMessage(content=user_message),
-            ])
-            intent = result.intent
-            keypoints = result.keywords
-            subject_candidates = _filter_subject_candidates(
-                result.subject_candidates,
-                available_subject_set,
-            )
-            subject = subject_candidates[0] if subject_candidates else "other"
-        except Exception:
-            logger.warning("Supervisor structured output failed, defaulting to academic")
-            intent = "academic"
-            subject = "other"
-            subject_candidates = []
-            keypoints = []
+            ],
+            output_mode=get_llm_output_mode("supervisor"),
+            fallback_modes=get_fallback_modes("supervisor"),
+            business_validator=validate_supervisor_output,
+            state=state,
+            max_raw_chars=get_max_raw_chars("supervisor"),
+        )
+    result = structured_result.parsed
+    if not isinstance(result, SupervisorOutput):
+        raise TypeError("supervisor parsed result is not SupervisorOutput")
+    intent = result.intent
+    keypoints = result.keywords
+    subject_candidates = _filter_subject_candidates(
+        result.subject_candidates,
+        available_subject_set,
+    )
+    subject = subject_candidates[0] if subject_candidates else "other"
 
     requested_resource_type = _detect_requested_resource_type(user_text)
     needs_mindmap = requested_resource_type == "mindmap"
 
-    if intent not in _VALID_INTENTS:
-        intent = "academic"
     if requested_resource_type:
         intent = "academic"
 

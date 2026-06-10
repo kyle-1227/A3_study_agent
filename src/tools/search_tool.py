@@ -25,6 +25,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^;\n]+"),
     re.compile(r"(?i)(x-api-key\s*[:=]\s*)[^\s,;]+"),
     re.compile(r"tvly-[A-Za-z0-9_-]+"),
+    re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
 )
 
 
@@ -35,6 +36,8 @@ def sanitize_error_message(message: Any, max_chars: int = 500) -> str:
     for pattern in _SECRET_PATTERNS:
         if pattern.pattern.startswith("tvly-"):
             text = pattern.sub("tvly-[REDACTED]", text)
+        elif pattern.pattern.startswith("sk-or-v1-"):
+            text = pattern.sub("sk-or-v1-[REDACTED]", text)
         else:
             text = pattern.sub(r"\1[REDACTED]", text)
     return text[:max_chars] + ("..." if len(text) > max_chars else "")

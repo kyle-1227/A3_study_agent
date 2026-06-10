@@ -662,7 +662,7 @@ class TestTracedSearch:
         """A span named 'web.search' should be created."""
         from src.tracing.decorators import traced_search
 
-        with traced_search(query="gaokao 2026 policy"):
+        with traced_search(query="data science learning roadmap 2026"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
@@ -673,11 +673,11 @@ class TestTracedSearch:
         """Span should have attribute 'search.query'."""
         from src.tracing.decorators import traced_search
 
-        with traced_search(query="gaokao reform"):
+        with traced_search(query="machine learning practice trends"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert spans[0].attributes["search.query"] == "gaokao reform"
+        assert spans[0].attributes["search.query"] == "machine learning practice trends"
 
     def test_records_timeout(self, in_memory_exporter):
         """Span should have attribute 'search.timeout_sec'."""

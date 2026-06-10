@@ -50,7 +50,11 @@
   ]
 }
 ## Strict JSON key completeness
-- Every object in items must include exactly these keys: level, question, answer, explanation, pitfall, tags.
-- Do not omit explanation. Do not merge explanation into answer or pitfall.
-- If a field is short, still keep the key and use an empty string only as a last resort.
+- Every object in items MUST include ALL of these keys: level, question, answer, explanation, pitfall, tags.
+- Do NOT omit any field. Every field is required and must be non-empty.
+- answer must contain the correct answer content.
+- explanation must explain why the answer is correct.
+- pitfall must describe a common mistake or misconception.
+- tags must contain at least 1 tag (Chinese or bilingual).
+- Do NOT output empty strings for any of these fields. Missing or empty fields will cause a hard validation failure.
 ]]></prompt>

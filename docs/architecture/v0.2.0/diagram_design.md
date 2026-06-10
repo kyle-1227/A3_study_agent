@@ -31,7 +31,7 @@ flowchart TD
             EH["evaluate_hallucination\nDeepSeek-V3 structured"]
         end
         subgraph Planner["Planner Branch"]
-            SP["search_policy\nDuckDuckGo"]
+            SP["gather_planning_context\nPlanning context retrieval"]
             GP["generate_plan\nDeepSeek-V3"]
         end
         ER["emotional_response\nDeepSeek-V3"]
@@ -96,7 +96,7 @@ flowchart TD
     START --> supervisor
 
     supervisor -->|"intent = academic"| academic_router
-    supervisor -->|"intent = planning"| search_policy
+    supervisor -->|"intent = planning"| gather_planning_context
     supervisor -->|"intent = emotional"| emotional_response
 
     subgraph fan_out["Fan-out / Fan-in (parallel)"]
@@ -111,7 +111,7 @@ flowchart TD
     evaluate_hallucination -->|"hallucination_detected=True\nretry_count ≤ max_retries"| academic_router
     evaluate_hallucination -->|"faithful OR retries exhausted"| END1
 
-    search_policy --> generate_plan
+    gather_planning_context --> generate_plan
     generate_plan --> END2
 
     emotional_response --> END3
@@ -128,7 +128,7 @@ flowchart TD
 | `subject` | supervisor | rag_retrieve（元数据过滤） |
 | `keypoints` | supervisor | rag_retrieve（查询构造） |
 | `context` | rag_retrieve、web_search（通过 `operator.add` 合并） | generate_answer |
-| `search_results` | search_policy | generate_plan |
+| `search_results` | gather_planning_context | generate_plan |
 | `retry_count` | evaluate_hallucination | should_retry_or_end |
 | `hallucination_detected` | evaluate_hallucination | should_retry_or_end |
 

@@ -225,7 +225,7 @@ class TestGenerateAnswerFromMergedContext:
             "messages": [HumanMessage(content="判别式")],
             "context": [
                 {"type": "rag", "content": "Δ=b²-4ac", "source": "math.pdf", "rerank_score": 0.9},
-                {"type": "web", "content": "判别式用法", "title": "高考数学", "url": "http://x"},
+                {"type": "web", "content": "判别式用法", "title": "高等数学课程资料", "url": "http://x"},
             ],
         }
 

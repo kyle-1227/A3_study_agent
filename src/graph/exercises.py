@@ -10,9 +10,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
-from src.graph.json_output import ainvoke_strict_json
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import TutorState
+from src.llm.structured_output import (
+    get_fallback_modes,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.observability.a3_trace import emit_a3_trace
 from src.tracing import traced_llm_call, traced_node
 
@@ -24,19 +29,19 @@ REQUIRED_LEVELS = {"基础题", "进阶题", "应用题", "自我检查题"}
 class ExerciseItem(BaseModel):
     """A single exercise item with answer and teaching feedback."""
 
-    level: str = Field(description="One of 基础题, 进阶题, 应用题, 自我检查题")
-    question: str = Field(default="", description="Exercise question")
-    answer: str = Field(default="", description="Concise reference answer")
-    explanation: str = Field(default="", description="Step-by-step explanation")
-    pitfall: str = Field(default="", description="Common mistake or reminder")
-    tags: list[str] = Field(default_factory=list, description="Related knowledge points")
+    level: str = Field(..., min_length=1, description="One of 基础题, 进阶题, 应用题, 自我检查题")
+    question: str = Field(..., min_length=1, description="Exercise question")
+    answer: str = Field(..., min_length=1, description="Concise reference answer")
+    explanation: str = Field(..., min_length=1, description="Step-by-step explanation")
+    pitfall: str = Field(..., min_length=1, description="Common mistake or reminder")
+    tags: list[str] = Field(..., min_length=1, description="Related knowledge points")
 
 
 class ExerciseArtifact(BaseModel):
     """Structured exercise resource produced by exercise_agent."""
 
-    title: str
-    items: list[ExerciseItem]
+    title: str = Field(..., min_length=1)
+    items: list[ExerciseItem] = Field(..., min_length=1)
 
 
 class ExerciseReviewVerdict(BaseModel):
@@ -44,6 +49,44 @@ class ExerciseReviewVerdict(BaseModel):
 
     verdict: Literal["approve", "reject"]
     reason: str
+
+
+def validate_exercise_artifact(parsed: BaseModel) -> str:
+    """Business validation for generated exercise artifacts.
+
+    Non-empty checks for level/question/answer/explanation/pitfall/tags
+    are now enforced by Pydantic Field(...).  This validator focuses on
+    semantic quality rules that Pydantic cannot express.
+    """
+    if not isinstance(parsed, ExerciseArtifact):
+        return "root expected ExerciseArtifact"
+    # semantic rules
+    if len(parsed.items or []) < 4:
+        return f"items expected at least 4, got {len(parsed.items or [])}"
+    levels_found = {item.level for item in (parsed.items or [])}
+    missing_levels = REQUIRED_LEVELS - levels_found
+    if missing_levels:
+        return f"missing required levels: {sorted(missing_levels)}"
+    # check for duplicate questions
+    questions = [item.question.strip() for item in (parsed.items or [])]
+    if len(questions) != len(set(questions)):
+        return "duplicate questions detected"
+    for idx, item in enumerate(parsed.items or []):
+        prefix = f"items.{idx}"
+        if len(item.tags or []) == 0:
+            return f"{prefix}.tags must have at least 1 tag"
+    return ""
+
+
+def validate_review_verdict(parsed: BaseModel) -> str:
+    """Business validation for reviewer verdict schemas."""
+    if not isinstance(parsed, ExerciseReviewVerdict):
+        return "root expected ExerciseReviewVerdict"
+    if parsed.verdict not in {"approve", "reject"}:
+        return "verdict must be approve or reject"
+    if not str(parsed.reason or "").strip():
+        return "reason must be non-empty"
+    return ""
 
 
 def _last_human_query(state: TutorState) -> str:
@@ -70,6 +113,19 @@ def _subjects_used(context: list[dict]) -> list[str]:
 
 def _roles_used(context: list[dict]) -> list[str]:
     return sorted({str(item.get("retrieval_role")) for item in context if item.get("retrieval_role")})
+
+
+def _is_web_evidence(item: dict) -> bool:
+    return (
+        item.get("source_type") == "web"
+        or item.get("type") in {"web_evidence", "web_supplement"}
+        or item.get("legacy_type") == "web_supplement"
+        or item.get("type_legacy") == "web_supplement"
+    )
+
+
+def _web_evidence_items(context: list[dict]) -> list[dict]:
+    return [item for item in context if _is_web_evidence(item)]
 
 
 def _format_context(context: list[dict]) -> str:
@@ -186,11 +242,7 @@ async def exercise_planner(state: TutorState) -> dict:
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     context = state.get("context", [])
-    web_supplements = [
-        item
-        for item in context
-        if item.get("type") in {"web_supplement", "web_evidence"} or item.get("source_type") == "web"
-    ]
+    web_evidence = _web_evidence_items(context)
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
@@ -201,8 +253,9 @@ async def exercise_planner(state: TutorState) -> dict:
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
             "context_count": len(context),
+            "context_web_count": len(web_evidence),
             "web_supplement_needed": bool(state.get("web_supplement_decisions")),
-            "web_supplement_count": len(web_supplements),
+            "web_supplement_count": len(web_evidence),
             "web_supplement_provider": state.get("web_supplement_provider", "tavily"),
             "web_supplement_failed": bool(state.get("web_supplement_failed")),
             "web_supplement_failure_reason": state.get("web_supplement_failure_reason", ""),
@@ -210,14 +263,14 @@ async def exercise_planner(state: TutorState) -> dict:
             "web_supplement_status_by_subject": state.get("web_supplement_status_by_subject", {}),
             "web_supplement_success_subjects": state.get("web_supplement_success_subjects", []),
             "web_supplement_failed_subjects": state.get("web_supplement_failed_subjects", []),
-            "web_evidence_count": len(web_supplements),
+            "web_evidence_count": len(web_evidence),
             "web_evidence_provider": "tavily",
             "web_judge_provider": state.get("web_judge_provider", "openrouter"),
-            "web_judge_model": state.get("web_judge_model", "openrouter/owl-alpha"),
+            "web_judge_model": state.get("web_judge_model", "deepseek/deepseek-v4-flash"),
             "web_judge_failed_subjects": state.get("web_judge_failed_subjects", []),
             "web_judge_rejected_all_subjects": state.get("web_judge_rejected_all_subjects", []),
-            "web_evidence_use_cases": sorted({item.get("use_case") for item in web_supplements if item.get("use_case")}),
-            "web_evidence_types": sorted({item.get("evidence_type") for item in web_supplements if item.get("evidence_type")}),
+            "web_evidence_use_cases": sorted({item.get("use_case") for item in web_evidence if item.get("use_case")}),
+            "web_evidence_types": sorted({item.get("evidence_type") for item in web_evidence if item.get("evidence_type")}),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
             "search_refinement_needed": bool(state.get("search_refinement_needed")),
@@ -297,27 +350,29 @@ async def exercise_agent(state: TutorState) -> dict:
         },
     )
 
-    llm = get_node_llm("exercise")
     temperature = get_setting("exercise.temperature", 0.2)
     model_name = get_setting("exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
-    try:
-        with traced_llm_call(model_name=model_name, node_name="exercise_agent", temperature=temperature) as span:
-            result = await ainvoke_strict_json(
-                llm,
-                [
-                    SystemMessage(content="你是分层练习题生成智能体。只输出一个 JSON 对象，不要输出 Markdown、代码块或解释文本。"),
-                    HumanMessage(content=prompt),
-                ],
-                schema=ExerciseArtifact,
-                node_name="exercise_agent",
-                span=span,
-            )
-        title = result.title.strip() or "分层练习题"
-        raw_items = [_model_to_dict(item) for item in result.items]
-    except Exception as exc:
-        logger.exception("exercise_agent structured output failed; fallback disabled")
-        raise RuntimeError(f"exercise_agent structured output failed; fallback disabled: {exc}") from exc
+    with traced_llm_call(model_name=model_name, node_name="exercise_agent", temperature=temperature):
+        structured_result = await invoke_structured_llm(
+            node_name="exercise_agent",
+            llm_node="exercise",
+            schema=ExerciseArtifact,
+            messages=[
+                SystemMessage(content="You are a leveled exercise generator. Return only valid JSON for the ExerciseArtifact schema."),
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("exercise_agent"),
+            fallback_modes=get_fallback_modes("exercise_agent"),
+            business_validator=validate_exercise_artifact,
+            state=state,
+            max_raw_chars=get_max_raw_chars("exercise_agent"),
+        )
+    result = structured_result.parsed
+    if not isinstance(result, ExerciseArtifact):
+        raise TypeError("exercise_agent parsed result is not ExerciseArtifact")
+    title = result.title.strip() or "Leveled exercises"
+    raw_items = [_model_to_dict(item) for item in result.items]
 
     items = _normalize_items(raw_items)
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
@@ -367,29 +422,28 @@ async def exercise_reviewer(state: TutorState) -> dict:
         },
     )
 
-    llm = get_node_llm("exercise", temperature=get_setting("exercise.reviewer_temperature", 0.0))
-    structured_llm = llm.with_structured_output(ExerciseReviewVerdict, method="json_mode")
-    fallback = get_fallback_llm(temperature=get_setting("exercise.reviewer_temperature", 0.0))
-    structured_fallback = fallback.with_structured_output(ExerciseReviewVerdict, method="json_mode")
     model_name = get_setting("exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
-    try:
-        with traced_llm_call(model_name=model_name, node_name="exercise_reviewer", temperature=0.0) as span:
-            result = await async_invoke_with_fallback(
-                structured_llm,
-                [
-                    SystemMessage(content="你是高校课程练习题质量审查智能体，只返回 JSON 审查结论。"),
-                    HumanMessage(content=prompt),
-                ],
-                fallback=structured_fallback,
-                span=span,
-            )
-        verdict = result.verdict
-        reason = result.reason.strip()
-    except Exception:
-        logger.warning("Exercise reviewer failed, approving items that passed local checks", exc_info=True)
-        verdict = "approve"
-        reason = "已通过本地练习结构质量检查。"
+    with traced_llm_call(model_name=model_name, node_name="exercise_reviewer", temperature=0.0):
+        structured_result = await invoke_structured_llm(
+            node_name="exercise_reviewer",
+            llm_node="exercise",
+            schema=ExerciseReviewVerdict,
+            messages=[
+                SystemMessage(content="You are a course exercise quality reviewer. Return only valid JSON for the ExerciseReviewVerdict schema."),
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("exercise_reviewer"),
+            fallback_modes=get_fallback_modes("exercise_reviewer"),
+            business_validator=validate_review_verdict,
+            state=state,
+            max_raw_chars=get_max_raw_chars("exercise_reviewer"),
+        )
+    result = structured_result.parsed
+    if not isinstance(result, ExerciseReviewVerdict):
+        raise TypeError("exercise_reviewer parsed result is not ExerciseReviewVerdict")
+    verdict = result.verdict
+    reason = result.reason.strip()
 
     return {
         "exercise_review_verdict": verdict,

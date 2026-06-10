@@ -39,6 +39,22 @@ Important rules:
 16. If evidence is insufficient, set overall_evidence_state to partially_sufficient or insufficient, set need_more_web_search when appropriate, and fill coverage_gaps.
 17. coverage_gaps.suggested_search_query is reserved for a future Search Optimization Loop. Do not assume that follow-up search has already happened.
 
+Output only enum values exactly as listed below. Do not invent, translate, or use natural-language values.
+
+Allowed use_case values:
+core_evidence, exercise_material, implementation_reference, background_context, tool_ecosystem, latest_practice, inspiration_only, redundant, discard
+- not_used → discard
+- supporting_evidence → background_context or exercise_material
+
+Allowed evidence_type values:
+local_course_material, local_textbook_chunk, local_exercise_answer, university_course_pdf, textbook_or_notes, official_documentation, open_exercise_set, github_or_notebook, educational_platform, document_sharing_platform, commercial_study_site, video, blog_or_article, web_article, unknown
+- web_page → web_article
+- web_pdf → university_course_pdf / textbook_or_notes / open_exercise_set / unknown
+
+Allowed coverage_gaps.purpose values:
+coverage_expansion, resource_enrichment, application_context, tool_ecosystem, latest_practice, case_example, implementation_detail, comparison, planning_support
+- No natural-language or Chinese purpose. Use only the enum values exactly as listed.
+
 Output JSON shape:
 {
   "overall_evidence_state": "sufficient | partially_sufficient | insufficient",

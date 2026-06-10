@@ -20,10 +20,10 @@ from src.graph.state import TutorState
 def _base_state(**overrides) -> TutorState:
     """Return a TutorState dict with sensible defaults, overridden by kwargs."""
     state: TutorState = {
-        "messages": [HumanMessage(content="帮我做复习计划")],
+        "messages": [HumanMessage(content="帮我做课程补基础计划")],
         "intent": "planning",
         "subject": "math",
-        "keypoints": ["数学", "复习计划"],
+        "keypoints": ["高等数学", "课程补基础计划"],
         "context": [],
         "search_results": [],
         "plan": "",
@@ -34,7 +34,7 @@ def _base_state(**overrides) -> TutorState:
         "emotional_intel": "",
         "resource_intel": "",
         "intel_summary": "学生数学薄弱",
-        "draft": "## 每日复习计划\n- 周一: 数学\n- 周二: 英语",
+        "draft": "## 每日学习计划\n- 周一: 高等数学\n- 周二: Python 基础",
         "academic_verdict": "",
         "academic_reason": "",
         "emotional_verdict": "",

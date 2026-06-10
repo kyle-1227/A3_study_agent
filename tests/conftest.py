@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for Gaokao Tutor unit tests.
+"""Shared pytest fixtures for A3 Study Agent unit tests.
 
 All unit tests mock external dependencies (LLM APIs, ChromaDB, web search)
 so they run offline without API keys.
@@ -83,8 +83,8 @@ def sample_retrieved_docs():
 def sample_search_results():
     """Sample web search results."""
     return [
-        {"content": "2026年高考时间为6月7日-8日。", "title": "高考时间", "url": "https://example.com/1"},
-        {"content": "新高考改革3+1+2模式。", "title": "高考改革", "url": "https://example.com/2"},
+        {"content": "2026年机器学习课程项目安排包含数据处理、建模和评估。", "title": "课程安排", "url": "https://example.com/1"},
+        {"content": "数据科学学习路线建议覆盖 Python、统计基础、机器学习和项目实践。", "title": "学习路线", "url": "https://example.com/2"},
     ]
 
 
