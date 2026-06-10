@@ -30,6 +30,7 @@ from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.schemas import ChatRequest, ResumeRequest
 from src.observability.a3_trace import emit_a3_trace
+from src.tools.document_tool import get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
@@ -135,7 +136,7 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "drafter", "plan_tweak", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output", "exercise_output"}
+TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output", "exercise_output", "review_doc_output"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -167,6 +168,11 @@ GRAPH_NODES = {
     "exercise_reviewer",
     "exercise_rewrite",
     "exercise_output",
+    "review_doc_planner",
+    "review_doc_agent",
+    "review_doc_reviewer",
+    "review_doc_rewrite",
+    "review_doc_output",
     "emotional_response",
     "handle_unknown",
 }
@@ -191,12 +197,15 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     mindmap_tree = final_state.get("mindmap_tree") or {}
     exercise_items = final_state.get("exercise_items") or []
     exercise_artifact = final_state.get("exercise_artifact") or {}
+    review_doc_artifact = final_state.get("review_doc_artifact") or {}
 
-    if resource_type not in {"mindmap", "quiz"}:
+    if resource_type not in {"mindmap", "quiz", "review_doc"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
             resource_type = "quiz"
+        elif review_doc_artifact:
+            resource_type = "review_doc"
         else:
             return None
 
@@ -226,6 +235,15 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             payload["answer"] = answer
         payload["exercise_items"] = exercise_items
         payload["exercise_artifact"] = exercise_artifact
+
+    if resource_type == "review_doc" and review_doc_artifact:
+        payload["review_doc"] = {
+            "title": review_doc_artifact.get("title", "Markdown复习文档"),
+            "filename": review_doc_artifact.get("filename", ""),
+            "docx_filename": review_doc_artifact.get("docx_filename", ""),
+            "markdown_url": review_doc_artifact.get("markdown_url", ""),
+            "docx_url": review_doc_artifact.get("docx_url", ""),
+        }
 
     return payload
 
@@ -310,6 +328,23 @@ async def _stream_graph_events(
                             )
                             yield f"data: {mindmap_payload}\n\n"
 
+                    if event_type == "on_chain_end" and node_name == "review_doc_output":
+                        output = event.get("data", {}).get("output")
+                        if isinstance(output, dict) and output.get("review_doc_artifact"):
+                            artifact = output["review_doc_artifact"]
+                            review_doc_payload = json.dumps(
+                                {
+                                    "type": "review_doc_result",
+                                    "title": artifact.get("title", "Markdown复习文档"),
+                                    "filename": artifact.get("filename", ""),
+                                    "docx_filename": artifact.get("docx_filename", ""),
+                                    "markdown_url": artifact.get("markdown_url", ""),
+                                    "docx_url": artifact.get("docx_url", ""),
+                                },
+                                ensure_ascii=False,
+                            )
+                            yield f"data: {review_doc_payload}\n\n"
+
             # ── Token streaming ────────────────────────────────────────────
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
@@ -366,6 +401,7 @@ async def _stream_graph_events(
             "has_mindmap_artifact": bool(final_state.get("mindmap_artifact")),
             "has_mindmap_tree": bool(final_state.get("mindmap_tree")),
             "has_exercise_items": bool(final_state.get("exercise_items")),
+            "has_review_doc_artifact": bool(final_state.get("review_doc_artifact")),
             "exercise_items_count": len(final_state.get("exercise_items") or []),
             "requested_resource_type": final_state.get("requested_resource_type", ""),
         },
@@ -395,6 +431,7 @@ async def _stream_graph_events(
                 "resource_type": resource_payload.get("resource_type", ""),
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
+                "has_review_doc": bool(resource_payload.get("review_doc")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
             },
             state=final_state,
@@ -510,6 +547,31 @@ async def download_mindmap_artifact(artifact_id: str, filename: str):
     return FileResponse(
         artifact_path,
         media_type="application/vnd.xmind.workbook",
+        filename=filename,
+    )
+
+
+@app.get("/artifacts/review-docs/{artifact_id}/{filename}")
+async def download_review_doc_artifact(artifact_id: str, filename: str):
+    root = get_review_doc_artifact_dir()
+    artifact_path = (root / artifact_id / filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {".md", ".docx"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if artifact_path.suffix.lower() == ".docx"
+        else "text/markdown; charset=utf-8"
+    )
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
         filename=filename,
     )
 

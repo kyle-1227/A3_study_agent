@@ -31,6 +31,14 @@ from src.graph.mindmap import (
     mindmap_rewrite,
     should_rewrite_mindmap,
 )
+from src.graph.review_doc import (
+    review_doc_agent,
+    review_doc_output,
+    review_doc_planner,
+    review_doc_reviewer,
+    review_doc_rewrite,
+    should_rewrite_review_doc,
+)
 from src.graph.plan_adversarial import (
     adv_rewrite_node,
     consensus_check_node,
@@ -96,6 +104,13 @@ def build_graph() -> StateGraph:
     graph.add_node("exercise_rewrite", exercise_rewrite)
     graph.add_node("exercise_output", exercise_output)
 
+    # Review document resource generation
+    graph.add_node("review_doc_planner", review_doc_planner)
+    graph.add_node("review_doc_agent", review_doc_agent)
+    graph.add_node("review_doc_reviewer", review_doc_reviewer)
+    graph.add_node("review_doc_rewrite", review_doc_rewrite)
+    graph.add_node("review_doc_output", review_doc_output)
+
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
@@ -137,6 +152,7 @@ def build_graph() -> StateGraph:
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
             "exercise": "exercise_planner",
+            "review_doc": "review_doc_planner",
         },
     )
     graph.add_conditional_edges(
@@ -146,6 +162,7 @@ def build_graph() -> StateGraph:
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
             "exercise": "exercise_planner",
+            "review_doc": "review_doc_planner",
         },
     )
 
@@ -220,6 +237,20 @@ def build_graph() -> StateGraph:
     graph.add_edge("exercise_rewrite", "exercise_agent")
     graph.add_edge("exercise_output", END)
 
+    # Review document resource generation: plan -> Markdown -> review -> output
+    graph.add_edge("review_doc_planner", "review_doc_agent")
+    graph.add_edge("review_doc_agent", "review_doc_reviewer")
+    graph.add_conditional_edges(
+        "review_doc_reviewer",
+        should_rewrite_review_doc,
+        {
+            "rewrite": "review_doc_rewrite",
+            "output": "review_doc_output",
+        },
+    )
+    graph.add_edge("review_doc_rewrite", "review_doc_agent")
+    graph.add_edge("review_doc_output", END)
+
     # Unknown — direct to END
     graph.add_edge("handle_unknown", END)
 
@@ -233,6 +264,8 @@ def route_after_academic_retrieval(state: TutorState) -> str:
         return "mindmap"
     if resource_type == "quiz":
         return "exercise"
+    if resource_type == "review_doc":
+        return "review_doc"
     return "answer"
 
 

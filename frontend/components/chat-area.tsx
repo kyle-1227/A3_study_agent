@@ -34,6 +34,7 @@ export interface Message {
   content: string
   resourceStatus?: ResourceGenerationStatus
   mindmap?: MindmapResult
+  reviewDoc?: ReviewDocResult
 }
 
 export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review"
@@ -69,6 +70,14 @@ export interface MindmapResult {
   title: string
   tree: MindmapNode
   xmindUrl: string
+}
+
+export interface ReviewDocResult {
+  title: string
+  markdownUrl: string
+  docxUrl?: string
+  filename?: string
+  docxFilename?: string
 }
 
 interface ChatAreaProps {
@@ -374,6 +383,7 @@ function MessageBubble({ message }: { message: Message }) {
               <ResourceGenerationStatusPanel status={message.resourceStatus} />
             )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
+            {message.reviewDoc && <ReviewDocCard reviewDoc={message.reviewDoc} markdownText={message.content} />}
             {message.content ? (
               // Assistant messages render as Markdown
               <div className="min-w-0 max-w-full break-words">
@@ -386,6 +396,31 @@ function MessageBubble({ message }: { message: Message }) {
             )}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult; markdownText: string }) {
+  return (
+    <div className="rounded-lg border border-[#C8D6C9] bg-[#F8FAF6] overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <FileText className="h-4 w-4 text-[#3D5A40] shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold text-[#3D5A40] truncate">Markdown 复习文档</p>
+            <p className="text-xs text-muted-foreground truncate">{reviewDoc.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          <DownloadButton href={reviewDoc.markdownUrl} label="下载 .md" />
+          {reviewDoc.docxUrl && <DownloadButton href={reviewDoc.docxUrl} label="下载 .docx" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(reviewDoc.title, markdownText)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
       </div>
     </div>
   )
@@ -720,6 +755,21 @@ function downloadText(filename: string, content: string, type: string) {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
+}
+
+function openReviewDocPrintPage(title: string, markdownText: string) {
+  try {
+    window.sessionStorage.setItem(
+      "review_doc_print_payload",
+      JSON.stringify({
+        title: title || "Markdown复习文档",
+        markdown: markdownText || `# ${title || "Markdown复习文档"}`,
+      }),
+    )
+  } catch {
+    return
+  }
+  window.open("/print/review-doc", "_blank")
 }
 
 async function downloadTreePng(tree: MindmapNode, filename: string) {

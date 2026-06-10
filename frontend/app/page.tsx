@@ -140,6 +140,26 @@ const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
     title: "输出练习资源",
     detail: "整理最终分层练习题，包含基础题、进阶题、应用题、自我检查题和解析。",
   },
+  review_doc_planner: {
+    title: "规划复习文档",
+    detail: "规划复习文档",
+  },
+  review_doc_agent: {
+    title: "生成 Markdown 文档",
+    detail: "生成 Markdown 文档",
+  },
+  review_doc_reviewer: {
+    title: "审查文档质量",
+    detail: "审查文档质量",
+  },
+  review_doc_rewrite: {
+    title: "修订复习文档",
+    detail: "修订复习文档",
+  },
+  review_doc_output: {
+    title: "输出复习文档",
+    detail: "输出复习文档",
+  },
   emotional_response: {
     title: "生成学习支持建议",
     detail: "围绕学习压力、专业适应和执行困难生成支持性建议。",
@@ -310,13 +330,50 @@ export default function Home() {
       return
     }
 
+    if (data.type === "review_doc_result") {
+      const markdownUrl =
+        typeof data.markdown_url === "string" && data.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${data.markdown_url}`
+          : data.markdown_url
+      const docxUrl =
+        typeof data.docx_url === "string" && data.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${data.docx_url}`
+          : data.docx_url
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === asstId
+            ? {
+                ...msg,
+                reviewDoc: {
+                  title: data.title || "Markdown复习文档",
+                  filename: data.filename || "",
+                  markdownUrl: markdownUrl || "",
+                  docxFilename: data.docx_filename || "",
+                  docxUrl: docxUrl || "",
+                },
+              }
+            : msg
+        )
+      )
+      return
+    }
+
     if (data.type === "resource_final") {
       const finalAnswer = typeof data.answer === "string" ? data.answer : ""
       const mindmap = data.resource_type === "mindmap" ? data.mindmap : null
+      const reviewDoc = data.resource_type === "review_doc" ? data.review_doc : null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
           : mindmap?.xmind_url
+      const markdownUrl =
+        reviewDoc && typeof reviewDoc.markdown_url === "string" && reviewDoc.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${reviewDoc.markdown_url}`
+          : reviewDoc?.markdown_url
+      const docxUrl =
+        reviewDoc && typeof reviewDoc.docx_url === "string" && reviewDoc.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${reviewDoc.docx_url}`
+          : reviewDoc?.docx_url
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -331,6 +388,15 @@ export default function Home() {
                       xmindUrl: xmindUrl || "",
                     }
                   : msg.mindmap,
+                reviewDoc: reviewDoc
+                  ? {
+                      title: reviewDoc.title || "Markdown复习文档",
+                      filename: reviewDoc.filename || "",
+                      markdownUrl: markdownUrl || "",
+                      docxFilename: reviewDoc.docx_filename || "",
+                      docxUrl: docxUrl || "",
+                    }
+                  : msg.reviewDoc,
               }
             : msg
         )
