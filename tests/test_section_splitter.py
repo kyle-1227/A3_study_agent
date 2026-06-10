@@ -4,8 +4,7 @@ Tests cover: section header detection, section splitting, metadata enrichment,
 sub-chunking of long sections, fallback for documents without section headers,
 and integration with load_documents.
 
-The sample document uses a generic university-course assessment context rather
-than high-school/Gaokao wording, while preserving Chinese top-level section
+The sample document uses a generic university-course assessment context, while preserving Chinese top-level section
 headers such as "一、基础概念" and "四、综合应用".
 """
 

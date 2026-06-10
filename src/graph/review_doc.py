@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import  LearningState
+from src.graph.state import LearningState
 from src.observability.a3_trace import emit_a3_trace
 from src.tools.document_tool import create_markdown_artifact
 from src.tracing import traced_llm_call, traced_node

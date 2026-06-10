@@ -113,10 +113,12 @@ Jaeger：`http://localhost:16686`
 ### 本地开发
 
 ```bash
-conda create -n a3_study_agent python=3.11 -y
-conda activate a3_study_agent
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
-pip install -e ".[dev]"
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
 
 cp .env.example .env
 # 编辑 .env，填入 API keys
