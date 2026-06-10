@@ -1,4 +1,4 @@
-"""TutorState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
+"""LearningState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def context_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
     return existing + update
 
 
-class TutorState(TypedDict):
+class LearningState(TypedDict):
     messages: Annotated[list, add_messages]                             # Chat history
     request_id: str                                                      # Per-request trace identifier
     session_id: str                                                      # Session identifier for trace grouping

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
     get_llm_output_mode,
@@ -75,7 +75,7 @@ def validate_feedback_classification(parsed: BaseModel) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     """Extract the last HumanMessage content from state messages."""
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
@@ -89,7 +89,7 @@ def _last_human_query(state: TutorState) -> str:
 
 
 @traced_node
-async def drafter_node(state: TutorState) -> dict[str, Any]:
+async def drafter_node(state: LearningState) -> dict[str, Any]:
     """Draft or rewrite a study plan based on intel and any revision notes."""
     llm = get_node_llm("planner")
     temperature = get_setting("planner.temperature", 0.7)
@@ -135,7 +135,7 @@ async def drafter_node(state: TutorState) -> dict[str, Any]:
 
 
 async def _run_reviewer(
-    state: TutorState,
+    state: LearningState,
     *,
     system_prompt_name: str,
     node_name: str,
@@ -175,7 +175,7 @@ async def _run_reviewer(
 
 
 @traced_node
-async def reviewer_academic_node(state: TutorState) -> dict[str, Any]:
+async def reviewer_academic_node(state: LearningState) -> dict[str, Any]:
     """Academic quality reviewer."""
     verdict = await _run_reviewer(
         state,
@@ -186,7 +186,7 @@ async def reviewer_academic_node(state: TutorState) -> dict[str, Any]:
 
 
 @traced_node
-async def reviewer_emotional_node(state: TutorState) -> dict[str, Any]:
+async def reviewer_emotional_node(state: LearningState) -> dict[str, Any]:
     """Emotional wellbeing reviewer."""
     verdict = await _run_reviewer(
         state,
@@ -197,7 +197,7 @@ async def reviewer_emotional_node(state: TutorState) -> dict[str, Any]:
 
 
 @traced_node
-async def consensus_check_node(state: TutorState) -> dict[str, Any]:
+async def consensus_check_node(state: LearningState) -> dict[str, Any]:
     """Check if both reviewers approved, or force output at max_rounds."""
     current_round = state.get("adv_round", 0)
     max_rounds = get_setting("planner.adversarial_max_rounds", 3)
@@ -234,7 +234,7 @@ async def consensus_check_node(state: TutorState) -> dict[str, Any]:
 
 
 @traced_node
-async def adv_rewrite_node(state: TutorState) -> dict[str, Any]:
+async def adv_rewrite_node(state: LearningState) -> dict[str, Any]:
     """Reset verdicts before sending back to drafter for revision."""
     return {
         "academic_verdict": "",
@@ -245,7 +245,7 @@ async def adv_rewrite_node(state: TutorState) -> dict[str, Any]:
 
 
 @traced_node
-async def plan_output_node(state: TutorState) -> dict:
+async def plan_output_node(state: LearningState) -> dict:
     """Final plan output — interrupt for HIL review if checkpointer available."""
     plan_text = state.get("draft", "")
 
@@ -274,7 +274,7 @@ async def plan_output_node(state: TutorState) -> dict:
 
 
 @traced_node
-async def feedback_router(state: TutorState) -> dict[str, Any]:
+async def feedback_router(state: LearningState) -> dict[str, Any]:
     """Classify user's HIL feedback as 'tweak' (minor edit) or 'rewrite' (full redo).
 
     Uses the supervisor's fast model for quick classification.
@@ -339,7 +339,7 @@ async def feedback_router(state: TutorState) -> dict[str, Any]:
 
 
 @traced_node
-async def plan_tweak_node(state: TutorState) -> dict[str, Any]:
+async def plan_tweak_node(state: LearningState) -> dict[str, Any]:
     """Make a targeted edit to the plan based on user feedback.
 
     Single LLM call — no reviewer loop needed for minor edits.
@@ -384,18 +384,18 @@ async def plan_tweak_node(state: TutorState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def should_output_or_revise(state: TutorState) -> str:
+def should_output_or_revise(state: LearningState) -> str:
     """Conditional edge after consensus_check: output or revise."""
     if state.get("consensus", False):
         return "output"
     return "revise"
 
 
-def route_after_hil(state: TutorState) -> str:
+def route_after_hil(state: LearningState) -> str:
     """Conditional edge after plan_output: confirm → end, feedback → feedback_router."""
     return "feedback" if state.get("hil_action") == "feedback" else "end"
 
 
-def route_feedback(state: TutorState) -> str:
+def route_feedback(state: LearningState) -> str:
     """Conditional edge after feedback_router: tweak or rewrite."""
     return state.get("feedback_route", "tweak")

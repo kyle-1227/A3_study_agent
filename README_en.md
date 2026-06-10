@@ -23,7 +23,7 @@ A3 Study Agent — AI-powered personalized learning resource generation assistan
 
 A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized learning resources such as course Q&A, layered exercises, mind maps, project examples, and study plans.
 
-The system combines local course-material RAG, BM25, reranking, Tavily Web Search, structured LLM output, evidence judging, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows rather than exam-prep-specific tutoring.
+The system combines local course-material RAG, BM25, reranking, Tavily Web Search, structured LLM output, evidence judging, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows rather than exam-prep-specific learning support.
 
 The current React frontend is a lightweight reference implementation for demonstrating complex agent interaction, streaming output, generated resources, and runtime traces. Additional planning modules may evolve later.
 

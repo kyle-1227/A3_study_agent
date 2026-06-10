@@ -1,4 +1,4 @@
-"""SubGraph A — Academic Tutor: parallel retrieval (fan-out/fan-in),
+"""SubGraph A — Academic Learning Assistant: parallel retrieval (fan-out/fan-in),
 answer generation, and hallucination evaluation with retry loop.
 
 Keypoint extraction is handled by the supervisor node (merged for latency),
@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.graph.state import CONTEXT_CLEAR, LearningState
 from src.llm.structured_output import (
     StructuredLLMResult,
     StructuredOutputError,
@@ -209,7 +209,7 @@ ALLOWED_SUPPLEMENT_PURPOSES = {
 }
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     """Extract the last HumanMessage content (robust for retry loops)."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -298,7 +298,7 @@ def _clear_retrieval_plan_state() -> dict:
     }
 
 
-def _query_source(state: TutorState) -> tuple[str, str]:
+def _query_source(state: LearningState) -> tuple[str, str]:
     rewritten = state.get("rewritten_query", "")
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
@@ -472,7 +472,7 @@ def _clamp_priority(value) -> float:
     return max(0.0, min(1.0, priority))
 
 
-def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
+def _allowed_retrieval_subjects(state: LearningState) -> set[str]:
     """Build the subject hard boundary for retrieval plans."""
     available = set(get_available_subjects_from_data())
     if available:
@@ -483,7 +483,7 @@ def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
 
 def _normalize_retrieval_plan(
     raw_plan: list[RetrievalPlanItem],
-    state: TutorState,
+    state: LearningState,
 ) -> tuple[list[dict], dict]:
     """Filter and normalize LLM-produced per-subject retrieval plan."""
     allowed_subjects = _allowed_retrieval_subjects(state)
@@ -550,7 +550,7 @@ def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
     return plan[0]["subject"] if plan else ""
 
 
-def _web_query_source(state: TutorState) -> tuple[str, str]:
+def _web_query_source(state: LearningState) -> tuple[str, str]:
     search_web_query = state.get("search_web_query", "")
     rewritten = state.get("rewritten_query", "")
     if search_web_query:
@@ -560,7 +560,7 @@ def _web_query_source(state: TutorState) -> tuple[str, str]:
     return _last_human_query(state), "original_query"
 
 
-def _build_retrieval_branches(state: TutorState) -> tuple[list[dict], dict]:
+def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
     """Build unified retrieval branches for multi- and single-subject paths."""
     retrieval_plan = state.get("retrieval_plan") or []
     if retrieval_plan and not state.get("rewritten_query"):
@@ -1150,7 +1150,7 @@ def _targets_from_decision(
 
 async def _decide_web_supplement_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     retrieval_plan: list[dict],
     branch_evals: dict[str, dict],
     docs_by_subject: dict[str, list[dict]],
@@ -1325,7 +1325,7 @@ def _judge_response_schema() -> dict[str, Any]:
 
 def _build_judge_messages(
     *,
-    state: TutorState,
+    state: LearningState,
     subject: str,
     role: str,
     purpose: str,
@@ -1464,7 +1464,7 @@ def _judge_failure_debug(
 
 async def _judge_tavily_search_results_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     subject: str,
     role: str,
     purpose: str,
@@ -1693,7 +1693,7 @@ def _fail_fast_evidence_judge() -> bool:
     return bool(get_setting("development.fail_fast_evidence_judge", True))
 
 
-def _evidence_failure_phase(state: TutorState) -> str:
+def _evidence_failure_phase(state: LearningState) -> str:
     output = state.get("evidence_judge_output") or {}
     if isinstance(output, dict):
         return str(output.get("failure_phase") or output.get("degraded_reason") or "")
@@ -2058,7 +2058,7 @@ def _structured_result_to_evidence_failure_debug(
 
 async def _judge_evidence_candidates_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     candidates: list[EvidenceCandidate],
     original_user_query: str,
     learning_goal: str,
@@ -2419,7 +2419,7 @@ def _followups_from_coverage_gaps(parsed: EvidenceJudgeOutput) -> list[dict]:
 
 async def _run_dynamic_web_supplement(
     *,
-    state: TutorState,
+    state: LearningState,
     targets: list[dict],
     decision_debug: dict,
     branch_mode: str,
@@ -2716,7 +2716,7 @@ async def _run_dynamic_web_supplement(
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
 
-def _dual_source_web_query(state: TutorState, branch: dict) -> tuple[str, str]:
+def _dual_source_web_query(state: LearningState, branch: dict) -> tuple[str, str]:
     if branch.get("web_search_query"):
         return str(branch.get("web_search_query")), "retrieval_branch_web_search_query"
     if state.get("search_web_query"):
@@ -2732,7 +2732,7 @@ def _source_distribution(items: list[dict]) -> dict:
 
 async def _run_dual_source_first_round_web(
     *,
-    state: TutorState,
+    state: LearningState,
     branch: dict,
     query: str,
     original_user_query: str,
@@ -2788,7 +2788,7 @@ async def _run_dual_source_first_round_web(
     return (diagnostics.get("results") or [])[:max_results], diagnostics
 
 
-async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], branch_debug: dict) -> dict:
+async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
     original_user_query = _last_human_query(state)
     per_subject_top_k = int(_retrieval_setting("local_rag.per_subject_top_k", get_setting("rag.multi_subject_per_subject_top_k", 3)))
     local_enabled = bool(_retrieval_setting("local_rag.enabled", True))
@@ -3114,7 +3114,7 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
 
 
 @traced_node
-async def academic_router(state: TutorState) -> dict:
+async def academic_router(state: LearningState) -> dict:
     """Router node for parallel fan-out. Clears context on retry path."""
     if state.get("retry_count", 0) > 0:
         return {"context": CONTEXT_CLEAR}
@@ -3124,7 +3124,7 @@ async def academic_router(state: TutorState) -> dict:
 # ── Node 0b: query rewriting (retry path only) ──────────────────
 
 @traced_node
-async def rewrite_query(state: TutorState) -> dict:
+async def rewrite_query(state: LearningState) -> dict:
     """Rewrite the user's query using hallucination feedback for better retrieval."""
     original_query = _last_human_query(state)
     reason = state.get("hallucination_reason", "")
@@ -3165,7 +3165,7 @@ async def rewrite_query(state: TutorState) -> dict:
 # ── Node 0c: initial search-query rewriting ───────────────────────────────
 
 @traced_node
-async def search_query_rewriter(state: TutorState) -> dict:
+async def search_query_rewriter(state: LearningState) -> dict:
     """Rewrite the original request into RAG and web-search queries."""
     if state.get("rewritten_query"):
         return _clear_retrieval_plan_state()
@@ -3312,7 +3312,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
 # ── Node 1: RAG retrieval (parallel branch A) ─────────────────────
 
 @traced_node
-async def rag_retrieve(state: TutorState) -> dict:
+async def rag_retrieve(state: LearningState) -> dict:
     """Retrieve local course evidence, then run branch-aware Web supplement when needed."""
     branches, branch_debug = _build_retrieval_branches(state)
     branch_mode = branch_debug.get("mode", "unknown")
@@ -3642,7 +3642,7 @@ _SEARCH_TIMEOUT = _web_timeout_seconds()
 
 
 @traced_node
-async def web_search(state: TutorState) -> dict:
+async def web_search(state: LearningState) -> dict:
     """Fan-out web search — runs in parallel with rag_retrieve."""
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
@@ -3899,7 +3899,7 @@ _RESOURCE_OFFER_SECTION = """请在回答末尾追加以下小节。注意：这
 _NO_RESOURCE_OFFER = "不要追加“还可以继续生成的个性化学习资源”小节，只处理用户当前明确要求的资源或问题。"
 
 
-def _resource_offer_instruction(state: TutorState) -> str:
+def _resource_offer_instruction(state: LearningState) -> str:
     """Return prompt instruction for optional follow-up resource offers."""
     if state.get("needs_mindmap") or state.get("requested_resource_type"):
         return _NO_RESOURCE_OFFER
@@ -3907,7 +3907,7 @@ def _resource_offer_instruction(state: TutorState) -> str:
 
 
 @traced_node
-async def generate_answer(state: TutorState) -> dict:
+async def generate_answer(state: LearningState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
     question = _last_human_query(state)
     if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
@@ -4062,7 +4062,7 @@ def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation
 
 
 @traced_node
-async def evaluate_hallucination(state: TutorState) -> dict:
+async def evaluate_hallucination(state: LearningState) -> dict:
     """Evaluate whether the generated answer hallucinates beyond retrieved context.
 
     Uses fail-fast structured LLM output to judge faithfulness. On detection,
@@ -4198,7 +4198,7 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     return result
 
 
-def should_retry_or_end(state: TutorState) -> str:
+def should_retry_or_end(state: LearningState) -> str:
     """Conditional edge: retry via academic_router or route to END.
 
     Allows up to MAX_RETRIES re-retrieval attempts when hallucination

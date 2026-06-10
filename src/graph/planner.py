@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.retriever import retrieve
 from src.tools.search_tool import search as web_search_fn
@@ -39,7 +39,7 @@ _SEARCH_TIMEOUT = get_setting("planner.search_timeout", 15)
 
 
 @traced_node
-async def gather_planning_context(state: TutorState) -> dict:
+async def gather_planning_context(state: LearningState) -> dict:
     """Use the configured Web Search provider to fetch planning context and learning-resource references."""
     year = datetime.now().year
     query = state.get("search_web_query") or f"{year}年高校课程学习资源 专业入门路径"
@@ -66,7 +66,7 @@ async def gather_planning_context(state: TutorState) -> dict:
 
 # ── Node: gather_intel (Phase2a — parallel fan-out) ──────────────
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     """Extract the last HumanMessage content."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -74,7 +74,7 @@ def _last_human_query(state: TutorState) -> str:
     return ""
 
 
-def _build_planning_retrieval_query(state: TutorState) -> str:
+def _build_planning_retrieval_query(state: LearningState) -> str:
     """Build a planning retrieval query without subject-specific hardcoding."""
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
@@ -89,7 +89,7 @@ def _build_planning_retrieval_query(state: TutorState) -> str:
     return _last_human_query(state)
 
 
-async def _gather_emotional_intel(state: TutorState) -> str:
+async def _gather_emotional_intel(state: LearningState) -> str:
     """Call LLM to summarize user's emotional state from conversation history."""
     llm = get_node_llm("emotional")
     fallback = get_fallback_llm(temperature=get_setting("emotional.temperature", 0.8))
@@ -120,7 +120,7 @@ async def _gather_emotional_intel(state: TutorState) -> str:
         return "无法获取情绪分析，建议按常规方式安排计划。"
 
 
-async def _gather_resource_intel(state: TutorState) -> str:
+async def _gather_resource_intel(state: LearningState) -> str:
     """Retrieve RAG + web search results in parallel, format as resource summary."""
     query = _build_planning_retrieval_query(state)
     web_query = state.get("search_web_query") or query
@@ -216,11 +216,11 @@ async def _gather_resource_intel(state: TutorState) -> str:
 
 
 @traced_node
-async def gather_intel(state: TutorState) -> dict:
+async def gather_intel(state: LearningState) -> dict:
     """Phase2a: Gather emotional + resource intel in parallel.
 
     Stores emotional_intel, resource_intel, and combined intel_summary
-    in TutorState for the adversarial planning SubGraph.
+    in LearningState for the adversarial planning SubGraph.
     """
     emotional_intel, resource_intel = await asyncio.gather(
         _gather_emotional_intel(state),

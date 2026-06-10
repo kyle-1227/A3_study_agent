@@ -1,4 +1,4 @@
-"""Unit tests for SubGraph A — Academic Tutor nodes."""
+"""Unit tests for SubGraph A — Academic Learning Assistant nodes."""
 
 from __future__ import annotations
 

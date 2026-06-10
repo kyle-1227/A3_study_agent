@@ -2,7 +2,7 @@
 
 Tests cover:
 - Parallel emotional + resource intel gathering
-- Integration with TutorState
+- Integration with LearningState
 - Error handling (graceful degradation)
 """
 

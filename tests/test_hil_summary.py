@@ -14,12 +14,12 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from src.graph.plan_adversarial import FeedbackClassification, feedback_router
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 
 
-def _base_state(**overrides) -> TutorState:
-    """Return a TutorState dict with sensible defaults, overridden by kwargs."""
-    state: TutorState = {
+def _base_state(**overrides) -> LearningState:
+    """Return a LearningState dict with sensible defaults, overridden by kwargs."""
+    state: LearningState = {
         "messages": [HumanMessage(content="帮我做课程补基础计划")],
         "intent": "planning",
         "subject": "math",

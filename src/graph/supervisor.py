@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
     get_llm_output_mode,
@@ -59,7 +59,7 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
 
 
 @traced_node
-async def supervisor_node(state: TutorState) -> dict:
+async def supervisor_node(state: LearningState) -> dict:
     """Classify intent, detect subject, and extract keypoints in one LLM call.
 
     Uses the fail-fast structured-output runtime for reliable parsing.
@@ -162,7 +162,7 @@ def _filter_subject_candidates(candidates: list[str], available_subjects: set[st
 
 
 @traced_node
-async def handle_unknown(state: TutorState) -> dict:
+async def handle_unknown(state: LearningState) -> dict:
     """Handle off-topic queries with a friendly redirect message."""
     return {
         "messages": [AIMessage(
@@ -175,7 +175,7 @@ async def handle_unknown(state: TutorState) -> dict:
     }
 
 
-def route_by_intent(state: TutorState) -> str:
+def route_by_intent(state: LearningState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
     return state.get("intent", "academic")
 
@@ -243,7 +243,7 @@ def _detect_requested_resource_type(text: str) -> str:
     """Deterministically identify explicit resource-generation requests.
 
     A resource type only counts when the user asks to create/export/produce it.
-    Explanation questions such as "思维导图是什么" remain ordinary tutoring.
+    Explanation questions such as "思维导图是什么" remain ordinary academic support.
     """
     lowered = text.lower()
     has_strong_action = any(marker.lower() in lowered for marker in _RESOURCE_ACTION_MARKERS)

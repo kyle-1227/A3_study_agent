@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
     get_llm_output_mode,
@@ -89,7 +89,7 @@ def validate_review_verdict(parsed: BaseModel) -> str:
     return ""
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
             return str(msg.content)
@@ -102,7 +102,7 @@ def _model_to_dict(model: BaseModel) -> dict:
     return model.dict()
 
 
-def _format_keypoints(state: TutorState) -> str:
+def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
     return "、".join(keypoints) if keypoints else "未提取到明确关键词"
 
@@ -237,7 +237,7 @@ def _render_exercise_markdown(title: str, items: list[dict], *, review_reason: s
 
 
 @traced_node
-async def exercise_planner(state: TutorState) -> dict:
+async def exercise_planner(state: LearningState) -> dict:
     """Plan leveled exercises from the user request and retrieval context."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -324,7 +324,7 @@ async def exercise_planner(state: TutorState) -> dict:
 
 
 @traced_node
-async def exercise_agent(state: TutorState) -> dict:
+async def exercise_agent(state: LearningState) -> dict:
     """Generate structured leveled exercises from the planner outline."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -399,7 +399,7 @@ async def exercise_agent(state: TutorState) -> dict:
 
 
 @traced_node
-async def exercise_reviewer(state: TutorState) -> dict:
+async def exercise_reviewer(state: LearningState) -> dict:
     """Review exercises for completeness, leveling, and academic fit."""
     query = _last_human_query(state)
     outline = state.get("exercise_outline", "")
@@ -453,7 +453,7 @@ async def exercise_reviewer(state: TutorState) -> dict:
 
 
 @traced_node
-async def exercise_rewrite(state: TutorState) -> dict:
+async def exercise_rewrite(state: LearningState) -> dict:
     """Prepare reviewer feedback for the next exercise generation attempt."""
     reason = state.get("exercise_review_reason", "")
     outline = state.get("exercise_outline", "")
@@ -469,7 +469,7 @@ async def exercise_rewrite(state: TutorState) -> dict:
 
 
 @traced_node
-async def exercise_output(state: TutorState) -> dict:
+async def exercise_output(state: LearningState) -> dict:
     """Render final exercises as Markdown and store structured artifact metadata."""
     items = state.get("exercise_items") or []
     if not items:
@@ -500,7 +500,7 @@ async def exercise_output(state: TutorState) -> dict:
     }
 
 
-def should_rewrite_exercise(state: TutorState) -> str:
+def should_rewrite_exercise(state: LearningState) -> str:
     """Route reviewer output to rewrite or final exercise output."""
     if state.get("exercise_review_verdict") != "reject":
         return "output"

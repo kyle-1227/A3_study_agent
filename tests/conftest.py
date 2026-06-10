@@ -42,7 +42,7 @@ def ai_msg():
 
 @pytest.fixture
 def sample_state(human_msg):
-    """Minimal TutorState dict for testing."""
+    """Minimal LearningState dict for testing."""
     return {
         "messages": [human_msg("二次函数的判别式怎么用？")],
         "intent": "academic",

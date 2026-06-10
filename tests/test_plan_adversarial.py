@@ -28,16 +28,16 @@ from src.graph.plan_adversarial import (
     route_feedback,
     should_output_or_revise,
 )
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 
 
 # ---------------------------------------------------------------------------
-# TutorState template — base for all tests
+# LearningState template — base for all tests
 # ---------------------------------------------------------------------------
 
-def _base_state(**overrides) -> TutorState:
-    """Return a TutorState dict with sensible defaults, overridden by kwargs."""
-    state: TutorState = {
+def _base_state(**overrides) -> LearningState:
+    """Return a LearningState dict with sensible defaults, overridden by kwargs."""
+    state: LearningState = {
         "messages": [HumanMessage(content="帮我做课程补基础计划")],
         "intent": "planning",
         "subject": "math",

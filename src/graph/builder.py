@@ -53,7 +53,7 @@ from src.graph.plan_adversarial import (
     should_output_or_revise,
 )
 from src.graph.planner import gather_intel, gather_planning_context
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
 
@@ -61,7 +61,7 @@ def build_graph() -> StateGraph:
     """Construct the full LangGraph StateGraph (uncompiled)."""
 
     # Build graph
-    graph = StateGraph(TutorState)
+    graph = StateGraph(LearningState)
 
     # ── Nodes ────────────────────────────────────────────────────────
     graph.add_node("supervisor", supervisor_node)
@@ -257,7 +257,7 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def route_after_academic_retrieval(state: TutorState) -> str:
+def route_after_academic_retrieval(state: LearningState) -> str:
     """Route retrieval fan-in to answer generation or resource chains."""
     resource_type = state.get("requested_resource_type")
     if resource_type == "mindmap":
@@ -269,7 +269,7 @@ def route_after_academic_retrieval(state: TutorState) -> str:
     return "answer"
 
 
-def route_after_query_rewrite(state: TutorState) -> str:
+def route_after_query_rewrite(state: LearningState) -> str:
     """Route shared query rewrite output to planning or academic flow."""
     return "planning" if state.get("intent") == "planning" else "academic"
 

@@ -21,7 +21,7 @@ flowchart TD
         SSE["generate_sse()\nastream_events v2"]
     end
 
-    subgraph Graph["LangGraph StateGraph — TutorState"]
+    subgraph Graph["LangGraph StateGraph — LearningState"]
         Supervisor["supervisor\nQwen2.5-7B\nSiliconFlow\ntemperature=0.0"]
         subgraph Academic["Academic Branch"]
             AR["academic_router"]
@@ -119,7 +119,7 @@ flowchart TD
     style fan_out fill:#f0f4f0,stroke:#7a9e7e
 ```
 
-**`TutorState` 关键字段与写入方归属：**
+**`LearningState` 关键字段与写入方归属：**
 
 | 字段 | 写入方 | 消费方 |
 |------|--------|--------|

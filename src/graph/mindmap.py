@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
     get_llm_output_mode,
@@ -92,7 +92,7 @@ else:
     MindmapNode.update_forward_refs()
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
             return str(msg.content)
@@ -105,7 +105,7 @@ def _model_to_dict(model: BaseModel) -> dict:
     return model.dict()
 
 
-def _format_keypoints(state: TutorState) -> str:
+def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
     return "、".join(keypoints) if keypoints else "未提取到明确关键词"
 
@@ -258,7 +258,7 @@ def _local_review_failure(tree: dict[str, Any], query: str) -> str:
 
 
 @traced_node
-async def mindmap_planner(state: TutorState) -> dict:
+async def mindmap_planner(state: LearningState) -> dict:
     """Build a concrete knowledge-structure blueprint from retrieved evidence."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -346,7 +346,7 @@ async def mindmap_planner(state: TutorState) -> dict:
 
 
 @traced_node
-async def mindmap_agent(state: TutorState) -> dict:
+async def mindmap_agent(state: LearningState) -> dict:
     """Convert the planned outline into a unified JSON Tree draft."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -409,7 +409,7 @@ async def mindmap_agent(state: TutorState) -> dict:
 
 
 @traced_node
-async def mindmap_reviewer(state: TutorState) -> dict:
+async def mindmap_reviewer(state: LearningState) -> dict:
     """Review the JSON Tree for A3-style academic resource quality."""
     query = _last_human_query(state)
     tree = state.get("mindmap_tree") or {}
@@ -471,7 +471,7 @@ async def mindmap_reviewer(state: TutorState) -> dict:
 
 
 @traced_node
-async def mindmap_rewrite(state: TutorState) -> dict:
+async def mindmap_rewrite(state: LearningState) -> dict:
     """Prepare reviewer feedback for the next JSON Tree generation attempt."""
     reason = state.get("mindmap_review_reason", "")
     outline = state.get("mindmap_outline", "")
@@ -487,7 +487,7 @@ async def mindmap_rewrite(state: TutorState) -> dict:
 
 
 @traced_node
-async def mindmap_output(state: TutorState) -> dict:
+async def mindmap_output(state: LearningState) -> dict:
     """Export final mindmap artifacts and emit the user-facing AI message."""
     tree = state.get("mindmap_tree") or {}
     if not tree:
@@ -526,7 +526,7 @@ async def mindmap_output(state: TutorState) -> dict:
     }
 
 
-def should_rewrite_mindmap(state: TutorState) -> str:
+def should_rewrite_mindmap(state: LearningState) -> str:
     """Route reviewer output to rewrite or final export."""
     if state.get("mindmap_review_verdict") != "reject":
         return "output"

@@ -1,18 +1,18 @@
-"""Unit tests for TutorState definition."""
+"""Unit tests for LearningState definition."""
 
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 
 
-class TestTutorState:
+class TestLearningState:
 
     def test_state_has_required_keys(self):
-        annotations = TutorState.__annotations__
+        annotations = LearningState.__annotations__
         required = ["messages", "intent", "subject", "keypoints", "context", "plan"]
         for key in required:
-            assert key in annotations, f"TutorState missing key: {key}"
+            assert key in annotations, f"LearningState missing key: {key}"
 
     def test_state_instantiation(self):
-        state: TutorState = {
+        state: LearningState = {
             "messages": [],
             "intent": "academic",
             "subject": "math",
@@ -25,7 +25,7 @@ class TestTutorState:
 
     def test_state_accepts_all_intents(self):
         for intent in ("academic", "planning", "emotional"):
-            state: TutorState = {
+            state: LearningState = {
                 "messages": [],
                 "intent": intent,
                 "subject": "",

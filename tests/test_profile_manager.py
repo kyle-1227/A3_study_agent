@@ -729,16 +729,16 @@ class TestProfileManagerIntegration:
 
 
 # ===========================================================================
-# TestAgentStateIntegration — profile in TutorState
+# TestAgentStateIntegration — profile in LearningState
 # ===========================================================================
 
 class TestAgentStateIntegration:
 
-    def test_tutor_state_has_user_id_field(self):
-        """TutorState should include fields needed for profile integration."""
-        from src.graph.state import TutorState
+    def test_learning_state_has_user_id_field(self):
+        """LearningState should include fields needed for profile integration."""
+        from src.graph.state import LearningState
 
-        annotations = TutorState.__annotations__
+        annotations = LearningState.__annotations__
         # These are the fields the profile system needs (or can co-exist with)
         assert "messages" in annotations
         assert "intent" in annotations
@@ -748,7 +748,7 @@ class TestAgentStateIntegration:
 
     def test_profile_context_can_be_injected_into_state(self):
         """Simulate how profile_context flows through the graph."""
-        from src.graph.state import TutorState
+        from src.graph.state import LearningState
 
         profile = UserProfile(user_id="test_user")
         profile.skills["math"] = SkillEntry(level=0.6, confidence=0.8, evidence_count=4)
@@ -758,7 +758,7 @@ class TestAgentStateIntegration:
         ctx = profile_to_summary(profile)
 
         # Simulate state enrichment in the graph
-        state: TutorState = {
+        state: LearningState = {
             "messages": [],
             "intent": "academic",
             "subject": "math",
