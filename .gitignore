@@ -11,6 +11,12 @@ __pycache__/
 venv/
 env/
 
+# data
+data/
+
+# artifacts
+artifacts/
+
 # Jetbrains IDE
 .idea/
 
