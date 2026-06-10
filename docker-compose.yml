@@ -3,14 +3,14 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: a3_study_agent
-      POSTGRES_USER: tutor
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tutor_dev}
+      POSTGRES_USER: a3_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-a3_study_dev}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tutor -d a3_study_agent"]
+      test: ["CMD-SHELL", "pg_isready -U a3_user -d a3_study_agent"]
       interval: 5s
       retries: 5
 
@@ -25,8 +25,7 @@ services:
       - "3000:3000"
     env_file: .env
     environment:
-      - DB_URI=postgresql://tutor:${POSTGRES_PASSWORD:-tutor_dev}@postgres:5432/a3_study_agent
-    depends_on:
+      - DB_URI=postgresql://a3_user:${POSTGRES_PASSWORD:-a3_study_dev}@postgres:5432/a3_study_agent
       postgres:
         condition: service_healthy
     volumes:

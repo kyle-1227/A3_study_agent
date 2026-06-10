@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import  LearningState
 from src.observability.a3_trace import emit_a3_trace
 from src.tools.document_tool import create_markdown_artifact
 from src.tracing import traced_llm_call, traced_node
@@ -46,14 +46,14 @@ class ReviewDocReviewVerdict(BaseModel):
     reason: str
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
             return str(msg.content)
     return ""
 
 
-def _format_keypoints(state: TutorState) -> str:
+def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
     return "、".join(keypoints) if keypoints else "未提取到明确关键词"
 
