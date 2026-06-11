@@ -24,6 +24,7 @@ interface LeftSidebarProps {
   chatHistory: ChatHistoryItem[]
   onNewChat: () => void
   onSelectChat: (id: string) => void
+  onClearChatHistory?: () => void
   selectedChatId?: string
 }
 
@@ -44,7 +45,7 @@ export function saveVolunteerHistory(items: VolunteerHistoryItem[]) {
   localStorage.setItem(VOLUNTEER_STORAGE_KEY, JSON.stringify(items))
 }
 
-export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChatId }: LeftSidebarProps) {
+export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, onClearChatHistory, selectedChatId }: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
   const router = useRouter()
@@ -230,8 +231,16 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
 
           {/* Chat History */}
           <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 pb-2">
+            <div className="px-4 pb-2 flex items-center justify-between">
               <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">对话</span>
+              {chatHistory.length > 0 && onClearChatHistory ? (
+                <button
+                  onClick={onClearChatHistory}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  清空
+                </button>
+              ) : null}
             </div>
             <ScrollArea className="flex-1 px-2">
               <div className="flex flex-col gap-1 pb-4">

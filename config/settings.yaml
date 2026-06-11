@@ -151,6 +151,14 @@ llm:
     structured_output: true
     strict_schema: true
     include_raw: true
+  emotional:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.2
+    max_tokens: 800
+    streaming: false
 
 llm_outputs:
   default:

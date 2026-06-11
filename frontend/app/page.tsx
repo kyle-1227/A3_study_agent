@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { LeftSidebar } from "@/components/left-sidebar"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
@@ -13,7 +13,87 @@ import { PlanReview } from "@/components/plan-review"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-const initialChatHistory: any[] = []
+const A3_CHAT_HISTORY_KEY = "a3_chat_history"
+const A3_CURRENT_CHAT_ID_KEY = "a3_current_chat_id"
+const A3_CURRENT_THREAD_ID_KEY = "a3_current_thread_id"
+const A3_MESSAGES_KEY_PREFIX = "a3_messages:"
+
+type ChatHistoryItem = {
+  id: string
+  threadId: string
+  title: string
+  updatedAt?: number
+}
+
+const initialChatHistory: ChatHistoryItem[] = []
+
+function isBrowser(): boolean {
+  return typeof window !== "undefined"
+}
+
+function readJSON<T>(key: string, fallback: T): T {
+  if (!isBrowser()) return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeJSON(key: string, value: unknown) {
+  if (!isBrowser()) return
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Ignore storage quota / serialization issues; chat should keep working in memory.
+  }
+}
+
+function removeStorageItem(key: string) {
+  if (!isBrowser()) return
+  localStorage.removeItem(key)
+}
+
+function messageStorageKey(threadId: string): string {
+  return `${A3_MESSAGES_KEY_PREFIX}${threadId}`
+}
+
+function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item: any) => {
+      const threadId = typeof item?.threadId === "string" ? item.threadId : typeof item?.id === "string" ? item.id : ""
+      const title = typeof item?.title === "string" && item.title.trim() ? item.title : "New chat"
+      return threadId
+        ? {
+            id: threadId,
+            threadId,
+            title,
+            updatedAt: typeof item?.updatedAt === "number" ? item.updatedAt : undefined,
+          }
+        : null
+    })
+    .filter(Boolean) as ChatHistoryItem[]
+}
+
+function normalizeMessages(raw: unknown): Message[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((item: any) => {
+    return (
+      item &&
+      typeof item.id === "string" &&
+      (item.role === "user" || item.role === "assistant") &&
+      typeof item.content === "string"
+    )
+  }) as Message[]
+}
+
+function makeChatTitle(content: string): string {
+  const compact = content.trim().replace(/\s+/g, " ")
+  if (!compact) return "New chat"
+  return compact.slice(0, 30) + (compact.length > 30 ? "..." : "")
+}
 
 function timestamp(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
@@ -208,7 +288,9 @@ function findLastRunningStepIndex(steps: ResourceGenerationStep[], node: string)
 export default function Home() {
   const [chatHistory, setChatHistory] = useState(initialChatHistory)
   const [selectedChatId, setSelectedChatId] = useState<string | undefined>()
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [storageReady, setStorageReady] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([
     { type: "info", message: "[INFO] System initialized.", ts: timestamp() },
@@ -222,6 +304,59 @@ export default function Home() {
   const [isResuming, setIsResuming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const assistantMessageIdRef = useRef<string>("")
+  const pendingChatTitleRef = useRef<string>("")
+
+  const setActiveThreadId = useCallback((threadId: string | null) => {
+    threadIdRef.current = threadId
+    setCurrentThreadId(threadId)
+    if (!threadId) {
+      removeStorageItem(A3_CURRENT_THREAD_ID_KEY)
+      return
+    }
+    if (isBrowser()) localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, threadId)
+  }, [])
+
+  useEffect(() => {
+    const storedHistory = normalizeChatHistory(readJSON<unknown>(A3_CHAT_HISTORY_KEY, []))
+    const storedThreadId = isBrowser() ? localStorage.getItem(A3_CURRENT_THREAD_ID_KEY) : null
+    const storedChatId = isBrowser() ? localStorage.getItem(A3_CURRENT_CHAT_ID_KEY) : null
+    const activeThreadId = storedThreadId || storedChatId || storedHistory[0]?.threadId || null
+
+    setChatHistory(storedHistory)
+    setSelectedChatId(activeThreadId ?? undefined)
+    threadIdRef.current = activeThreadId
+    setCurrentThreadId(activeThreadId)
+    setMessages(activeThreadId ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), [])) : [])
+    setStorageReady(true)
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (chatHistory.length > 0) {
+      writeJSON(A3_CHAT_HISTORY_KEY, chatHistory)
+    } else {
+      removeStorageItem(A3_CHAT_HISTORY_KEY)
+    }
+  }, [chatHistory, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (selectedChatId) {
+      localStorage.setItem(A3_CURRENT_CHAT_ID_KEY, selectedChatId)
+    } else {
+      removeStorageItem(A3_CURRENT_CHAT_ID_KEY)
+    }
+  }, [selectedChatId, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (currentThreadId) {
+      localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, currentThreadId)
+      writeJSON(messageStorageKey(currentThreadId), messages)
+    } else {
+      removeStorageItem(A3_CURRENT_THREAD_ID_KEY)
+    }
+  }, [currentThreadId, messages, storageReady])
 
   const updateAssistantResourceStatus = useCallback((
     messageId: string,
@@ -246,27 +381,67 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
-  }, [])
+    setActiveThreadId(null)
+    pendingChatTitleRef.current = ""
+  }, [setActiveThreadId])
 
   const handleSelectChat = useCallback((id: string) => {
-    setSelectedChatId(id)
-    setMessages([])
+    const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
+    const threadId = chat?.threadId || id
+    setSelectedChatId(threadId)
+    setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
     setNodeEvents([])
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
-  }, [])
+    setActiveThreadId(threadId)
+    setLogs((prev) => [
+      ...prev,
+      { type: "info", message: `[INFO] Restored chat thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
+    ])
+  }, [chatHistory, setActiveThreadId])
+
+  const handleClearChatHistory = useCallback(() => {
+    if (isBrowser()) {
+      localStorage.removeItem(A3_CHAT_HISTORY_KEY)
+      localStorage.removeItem(A3_CURRENT_CHAT_ID_KEY)
+      localStorage.removeItem(A3_CURRENT_THREAD_ID_KEY)
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith(A3_MESSAGES_KEY_PREFIX))
+        .forEach((key) => localStorage.removeItem(key))
+    }
+    setChatHistory([])
+    setSelectedChatId(undefined)
+    setMessages([])
+    setNodeEvents([])
+    setTokenUsage({ input: 0, output: 0, total: 0 })
+    setIsInterrupted(false)
+    setInterruptDraft("")
+    setActiveThreadId(null)
+    pendingChatTitleRef.current = ""
+    setLogs([{ type: "info", message: "[INFO] Chat history cleared.", ts: timestamp() }])
+  }, [setActiveThreadId])
 
   /** Process a single SSE data payload — shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
 
     if (data.type === "thread_id") {
-      threadIdRef.current = data.thread_id
+      const threadId = data.thread_id
+      setActiveThreadId(threadId)
+      setSelectedChatId(threadId)
+      setChatHistory((prev) => {
+        const existing = prev.find((item) => item.id === threadId || item.threadId === threadId)
+        const nextItem: ChatHistoryItem = {
+          id: threadId,
+          threadId,
+          title: existing?.title || makeChatTitle(pendingChatTitleRef.current),
+          updatedAt: Date.now(),
+        }
+        return [nextItem, ...prev.filter((item) => item.id !== threadId && item.threadId !== threadId)]
+      })
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: `[INFO] Thread: ${data.thread_id.slice(0, 8)}...`, ts: timestamp() },
+        { type: "info", message: `[INFO] Thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
       ])
       return
     }
@@ -274,7 +449,7 @@ export default function Home() {
     if (data.type === "interrupt") {
       setInterruptDraft(data.draft)
       setIsInterrupted(true)
-      if (data.thread_id) threadIdRef.current = data.thread_id
+      if (data.thread_id) setActiveThreadId(data.thread_id)
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "waiting_review",
@@ -529,7 +704,7 @@ export default function Home() {
         { type: "usage", message: `[USAGE] ${data.node}: ${data.input_tokens} in / ${data.output_tokens} out`, ts: now },
       ])
     }
-  }, [updateAssistantResourceStatus])
+  }, [setActiveThreadId, updateAssistantResourceStatus])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
@@ -594,22 +769,24 @@ export default function Home() {
   }, [])
 
   const handleSendMessage = useCallback(async (content: string) => {
+    const threadId = threadIdRef.current
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
       content,
     }
 
+    pendingChatTitleRef.current = content
     setMessages((prev) => [...prev, userMessage])
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
     setLogs((prev) => [
       ...prev,
       { type: "info" as const, message: `[INFO] User query: ${content.slice(0, 60)}`, ts: timestamp() },
     ])
+    console.debug("[A3_CHAT] sending", { threadId, selectedChatId, messageCount: messages.length + 1 })
 
     setIsLoading(true)
 
@@ -617,7 +794,7 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query: content }),
+        body: JSON.stringify({ query: content, thread_id: threadId }),
       })
 
       if (!body) return
@@ -643,17 +820,8 @@ export default function Home() {
       ])
     } finally {
       setIsLoading(false)
-
-      if (!selectedChatId) {
-        const newChat = {
-          id: Date.now().toString(),
-          title: content.slice(0, 30) + (content.length > 30 ? "..." : ""),
-        }
-        setChatHistory((prev) => [newChat, ...prev])
-        setSelectedChatId(newChat.id)
-      }
     }
-  }, [selectedChatId, fetchWithErrorHandling, consumeSSEStream])
+  }, [selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream])
 
   const handleResume = useCallback(async (editedPlan: string) => {
     const threadId = threadIdRef.current
@@ -760,6 +928,7 @@ export default function Home() {
         chatHistory={chatHistory}
         onNewChat={handleNewChat}
         onSelectChat={handleSelectChat}
+        onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
       />
       <div className="flex-1 flex flex-col h-full">
