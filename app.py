@@ -145,6 +145,7 @@ GRAPH_NODES = {
     "search_query_rewriter",
     "rag_retrieve",
     "web_search",
+    "evidence_judge",
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",
@@ -260,6 +261,7 @@ async def _stream_graph_events(
     token streaming, usage, and interrupt events.
     """
     node_start_times: dict[str, float] = {}
+    active_nodes: list[str] = []
 
     try:
         async for event in graph.astream_events(input_data, config=config, version="v2"):
@@ -274,6 +276,8 @@ async def _stream_graph_events(
                 if node_name and node_name == meta_node and node_name in GRAPH_NODES:
                     if event_type == "on_chain_start":
                         node_start_times[node_name] = time.monotonic()
+                        if node_name not in active_nodes:
+                            active_nodes.append(node_name)
                         payload = json.dumps(
                             {"type": "node_event", "status": "start", "node": node_name},
                             ensure_ascii=False,
@@ -281,6 +285,8 @@ async def _stream_graph_events(
                     else:
                         duration_ms = None
                         start_t = node_start_times.pop(node_name, None)
+                        if node_name in active_nodes:
+                            active_nodes.remove(node_name)
                         if start_t is not None:
                             duration_ms = round((time.monotonic() - start_t) * 1000)
 
@@ -376,8 +382,24 @@ async def _stream_graph_events(
                     yield f"data: {payload}\n\n"
     except Exception as e:
         logger.exception("Unhandled error in graph streaming")
+        failed_node = active_nodes[-1] if active_nodes else None
+        if failed_node:
+            start_t = node_start_times.get(failed_node)
+            duration_ms = round((time.monotonic() - start_t) * 1000) if start_t is not None else None
+            node_payload = json.dumps(
+                {
+                    "type": "node_event",
+                    "status": "end",
+                    "node": failed_node,
+                    "duration_ms": duration_ms,
+                    "error": str(e),
+                    "synthetic": True,
+                },
+                ensure_ascii=False,
+            )
+            yield f"data: {node_payload}\n\n"
         error_payload = json.dumps(
-            {"type": "error", "message": str(e)},
+            {"type": "error", "message": str(e), "failed_node": failed_node, "active_nodes": active_nodes},
             ensure_ascii=False,
         )
         yield f"data: {error_payload}\n\n"

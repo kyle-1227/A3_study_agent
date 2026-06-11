@@ -322,6 +322,7 @@ class TestSSEAllGraphNodes:
         "search_query_rewriter",
         "rag_retrieve",
         "web_search",
+        "evidence_judge",
         "generate_answer",
         "evaluate_hallucination",
         "rewrite_query",
@@ -345,6 +346,11 @@ class TestSSEAllGraphNodes:
         "exercise_reviewer",
         "exercise_rewrite",
         "exercise_output",
+        "review_doc_planner",
+        "review_doc_agent",
+        "review_doc_reviewer",
+        "review_doc_rewrite",
+        "review_doc_output",
         "emotional_response",
         "handle_unknown",
     ]
@@ -463,6 +469,43 @@ class TestSSEErrorCapture:
 
         payloads = _parse_payloads(collected)
         assert payloads[1]["error"] == "TimeoutError: request timed out"
+
+    @pytest.mark.anyio
+    async def test_exception_emits_synthetic_error_for_active_node(self):
+        """If streaming fails mid-node, emit a synthetic node error before global error."""
+        from app import generate_sse
+
+        class RaisingIterator:
+            def __init__(self):
+                self._started = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._started:
+                    self._started = True
+                    return _node_start("evidence_judge")
+                raise RuntimeError("Evidence Judge timed out")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=RaisingIterator())
+        mock_graph.aget_state = AsyncMock(return_value=SimpleNamespace(next=(), tasks=[]))
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        payloads = _parse_payloads(collected)
+        assert payloads[0] == {"type": "node_event", "status": "start", "node": "evidence_judge"}
+        assert payloads[1]["type"] == "node_event"
+        assert payloads[1]["status"] == "end"
+        assert payloads[1]["node"] == "evidence_judge"
+        assert payloads[1]["synthetic"] is True
+        assert "Evidence Judge timed out" in payloads[1]["error"]
+        assert payloads[2]["type"] == "error"
+        assert payloads[2]["failed_node"] == "evidence_judge"
+        assert "evidence_judge" in payloads[2]["active_nodes"]
 
 
 # ---------------------------------------------------------------------------

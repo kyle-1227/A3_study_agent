@@ -1,8 +1,8 @@
 """Unit tests for parallel retrieval (fan-out / fan-in) pattern.
 
 Tests cover: operator.add context reducer, academic_router pass-through,
-rag_retrieve + web_search writing context with type tags,
-generate_answer reading merged context, and graph fan-out structure.
+rag_retrieve + web_search writing evidence candidates,
+generate_answer reading judged context, and graph fan-out/barrier structure.
 All tests mock external dependencies -- no real API calls required.
 """
 
@@ -103,11 +103,11 @@ class TestAcademicRouterNode:
 
 
 # ===========================================================================
-# TestRagRetrieveParallelOutput -- writes context with type="rag"
+# TestRagRetrieveParallelOutput -- writes local evidence candidates
 # ===========================================================================
 
 class TestRagRetrieveParallelOutput:
-    """rag_retrieve returns context entries tagged type='rag'."""
+    """rag_retrieve returns local evidence only; context is written by evidence_judge."""
 
     @patch("src.graph.academic.retrieve")
     async def test_returns_context_with_rag_type(self, mock_retrieve):
@@ -122,11 +122,12 @@ class TestRagRetrieveParallelOutput:
         }
         result = await rag_retrieve(state)
 
-        assert "context" in result
-        assert len(result["context"]) == 1
-        assert result["context"][0]["type"] == "rag"
-        assert result["context"][0]["content"] == "判别式"
-        assert result["context"][0]["source"] == "math.pdf"
+        assert "context" not in result
+        assert len(result["local_evidence_candidates"]) == 1
+        candidate = result["local_evidence_candidates"][0]
+        assert candidate["source_type"] == "local_rag"
+        assert candidate["content_preview"] == "判别式"
+        assert result["local_evidence_originals"][candidate["evidence_id"]]["source"] == "math.pdf"
 
     @patch("src.graph.academic.retrieve")
     async def test_empty_retrieval_returns_empty_context(self, mock_retrieve):
@@ -139,7 +140,9 @@ class TestRagRetrieveParallelOutput:
         }
         result = await rag_retrieve(state)
 
-        assert result["context"] == []
+        assert result["local_evidence_candidates"] == []
+        assert result["local_evidence_originals"] == {}
+        assert "context" not in result
 
     @patch("src.graph.academic.retrieve")
     async def test_uses_last_human_message_when_no_keypoints(self, mock_retrieve):
@@ -156,15 +159,15 @@ class TestRagRetrieveParallelOutput:
         }
         await rag_retrieve(state)
 
-        mock_retrieve.assert_called_once_with(query="original question", subject="math")
+        mock_retrieve.assert_called_once_with(query="original question", subject="math", top_k=3)
 
 
 # ===========================================================================
-# TestWebSearchParallelOutput -- writes context with type="web"
+# TestWebSearchParallelOutput -- writes web evidence candidates
 # ===========================================================================
 
 class TestWebSearchParallelOutput:
-    """web_search returns context entries tagged type='web'."""
+    """web_search returns web evidence only; context is written by evidence_judge."""
 
     @patch("src.graph.academic.web_search_fn")
     async def test_returns_context_with_web_type(self, mock_search):
@@ -175,18 +178,21 @@ class TestWebSearchParallelOutput:
         state = {"messages": [HumanMessage(content="量子力学")]}
         result = await web_search(state)
 
-        assert "context" in result
-        assert len(result["context"]) == 1
-        assert result["context"][0]["type"] == "web"
-        assert result["context"][0]["content"] == "result"
-        assert result["context"][0]["title"] == "Title"
+        assert "context" not in result
+        assert len(result["web_evidence_candidates"]) == 1
+        candidate = result["web_evidence_candidates"][0]
+        assert candidate["source_type"] == "web"
+        assert candidate["content_preview"] == "result"
+        assert result["web_evidence_originals"][candidate["evidence_id"]]["title"] == "Title"
 
     @patch("src.graph.academic.web_search_fn", side_effect=Exception("network"))
     async def test_returns_empty_context_on_exception(self, mock_search):
         state = {"messages": [HumanMessage(content="test")]}
         result = await web_search(state)
 
-        assert result["context"] == []
+        assert result["web_evidence_candidates"] == []
+        assert result["web_evidence_originals"] == {}
+        assert "context" not in result
 
     @patch("src.graph.academic.web_search_fn")
     async def test_uses_last_human_message_for_query(self, mock_search):
@@ -201,7 +207,8 @@ class TestWebSearchParallelOutput:
         }
         await web_search(state)
 
-        mock_search.assert_called_once_with("the real question")
+        mock_search.assert_called_once()
+        assert mock_search.call_args.args[0] == "the real question"
 
 
 # ===========================================================================

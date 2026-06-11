@@ -2088,6 +2088,15 @@ async def _judge_evidence_candidates_with_llm(
             "coverage_gap_count": 0,
             "coverage_gaps": [],
             "raw_preview": "",
+            "raw_output_chars": 0,
+            "output_mode": str(_evidence_judge_output_setting("output_mode", "native_json_schema_pydantic") or "native_json_schema_pydantic"),
+            "fallback_modes": [],
+            "fallback_used": False,
+            "default_used": False,
+            "retry_count": 0,
+            "failure_phase": "",
+            "error_type": "",
+            "provider_error_body": "",
             "parsing_error": None,
             "validation_error": None,
         }
@@ -2149,6 +2158,12 @@ async def _judge_evidence_candidates_with_llm(
         "success": True,
         "output_mode": structured_result.output_mode,
         "fallback_modes": structured_result.fallback_modes,
+        "fallback_used": structured_result.fallback_used,
+        "default_used": structured_result.default_used,
+        "retry_count": structured_result.retry_count,
+        "failure_phase": "",
+        "error_type": "",
+        "provider_error_body": "",
         "overall_evidence_state": parsed.overall_evidence_state,
         "need_more_web_search": parsed.need_more_web_search,
         "input_candidate_count": len(candidates),
@@ -2158,6 +2173,7 @@ async def _judge_evidence_candidates_with_llm(
         "coverage_gap_count": len(parsed.coverage_gaps),
         "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
         "raw_preview": structured_result.raw_output[:4000],
+        "raw_output_chars": len(structured_result.raw_output or ""),
         "parsing_error": None,
         "validation_error": None,
         "structured_output_method": structured_result.output_mode,
@@ -2792,24 +2808,8 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
     original_user_query = _last_human_query(state)
     per_subject_top_k = int(_retrieval_setting("local_rag.per_subject_top_k", get_setting("rag.multi_subject_per_subject_top_k", 3)))
     local_enabled = bool(_retrieval_setting("local_rag.enabled", True))
-    web_enabled = bool(_retrieval_setting("web.enabled", True))
-    all_candidates: list[EvidenceCandidate] = []
+    local_candidates_all: list[EvidenceCandidate] = []
     originals: dict[str, dict] = {}
-    web_candidate_count_raw = 0
-
-    # TEMP A3_TRACE: remove after multi-source evidence validation.
-    emit_a3_trace(
-        logger,
-        "coverage_decision",
-        {
-            "skipped": True,
-            "skip_reason": "dual_source_evidence_mode_uses_evidence_judge",
-            "branch_mode": branch_debug.get("mode", ""),
-            "branch_count": len(branches),
-        },
-        state=state,
-        env_flag="LOG_RETRIEVAL_PLAN",
-    )
 
     with traced_retrieval(
         query=original_user_query,
@@ -2863,7 +2863,7 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                     branch_status_score_source=branch_eval["branch_status_score_source"],
                 )
                 for candidate, original in zip(local_candidates, local_docs):
-                    all_candidates.append(candidate)
+                    local_candidates_all.append(candidate)
                     originals[candidate.evidence_id] = original
                 emit_a3_trace(
                     logger,
@@ -2892,51 +2892,161 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                     env_flag="LOG_RAG_RESULT",
                 )
 
-            if web_enabled:
-                web_query, query_source = _dual_source_web_query(state, branch)
-                web_results, diagnostics = await _run_dual_source_first_round_web(
-                    state=state,
-                    branch=branch,
-                    query=web_query,
-                    original_user_query=original_user_query,
-                )
-                web_candidate_count_raw += len(web_results)
-                emit_a3_trace(
-                    logger,
-                    "dual_source_web_search",
-                    {
-                        "branch_mode": "dual_source_evidence",
-                        "subject": subject,
-                        "role": role,
-                        "query_source": query_source,
-                        "query": web_query,
-                        "provider": diagnostics.get("provider", "tavily"),
-                        "ok": diagnostics.get("ok", False),
-                        "result_count": diagnostics.get("result_count", len(web_results)),
-                        "used_result_count": len(web_results),
-                        "status_code": diagnostics.get("status_code"),
-                        "elapsed_ms": diagnostics.get("elapsed_ms"),
-                        "error_type": diagnostics.get("error_type", ""),
-                        "error_message": diagnostics.get("error_message", ""),
-                        "search_result_judge_disabled_by_dual_source": True,
-                    },
-                    state=state,
-                    env_flag="LOG_WEB_SEARCH_RESULT",
-                )
-                web_candidates = _build_web_evidence_candidates(
-                    tavily_results=web_results,
-                    subject=subject,
-                    role=role,
-                    purpose=str(branch.get("purpose") or "first_round_dual_source"),
-                    query=web_query,
-                    attempt_index=branch_index,
-                )
-                for candidate, original in zip(web_candidates, web_results):
-                    all_candidates.append(candidate)
-                    originals[candidate.evidence_id] = original
+    candidates = _cap_evidence_candidates(local_candidates_all)
+    emit_a3_trace(
+        logger,
+        "local_evidence_candidate_build",
+        {
+            "branch_mode": "dual_source_evidence",
+            "local_candidate_count": len(candidates),
+            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "candidate_preview": [
+                {
+                    "evidence_id": candidate.evidence_id,
+                    "source_type": candidate.source_type,
+                    "subject": candidate.subject,
+                    "rerank_score": candidate.rerank_score,
+                    "tavily_score": candidate.tavily_score,
+                    "source": candidate.source,
+                    "url": candidate.url,
+                }
+                for candidate in candidates[:10]
+            ],
+        },
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
 
-    candidates = _cap_evidence_candidates(all_candidates)
-    originals = {candidate.evidence_id: originals[candidate.evidence_id] for candidate in candidates if candidate.evidence_id in originals}
+    return {
+        "local_evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "local_evidence_originals": {
+            candidate.evidence_id: originals[candidate.evidence_id]
+            for candidate in candidates
+            if candidate.evidence_id in originals
+        },
+        "retrieval_branch_mode": branch_debug.get("mode", ""),
+    }
+
+
+async def _web_search_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+    original_user_query = _last_human_query(state)
+    web_enabled = bool(_retrieval_setting("web.enabled", True))
+    web_candidates_all: list[EvidenceCandidate] = []
+    originals: dict[str, dict] = {}
+
+    if not web_enabled:
+        emit_a3_trace(
+            logger,
+            "web_search",
+            {
+                "branch_mode": "dual_source_evidence",
+                "skipped": True,
+                "skip_reason": "retrieval_web_disabled",
+                "provider": "tavily",
+                "result_count": 0,
+                "used_result_count": 0,
+            },
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+        return {
+            "web_evidence_candidates": [],
+            "web_evidence_originals": {},
+        }
+
+    for branch_index, branch in enumerate(branches):
+        subject = str(branch.get("subject") or "")
+        role = str(branch.get("role") or "supporting_context")
+        web_query, query_source = _dual_source_web_query(state, branch)
+        web_results, diagnostics = await _run_dual_source_first_round_web(
+            state=state,
+            branch=branch,
+            query=web_query,
+            original_user_query=original_user_query,
+        )
+        emit_a3_trace(
+            logger,
+            "web_search",
+            {
+                "branch_mode": "dual_source_evidence",
+                "subject": subject,
+                "role": role,
+                "query_source": query_source,
+                "query": web_query,
+                "provider": diagnostics.get("provider", "tavily"),
+                "ok": diagnostics.get("ok", False),
+                "result_count": diagnostics.get("result_count", len(web_results)),
+                "used_result_count": len(web_results),
+                "status_code": diagnostics.get("status_code"),
+                "elapsed_ms": diagnostics.get("elapsed_ms"),
+                "error_type": diagnostics.get("error_type", ""),
+                "error_message": diagnostics.get("error_message", ""),
+                "search_result_judge_disabled_by_dual_source": True,
+            },
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+        web_candidates = _build_web_evidence_candidates(
+            tavily_results=web_results,
+            subject=subject,
+            role=role,
+            purpose=str(branch.get("purpose") or "first_round_dual_source"),
+            query=web_query,
+            attempt_index=branch_index,
+        )
+        for candidate, original in zip(web_candidates, web_results):
+            web_candidates_all.append(candidate)
+            originals[candidate.evidence_id] = original
+
+    candidates = _cap_evidence_candidates(web_candidates_all)
+    emit_a3_trace(
+        logger,
+        "web_evidence_candidate_build",
+        {
+            "branch_mode": "dual_source_evidence",
+            "web_candidate_count": len(candidates),
+            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "candidate_preview": [
+                {
+                    "evidence_id": candidate.evidence_id,
+                    "source_type": candidate.source_type,
+                    "subject": candidate.subject,
+                    "tavily_score": candidate.tavily_score,
+                    "source": candidate.source,
+                    "url": candidate.url,
+                }
+                for candidate in candidates[:10]
+            ],
+        },
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+    )
+    return {
+        "web_evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "web_evidence_originals": {
+            candidate.evidence_id: originals[candidate.evidence_id]
+            for candidate in candidates
+            if candidate.evidence_id in originals
+        },
+    }
+
+
+@traced_node
+async def evidence_judge(state: LearningState) -> dict:
+    """Barrier fan-in: judge local and web candidates, then assemble final context."""
+    original_user_query = _last_human_query(state)
+    local_candidate_dicts = state.get("local_evidence_candidates") or []
+    web_candidate_dicts = state.get("web_evidence_candidates") or []
+    candidates = [
+        EvidenceCandidate.model_validate(item)
+        for item in [*local_candidate_dicts, *web_candidate_dicts]
+    ]
+    candidates = _cap_evidence_candidates(candidates)
+    local_originals = dict(state.get("local_evidence_originals") or {})
+    web_originals = dict(state.get("web_evidence_originals") or {})
+    all_originals = {**local_originals, **web_originals}
+    originals = {candidate.evidence_id: all_originals.get(candidate.evidence_id, {}) for candidate in candidates}
+
     emit_a3_trace(
         logger,
         "evidence_candidate_build",
@@ -2974,60 +3084,16 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
             round_index=1,
         )
     except StructuredOutputError as exc:
-        if _fail_fast_evidence_judge():
-            raise RuntimeError(
-                f"Evidence Judge failed: {exc.result.failure_phase}. "
-                f"Fix the root cause before retrying."
-            ) from exc
-        parsed = None
-        judge_debug = exc.result.to_debug_payload()
+        raise RuntimeError(
+            f"Evidence Judge failed: {exc.result.failure_phase}. "
+            f"Fix the root cause before retrying."
+        ) from exc
 
     if parsed is None:
-        if _fail_fast_evidence_judge():
-            raise RuntimeError(
-                f"Evidence Judge returned no parsed result: "
-                f"{judge_debug.get('failure_phase', 'unknown')}"
-            )
-        emit_a3_trace(
-            logger,
-            "context_assembly",
-            {
-                "mode": "dual_source_evidence",
-                "final_doc_count": 0,
-                "evidence_judge_failed": True,
-                "degraded_generation": True,
-                "degraded_reason": "evidence_judge_failed",
-                "source_type_distribution": {},
-                "web_evidence_count": 0,
-                "web_supplement_count": 0,
-            },
-            state=state,
-            env_flag="LOG_CONTEXT_ASSEMBLY",
+        raise RuntimeError(
+            f"Evidence Judge returned no parsed result: "
+            f"{judge_debug.get('failure_phase', 'unknown')}"
         )
-        return {
-            "context": [],
-            "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
-            "evidence_judge_output": judge_debug,
-            "evidence_judge_rounds": 1,
-            "evidence_judge_state": "failed",
-            "evidence_coverage_gaps": [],
-            "search_refinement_needed": False,
-            "search_refinement_deferred": False,
-            "search_refinement_deferred_reason": "",
-            "proposed_followup_search_queries": [],
-            "search_optimization_reserved": True,
-            "search_optimization_status": "reserved_not_implemented",
-            "dual_source_mode": True,
-            "evidence_judge_failed": True,
-            "degraded_generation": True,
-            "degraded_reason": "evidence_judge_failed",
-            "web_supplement_provider": "tavily",
-            "web_supplement_results": [],
-            "web_supplement_failed": bool(web_candidate_count_raw),
-            "web_supplement_failure_reason": "evidence_judge_failed",
-            "web_judge_provider": _evidence_judge_provider(),
-            "web_judge_model": _evidence_judge_model(),
-        }
 
     context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
     followups = _followups_from_coverage_gaps(parsed)
@@ -3053,7 +3119,7 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
     web_context_docs = _web_evidence_items(context_docs)
     local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
     web_evidence_count = len(web_context_docs)
-    web_failed = bool(web_enabled and web_candidate_count_raw and not web_context_docs)
+    web_failed = bool(web_candidate_dicts and not web_context_docs)
     emit_a3_trace(
         logger,
         "context_assembly",
@@ -3647,6 +3713,10 @@ async def web_search(state: LearningState) -> dict:
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
     retrieval_plan = state.get("retrieval_plan") or []
+    if _dual_source_enabled():
+        branches, branch_debug = _build_retrieval_branches(state)
+        return await _web_search_dual_source(state, branches, branch_debug)
+
     if (
         _web_conditional_enabled()
         and bool(_web_setting("skip_general_when_conditional", True))

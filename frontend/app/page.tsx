@@ -655,14 +655,38 @@ export default function Home() {
         if (status === "start") {
           return [...prev, { node, status: "running", ts: now }]
         }
-        return prev.map((e) =>
-          e.node === node && e.status === "running"
-            ? { ...e, status: "done", endTs: now, durationMs: data.duration_ms ?? undefined }
-            : e
-        )
+        const nextStatus: NodeEvent["status"] = data.error ? "error" : "done"
+        let updated = false
+        const nextEvents = prev.map((e) => {
+          if (e.node === node && e.status === "running") {
+            updated = true
+            return {
+              ...e,
+              status: nextStatus,
+              endTs: now,
+              durationMs: data.duration_ms ?? undefined,
+              error: data.error ?? undefined,
+              synthetic: Boolean(data.synthetic),
+            }
+          }
+          return e
+        })
+        if (updated) return nextEvents
+        return [
+          ...nextEvents,
+          {
+            node,
+            status: nextStatus,
+            ts: now,
+            endTs: now,
+            durationMs: data.duration_ms ?? undefined,
+            error: data.error ?? undefined,
+            synthetic: Boolean(data.synthetic),
+          },
+        ]
       })
 
-      const label = status === "start" ? "Entering" : "Leaving"
+      const label = status === "start" ? "Entering" : data.error ? "Failed" : "Leaving"
       setLogs((prev) => [
         ...prev,
         { type: "info", message: `[INFO] ${label} node: ${node}`, ts: now },

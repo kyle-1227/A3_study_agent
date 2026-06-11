@@ -84,6 +84,10 @@ class LearningState(TypedDict):
     web_judge_model: str                                                # Search Result Judge model
     web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
     web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
+    local_evidence_candidates: list[dict]                                # Local RAG EvidenceCandidate snapshots from rag_retrieve
+    web_evidence_candidates: list[dict]                                  # Web EvidenceCandidate snapshots from web_search
+    local_evidence_originals: dict                                       # Original local RAG docs keyed by evidence_id
+    web_evidence_originals: dict                                         # Original Tavily results keyed by evidence_id
     evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
     evidence_judge_output: dict                                          # Raw structured Evidence Judge output
     evidence_judge_rounds: int                                           # Evidence Judge rounds executed

@@ -6,6 +6,7 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
+    evidence_judge,
     evaluate_hallucination,
     generate_answer,
     rag_retrieve,
@@ -71,6 +72,7 @@ def build_graph() -> StateGraph:
     graph.add_node("search_query_rewriter", search_query_rewriter)
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
+    graph.add_node("evidence_judge", evidence_judge)
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
@@ -143,21 +145,13 @@ def build_graph() -> StateGraph:
     graph.add_edge("academic_router", "rag_retrieve")
     graph.add_edge("academic_router", "web_search")
 
-    # Fan-in: ordinary academic requests converge at answer generation;
-    # resource requests reuse retrieval first, then enter sibling resource chains.
+    # Barrier fan-in: Evidence Judge runs once after Local RAG and Tavily both finish.
+    graph.add_edge(["rag_retrieve", "web_search"], "evidence_judge")
+
+    # Fan-in routing: only judged context may enter answer/resource generation.
     graph.add_conditional_edges(
-        "rag_retrieve",
-        route_after_academic_retrieval,
-        {
-            "answer": "generate_answer",
-            "mindmap": "mindmap_planner",
-            "exercise": "exercise_planner",
-            "review_doc": "review_doc_planner",
-        },
-    )
-    graph.add_conditional_edges(
-        "web_search",
-        route_after_academic_retrieval,
+        "evidence_judge",
+        route_after_evidence_judge,
         {
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
@@ -257,8 +251,8 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def route_after_academic_retrieval(state: LearningState) -> str:
-    """Route retrieval fan-in to answer generation or resource chains."""
+def route_after_evidence_judge(state: LearningState) -> str:
+    """Route judged evidence to answer generation or resource chains."""
     resource_type = state.get("requested_resource_type")
     if resource_type == "mindmap":
         return "mindmap"
@@ -267,6 +261,10 @@ def route_after_academic_retrieval(state: LearningState) -> str:
     if resource_type == "review_doc":
         return "review_doc"
     return "answer"
+
+
+# Backward-compatible import alias for older tests/tools; do not attach this to retrieval nodes.
+route_after_academic_retrieval = route_after_evidence_judge
 
 
 def route_after_query_rewrite(state: LearningState) -> str:

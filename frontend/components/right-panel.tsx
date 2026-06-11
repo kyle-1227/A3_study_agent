@@ -28,10 +28,12 @@ export interface LogEntry {
 
 export interface NodeEvent {
   node: string
-  status: "running" | "done"
+  status: "running" | "done" | "error"
   ts: string
   endTs?: string
   durationMs?: number
+  error?: string
+  synthetic?: boolean
 }
 
 interface RightPanelProps {
@@ -47,8 +49,9 @@ const NODE_LABELS: Record<string, string> = {
   supervisor: "意图分类",
   academic_router: "学术路由",
   search_query_rewriter: "查询改写",
-  rag_retrieve: "RAG 检索",
-  web_search: "网络搜索",
+  rag_retrieve: "Local RAG",
+  web_search: "Tavily Web Search",
+  evidence_judge: "Evidence Judge",
   generate_answer: "回答生成",
   evaluate_hallucination: "幻觉评估",
   rewrite_query: "查询改写",
@@ -72,6 +75,11 @@ const NODE_LABELS: Record<string, string> = {
   exercise_reviewer: "题目审查",
   exercise_rewrite: "题目修订",
   exercise_output: "练习输出",
+  review_doc_planner: "复习文档规划",
+  review_doc_agent: "复习文档生成",
+  review_doc_reviewer: "复习文档审查",
+  review_doc_rewrite: "复习文档修订",
+  review_doc_output: "复习文档输出",
   emotional_response: "情绪支持",
   handle_unknown: "未知意图",
 }
@@ -336,6 +344,7 @@ const DAG_NODE_IDS = [
   "search_query_rewriter",
   "rag_retrieve",
   "web_search",
+  "evidence_judge",
   "gather_intel",
   "generate_answer",
   "drafter",
@@ -358,6 +367,11 @@ const DAG_NODE_IDS = [
   "exercise_reviewer",
   "exercise_rewrite",
   "exercise_output",
+  "review_doc_planner",
+  "review_doc_agent",
+  "review_doc_reviewer",
+  "review_doc_rewrite",
+  "review_doc_output",
 ]
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
@@ -371,22 +385,27 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   // Academic branch
   { from: "academic_router", to: "rag_retrieve" },
   { from: "academic_router", to: "web_search" },
-  { from: "rag_retrieve", to: "generate_answer" },
-  { from: "web_search", to: "generate_answer" },
-  { from: "rag_retrieve", to: "mindmap_planner" },
-  { from: "web_search", to: "mindmap_planner" },
+  { from: "rag_retrieve", to: "evidence_judge" },
+  { from: "web_search", to: "evidence_judge" },
+  { from: "evidence_judge", to: "generate_answer" },
+  { from: "evidence_judge", to: "mindmap_planner" },
+  { from: "evidence_judge", to: "exercise_planner" },
+  { from: "evidence_judge", to: "review_doc_planner" },
   { from: "mindmap_planner", to: "mindmap_agent" },
   { from: "mindmap_agent", to: "mindmap_reviewer" },
   { from: "mindmap_reviewer", to: "mindmap_output" },
   { from: "mindmap_reviewer", to: "mindmap_rewrite", retry: true },
   { from: "mindmap_rewrite", to: "mindmap_agent", retry: true },
-  { from: "rag_retrieve", to: "exercise_planner" },
-  { from: "web_search", to: "exercise_planner" },
   { from: "exercise_planner", to: "exercise_agent" },
   { from: "exercise_agent", to: "exercise_reviewer" },
   { from: "exercise_reviewer", to: "exercise_output" },
   { from: "exercise_reviewer", to: "exercise_rewrite", retry: true },
   { from: "exercise_rewrite", to: "exercise_agent", retry: true },
+  { from: "review_doc_planner", to: "review_doc_agent" },
+  { from: "review_doc_agent", to: "review_doc_reviewer" },
+  { from: "review_doc_reviewer", to: "review_doc_output" },
+  { from: "review_doc_reviewer", to: "review_doc_rewrite", retry: true },
+  { from: "review_doc_rewrite", to: "review_doc_agent", retry: true },
   { from: "generate_answer", to: "evaluate_hallucination" },
   { from: "evaluate_hallucination", to: "rewrite_query" },
   { from: "rewrite_query", to: "academic_router", retry: true },
@@ -409,9 +428,26 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
 
 const NODE_WIDTH = 90
 const NODE_HEIGHT = 36
+type DagNodeState = "idle" | "running" | "done" | "error"
+
+function traversedEdgeIds(nodeEvents: NodeEvent[]): Set<string> {
+  const seenNodes = new Set<string>()
+  const traversed = new Set<string>()
+  for (const event of nodeEvents) {
+    for (const edge of DAG_EDGE_DEFS) {
+      if (edge.to !== event.node) continue
+      if (edge.from === "academic_router" || seenNodes.has(edge.from)) {
+        traversed.add(`${edge.from}-${edge.to}`)
+      }
+    }
+    seenNodes.add(event.node)
+  }
+  return traversed
+}
 
 function buildLayoutedElements(
-  nodeStates: Map<string, { state: "idle" | "running" | "done"; durationMs?: number }>,
+  nodeStates: Map<string, { state: DagNodeState; durationMs?: number; error?: string }>,
+  traversedEdges: Set<string>,
 ): { nodes: RFNode[]; edges: RFEdge[] } {
   const g = new dagre.graphlib.Graph()
   g.setDefaultEdgeLabel(() => ({}))
@@ -440,10 +476,10 @@ function buildLayoutedElements(
   })
 
   const edges: RFEdge[] = DAG_EDGE_DEFS.map((edge) => {
-    const targetState = nodeStates.get(edge.to)?.state
-    const active = targetState === "running" || targetState === "done"
+    const edgeId = `${edge.from}-${edge.to}`
+    const active = traversedEdges.has(edgeId)
     return {
-      id: `${edge.from}-${edge.to}`,
+      id: edgeId,
       source: edge.from,
       target: edge.to,
       type: "smoothstep",
@@ -463,10 +499,11 @@ function buildLayoutedElements(
 }
 
 function DagNodeComponent({ data }: NodeProps) {
-  const { label, state, durationMs } = data as {
+  const { label, state, durationMs, error } = data as {
     label: string
-    state: "idle" | "running" | "done"
+    state: DagNodeState
     durationMs?: number
+    error?: string
   }
   return (
     <>
@@ -480,13 +517,18 @@ function DagNodeComponent({ data }: NodeProps) {
           state === "running" &&
             "border-[#E8A87C] bg-[#FFCC99] text-[#5C3D2E] font-semibold animate-pulse",
           state === "done" &&
-            "border-[#3D5A40] bg-[#3D5A40]/10 text-[#3D5A40]"
+            "border-[#3D5A40] bg-[#3D5A40]/10 text-[#3D5A40]",
+          state === "error" &&
+            "border-[#D97B6C] bg-[#D97B6C]/10 text-[#9F3A2F] font-semibold"
         )}
         style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
       >
         <span className="text-[9px] leading-tight truncate w-full">{label}</span>
         {state === "done" && durationMs != null && (
           <span className="text-[7px] opacity-60 leading-none">{durationMs}ms</span>
+        )}
+        {state === "error" && (
+          <span className="text-[7px] opacity-70 leading-none truncate w-full">{error || "error"}</span>
         )}
       </div>
       <Handle type="source" position={Position.Bottom} className="!w-1 !h-1 !min-w-0 !min-h-0 !bg-transparent !border-0" />
@@ -498,7 +540,7 @@ const rfNodeTypes = { dagNode: DagNodeComponent }
 
 function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
   const nodeStates = useMemo(() => {
-    const states = new Map<string, { state: "idle" | "running" | "done"; durationMs?: number }>()
+    const states = new Map<string, { state: DagNodeState; durationMs?: number; error?: string }>()
     for (const id of DAG_NODE_IDS) {
       let found: NodeEvent | undefined
       for (let i = nodeEvents.length - 1; i >= 0; i--) {
@@ -509,14 +551,15 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
       }
       if (!found) states.set(id, { state: "idle" })
       else if (found.status === "running") states.set(id, { state: "running" })
-      else states.set(id, { state: "done", durationMs: found.durationMs })
+      else states.set(id, { state: found.status, durationMs: found.durationMs, error: found.error })
     }
     return states
   }, [nodeEvents])
 
+  const traversedEdges = useMemo(() => traversedEdgeIds(nodeEvents), [nodeEvents])
   const { nodes, edges } = useMemo(
-    () => buildLayoutedElements(nodeStates),
-    [nodeStates],
+    () => buildLayoutedElements(nodeStates, traversedEdges),
+    [nodeStates, traversedEdges],
   )
 
   return (
@@ -540,6 +583,7 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
             const s = (n.data as any)?.state
             if (s === "running") return "#FFCC99"
             if (s === "done") return "#3D5A40"
+            if (s === "error") return "#D97B6C"
             return "#E8E5D8"
           }}
           style={{ height: 60, width: 80 }}
@@ -555,6 +599,7 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
 function TraversalNode({ event }: { event: NodeEvent }) {
   const label = NODE_LABELS[event.node] || event.node
   const isRunning = event.status === "running"
+  const isError = event.status === "error"
 
   return (
     <div
@@ -563,7 +608,9 @@ function TraversalNode({ event }: { event: NodeEvent }) {
         "transition-all duration-300",
         isRunning
           ? "bg-[#FFCC99] border-[#E8A87C] text-[#5C3D2E] font-semibold animate-pulse"
-          : "bg-[#3D5A40]/10 border-[#3D5A40] text-[#3D5A40]"
+          : isError
+            ? "bg-[#D97B6C]/10 border-[#D97B6C] text-[#A5483D]"
+            : "bg-[#3D5A40]/10 border-[#3D5A40] text-[#3D5A40]"
       )}
     >
       <div className="flex items-center justify-center gap-1.5">
@@ -572,18 +619,28 @@ function TraversalNode({ event }: { event: NodeEvent }) {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
           </span>
+        ) : isError ? (
+          <svg className="h-3 w-3 text-[#A5483D]" viewBox="0 0 12 12" fill="none">
+            <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
         ) : (
           <svg className="h-3 w-3 text-[#3D5A40]" viewBox="0 0 12 12" fill="none">
             <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         )}
         {label}
+        {event.synthetic ? <span className="text-[9px] uppercase opacity-70">synthetic</span> : null}
       </div>
       <div className="text-[10px] opacity-60 mt-0.5">
         {isRunning
           ? event.ts
           : `${event.ts} → ${event.endTs ?? ""}${event.durationMs != null ? ` (${event.durationMs}ms)` : ""}`}
       </div>
+      {isError && event.error ? (
+        <div className="mt-1 line-clamp-2 text-[10px] leading-tight opacity-80" title={event.error}>
+          {event.error}
+        </div>
+      ) : null}
     </div>
   )
 }
