@@ -251,7 +251,7 @@ def _extract_outline_items(outline: str) -> list[str]:
 
 
 @traced_node
-async def review_doc_planner(state: TutorState) -> dict:
+async def review_doc_planner(state: LearningState) -> dict:
     """Plan a Markdown review document from the user request and context."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -324,7 +324,7 @@ async def review_doc_planner(state: TutorState) -> dict:
 
 
 @traced_node
-async def review_doc_agent(state: TutorState) -> dict:
+async def review_doc_agent(state: LearningState) -> dict:
     """Generate a Markdown review document from the planner outline."""
     query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
@@ -476,7 +476,7 @@ async def review_doc_agent(state: TutorState) -> dict:
 
 
 @traced_node
-async def review_doc_reviewer(state: TutorState) -> dict:
+async def review_doc_reviewer(state: LearningState) -> dict:
     """Review the Markdown document for structure, usefulness, and source discipline."""
     query = _last_human_query(state)
     outline = state.get("review_doc_outline", "")
@@ -578,7 +578,7 @@ async def review_doc_reviewer(state: TutorState) -> dict:
 
 
 @traced_node
-async def review_doc_rewrite(state: TutorState) -> dict:
+async def review_doc_rewrite(state: LearningState) -> dict:
     """Prepare reviewer feedback for the next Markdown generation attempt."""
     reason = state.get("review_doc_review_reason", "")
     outline = state.get("review_doc_outline", "")
@@ -595,7 +595,7 @@ async def review_doc_rewrite(state: TutorState) -> dict:
 
 
 @traced_node
-async def review_doc_output(state: TutorState) -> dict:
+async def review_doc_output(state: LearningState) -> dict:
     """Emit the final Markdown review document as the user-facing message."""
     markdown = state.get("review_doc_markdown", "")
     if not markdown:
@@ -639,7 +639,7 @@ async def review_doc_output(state: TutorState) -> dict:
     }
 
 
-def should_rewrite_review_doc(state: TutorState) -> str:
+def should_rewrite_review_doc(state: LearningState) -> str:
     """Route reviewer output to rewrite or final Markdown output."""
     if state.get("review_doc_review_verdict") != "reject":
         return "output"

@@ -26,6 +26,7 @@ services:
     env_file: .env
     environment:
       - DB_URI=postgresql://a3_user:${POSTGRES_PASSWORD:-a3_study_dev}@postgres:5432/a3_study_agent
+    depends_on:
       postgres:
         condition: service_healthy
     volumes:
