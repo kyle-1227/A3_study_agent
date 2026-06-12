@@ -212,7 +212,7 @@ async def mindmap_agent(state: LearningState) -> dict:
             "revision_notes": state.get("mindmap_revision_notes", "") or "None",
         },
     )
-    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(model_name=model_name, node_name="mindmap_agent", temperature=get_setting("mindmap.temperature", 0.2)):
         structured_result = await invoke_structured_llm(
             node_name="mindmap_agent",
@@ -263,7 +263,7 @@ async def mindmap_reviewer(state: LearningState) -> dict:
             "mindmap_tree": str(tree),
         },
     )
-    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(model_name=model_name, node_name="mindmap_reviewer", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="mindmap_reviewer",

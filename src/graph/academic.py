@@ -3816,7 +3816,7 @@ async def search_query_rewriter(state: LearningState) -> dict:
     parsing_error = None
     try:
         with traced_llm_call(
-            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
             node_name="search_query_rewriter",
             temperature=0.0,
         ):
@@ -4688,7 +4688,7 @@ async def generate_answer(state: LearningState) -> dict:
     ]
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         node_name="generate_answer",
         temperature=temperature,
     ) as span:
@@ -4753,7 +4753,7 @@ async def evaluate_hallucination(state: LearningState) -> dict:
         }
 
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
-    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content

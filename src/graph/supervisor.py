@@ -128,7 +128,7 @@ async def supervisor_node(state: LearningState) -> dict:
     )
 
     temperature = get_setting("supervisor.temperature", 0.0)
-    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(
         model_name=model_name,
         node_name="supervisor",

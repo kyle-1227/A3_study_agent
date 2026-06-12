@@ -25,7 +25,7 @@ async def emotional_response(state: LearningState) -> dict:
     fallback = get_fallback_llm(temperature=temperature)
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         node_name="emotional_response",
         temperature=temperature,
     ) as span:

@@ -613,4 +613,4 @@ class TestRagSettings:
 
     def test_rag_reranker_model(self):
         from src.config import get_setting
-        assert get_setting("rag.reranker_model") == "BAAI/bge-reranker-v2-m3"
+        assert get_setting("rag.reranker_model") == "nvidia/llama-nemotron-rerank-vl-1b-v2:free"

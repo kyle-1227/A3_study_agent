@@ -55,7 +55,7 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     nested_prefix = f"llm.{node_name}"
     provider = get_setting(f"{nested_prefix}.provider", get_setting(f"{node_name}.provider", "deepseek"))
     provider_name = str(provider or "").strip().lower()
-    default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     default_api_key_env = "DEEPSEEK_API_KEY"
     default_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
@@ -111,7 +111,7 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
 def get_primary_llm(**overrides) -> ChatOpenAI:
     """Build the primary chat model from DEEPSEEK_* env vars."""
     defaults = dict(
-        model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         temperature=0.7,
@@ -129,7 +129,7 @@ def get_fallback_llm(**overrides) -> ChatOpenAI:
     instance or a different cloud provider.
     """
     defaults = dict(
-        model=os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+        model=os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
         api_key=os.getenv("FALLBACK_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or "not-configured",
         base_url=os.getenv("FALLBACK_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")),
         temperature=0.7,

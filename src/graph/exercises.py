@@ -231,7 +231,7 @@ async def exercise_agent(state: LearningState) -> dict:
             "revision_notes": state.get("exercise_revision_notes", "") or "None",
         },
     )
-    model_name = get_setting("llm.exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("llm.exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(model_name=model_name, node_name="exercise_agent", temperature=get_setting("exercise.temperature", 0.2)):
         structured_result = await invoke_structured_llm(
             node_name="exercise_agent",
@@ -277,7 +277,7 @@ async def exercise_reviewer(state: LearningState) -> dict:
             "exercise_items": str(items),
         },
     )
-    model_name = get_setting("llm.exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("llm.exercise.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(model_name=model_name, node_name="exercise_reviewer", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="exercise_reviewer",

@@ -215,7 +215,7 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             "review_doc_markdown": markdown,
         },
     )
-    model_name = get_setting("llm.review_doc.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("llm.review_doc.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(model_name=model_name, node_name="review_doc_reviewer", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="review_doc_reviewer",

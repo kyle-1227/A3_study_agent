@@ -283,8 +283,8 @@ rag:
   bm25_top_k: 10                        # Candidates from BM25 keyword search
   reranker_top_n: 5                     # Results after reranking
   relevance_threshold: 0.3              # Minimum score for a "hit"
-  reranker_model: "BAAI/bge-reranker-v2-m3"
-  reranker_base_url: "https://api.siliconflow.cn/v1"
+  reranker_model: "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+  reranker_base_url: "https://openrouter.ai/api/v1"
   multi_subject_per_subject_top_k: 3     # Per-subject docs for retrieval_plan RAG
   multi_subject_max_docs: 8              # Final merged docs across subjects
   multi_subject_subject_max_docs: 3       # Max docs per subject in merged multi-subject context
