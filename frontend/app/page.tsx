@@ -1,4 +1,4 @@
-"use client"
+﻿"use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
 import { LeftSidebar } from "@/components/left-sidebar"
@@ -108,148 +108,41 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
-  supervisor: {
-    title: "解析学习需求",
-    detail: "识别专业课程、学习目标、知识短板和需要生成的资源类型。",
-  },
-  academic_router: {
-    title: "选择课程资源链路",
-    detail: "判断当前任务更适合课程讲解、资料生成、练习设计还是综合答疑。",
-  },
-  search_query_rewriter: {
-    title: "改写检索查询",
-    detail: "将学习者原始问题转换为适合课程知识库和网络搜索的精准查询。",
-  },
-  rag_retrieve: {
-    title: "检索课程知识库",
-    detail: "从初始课程文档集和知识库中抽取可引用的课程依据。",
-  },
-  web_search: {
-    title: "补充前沿资料",
-    detail: "补充高校课程、项目实践和拓展阅读相关参考信息。",
-  },
-  generate_answer: {
-    title: "生成学习资源",
-    detail: "生成课程讲解、练习题、实操案例、拓展阅读或多模态脚本内容。",
-  },
-  evaluate_hallucination: {
-    title: "内容可信校验",
-    detail: "检查学术事实、引用依据和内容安全，降低幻觉风险。",
-  },
-  rewrite_query: {
-    title: "重写检索问题",
-    detail: "根据校验反馈补全查询，准备再次检索关键课程资料。",
-  },
-  gather_planning_context: {
-    title: "检索规划上下文",
-    detail: "检索课程资料、学习目标、资源约束和学习路径参考。",
-  },
-  gather_intel: {
-    title: "汇总画像与情报",
-    detail: "整合学习者基础、知识短板、目标课程和资源生成需求。",
-  },
-  drafter: {
-    title: "起草个性化方案",
-    detail: "生成学习路径、资源清单、练习安排和项目实践建议。",
-  },
-  reviewer_academic: {
-    title: "学术质量审查",
-    detail: "审查知识准确性、课程逻辑、难度递进和资源覆盖度。",
-  },
-  reviewer_emotional: {
-    title: "学习负荷审查",
-    detail: "检查学习节奏、任务压力和执行可持续性。",
-  },
-  consensus_check: {
-    title: "协同评审汇总",
-    detail: "汇总多智能体审查结论，判断方案是否可以输出。",
-  },
-  adv_rewrite: {
-    title: "修订资源方案",
-    detail: "根据审查意见优化学习路径、资源顺序和任务颗粒度。",
-  },
-  plan_output: {
-    title: "输出资源方案",
-    detail: "整理最终的个性化学习路径与多类型资源生成结果。",
-  },
-  feedback_router: {
-    title: "分析用户反馈",
-    detail: "判断反馈需要局部微调还是重新生成资源方案。",
-  },
-  plan_tweak: {
-    title: "微调学习方案",
-    detail: "根据反馈更新学习路径、资源推荐和练习安排。",
-  },
-  mindmap_agent: {
-    title: "生成 JSON Tree",
-    detail: "将知识结构蓝图转换为统一 JSON Tree，供多格式导图预览与导出使用。",
-  },
-  mindmap_planner: {
-    title: "规划知识结构蓝图",
-    detail: "整合课程资料、关键词和学习目标，规划具体到知识点的导图结构。",
-  },
-  mindmap_reviewer: {
-    title: "审查导图质量",
-    detail: "检查导图层级、具体知识点覆盖、易错辨析、实践案例和学术准确性。",
-  },
-  mindmap_rewrite: {
-    title: "根据审查意见重写",
-    detail: "根据审查反馈补充课程核心知识点，优化分支层级和资源可用性。",
-  },
-  mindmap_output: {
-    title: "导出多格式导图",
-    detail: "生成 XMind 下载文件，并准备 Mermaid、Markdown、SVG、PNG 和交互树预览。",
-  },
-  exercise_planner: {
-    title: "规划练习结构",
-    detail: "结合课程资料、关键词和学习目标，规划基础题、进阶题、应用题和自我检查题。",
-  },
-  exercise_agent: {
-    title: "生成分层题目",
-    detail: "生成包含答案、解析和易错提醒的分层练习题。",
-  },
-  exercise_reviewer: {
-    title: "审查题目质量",
-    detail: "检查题型覆盖、难度递进、答案解析、易错提醒和课程主题匹配度。",
-  },
-  exercise_rewrite: {
-    title: "修订练习题",
-    detail: "根据审查意见补齐题型层级、解析细节和易错提醒。",
-  },
-  exercise_output: {
-    title: "输出练习资源",
-    detail: "整理最终分层练习题，包含基础题、进阶题、应用题、自我检查题和解析。",
-  },
-  review_doc_planner: {
-    title: "规划复习文档",
-    detail: "规划复习文档",
-  },
-  review_doc_agent: {
-    title: "生成 Markdown 文档",
-    detail: "生成 Markdown 文档",
-  },
-  review_doc_reviewer: {
-    title: "审查文档质量",
-    detail: "审查文档质量",
-  },
-  review_doc_rewrite: {
-    title: "修订复习文档",
-    detail: "修订复习文档",
-  },
-  review_doc_output: {
-    title: "输出复习文档",
-    detail: "输出复习文档",
-  },
-  emotional_response: {
-    title: "生成学习支持建议",
-    detail: "围绕学习压力、专业适应和执行困难生成支持性建议。",
-  },
-  handle_unknown: {
-    title: "确认服务范围",
-    detail: "判断请求是否属于高校课程学习与个性化资源生成范围。",
-  },
+  supervisor: { title: "解析学习需求", detail: "识别课程主题、学习目标和需要生成的资源类型。" },
+  search_query_rewriter: { title: "改写检索查询", detail: "将原始问题改写为适合本地课程库和网络搜索的查询。" },
+  academic_router: { title: "选择学习资源链路", detail: "调度本地 RAG、网络搜索和资源生成子 Agent。" },
+  rag_retrieve: { title: "本地 RAG", detail: "从本地课程资料库检索候选证据。" },
+  web_search: { title: "Tavily 网络搜索", detail: "检索外部学习资料与官方文档候选证据。" },
+  evidence_judge: { title: "证据评审", detail: "裁决本地和网络候选证据，只保留可信上下文。" },
+  generate_answer: { title: "生成学习回答", detail: "基于已裁决证据生成课程答疑或学习资源建议。" },
+  evaluate_hallucination: { title: "可信度校验", detail: "检查回答与证据的一致性。" },
+  rewrite_query: { title: "重写检索问题", detail: "根据校验反馈准备下一轮检索。" },
+  study_plan_emotional_intel: { title: "情绪画像分析", detail: "分析学习负担、节奏风险和支持需求。" },
+  study_plan_planner: { title: "学习计划规划", detail: "基于证据、目标和学习者状态规划学习计划蓝图。" },
+  study_plan_agent: { title: "学习计划生成", detail: "生成结构化个性化学习计划。" },
+  study_plan_reviewer_academic: { title: "学习计划学术审查", detail: "检查阶段递进、证据一致性和资源可靠性。" },
+  study_plan_reviewer_emotional: { title: "学习计划负担审查", detail: "检查任务负担、复盘休息和执行可持续性。" },
+  study_plan_consensus: { title: "学习计划共识检查", detail: "汇总双 reviewer 结论，决定输出或修订。" },
+  study_plan_rewrite: { title: "学习计划修订", detail: "根据审查意见准备下一轮生成。" },
+  study_plan_output: { title: "学习计划输出", detail: "渲染 Markdown 学习计划并生成文档 artifact。" },
+  mindmap_planner: { title: "规划知识结构", detail: "规划课程知识点的导图结构。" },
+  mindmap_agent: { title: "生成导图", detail: "生成结构化 JSON Tree。" },
+  mindmap_reviewer: { title: "审查导图质量", detail: "检查层级、覆盖和学术准确性。" },
+  mindmap_rewrite: { title: "修订导图", detail: "根据审查意见重写导图。" },
+  mindmap_output: { title: "导出导图", detail: "生成 XMind 等导图 artifact。" },
+  exercise_planner: { title: "规划练习结构", detail: "规划基础、进阶、应用和自检练习。" },
+  exercise_agent: { title: "生成分层练习", detail: "生成包含答案、解析和易错提醒的练习题。" },
+  exercise_reviewer: { title: "审查练习质量", detail: "检查题型覆盖、难度递进和解析完整性。" },
+  exercise_rewrite: { title: "修订练习", detail: "根据审查意见重写练习。" },
+  exercise_output: { title: "输出练习资源", detail: "整理最终分层练习资源。" },
+  review_doc_planner: { title: "规划复习文档", detail: "规划 Markdown 复习文档结构。" },
+  review_doc_agent: { title: "生成复习文档", detail: "生成 Markdown 课程复习文档。" },
+  review_doc_reviewer: { title: "审查文档质量", detail: "检查结构、证据使用和内容完整性。" },
+  review_doc_rewrite: { title: "修订复习文档", detail: "根据审查意见重写文档。" },
+  review_doc_output: { title: "输出复习文档", detail: "生成 Markdown/DOCX 文档 artifact。" },
+  emotional_response: { title: "生成学业支持建议", detail: "围绕学习压力、适应和执行困难生成支持性建议。" },
+  handle_unknown: { title: "确认服务范围", detail: "判断请求是否属于高校课程学习与个性化资源生成范围。" },
 }
-
 function createInitialResourceStatus(): ResourceGenerationStatus {
   return {
     state: "running",
@@ -305,6 +198,7 @@ export default function Home() {
   const threadIdRef = useRef<string | null>(null)
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
+  const streamHadErrorRef = useRef(false)
 
   const setActiveThreadId = useCallback((threadId: string | null) => {
     threadIdRef.current = threadId
@@ -421,7 +315,7 @@ export default function Home() {
     setLogs([{ type: "info", message: "[INFO] Chat history cleared.", ts: timestamp() }])
   }, [setActiveThreadId])
 
-  /** Process a single SSE data payload — shared between /stream and /resume */
+  /** Process a single SSE data payload 鈥?shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
 
@@ -453,12 +347,12 @@ export default function Home() {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "waiting_review",
-        summary: "个性化学习路径与资源方案已生成，等待确认或反馈后继续优化。",
+        summary: "个性化学习资源生成状态已更新。",
         waitingForReview: true,
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "warning", message: "[HIL] Graph interrupted — awaiting user plan review", ts: timestamp() },
+        { type: "warning", message: "[HIL] Graph interrupted 鈥?awaiting user plan review", ts: timestamp() },
       ])
       return
     }
@@ -494,7 +388,7 @@ export default function Home() {
             ? {
                 ...msg,
                 mindmap: {
-                  title: data.title || "知识点思维导图",
+                  title: data.title || "Knowledge Mindmap",
                   tree: data.tree,
                   xmindUrl,
                 },
@@ -520,7 +414,7 @@ export default function Home() {
             ? {
                 ...msg,
                 reviewDoc: {
-                  title: data.title || "Markdown复习文档",
+                  title: data.title || "Review Document",
                   filename: data.filename || "",
                   markdownUrl: markdownUrl || "",
                   docxFilename: data.docx_filename || "",
@@ -558,14 +452,14 @@ export default function Home() {
                 content: finalAnswer || msg.content,
                 mindmap: mindmap
                   ? {
-                      title: mindmap.title || "鐭ヨ瘑鐐规€濈淮瀵煎浘",
+                      title: mindmap.title || "Knowledge Mindmap",
                       tree: mindmap.tree,
                       xmindUrl: xmindUrl || "",
                     }
                   : msg.mindmap,
                 reviewDoc: reviewDoc
                   ? {
-                      title: reviewDoc.title || "Markdown复习文档",
+                      title: reviewDoc.title || "Review Document",
                       filename: reviewDoc.filename || "",
                       markdownUrl: markdownUrl || "",
                       docxFilename: reviewDoc.docx_filename || "",
@@ -583,17 +477,18 @@ export default function Home() {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: status.state === "error" ? "error" : "done",
-        summary: "个性化学习资源已生成，可继续根据反馈调整。",
+        summary: "个性化学习资源生成状态已更新。",
         waitingForReview: false,
       }))
       return
     }
 
     if (data.type === "error") {
+      streamHadErrorRef.current = true
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "error",
-        summary: "个性化资源生成遇到异常，请稍后重试或调整输入。",
+        summary: "个性化学习资源生成状态已更新。",
         error: data.message,
         waitingForReview: false,
       }))
@@ -695,7 +590,13 @@ export default function Home() {
       if (status === "end" && data.duration_ms != null) {
         setLogs((prev) => [
           ...prev,
-          { type: "perf", message: `[PERF] Node "${node}" completed in ${data.duration_ms}ms`, ts: now },
+          {
+            type: data.error ? "error" : "perf",
+            message: data.error
+              ? `[ERROR] Node "${node}" failed after ${data.duration_ms}ms`
+              : `[PERF] Node "${node}" completed in ${data.duration_ms}ms`,
+            ts: now,
+          },
         ])
       }
 
@@ -764,7 +665,7 @@ export default function Home() {
     if (response.status === 429) {
       setMessages((prev) => [
         ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "⚠️ 服务繁忙，请稍后重试。" },
+        { id: (Date.now() + 1).toString(), role: "assistant", content: "服务繁忙，请稍后重试。" },
       ])
       setLogs((prev) => [
         ...prev,
@@ -776,11 +677,11 @@ export default function Home() {
     if (response.status === 401) {
       setMessages((prev) => [
         ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "🔑 访问未授权，请检查访问令牌是否正确。" },
+        { id: (Date.now() + 1).toString(), role: "assistant", content: "访问未授权，请检查访问令牌。" },
       ])
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] 401 Unauthorized — invalid or missing access token", ts: timestamp() },
+        { type: "error", message: "[ERROR] 401 Unauthorized 鈥?invalid or missing access token", ts: timestamp() },
       ])
       if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
       return null
@@ -815,6 +716,7 @@ export default function Home() {
     setIsLoading(true)
 
     try {
+      streamHadErrorRef.current = false
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -835,7 +737,11 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Stream complete.", ts: timestamp() },
+        {
+          type: streamHadErrorRef.current ? "error" : "info",
+          message: streamHadErrorRef.current ? "[ERROR] Stream ended after error." : "[INFO] Stream complete.",
+          ts: timestamp(),
+        },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -852,7 +758,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id — cannot resume", ts: timestamp() },
+        { type: "error", message: "[ERROR] No thread_id 鈥?cannot resume", ts: timestamp() },
       ])
       return
     }
@@ -897,7 +803,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id — cannot send feedback", ts: timestamp() },
+        { type: "error", message: "[ERROR] No thread_id 鈥?cannot send feedback", ts: timestamp() },
       ])
       return
     }
@@ -979,3 +885,4 @@ export default function Home() {
     </div>
   )
 }
+

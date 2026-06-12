@@ -1,4 +1,4 @@
-# A3 Study Agent — System Logic Parameters
+﻿# A3 Study Agent 鈥?System Logic Parameters
 # Loaded by src/config/config_manager.py at runtime.
 
 academic:
@@ -113,14 +113,6 @@ llm:
     temperature: 0.2
     max_tokens: 4096
     streaming: false
-  planner:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
-    temperature: 0.0
-    max_tokens: 1200
-    streaming: false
   web_coverage_decision:
     provider: openrouter
     model: "deepseek/deepseek-v4-flash"
@@ -158,6 +150,22 @@ llm:
     api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.2
     max_tokens: 800
+    streaming: false
+  review_doc:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    streaming: false
+  study_plan:
+    provider: openrouter
+    model: "deepseek/deepseek-v4-flash"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
     streaming: false
 
 llm_outputs:
@@ -203,24 +211,6 @@ llm_outputs:
     failure_policy: block
     max_retries: 0
     max_raw_chars: 12000
-  reviewer_academic:
-    output_mode: native_json_schema_pydantic
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 0
-    max_raw_chars: 12000
-  reviewer_emotional:
-    output_mode: native_json_schema_pydantic
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 0
-    max_raw_chars: 12000
-  feedback_router:
-    output_mode: native_json_schema_pydantic
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 0
-    max_raw_chars: 12000
   hallucination_eval:
     output_mode: native_json_schema_pydantic
     fallback_modes: []
@@ -245,12 +235,35 @@ llm_outputs:
     failure_policy: block
     max_retries: 0
     max_raw_chars: 12000
+  study_plan_emotional_intel:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  study_plan_agent:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  study_plan_reviewer_academic:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
+  study_plan_reviewer_emotional:
+    output_mode: native_json_schema_pydantic
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    max_raw_chars: 12000
 
-planner:
-  search_timeout: 15                    # Planning context search timeout (seconds)
-  temperature: 0.7                      # Plan generation temperature
-  reviewer_temperature: 0.0             # Reviewers need deterministic structured output
-  adversarial_max_rounds: 3             # Max drafter-reviewer iterations
+study_plan:
+  temperature: 0.2
+  reviewer_temperature: 0.0
+  max_generation_rounds: 3
 
 emotional:
   temperature: 0.8                      # Slightly creative for empathy

@@ -137,6 +137,7 @@ class ProfileManager:
         if profile is None:
             profile = UserProfile(user_id=user_id)
             profile.touch()
+            await self._store.save(profile)
             logger.info("Created new profile for user=%s", user_id)
         return profile
 

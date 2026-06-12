@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from typing import Any
 
+from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
 from src.config import get_setting
+from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
 
@@ -232,3 +236,103 @@ async def async_invoke_with_fallback(primary, messages, *, fallback=None, span=N
             )
 
         return await fallback.ainvoke(messages)
+
+
+def _message_content_chars(messages: list[Any]) -> int:
+    total = 0
+    for message in messages or []:
+        if isinstance(message, BaseMessage):
+            total += len(str(message.content or ""))
+        elif isinstance(message, dict):
+            total += len(str(message.get("content") or ""))
+        else:
+            total += len(str(message))
+    return total
+
+
+def _provider_error_body(exc: BaseException, *, max_chars: int = 12000) -> str:
+    response = getattr(exc, "response", None)
+    text = ""
+    if response is not None:
+        text = str(getattr(response, "text", "") or "")
+        if not text:
+            try:
+                text = str(response.json())
+            except Exception:
+                text = ""
+    if not text:
+        body = getattr(exc, "body", None)
+        if body:
+            text = str(body)
+    return text[:max_chars]
+
+
+async def invoke_plain_llm_fail_fast(
+    *,
+    node_name: str,
+    llm_node: str,
+    messages: list[Any],
+    state: dict | None = None,
+    temperature: float | None = None,
+    max_raw_chars: int | None = None,
+) -> str:
+    """Invoke a plain-text LLM call with diagnostics and no implicit fallback."""
+    llm = get_node_llm(llm_node)
+    model = get_setting(f"llm.{llm_node}.model", get_setting(f"{llm_node}.model", getattr(llm, "model_name", "")))
+    provider = get_setting(f"llm.{llm_node}.provider", get_setting(f"{llm_node}.provider", ""))
+    if temperature is None:
+        temperature = get_setting(f"llm.{llm_node}.temperature", get_setting(f"{llm_node}.temperature", 0.7))
+    max_chars = int(max_raw_chars or get_setting(f"llm_outputs.{node_name}.max_raw_chars", 12000) or 12000)
+    started = time.perf_counter()
+    base_payload = {
+        "node_name": node_name,
+        "llm_node": llm_node,
+        "provider": provider,
+        "model": model,
+        "temperature": temperature,
+        "message_count": len(messages or []),
+        "prompt_chars": _message_content_chars(messages or []),
+        "fallback_used": False,
+    }
+    try:
+        result = await llm.ainvoke(messages)
+        raw = str(getattr(result, "content", result) or "")
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        if not raw.strip():
+            raise ValueError("plain LLM returned empty output")
+        emit_a3_trace(
+            logger,
+            "plain_llm_output",
+            {
+                **base_payload,
+                "success": True,
+                "total_elapsed_ms": elapsed_ms,
+                "raw_output_chars": len(raw),
+                "raw_output": raw[:max_chars],
+                "error_type": "",
+                "error_message": "",
+                "provider_error_body": "",
+            },
+            state=state or {},
+            env_flag="LOG_A3_TRACE",
+        )
+        return raw.strip()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        emit_a3_trace(
+            logger,
+            "plain_llm_output",
+            {
+                **base_payload,
+                "success": False,
+                "total_elapsed_ms": elapsed_ms,
+                "raw_output_chars": 0,
+                "raw_output": "",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:max_chars],
+                "provider_error_body": _provider_error_body(exc, max_chars=max_chars),
+            },
+            state=state or {},
+            env_flag="LOG_A3_TRACE",
+        )
+        raise

@@ -101,14 +101,6 @@ class TestPrompts:
         assert "{resource_offer_instruction}" in answer_prompt
         assert len(system_prompt) > 50
 
-    def test_planner_prompts_have_placeholders(self):
-        from src.config import load_prompt
-        generate_prompt = load_prompt("planner_generate")
-        system_prompt = load_prompt("planner_system")
-        assert "{user_request}" in generate_prompt
-        assert "{planning_context}" in generate_prompt
-        assert len(system_prompt) > 50
-
     def test_emotional_prompt_not_empty(self):
         from src.config import load_prompt
         prompt = load_prompt("emotional_system")

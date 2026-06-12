@@ -55,8 +55,20 @@ class LearningState(TypedDict):
     review_doc_review_reason: str                                       # Review document reviewer reasoning
     review_doc_revision_notes: str                                      # Feedback for review_doc_agent regeneration
     review_doc_round: int                                               # Review document generation/review round
+    study_plan_emotional_intel: str                                     # Study-plan learner workload/emotional summary
+    study_plan_emotional_profile: dict                                  # Structured emotional/workload profile
+    study_plan_outline: str                                             # Planner-produced study-plan outline
+    study_plan_artifact: dict                                           # Structured personalized study-plan artifact
+    study_plan_markdown: str                                            # Rendered study-plan Markdown
+    study_plan_round: int                                               # Study-plan generation/review round
+    study_plan_academic_verdict: str                                    # "approve" / "reject"
+    study_plan_academic_reason: str                                     # Academic reviewer reasoning
+    study_plan_emotional_verdict: str                                   # "approve" / "reject"
+    study_plan_emotional_reason: str                                    # Emotional/workload reviewer reasoning
+    study_plan_consensus: bool                                          # Both study-plan reviewers approved
+    study_plan_revision_notes: str                                      # Feedback for study_plan_agent regeneration
+    study_plan_document_artifact: dict                                  # Markdown/DOCX artifact metadata
     context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
-    search_results: list[dict]                                          # Planner search results
     retrieval_plan: list[dict]                                          # Multi-subject retrieval plan
     primary_subject: str                                                # Main subject of the user goal
     learning_goal: str                                                  # Normalized learning goal
@@ -108,20 +120,3 @@ class LearningState(TypedDict):
     hallucination_detected: bool                                        # Hallucination flag
     rewritten_query: str                                                # Rewritten query on retry
     hallucination_reason: str                                           # Reason from hallucination eval
-    emotional_intel: str                                                # Emotional state summary (gather_intel)
-    resource_intel: str                                                 # Resource intel summary (gather_intel)
-    intel_summary: str                                                  # Combined intel for adversarial planner
-    # ── Adversarial planning (flattened SubGraph — AC-01) ────────────
-    draft: str                                                          # Current plan draft text
-    academic_verdict: str                                               # "approve" / "reject"
-    academic_reason: str                                                # Reviewer reasoning
-    emotional_verdict: str                                              # "approve" / "reject"
-    emotional_reason: str                                               # Reviewer reasoning
-    adv_round: int                                                      # Current review round
-    consensus: bool                                                     # Both reviewers approved?
-    revision_notes: str                                                 # Combined feedback for drafter
-    # ── HIL feedback loop ────────────────────────────────────────────
-    hil_action: str                                                     # "confirm" or "feedback" — set by plan_output
-    hil_feedback: str                                                   # User's raw feedback text — set by plan_output
-    hil_summary: str                                                    # Compressed summary of all prior feedback rounds (overwritten, not appended)
-    feedback_route: str                                                 # "tweak" or "rewrite" — set by feedback_router

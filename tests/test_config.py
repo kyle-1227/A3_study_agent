@@ -330,19 +330,6 @@ class TestPromptRendering:
         assert "C" in rendered
         assert "A" in rendered
 
-    def test_planner_generate_renders(self):
-        """planner_generate prompt renders with user_request, planning_context."""
-        from src.config import load_prompt
-
-        prompt = load_prompt("planner_generate")
-        rendered = prompt.format(
-            user_request="Make a plan",
-            planning_context="Planning context info",
-        )
-
-        assert "Make a plan" in rendered
-        assert "Planning context info" in rendered
-
     def test_system_prompts_have_no_variables(self):
         """System prompts should load without needing .format()."""
         from src.config import load_prompt
@@ -351,7 +338,6 @@ class TestPromptRendering:
             "supervisor_system",
             "academic_system",
             "hallucination_system",
-            "planner_system",
             "emotional_system",
         ]:
             prompt = load_prompt(name)
@@ -406,8 +392,6 @@ class TestAllPromptsLoadable:
         "academic_answer",
         "hallucination_system",
         "hallucination_eval",
-        "planner_system",
-        "planner_generate",
         "emotional_system",
         "mindmap_planner",
         "mindmap_agent",
@@ -442,7 +426,7 @@ class TestSettingsValues:
     def test_academic_search_timeout(self):
         from src.config import get_setting
 
-        assert get_setting("academic.search_timeout") == 15
+        assert get_setting("academic.search_timeout") == 6
 
     def test_academic_temperature(self):
         from src.config import get_setting
@@ -454,10 +438,10 @@ class TestSettingsValues:
 
         assert get_setting("academic.hallucination_eval_temperature") == 0.0
 
-    def test_planner_temperature(self):
+    def test_study_plan_temperature(self):
         from src.config import get_setting
 
-        assert get_setting("planner.temperature") == 0.7
+        assert get_setting("study_plan.temperature") == 0.2
 
     def test_emotional_temperature(self):
         from src.config import get_setting
@@ -497,11 +481,11 @@ class TestNodeConfigIntegration:
         assert MAX_RETRIES == get_setting("academic.max_retries")
 
     def test_academic_search_timeout_from_config(self):
-        """_SEARCH_TIMEOUT in academic.py should come from config."""
+        """_SEARCH_TIMEOUT in academic.py should come from web search config."""
         from src.graph.academic import _SEARCH_TIMEOUT
         from src.config import get_setting
 
-        assert _SEARCH_TIMEOUT == get_setting("academic.search_timeout")
+        assert _SEARCH_TIMEOUT == get_setting("web_search.timeout_seconds")
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")
@@ -528,25 +512,27 @@ class TestNodeConfigIntegration:
 
         assert "answer" in result["messages"][0].content
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_supervisor_uses_config_prompt(self, mock_get_llm):
+    @patch("src.graph.supervisor.invoke_structured_llm")
+    async def test_supervisor_uses_config_prompt(self, mock_invoke):
         """supervisor_node should use prompt loaded from XML config."""
-        import json
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
         from langchain_core.messages import HumanMessage
 
-        from src.graph.supervisor import supervisor_node
+        from src.graph.supervisor import SupervisorOutput, supervisor_node
 
-        mock_llm = mock_get_llm.return_value
-        mock_resp = type("R", (), {
-            "content": json.dumps({
-                "intent": "academic", "subject": "math", "keypoints": ["test"],
-            }),
-        })()
-        mock_llm.ainvoke = AsyncMock(return_value=mock_resp)
-
+        mock_invoke.side_effect = AsyncMock(return_value=SimpleNamespace(
+            parsed=SupervisorOutput(
+                intent="academic",
+                keywords=["test"],
+                confidence=0.9,
+                subject_candidates=["math"],
+            ),
+        ))
         state = {"messages": [HumanMessage(content="test")]}
-        result = await supervisor_node(state)
+        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["math"]):
+            result = await supervisor_node(state)
 
         assert result["intent"] == "academic"
+        assert result["subject"] == "math"

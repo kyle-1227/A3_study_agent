@@ -1,4 +1,4 @@
-"use client"
+﻿"use client"
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react"
 import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripHorizontal } from "lucide-react"
@@ -18,7 +18,7 @@ import {
 import "@xyflow/react/dist/style.css"
 import dagre from "@dagrejs/dagre"
 
-// ── Exported types consumed by page.tsx ────────────────────────────
+// 鈹€鈹€ Exported types consumed by page.tsx 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export interface LogEntry {
   type: "info" | "error" | "warning" | "perf" | "usage"
@@ -43,7 +43,7 @@ interface RightPanelProps {
   isInterrupted?: boolean
 }
 
-// ── Human-readable node labels ─────────────────────────────────────
+// 鈹€鈹€ Human-readable node labels 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 const NODE_LABELS: Record<string, string> = {
   supervisor: "意图分类",
@@ -53,18 +53,8 @@ const NODE_LABELS: Record<string, string> = {
   web_search: "Tavily Web Search",
   evidence_judge: "Evidence Judge",
   generate_answer: "回答生成",
-  evaluate_hallucination: "幻觉评估",
-  rewrite_query: "查询改写",
-  gather_planning_context: "规划上下文检索",
-  gather_intel: "情报收集",
-  drafter: "计划起草",
-  reviewer_academic: "学术审查",
-  reviewer_emotional: "情绪审查",
-  consensus_check: "共识检查",
-  adv_rewrite: "计划修订",
-  plan_output: "计划输出",
-  feedback_router: "反馈分类",
-  plan_tweak: "计划微调",
+  evaluate_hallucination: "可信校验",
+  rewrite_query: "查询重写",
   mindmap_planner: "导图规划",
   mindmap_agent: "JSON Tree",
   mindmap_reviewer: "导图审查",
@@ -80,11 +70,20 @@ const NODE_LABELS: Record<string, string> = {
   review_doc_reviewer: "复习文档审查",
   review_doc_rewrite: "复习文档修订",
   review_doc_output: "复习文档输出",
+  study_plan_emotional_intel: "情绪画像分析",
+  study_plan_planner: "学习计划规划",
+  study_plan_agent: "学习计划生成",
+  study_plan_reviewer_academic: "学习计划学术审查",
+  study_plan_reviewer_emotional: "学习计划负担审查",
+  study_plan_consensus: "学习计划共识检查",
+  study_plan_rewrite: "学习计划修订",
+  study_plan_output: "学习计划输出",
   emotional_response: "情绪支持",
   handle_unknown: "未知意图",
 }
 
-// ── Main component ─────────────────────────────────────────────────
+
+// 鈹€鈹€ Main component 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(true)
@@ -102,7 +101,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [logs])
 
-  // ── Drag-to-resize divider ──────────────────────────────────────
+  // 鈹€鈹€ Drag-to-resize divider 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     draggingRef.current = true
@@ -165,7 +164,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             <ChevronRight className="h-4 w-4" />
           </Button>
 
-          {/* ── Upper Section: Node Trail / Graph + status bars ───── */}
+          {/* 鈹€鈹€ Upper Section: Node Trail / Graph + status bars 鈹€鈹€鈹€鈹€鈹€ */}
           <div
             className="flex flex-col min-h-0"
             style={
@@ -206,9 +205,9 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                   <div className="bg-[#F5F3E8] rounded-lg p-6">
                     {nodeEvents.length === 0 ? (
                       <div className="flex flex-col items-center gap-3">
-                        <IdleNode label="等待请求..." />
+                        <IdleNode label="绛夊緟璇锋眰..." />
                         <p className="text-xs text-muted-foreground mt-2">
-                          发送消息后，推理路径将实时显示
+                          鍙戦€佹秷鎭悗锛屾帹鐞嗚矾寰勫皢瀹炴椂鏄剧ず
                         </p>
                       </div>
                     ) : (
@@ -238,7 +237,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
                   </span>
-                  等待用户审批
+                  绛夊緟鐢ㄦ埛瀹℃壒
                 </p>
               </div>
             )}
@@ -256,7 +255,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             )}
           </div>
 
-          {/* ── Draggable Divider ─────────────────────────────────── */}
+          {/* 鈹€鈹€ Draggable Divider 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */}
           {!isLogsCollapsed && (
             <div
               onMouseDown={handleDragStart}
@@ -271,11 +270,11 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             </div>
           )}
 
-          {/* ── System Logs (collapsed/expanded) ──────────────────── */}
+          {/* 鈹€鈹€ System Logs (collapsed/expanded) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */}
           {!isLogsCollapsed ? (
             <div className="flex-1 flex flex-col overflow-hidden min-h-0">
               <div className="px-4 py-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-[#3D5A40]">系统 Logs</h3>
+                <h3 className="text-sm font-semibold text-[#3D5A40]">绯荤粺 Logs</h3>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -313,7 +312,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
               className="flex-shrink-0 px-4 py-2 border-t border-border flex items-center gap-1.5 text-xs text-muted-foreground hover:text-[#3D5A40] hover:bg-[#F5F3E8]/50 transition-colors"
             >
               <ChevronUp className="h-3 w-3" />
-              系统 Logs
+              绯荤粺 Logs
               {logs.length > 0 && (
                 <span className="bg-[#3D5A40]/10 text-[#3D5A40] text-[10px] px-1.5 py-0.5 rounded-full">
                   {logs.length}
@@ -327,7 +326,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
   )
 }
 
-// ── Graph DAG View (React Flow + dagre auto-layout) ──────────────
+// 鈹€鈹€ Graph DAG View (React Flow + dagre auto-layout) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 interface DagEdgeDef {
   from: string
@@ -338,25 +337,15 @@ interface DagEdgeDef {
 const DAG_NODE_IDS = [
   "supervisor",
   "academic_router",
-  "gather_planning_context",
   "emotional_response",
   "handle_unknown",
   "search_query_rewriter",
   "rag_retrieve",
   "web_search",
   "evidence_judge",
-  "gather_intel",
   "generate_answer",
-  "drafter",
   "evaluate_hallucination",
-  "reviewer_academic",
-  "reviewer_emotional",
   "rewrite_query",
-  "consensus_check",
-  "adv_rewrite",
-  "plan_output",
-  "feedback_router",
-  "plan_tweak",
   "mindmap_planner",
   "mindmap_agent",
   "mindmap_reviewer",
@@ -372,17 +361,21 @@ const DAG_NODE_IDS = [
   "review_doc_reviewer",
   "review_doc_rewrite",
   "review_doc_output",
+  "study_plan_emotional_intel",
+  "study_plan_planner",
+  "study_plan_agent",
+  "study_plan_reviewer_academic",
+  "study_plan_reviewer_emotional",
+  "study_plan_consensus",
+  "study_plan_rewrite",
+  "study_plan_output",
 ]
 
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
-  // Supervisor routing
   { from: "supervisor", to: "search_query_rewriter" },
   { from: "supervisor", to: "emotional_response" },
   { from: "supervisor", to: "handle_unknown" },
-  // Shared query rewrite routes to academic or planning
   { from: "search_query_rewriter", to: "academic_router" },
-  { from: "search_query_rewriter", to: "gather_planning_context" },
-  // Academic branch
   { from: "academic_router", to: "rag_retrieve" },
   { from: "academic_router", to: "web_search" },
   { from: "rag_retrieve", to: "evidence_judge" },
@@ -391,6 +384,7 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "evidence_judge", to: "mindmap_planner" },
   { from: "evidence_judge", to: "exercise_planner" },
   { from: "evidence_judge", to: "review_doc_planner" },
+  { from: "evidence_judge", to: "study_plan_emotional_intel" },
   { from: "mindmap_planner", to: "mindmap_agent" },
   { from: "mindmap_agent", to: "mindmap_reviewer" },
   { from: "mindmap_reviewer", to: "mindmap_output" },
@@ -406,24 +400,18 @@ const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "review_doc_reviewer", to: "review_doc_output" },
   { from: "review_doc_reviewer", to: "review_doc_rewrite", retry: true },
   { from: "review_doc_rewrite", to: "review_doc_agent", retry: true },
+  { from: "study_plan_emotional_intel", to: "study_plan_planner" },
+  { from: "study_plan_planner", to: "study_plan_agent" },
+  { from: "study_plan_agent", to: "study_plan_reviewer_academic" },
+  { from: "study_plan_agent", to: "study_plan_reviewer_emotional" },
+  { from: "study_plan_reviewer_academic", to: "study_plan_consensus" },
+  { from: "study_plan_reviewer_emotional", to: "study_plan_consensus" },
+  { from: "study_plan_consensus", to: "study_plan_output" },
+  { from: "study_plan_consensus", to: "study_plan_rewrite", retry: true },
+  { from: "study_plan_rewrite", to: "study_plan_agent", retry: true },
   { from: "generate_answer", to: "evaluate_hallucination" },
   { from: "evaluate_hallucination", to: "rewrite_query" },
   { from: "rewrite_query", to: "academic_router", retry: true },
-  // Planning branch
-  { from: "gather_planning_context", to: "gather_intel" },
-  { from: "gather_intel", to: "drafter" },
-  { from: "drafter", to: "reviewer_academic" },
-  { from: "drafter", to: "reviewer_emotional" },
-  { from: "reviewer_academic", to: "consensus_check" },
-  { from: "reviewer_emotional", to: "consensus_check" },
-  { from: "consensus_check", to: "adv_rewrite" },
-  { from: "consensus_check", to: "plan_output" },
-  { from: "adv_rewrite", to: "drafter", retry: true },
-  // Feedback loop
-  { from: "plan_output", to: "feedback_router" },
-  { from: "feedback_router", to: "plan_tweak" },
-  { from: "feedback_router", to: "drafter", retry: true },
-  { from: "plan_tweak", to: "plan_output" },
 ]
 
 const NODE_WIDTH = 90
@@ -594,7 +582,7 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
   )
 }
 
-// ── Sub-components ─────────────────────────────────────────────────
+// 鈹€鈹€ Sub-components 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function TraversalNode({ event }: { event: NodeEvent }) {
   const label = NODE_LABELS[event.node] || event.node
@@ -634,7 +622,7 @@ function TraversalNode({ event }: { event: NodeEvent }) {
       <div className="text-[10px] opacity-60 mt-0.5">
         {isRunning
           ? event.ts
-          : `${event.ts} → ${event.endTs ?? ""}${event.durationMs != null ? ` (${event.durationMs}ms)` : ""}`}
+          : `${event.ts} 鈫?${event.endTs ?? ""}${event.durationMs != null ? ` (${event.durationMs}ms)` : ""}`}
       </div>
       {isError && event.error ? (
         <div className="mt-1 line-clamp-2 text-[10px] leading-tight opacity-80" title={event.error}>

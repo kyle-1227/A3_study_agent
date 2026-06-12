@@ -1,9 +1,11 @@
-"""Tests for collaborative mindmap resource generation nodes."""
+"""Tests for fail-fast mindmap resource generation nodes."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.mindmap import (
@@ -16,104 +18,102 @@ from src.graph.mindmap import (
 )
 
 
-@patch("src.graph.mindmap.get_fallback_llm")
-@patch("src.graph.mindmap.get_node_llm")
-async def test_mindmap_agent_generates_json_tree_from_outline(
-    mock_get_llm,
-    mock_get_fallback,
-):
-    artifact = MindmapArtifact(
-        title="过拟合思维导图",
+def _mindmap_artifact() -> MindmapArtifact:
+    return MindmapArtifact(
+        title="Machine Learning Mindmap",
         tree=MindmapNode(
-            title="过拟合",
+            title="Machine Learning",
             children=[
-                MindmapNode(
-                    title="现象识别",
-                    children=[MindmapNode(title="训练误差低"), MindmapNode(title="验证误差高")],
-                ),
-                MindmapNode(
-                    title="缓解方法",
-                    children=[MindmapNode(title="正则化"), MindmapNode(title="交叉验证")],
-                ),
-                MindmapNode(
-                    title="模型评估",
-                    children=[MindmapNode(title="泛化误差"), MindmapNode(title="验证集")],
-                ),
-                MindmapNode(
-                    title="实践检查",
-                    children=[MindmapNode(title="学习曲线"), MindmapNode(title="数据增强")],
-                ),
+                MindmapNode(title="Supervised learning", children=[MindmapNode(title="Regression")]),
+                MindmapNode(title="Unsupervised learning", children=[MindmapNode(title="Clustering")]),
+                MindmapNode(title="Model evaluation", children=[MindmapNode(title="Validation set")]),
+                MindmapNode(title="Practice", children=[MindmapNode(title="Mini project")]),
             ],
         ),
     )
-    llm = MagicMock()
-    llm.ainvoke = AsyncMock(
-        return_value=AIMessage(
-            content=artifact.model_dump_json() if hasattr(artifact, "model_dump_json") else artifact.json()
+
+
+@pytest.mark.anyio
+async def test_mindmap_agent_generates_json_tree_from_outline():
+    artifact = _mindmap_artifact()
+    with patch("src.graph.mindmap.invoke_structured_llm", return_value=SimpleNamespace(parsed=artifact)):
+        result = await mindmap_agent(
+            {
+                "messages": [HumanMessage(content="Create a machine learning mindmap")],
+                "context": [{"content": "Machine learning course notes", "source": "ml.md"}],
+                "mindmap_outline": "Supervised, unsupervised, evaluation, practice",
+                "mindmap_round": 0,
+            }
         )
-    )
-    mock_get_llm.return_value = llm
 
-    fallback_llm = MagicMock()
-    fallback_llm.with_structured_output.return_value = MagicMock()
-    mock_get_fallback.return_value = fallback_llm
-
-    result = await mindmap_agent({
-        "messages": [HumanMessage(content="给我生成机器学习过拟合的思维导图")],
-        "keypoints": ["机器学习", "过拟合"],
-        "context": [{"content": "过拟合是模型泛化能力不足", "source": "ml.md"}],
-        "mindmap_outline": "1. 现象识别：训练误差低、验证误差高\n2. 缓解方法：正则化、交叉验证",
-        "mindmap_round": 0,
-    })
-
-    assert result["mindmap_tree"]["title"] == "过拟合"
+    assert result["mindmap_tree"]["title"] == "Machine Learning"
     assert result["mindmap_round"] == 1
     assert "mindmap_artifact" not in result
 
 
+@pytest.mark.anyio
+async def test_mindmap_agent_empty_outline_raises():
+    with pytest.raises(ValueError, match="outline"):
+        await mindmap_agent({"mindmap_outline": ""})
+
+
+@pytest.mark.anyio
 async def test_mindmap_reviewer_rejects_generic_template_tree():
-    result = await mindmap_reviewer({
-        "messages": [HumanMessage(content="总结机器学习的知识点")],
-        "mindmap_outline": "监督学习、无监督学习、损失函数、模型评估",
-        "mindmap_tree": {
-            "title": "机器学习",
-            "children": [
-                {"title": "核心概念", "children": []},
-                {"title": "关系层级", "children": []},
-                {"title": "易错点", "children": []},
-                {"title": "实践案例", "children": []},
-            ],
-        },
-    })
+    result = await mindmap_reviewer(
+        {
+            "messages": [HumanMessage(content="Summarize machine learning")],
+            "mindmap_outline": "Supervised, unsupervised, loss function, evaluation",
+            "mindmap_tree": {
+                "title": "Machine Learning",
+                "children": [
+                    {"title": "Core concepts", "children": []},
+                    {"title": "Relationships", "children": []},
+                    {"title": "Pitfalls", "children": []},
+                    {"title": "Practice", "children": []},
+                ],
+            },
+        }
+    )
 
     assert result["mindmap_review_verdict"] == "reject"
-    assert "节点数" in result["mindmap_review_reason"] or "模板" in result["mindmap_review_reason"]
+    assert "too few nodes" in result["mindmap_review_reason"]
 
 
-@patch("src.graph.mindmap.create_xmind_artifact")
-async def test_mindmap_output_generates_artifact(mock_create_artifact):
-    mock_create_artifact.return_value = {
-        "artifact_id": "a1",
-        "filename": "mindmap.xmind",
-        "path": "/tmp/mindmap.xmind",
-        "xmind_url": "/artifacts/mindmaps/a1/mindmap.xmind",
-    }
-
-    result = await mindmap_output({
-        "mindmap_tree": {
-            "title": "过拟合",
-            "children": [{"title": "正则化", "children": [{"title": "L2 正则"}]}],
+@pytest.mark.anyio
+async def test_mindmap_output_generates_artifact():
+    with patch(
+        "src.graph.mindmap.create_xmind_artifact",
+        return_value={
+            "artifact_id": "a1",
+            "filename": "mindmap.xmind",
+            "path": "/tmp/mindmap.xmind",
+            "xmind_url": "/artifacts/mindmaps/a1/mindmap.xmind",
         },
-        "mindmap_review_verdict": "approve",
-        "mindmap_review_reason": "通过",
-    })
+    ):
+        result = await mindmap_output(
+            {
+                "mindmap_tree": {
+                    "title": "Machine Learning",
+                    "children": [{"title": "Regularization", "children": [{"title": "L2"}]}],
+                },
+                "mindmap_review_verdict": "approve",
+                "mindmap_review_reason": "approved",
+            }
+        )
 
-    assert result["mindmap_artifact"]["tree"]["title"] == "过拟合"
+    assert result["mindmap_artifact"]["tree"]["title"] == "Machine Learning"
     assert result["mindmap_artifact"]["xmind_url"].endswith(".xmind")
     assert isinstance(result["messages"][0], AIMessage)
+
+
+@pytest.mark.anyio
+async def test_mindmap_output_empty_tree_raises():
+    with pytest.raises(ValueError, match="mindmap tree"):
+        await mindmap_output({})
 
 
 def test_should_rewrite_mindmap_caps_retry_rounds():
     assert should_rewrite_mindmap({"mindmap_review_verdict": "approve", "mindmap_round": 1}) == "output"
     assert should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 1}) == "rewrite"
-    assert should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 3}) == "output"
+    with pytest.raises(RuntimeError, match="max rounds"):
+        should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 3})

@@ -1,4 +1,4 @@
-"""A3 Study Agent — AI-powered university learning resource generation system."""
+﻿"""A3 Study Agent 鈥?AI-powered university learning resource generation system."""
 
 from __future__ import annotations
 
@@ -133,10 +133,10 @@ app.add_middleware(
 )
 
 
-ALLOWED_NODES = {"generate_answer", "drafter", "plan_tweak", "emotional_response"}
+ALLOWED_NODES = {"generate_answer", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"plan_output", "handle_unknown", "mindmap_output", "exercise_output", "review_doc_output"}
+TEXT_EMIT_NODES = {"handle_unknown", "mindmap_output", "exercise_output", "review_doc_output", "study_plan_output"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -149,16 +149,6 @@ GRAPH_NODES = {
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",
-    "gather_planning_context",
-    "gather_intel",
-    "drafter",
-    "reviewer_academic",
-    "reviewer_emotional",
-    "consensus_check",
-    "adv_rewrite",
-    "plan_output",
-    "feedback_router",
-    "plan_tweak",
     "mindmap_planner",
     "mindmap_agent",
     "mindmap_reviewer",
@@ -174,6 +164,14 @@ GRAPH_NODES = {
     "review_doc_reviewer",
     "review_doc_rewrite",
     "review_doc_output",
+    "study_plan_emotional_intel",
+    "study_plan_planner",
+    "study_plan_agent",
+    "study_plan_reviewer_academic",
+    "study_plan_reviewer_emotional",
+    "study_plan_consensus",
+    "study_plan_rewrite",
+    "study_plan_output",
     "emotional_response",
     "handle_unknown",
 }
@@ -199,14 +197,18 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     exercise_items = final_state.get("exercise_items") or []
     exercise_artifact = final_state.get("exercise_artifact") or {}
     review_doc_artifact = final_state.get("review_doc_artifact") or {}
+    study_plan_artifact = final_state.get("study_plan_artifact") or {}
+    study_plan_document = final_state.get("study_plan_document_artifact") or {}
 
-    if resource_type not in {"mindmap", "quiz", "review_doc"}:
+    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
             resource_type = "quiz"
         elif review_doc_artifact:
             resource_type = "review_doc"
+        elif study_plan_artifact or study_plan_document:
+            resource_type = "study_plan"
         else:
             return None
 
@@ -219,14 +221,14 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     if resource_type == "mindmap" and (mindmap_artifact or mindmap_tree):
         payload["mindmap"] = {
-            "title": mindmap_artifact.get("title", "知识点思维导图"),
+            "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
             "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
             "xmind_url": mindmap_artifact.get("xmind_url", ""),
         }
 
     if resource_type == "quiz":
         if (not answer or len(answer.strip()) < 40) and exercise_items:
-            title = str(exercise_artifact.get("title") or "分层练习题")
+            title = str(exercise_artifact.get("title") or "Leveled exercises")
             answer = _render_exercise_markdown(
                 title,
                 exercise_items,
@@ -239,14 +241,24 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     if resource_type == "review_doc" and review_doc_artifact:
         payload["review_doc"] = {
-            "title": review_doc_artifact.get("title", "Markdown复习文档"),
+            "title": review_doc_artifact.get("title", "Markdown Review Document"),
             "filename": review_doc_artifact.get("filename", ""),
             "docx_filename": review_doc_artifact.get("docx_filename", ""),
             "markdown_url": review_doc_artifact.get("markdown_url", ""),
             "docx_url": review_doc_artifact.get("docx_url", ""),
         }
 
+    if resource_type == "study_plan" and (study_plan_artifact or study_plan_document):
+        payload["study_plan"] = {
+            "title": study_plan_artifact.get("title") or study_plan_document.get("title", "Personalized Study Plan"),
+            "filename": study_plan_document.get("filename", ""),
+            "docx_filename": study_plan_document.get("docx_filename", ""),
+            "markdown_url": study_plan_document.get("markdown_url", ""),
+            "docx_url": study_plan_document.get("docx_url", ""),
+        }
+
     return payload
+
 
 
 async def _stream_graph_events(
@@ -267,7 +279,7 @@ async def _stream_graph_events(
         async for event in graph.astream_events(input_data, config=config, version="v2"):
             event_type = event["event"]
 
-            # ── Node lifecycle events ──────────────────────────────────────
+            # 鈹€鈹€ Node lifecycle events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             if event_type in ("on_chain_start", "on_chain_end"):
                 node_name = event.get("name")
                 meta_node = event.get("metadata", {}).get("langgraph_node")
@@ -326,7 +338,7 @@ async def _stream_graph_events(
                             mindmap_payload = json.dumps(
                                 {
                                     "type": "mindmap_result",
-                                    "title": artifact.get("title", "知识点思维导图"),
+                                    "title": artifact.get("title", "鐭ヨ瘑鐐规€濈淮瀵煎浘"),
                                     "tree": artifact.get("tree", {}),
                                     "xmind_url": artifact.get("xmind_url", ""),
                                 },
@@ -341,7 +353,7 @@ async def _stream_graph_events(
                             review_doc_payload = json.dumps(
                                 {
                                     "type": "review_doc_result",
-                                    "title": artifact.get("title", "Markdown复习文档"),
+                                    "title": artifact.get("title", "Markdown澶嶄範鏂囨。"),
                                     "filename": artifact.get("filename", ""),
                                     "docx_filename": artifact.get("docx_filename", ""),
                                     "markdown_url": artifact.get("markdown_url", ""),
@@ -351,7 +363,7 @@ async def _stream_graph_events(
                             )
                             yield f"data: {review_doc_payload}\n\n"
 
-            # ── Token streaming ────────────────────────────────────────────
+            # 鈹€鈹€ Token streaming 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 if node_name in ALLOWED_NODES:
@@ -363,7 +375,7 @@ async def _stream_graph_events(
                         )
                         yield f"data: {payload}\n\n"
 
-            # ── Token usage events ─────────────────────────────────────────
+            # 鈹€鈹€ Token usage events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             elif event_type == "on_chat_model_end":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 output = event.get("data", {}).get("output")
@@ -405,7 +417,7 @@ async def _stream_graph_events(
         yield f"data: {error_payload}\n\n"
         return
 
-    # ── Check for interrupt after stream completes ─────────────────
+    # 鈹€鈹€ Check for interrupt after stream completes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     try:
         state_snapshot = await graph.aget_state(config)
     except Exception:
@@ -474,13 +486,13 @@ async def generate_sse(
     Yields SSE payload types:
 
     * ``{"type": "thread_id", "thread_id": "..."}``
-      — emitted once at stream start so frontend can use it for /resume.
+      鈥?emitted once at stream start so frontend can use it for /resume.
     * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
-      — emitted when a graph node begins or finishes execution.
+      鈥?emitted when a graph node begins or finishes execution.
     * ``{"type": "token", "content": "<text>"}``
-      — emitted for each streamed token from an allowed LLM node.
+      鈥?emitted for each streamed token from an allowed LLM node.
     * ``{"type": "interrupt", "draft": "...", "thread_id": "..."}``
-      — emitted when the graph pauses for human review (HIL).
+      鈥?emitted when the graph pauses for human review (HIL).
 
     Args:
         query: The user-provided string to be processed by the graph.

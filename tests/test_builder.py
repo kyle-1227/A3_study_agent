@@ -36,16 +36,14 @@ class TestBuildGraph:
             "generate_answer",
             "evaluate_hallucination",
             "rewrite_query",
-            "gather_planning_context",
-            "gather_intel",
-            "drafter",
-            "reviewer_academic",
-            "reviewer_emotional",
-            "consensus_check",
-            "adv_rewrite",
-            "plan_output",
-            "feedback_router",
-            "plan_tweak",
+            "study_plan_emotional_intel",
+            "study_plan_planner",
+            "study_plan_agent",
+            "study_plan_reviewer_academic",
+            "study_plan_reviewer_emotional",
+            "study_plan_consensus",
+            "study_plan_rewrite",
+            "study_plan_output",
             "mindmap_planner",
             "mindmap_agent",
             "mindmap_reviewer",
@@ -82,11 +80,12 @@ class TestBuildGraph:
         assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
         assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
         assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "review_doc"
+        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "study_plan"
         assert route_after_evidence_judge({}) == "answer"
         assert route_after_academic_retrieval({}) == "answer"
 
     def test_route_after_query_rewrite_routes_planning_and_academic(self):
-        assert route_after_query_rewrite({"intent": "planning"}) == "planning"
+        assert route_after_query_rewrite({"intent": "planning"}) == "academic"
         assert route_after_query_rewrite({"intent": "academic"}) == "academic"
         assert route_after_query_rewrite({}) == "academic"
 
@@ -117,6 +116,15 @@ class TestBuildGraph:
         graph = build_graph()
         assert "search_query_rewriter" in graph.branches
         assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]
+
+    def test_study_plan_reviewer_fan_in_uses_barrier(self):
+        graph = build_graph()
+        assert (
+            ("study_plan_reviewer_academic", "study_plan_reviewer_emotional"),
+            "study_plan_consensus",
+        ) in graph.waiting_edges
+        assert ("study_plan_reviewer_academic", "study_plan_consensus") not in graph.edges
+        assert ("study_plan_reviewer_emotional", "study_plan_consensus") not in graph.edges
 
     @pytest.mark.anyio
     async def test_evidence_judge_runs_once_after_local_and_web_candidates(self):

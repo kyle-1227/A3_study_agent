@@ -1,85 +1,71 @@
-# v0.3.0 架构图
+# v0.3.0 Architecture Diagram
 
-## A.架构图
+## Runtime Graph
 
 ```mermaid
 graph TD
-  START([用户输入]) --> supervisor[意图分类]
+  START([Learner Input]) --> supervisor[Supervisor]
+  supervisor --> search_query_rewriter[Search Query Rewriter]
+  supervisor -->|emotional| emotional_response[Academic Support]
+  supervisor -->|unknown| handle_unknown[Unknown Intent]
 
-  supervisor -->|academic| academic_router[学术路由]
-  supervisor -->|planning| gather_planning_context[规划上下文检索]
-  supervisor -->|emotional| emotional_response[情绪支持]
-  supervisor -->|unknown| handle_unknown[未知意图]
+  search_query_rewriter --> academic_router[Academic Router]
+  academic_router --> rag_retrieve[Local RAG]
+  academic_router --> web_search[Tavily Web Search]
+  rag_retrieve --> evidence_judge[Evidence Judge]
+  web_search --> evidence_judge
 
-  %% Academic branch
-  academic_router --> rag_retrieve[RAG 检索]
-  academic_router --> web_search[网络搜索]
-  rag_retrieve --> generate_answer[回答生成]
-  web_search --> generate_answer
-  generate_answer --> evaluate_hallucination[幻觉评估]
-  evaluate_hallucination -->|通过| END_A([结束])
-  evaluate_hallucination -->|重试| rewrite_query[查询改写]
+  evidence_judge --> generate_answer[Generate Answer]
+  evidence_judge --> mindmap_planner[Mindmap Planner]
+  evidence_judge --> exercise_planner[Exercise Planner]
+  evidence_judge --> review_doc_planner[Review Doc Planner]
+  evidence_judge --> study_plan_emotional_intel[Study Plan Emotional Intel]
+
+  generate_answer --> evaluate_hallucination[Hallucination Eval]
+  evaluate_hallucination -->|pass| END_A([End])
+  evaluate_hallucination -->|retry| rewrite_query[Retry Query Rewrite]
   rewrite_query --> academic_router
 
-  %% Planning branch
-  gather_planning_context --> gather_intel[情报收集]
-  gather_intel --> drafter[计划起草]
-  drafter --> reviewer_academic[学术审查]
-  drafter --> reviewer_emotional[情绪审查]
-  reviewer_academic --> consensus_check[共识检查]
-  reviewer_emotional --> consensus_check
-  consensus_check -->|通过| plan_output[计划输出 + HIL]
-  consensus_check -->|打回| adv_rewrite[计划修订]
-  adv_rewrite --> drafter
+  mindmap_planner --> mindmap_agent[Mindmap Agent]
+  mindmap_agent --> mindmap_reviewer[Mindmap Reviewer]
+  mindmap_reviewer -->|approve| mindmap_output[Mindmap Output]
+  mindmap_reviewer -->|reject| mindmap_rewrite[Mindmap Rewrite]
+  mindmap_rewrite --> mindmap_agent
+  mindmap_output --> END_M([End])
 
-  %% HIL feedback loop
-  plan_output -->|确认| END_P([结束])
-  plan_output -->|反馈| feedback_router[反馈分类]
-  feedback_router -->|微调| plan_tweak[计划微调]
-  feedback_router -->|重写| drafter
-  plan_tweak --> plan_output
+  exercise_planner --> exercise_agent[Exercise Agent]
+  exercise_agent --> exercise_reviewer[Exercise Reviewer]
+  exercise_reviewer -->|approve| exercise_output[Exercise Output]
+  exercise_reviewer -->|reject| exercise_rewrite[Exercise Rewrite]
+  exercise_rewrite --> exercise_agent
+  exercise_output --> END_X([End])
 
-  %% Terminal nodes
-  emotional_response --> END_E([结束])
-  handle_unknown --> END_U([结束])
+  review_doc_planner --> review_doc_agent[Review Doc Agent]
+  review_doc_agent --> review_doc_reviewer[Review Doc Reviewer]
+  review_doc_reviewer -->|approve| review_doc_output[Review Doc Output]
+  review_doc_reviewer -->|reject| review_doc_rewrite[Review Doc Rewrite]
+  review_doc_rewrite --> review_doc_agent
+  review_doc_output --> END_D([End])
 
-  %% Styling
-  style plan_output fill:#FFF9E6,stroke:#E8A87C
-  style feedback_router fill:#E8F4FD,stroke:#4A90D9
-  style plan_tweak fill:#E8F4FD,stroke:#4A90D9
+  study_plan_emotional_intel --> study_plan_planner[Study Plan Planner]
+  study_plan_planner --> study_plan_agent[Study Plan Agent]
+  study_plan_agent --> study_plan_reviewer_academic[Academic Reviewer]
+  study_plan_agent --> study_plan_reviewer_emotional[Workload Reviewer]
+  study_plan_reviewer_academic --> study_plan_consensus[Study Plan Consensus]
+  study_plan_reviewer_emotional --> study_plan_consensus
+  study_plan_consensus -->|approve| study_plan_output[Study Plan Output]
+  study_plan_consensus -->|reject| study_plan_rewrite[Study Plan Rewrite]
+  study_plan_rewrite --> study_plan_agent
+  study_plan_output --> END_P([End])
+
+  emotional_response --> END_E([End])
+  handle_unknown --> END_U([End])
 ```
 
-## B.顺序图
+## Notes
 
-```mermaid
-
-sequenceDiagram
-  participant U as 用户
-  participant FE as 前端
-  participant BE as 后端
-  participant G as LangGraph
-
-  Note over G: Node: plan_output
-  G->>G: interrupt(draft)
-  G-->>BE: 图暂停 (State Suspended)
-  BE-->>FE: SSE: {"type":"interrupt","draft":"..."}
-  FE->>U: 显示 PlanReview 组件
-
-  alt 用户确认
-      U->>FE: 点击"确认计划"
-      FE->>BE: POST /resume {edited_plan: "..."}
-      BE->>G: Command(resume="...")
-      G->>G: plan_output → END
-  else 用户反馈
-      U->>FE: 输入反馈 + 点击"要求修改"
-      FE->>BE: POST /resume {feedback: "..."}
-      BE->>G: Command(resume={"action":"feedback","text":"..."})
-      G->>G: feedback_router → tweak/rewrite
-      G->>G: plan_output: interrupt(new_draft)
-      G-->>BE: 图再次暂停
-      BE-->>FE: SSE: {"type":"interrupt","draft":"..."}
-      FE->>U: 显示更新后的 PlanReview
-  end
-  
-```
-
+- `rag_retrieve` and `web_search` are parallel evidence-source nodes.
+- `evidence_judge` is a barrier fan-in node. It runs once after both evidence-source nodes finish.
+- Resource generation nodes only run after Evidence Judge has assembled judged context.
+- `study_plan` is a resource-generation sub-agent, not a standalone planning branch.
+- Development mode is fail-fast: planner/agent/reviewer failures raise and stop the graph instead of producing fallback output.

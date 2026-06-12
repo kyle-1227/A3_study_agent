@@ -116,6 +116,8 @@ async def supervisor_node(state: LearningState) -> dict:
     subject = subject_candidates[0] if subject_candidates else "other"
 
     requested_resource_type = _detect_requested_resource_type(user_text)
+    if intent == "planning" and not requested_resource_type:
+        requested_resource_type = "study_plan"
     needs_mindmap = requested_resource_type == "mindmap"
 
     if requested_resource_type:
@@ -177,7 +179,8 @@ async def handle_unknown(state: LearningState) -> dict:
 
 def route_by_intent(state: LearningState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
-    return state.get("intent", "academic")
+    intent = state.get("intent", "academic")
+    return "academic" if intent == "planning" else intent
 
 
 _RESOURCE_ACTION_MARKERS = (
@@ -233,6 +236,7 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("project_case", ("项目案例", "实践项目", "项目实战", "课程项目", "实验项目")),
     ("video_script", ("视频脚本", "动画脚本", "讲解视频", "教学视频", "分镜")),
     ("review_doc", ("复习资料", "复习文档", "学习文档", "学习材料", "考试讲义", "复习讲义", "知识整理", "知识点整理", "章节复习", "期末复习")),
+    ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
     ("reading", ("拓展阅读", "阅读材料", "参考资料", "文献清单", "资料清单")),
     ("volunteer", ("志愿填报", "高考志愿", "填报志愿", "志愿", "择校", "选专业", "分数线", "院校推荐", "专业推荐")),
     ("other", ("讲义", "学习资源", "资源清单", "知识卡片")),
@@ -249,6 +253,12 @@ def _detect_requested_resource_type(text: str) -> str:
     has_strong_action = any(marker.lower() in lowered for marker in _RESOURCE_ACTION_MARKERS)
     has_weak_request = any(marker.lower() in lowered for marker in _WEAK_REQUEST_MARKERS)
     asks_explanation = any(marker.lower() in lowered for marker in _EXPLANATION_MARKERS)
+    study_plan_markers = next(
+        (markers for resource_type, markers in _RESOURCE_TYPE_MARKERS if resource_type == "study_plan"),
+        (),
+    )
+    if any(marker.lower() in lowered for marker in study_plan_markers):
+        return "study_plan"
 
     if not has_strong_action and (not has_weak_request or asks_explanation):
         return ""
