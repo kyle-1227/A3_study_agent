@@ -1,7 +1,7 @@
 ﻿"use client"
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react"
-import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripHorizontal } from "lucide-react"
+import { ArrowDown as ArrowDownIcon, Check, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripHorizontal, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
@@ -18,7 +18,7 @@ import {
 import "@xyflow/react/dist/style.css"
 import dagre from "@dagrejs/dagre"
 
-// 鈹€鈹€ Exported types consumed by page.tsx 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Exported types consumed by page.tsx
 
 export interface LogEntry {
   type: "info" | "error" | "warning" | "perf" | "usage"
@@ -43,7 +43,7 @@ interface RightPanelProps {
   isInterrupted?: boolean
 }
 
-// 鈹€鈹€ Human-readable node labels 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Human-readable node labels
 
 const NODE_LABELS: Record<string, string> = {
   supervisor: "意图分类",
@@ -83,7 +83,7 @@ const NODE_LABELS: Record<string, string> = {
 }
 
 
-// 鈹€鈹€ Main component 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Main component
 
 export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(true)
@@ -101,7 +101,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [logs])
 
-  // 鈹€鈹€ Drag-to-resize divider 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // Drag-to-resize divider
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     draggingRef.current = true
@@ -164,7 +164,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             <ChevronRight className="h-4 w-4" />
           </Button>
 
-          {/* 鈹€鈹€ Upper Section: Node Trail / Graph + status bars 鈹€鈹€鈹€鈹€鈹€ */}
+          {/* Upper Section: Node Trail / Graph + status bars */}
           <div
             className="flex flex-col min-h-0"
             style={
@@ -205,9 +205,9 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                   <div className="bg-[#F5F3E8] rounded-lg p-6">
                     {nodeEvents.length === 0 ? (
                       <div className="flex flex-col items-center gap-3">
-                        <IdleNode label="绛夊緟璇锋眰..." />
+                        <IdleNode label="等待请求..." />
                         <p className="text-xs text-muted-foreground mt-2">
-                          鍙戦€佹秷鎭悗锛屾帹鐞嗚矾寰勫皢瀹炴椂鏄剧ず
+                          发送消息后，推理路径将实时显示
                         </p>
                       </div>
                     ) : (
@@ -237,7 +237,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#E8A87C] opacity-75" />
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
                   </span>
-                  绛夊緟鐢ㄦ埛瀹℃壒
+                  等待用户审批
                 </p>
               </div>
             )}
@@ -255,7 +255,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             )}
           </div>
 
-          {/* 鈹€鈹€ Draggable Divider 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */}
+          {/* Draggable Divider */}
           {!isLogsCollapsed && (
             <div
               onMouseDown={handleDragStart}
@@ -270,11 +270,11 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
             </div>
           )}
 
-          {/* 鈹€鈹€ System Logs (collapsed/expanded) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */}
+          {/* System Logs (collapsed/expanded) */}
           {!isLogsCollapsed ? (
             <div className="flex-1 flex flex-col overflow-hidden min-h-0">
               <div className="px-4 py-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-[#3D5A40]">绯荤粺 Logs</h3>
+                <h3 className="text-sm font-semibold text-[#3D5A40]">系统日志</h3>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -312,7 +312,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
               className="flex-shrink-0 px-4 py-2 border-t border-border flex items-center gap-1.5 text-xs text-muted-foreground hover:text-[#3D5A40] hover:bg-[#F5F3E8]/50 transition-colors"
             >
               <ChevronUp className="h-3 w-3" />
-              绯荤粺 Logs
+              系统日志
               {logs.length > 0 && (
                 <span className="bg-[#3D5A40]/10 text-[#3D5A40] text-[10px] px-1.5 py-0.5 rounded-full">
                   {logs.length}
@@ -326,7 +326,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
   )
 }
 
-// 鈹€鈹€ Graph DAG View (React Flow + dagre auto-layout) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Graph DAG View (React Flow + dagre auto-layout)
 
 interface DagEdgeDef {
   from: string
@@ -582,7 +582,7 @@ function GraphDAGView({ nodeEvents }: { nodeEvents: NodeEvent[] }) {
   )
 }
 
-// 鈹€鈹€ Sub-components 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Sub-components
 
 function TraversalNode({ event }: { event: NodeEvent }) {
   const label = NODE_LABELS[event.node] || event.node
@@ -608,13 +608,9 @@ function TraversalNode({ event }: { event: NodeEvent }) {
             <span className="relative inline-flex rounded-full h-2 w-2 bg-[#E8A87C]" />
           </span>
         ) : isError ? (
-          <svg className="h-3 w-3 text-[#A5483D]" viewBox="0 0 12 12" fill="none">
-            <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
+          <X className="h-3 w-3 text-[#A5483D]" strokeWidth={2.4} />
         ) : (
-          <svg className="h-3 w-3 text-[#3D5A40]" viewBox="0 0 12 12" fill="none">
-            <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <Check className="h-3 w-3 text-[#3D5A40]" strokeWidth={2.4} />
         )}
         {label}
         {event.synthetic ? <span className="text-[9px] uppercase opacity-70">synthetic</span> : null}
@@ -622,7 +618,7 @@ function TraversalNode({ event }: { event: NodeEvent }) {
       <div className="text-[10px] opacity-60 mt-0.5">
         {isRunning
           ? event.ts
-          : `${event.ts} 鈫?${event.endTs ?? ""}${event.durationMs != null ? ` (${event.durationMs}ms)` : ""}`}
+          : `${event.ts} -> ${event.endTs ?? ""}${event.durationMs != null ? ` (${event.durationMs}ms)` : ""}`}
       </div>
       {isError && event.error ? (
         <div className="mt-1 line-clamp-2 text-[10px] leading-tight opacity-80" title={event.error}>
@@ -645,9 +641,7 @@ function ArrowDown() {
   return (
     <div className="flex flex-col items-center text-[#7A9E7E] my-0.5">
       <div className="w-0.5 h-3 bg-[#7A9E7E]/50" />
-      <svg width="8" height="6" viewBox="0 0 8 6" fill="currentColor" className="opacity-70">
-        <path d="M4 6L0 0h8L4 6z" />
-      </svg>
+      <ArrowDownIcon className="h-2.5 w-2.5 opacity-70" strokeWidth={2.2} />
     </div>
   )
 }

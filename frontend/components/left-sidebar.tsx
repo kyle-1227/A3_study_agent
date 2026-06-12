@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ChevronLeft, ChevronRight, MessageSquarePlus, MessageSquare, Settings, GraduationCap } from "lucide-react"
+import { BrainCircuit, ChevronLeft, ChevronRight, MessageSquarePlus, MessageSquare, Settings, GraduationCap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -125,47 +125,9 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, onClearChatH
           {/* Header */}
           <div className="p-4 pr-12">
             <div className="flex items-start gap-3">
-              {/* Phoenix Icon */}
+              {/* Brand Icon */}
               <div className="relative flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-[#3D5A40] to-[#5A7A5E]">
-                <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M16 28C16 28 12 24 12 18C12 14 14 10 16 8"
-                    stroke="#FFCC99"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 28C16 28 20 24 20 18C20 14 18 10 16 8"
-                    stroke="#FFCC99"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 12C16 12 10 10 6 12C4 13 3 15 4 17C5 19 8 18 10 16C12 14 14 13 16 14"
-                    stroke="white"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 12C16 12 22 10 26 12C28 13 29 15 28 17C27 19 24 18 22 16C20 14 18 13 16 14"
-                    stroke="white"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 8C16 8 14 5 16 3C18 5 16 8 16 8Z"
-                    fill="#FFCC99"
-                    stroke="#FFCC99"
-                    strokeWidth="1"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <circle cx="16" cy="14" r="1.5" fill="#FFCC99" />
-                </svg>
+                <BrainCircuit className="h-6 w-6 text-[#FFCC99]" strokeWidth={1.9} />
               </div>
               <div className="flex-1 min-w-0">
                 <h1 className="text-base font-semibold text-[#3D5A40] leading-tight">高校学习 AI 助手</h1>

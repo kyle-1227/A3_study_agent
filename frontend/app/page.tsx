@@ -315,7 +315,7 @@ export default function Home() {
     setLogs([{ type: "info", message: "[INFO] Chat history cleared.", ts: timestamp() }])
   }, [setActiveThreadId])
 
-  /** Process a single SSE data payload 鈥?shared between /stream and /resume */
+  /** Process a single SSE data payload shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
 
@@ -352,7 +352,7 @@ export default function Home() {
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "warning", message: "[HIL] Graph interrupted 鈥?awaiting user plan review", ts: timestamp() },
+        { type: "warning", message: "[HIL] Graph interrupted - awaiting user plan review", ts: timestamp() },
       ])
       return
     }
@@ -681,7 +681,7 @@ export default function Home() {
       ])
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] 401 Unauthorized 鈥?invalid or missing access token", ts: timestamp() },
+        { type: "error", message: "[ERROR] 401 Unauthorized - invalid or missing access token", ts: timestamp() },
       ])
       if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
       return null
@@ -758,7 +758,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id 鈥?cannot resume", ts: timestamp() },
+        { type: "error", message: "[ERROR] No thread_id - cannot resume", ts: timestamp() },
       ])
       return
     }
@@ -803,7 +803,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id 鈥?cannot send feedback", ts: timestamp() },
+        { type: "error", message: "[ERROR] No thread_id - cannot send feedback", ts: timestamp() },
       ])
       return
     }

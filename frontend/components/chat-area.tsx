@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import {
+  BrainCircuit,
   Send,
   Bot,
   User,
@@ -137,47 +138,9 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
         <div className="max-w-3xl mx-auto py-6 flex flex-col gap-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-[60vh] text-center">
-              {/* Phoenix Icon for Empty State */}
+              {/* Brand Icon for Empty State */}
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-[#3D5A40] to-[#5A7A5E] mb-4">
-                <svg width="36" height="36" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path 
-                    d="M16 28C16 28 12 24 12 18C12 14 14 10 16 8" 
-                    stroke="#FFCC99" 
-                    strokeWidth="2" 
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path 
-                    d="M16 28C16 28 20 24 20 18C20 14 18 10 16 8" 
-                    stroke="#FFCC99" 
-                    strokeWidth="2" 
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path 
-                    d="M16 12C16 12 10 10 6 12C4 13 3 15 4 17C5 19 8 18 10 16C12 14 14 13 16 14" 
-                    stroke="white" 
-                    strokeWidth="1.8" 
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path 
-                    d="M16 12C16 12 22 10 26 12C28 13 29 15 28 17C27 19 24 18 22 16C20 14 18 13 16 14" 
-                    stroke="white" 
-                    strokeWidth="1.8" 
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path 
-                    d="M16 8C16 8 14 5 16 3C18 5 16 8 16 8Z" 
-                    fill="#FFCC99"
-                    stroke="#FFCC99"
-                    strokeWidth="1"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <circle cx="16" cy="14" r="1.5" fill="#FFCC99" />
-                </svg>
+                <BrainCircuit className="h-9 w-9 text-[#FFCC99]" strokeWidth={1.8} />
               </div>
               <h2 className="text-xl font-semibold text-[#3D5A40] mb-2">高校学习 AI 助手</h2>
               <p className="text-muted-foreground max-w-md leading-relaxed">
