@@ -28,6 +28,7 @@ from src.database.checkpointer import (
 )
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
+from src.graph.state import CONTEXT_CLEAR, initial_request_reset_transient_state
 from src.schemas import ChatRequest, ResumeRequest
 from src.observability.a3_trace import emit_a3_trace
 from src.tools.document_tool import get_review_doc_artifact_dir
@@ -508,6 +509,8 @@ async def generate_sse(
         "request_id": request_id,
         "session_id": thread_id,
         "thread_id": thread_id,
+        "context": CONTEXT_CLEAR,
+        **initial_request_reset_transient_state(),
     }
     _emit_graph_config_trace(graph, config, state_input)
 

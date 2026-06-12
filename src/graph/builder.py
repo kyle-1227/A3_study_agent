@@ -7,6 +7,7 @@ from langgraph.graph import END, StateGraph
 from src.graph.academic import (
     academic_router,
     evidence_judge,
+    evidence_summary_output,
     evaluate_hallucination,
     generate_answer,
     rag_retrieve,
@@ -70,6 +71,7 @@ def build_graph() -> StateGraph:
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
     graph.add_node("evidence_judge", evidence_judge)
+    graph.add_node("evidence_summary_output", evidence_summary_output)
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
@@ -153,8 +155,10 @@ def build_graph() -> StateGraph:
             "exercise": "exercise_planner",
             "review_doc": "review_doc_planner",
             "study_plan": "study_plan_emotional_intel",
+            "evidence_summary_output": "evidence_summary_output",
         },
     )
+    graph.add_edge("evidence_summary_output", END)
 
     # Hallucination evaluation with retry loop
     graph.add_edge("generate_answer", "evaluate_hallucination")
@@ -236,7 +240,10 @@ def build_graph() -> StateGraph:
 
 
 def route_after_evidence_judge(state: LearningState) -> str:
-    """Route judged evidence to answer generation or resource chains."""
+    """Route judged evidence to answer generation, resource chains, or controlled stop."""
+    if state.get("evidence_controlled_stop"):
+        return "evidence_summary_output"
+
     resource_type = state.get("requested_resource_type")
     if resource_type == "mindmap":
         return "mindmap"

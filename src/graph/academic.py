@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import CONTEXT_CLEAR, LearningState
+from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
 from src.llm.structured_output import (
     StructuredLLMResult,
     StructuredOutputError,
@@ -298,12 +298,97 @@ def _clear_retrieval_plan_state() -> dict:
     }
 
 
+def _is_retry_rewrite_active(state: LearningState) -> bool:
+    """True only when a hallucination retry rewrite is in progress."""
+    return bool(
+        (state.get("retry_count") or 0) > 0
+        or state.get("hallucination_reason", "")
+    )
+
+
+def select_relevant_memory_summaries(
+    state: LearningState,
+    current_query: str,
+    subject: str,
+    requested_resource_type: str,
+    *,
+    max_selected: int = 3,
+) -> list[dict]:
+    """Select compact evidence memory summaries relevant to the current query.
+
+    Returns only compact summaries — never raw docs, full old context, or
+    full historical answers.  Selection uses lightweight
+    recency/resource/subject metadata; no hardcoded discipline keyword maps.
+    """
+    memory_entries = state.get("evidence_summary_memory") or []
+    if not memory_entries:
+        return []
+
+    query_lower = (current_query or "").lower()
+    subject_lower = (subject or "").lower()
+    resource_lower = (requested_resource_type or "").lower()
+
+    scored: list[tuple[float, dict]] = []
+    for entry in memory_entries:
+        score = 0.0
+        entry_subject = str(entry.get("subject") or "").lower()
+        entry_resource = str(entry.get("resource_type") or "").lower()
+        entry_summary = str(entry.get("summary") or "").lower()
+
+        # Recency bonus
+        score += 0.2
+
+        # Subject match
+        if subject_lower and entry_subject == subject_lower:
+            score += 0.3
+        elif subject_lower and entry_subject and subject_lower in entry_subject:
+            score += 0.15
+
+        # Resource type match
+        if resource_lower and entry_resource == resource_lower:
+            score += 0.2
+
+        # Query term overlap (minimal — just a lightweight signal)
+        if query_lower and entry_summary:
+            query_terms = set(query_lower.split())
+            summary_terms = set(entry_summary.split())
+            if query_terms and summary_terms:
+                overlap = len(query_terms & summary_terms) / max(len(query_terms), 1)
+                score += min(overlap * 0.3, 0.3)
+
+        scored.append((score, entry))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = [
+        entry
+        for _, entry in scored[:max_selected]
+        if _ > 0.0
+    ]
+
+    selected_ids = [e.get("memory_id", "") for e in selected]
+    emit_a3_trace(
+        logger,
+        "memory_summary_selection",
+        {
+            "available_count": len(memory_entries),
+            "selected_count": len(selected),
+            "selected_ids": selected_ids,
+            "selection_reason": f"scored {len(memory_entries)} entries, selected top {len(selected)}",
+            "prompt_chars_added": sum(len(str(e.get('summary', ''))) for e in selected),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return selected
+
+
 def _query_source(state: LearningState) -> tuple[str, str]:
     rewritten = state.get("rewritten_query", "")
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
     keypoints = state.get("keypoints", [])
-    if rewritten:
+    # rewritten_query is only used when retry rewrite is active
+    if rewritten and _is_retry_rewrite_active(state):
         return rewritten, "rewritten_query"
     if search_rag_query:
         return search_rag_query, "search_rag_query"
@@ -550,20 +635,76 @@ def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
     return plan[0]["subject"] if plan else ""
 
 
+def _maybe_fail_subject_conflict(
+    *,
+    parsed_primary: str,
+    normalized_primary: str,
+    supervisor_subject: str,
+    available_subjects: list[str],
+    retrieval_plan: list[dict],
+) -> None:
+    """Fail-fast if the LLM subject conflicts with supervisor/available subjects
+    in a way normalization cannot justify."""
+    raw = (parsed_primary or "").strip().lower()
+    if not raw:
+        return  # LLM made no subject claim — no conflict to check
+
+    sv = (supervisor_subject or "").strip().lower()
+    if not sv or sv in ("unknown", "other"):
+        return  # Supervisor did not classify — no conflict baseline
+
+    norm = (normalized_primary or "").strip().lower()
+    available_lower = {s.lower() for s in available_subjects}
+    plan_subjects_lower = {item.get("subject", "").lower() for item in retrieval_plan}
+
+    # No conflict: normalized matches supervisor's subject
+    if norm == sv:
+        return
+    # No conflict: normalized is in available subjects
+    if norm and norm in available_lower:
+        return
+    # No conflict: LLM raw matches supervisor (normalization lost it)
+    if raw == sv:
+        return
+
+    # Conflict: raw is plausible (in available) but normalized mismatched
+    # — that's a normalization issue, not a conflict
+    if raw in available_lower:
+        return
+
+    # Genuine conflict: LLM proposes a subject that is neither the
+    # supervisor's subject nor in the available/plan set
+    if norm and plan_subjects_lower and norm not in plan_subjects_lower:
+        if norm not in available_lower:
+            raise ValueError(
+                f"search_query_rewriter subject conflict: "
+                f"LLM proposed '{parsed_primary}' (normalized '{normalized_primary}'), "
+                f"but supervisor subject is '{supervisor_subject}' "
+                f"and normalized subject is not in available subjects."
+            )
+
+
 def _web_query_source(state: LearningState) -> tuple[str, str]:
     search_web_query = state.get("search_web_query", "")
     rewritten = state.get("rewritten_query", "")
     if search_web_query:
         return search_web_query, "search_web_query"
-    if rewritten:
+    if rewritten and _is_retry_rewrite_active(state):
         return rewritten, "rewritten_query"
     return _last_human_query(state), "original_query"
 
 
 def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
-    """Build unified retrieval branches for multi- and single-subject paths."""
+    """Build unified retrieval branches for multi- and single-subject paths.
+
+    retrieval_plan always wins when non-empty.
+    Stale rewritten_query never suppresses retrieval plan.
+    """
     retrieval_plan = state.get("retrieval_plan") or []
-    if retrieval_plan and not state.get("rewritten_query"):
+    retry_active = _is_retry_rewrite_active(state)
+    rewritten_query = state.get("rewritten_query", "")
+
+    if retrieval_plan:
         branches = [dict(item, _synthetic_single_subject=False) for item in retrieval_plan]
         debug = {
             "mode": "multi_subject_plan",
@@ -571,6 +712,11 @@ def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
             "subjects": [item.get("subject") for item in branches],
             "synthetic_single_subject": False,
             "query_source": "retrieval_plan",
+            "rewritten_query_present": bool(rewritten_query),
+            "retry_rewrite_active": retry_active,
+            "ignored_stale_rewritten_query": bool(rewritten_query and not retry_active),
+            "used_retrieval_plan": True,
+            "retrieval_plan_count": len(branches),
         }
         return branches, debug
 
@@ -595,6 +741,11 @@ def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
         "subjects": [subject] if query else [],
         "synthetic_single_subject": True,
         "query_source": query_source,
+        "rewritten_query_present": bool(rewritten_query),
+        "retry_rewrite_active": retry_active,
+        "ignored_stale_rewritten_query": False,
+        "used_retrieval_plan": False,
+        "retrieval_plan_count": 0,
     }
     return ([branch] if query else []), debug
 
@@ -841,57 +992,19 @@ def _clip_text(value: Any, limit: int) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-_WEB_KEY_PHRASES = (
-    "machine learning",
-    "deep learning",
-    "neural networks",
-    "neural network",
-    "scikit-learn",
-    "TensorFlow",
-    "PyTorch",
-    "practice problems",
-    "coding exercises",
-    "with solutions",
-    "classification regression",
-    "train test split",
-    "model evaluation",
-)
-
-_PURPOSE_QUERY_HINTS = {
-    "resource_enrichment": ("exercises", "with solutions", "practice problems", "quiz"),
-    "coverage_expansion": ("deep learning", "neural networks", "practice problems"),
-    "implementation_detail": ("scikit-learn", "classification regression", "Python"),
-    "tool_ecosystem": ("TensorFlow", "PyTorch", "scikit-learn"),
-    "case_example": ("project example", "case study"),
-}
-
-
 def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_chars: int = 160) -> str:
-    """Compact a bilingual supplement query for faster Web Search."""
+    """Pure compression only — never add subject, purpose, or discipline terms.
+
+    - Normalize whitespace
+    - Remove duplicate tokens while preserving input order
+    - Enforce max length
+    - Preserve terms already present in the input
+    """
     text = " ".join(str(query or "").replace("\n", " ").split())
     if len(text) <= max_chars and len(text.split()) <= 8:
         return text
 
-    lower_text = text.lower()
-    protected_phrases: list[str] = []
-    if bool(_web_setting("preserve_key_phrases", True)):
-        for phrase in _WEB_KEY_PHRASES:
-            if phrase.lower() in lower_text:
-                protected_phrases.append(phrase)
-    for phrase in _PURPOSE_QUERY_HINTS.get(purpose, ()):
-        if phrase.lower() in lower_text and phrase not in protected_phrases:
-            protected_phrases.append(phrase)
-
-    placeholder_text = text
-    for idx, phrase in enumerate(protected_phrases):
-        placeholder_text = re.sub(
-            re.escape(phrase),
-            f" __PHRASE_{idx}__ ",
-            placeholder_text,
-            flags=re.IGNORECASE,
-        )
-
-    raw_tokens = placeholder_text.split()
+    raw_tokens = text.split()
     seen: set[str] = set()
     english_tokens: list[str] = []
     other_tokens: list[str] = []
@@ -910,13 +1023,10 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
         "and",
         "or",
     }
-    phrase_by_placeholder = {f"__PHRASE_{idx}__": phrase for idx, phrase in enumerate(protected_phrases)}
     for token in raw_tokens:
         cleaned = token.strip(" ,;，；。.!?()[]{}<>\"'`")
         if not cleaned:
             continue
-        if cleaned in phrase_by_placeholder:
-            cleaned = phrase_by_placeholder[cleaned]
         key = cleaned.lower()
         if key in seen or key in filler_tokens:
             continue
@@ -927,11 +1037,7 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
             other_tokens.append(cleaned)
 
     selected: list[str] = []
-    subject_token = str(subject or "").replace("_", " ").strip()
-    prioritized = []
-    if subject_token and subject_token.lower() not in {item.lower() for item in english_tokens}:
-        prioritized.append(subject_token)
-    prioritized.extend(english_tokens)
+    prioritized = list(english_tokens)
     prioritized.extend(other_tokens[:4])
     for token in prioritized:
         candidate = " ".join([*selected, token]).strip()
@@ -3144,12 +3250,45 @@ async def evidence_judge(state: LearningState) -> dict:
         env_flag="LOG_CONTEXT_ASSEMBLY",
     )
 
+    # ── Evidence memory ──────────────────────────────────────────────
+    request_id = state.get("request_id", "")
+    thread_id = state.get("thread_id", "")
+    new_evidence, new_gaps = build_evidence_memory_summary(
+        state=state,
+        parsed=parsed,
+        request_id=request_id,
+        thread_id=thread_id,
+    )
+
+    # ── Controlled stop logic ────────────────────────────────────────
+    evidence_state = parsed.overall_evidence_state
+    controlled_stop = False
+    controlled_stop_reason = ""
+    degraded_generation = False
+    degraded_reason = ""
+
+    fail_fast_on_insufficient = bool(
+        get_setting("retrieval.evidence_memory.fail_fast_on_insufficient_evidence", False)
+    )
+
+    if evidence_state == "insufficient":
+        if fail_fast_on_insufficient:
+            raise RuntimeError(
+                "Evidence Judge declared evidence insufficient and "
+                "fail_fast_on_insufficient_evidence is enabled."
+            )
+        controlled_stop = True
+        controlled_stop_reason = "evidence_insufficient"
+    elif evidence_state == "partially_sufficient":
+        degraded_generation = True
+        degraded_reason = "evidence_partially_sufficient"
+
     return {
         "context": context_docs,
         "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
         "evidence_judge_output": parsed.model_dump(mode="json"),
         "evidence_judge_rounds": 1,
-        "evidence_judge_state": parsed.overall_evidence_state,
+        "evidence_judge_state": evidence_state,
         "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
         "search_refinement_needed": refinement_needed,
         "search_refinement_deferred": refinement_deferred,
@@ -3159,8 +3298,12 @@ async def evidence_judge(state: LearningState) -> dict:
         "search_optimization_status": "reserved_not_implemented",
         "dual_source_mode": True,
         "evidence_judge_failed": False,
-        "degraded_generation": False,
-        "degraded_reason": "",
+        "degraded_generation": degraded_generation,
+        "degraded_reason": degraded_reason,
+        "evidence_controlled_stop": controlled_stop,
+        "evidence_controlled_stop_reason": controlled_stop_reason,
+        "evidence_summary_memory": new_evidence,
+        "evidence_gap_memory": new_gaps,
         "web_supplement_provider": "tavily",
         "web_supplement_results": web_context_docs,
         "web_evidence_count": web_evidence_count,
@@ -3179,69 +3322,315 @@ async def evidence_judge(state: LearningState) -> dict:
     }
 
 
+# ── Evidence memory builder ────────────────────────────────────────────────
+
+def build_evidence_memory_summary(
+    *,
+    state: LearningState,
+    parsed: EvidenceJudgeOutput,
+    request_id: str,
+    thread_id: str,
+    round_index: int = 1,
+) -> tuple[list[dict], list[dict]]:
+    """Build compact evidence memory and gap memory entries.
+
+    Stores only:
+    - compact summary
+    - source/evidence ids
+    - url/source
+    - quality/use case
+    - coverage gaps
+    - follow-up queries
+    - request/thread metadata
+
+    Never stores raw docs or full old context.
+    Returns (new_evidence_entries, new_gap_entries).
+    """
+    memory_id = f"{thread_id}:{request_id}:evidence_judge_round_{round_index}"
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    judged_summaries: list[dict] = []
+    for item in parsed.judged_evidence:
+        judged_summaries.append({
+            "evidence_id": item.evidence_id,
+            "keep": item.keep,
+            "final_quality": item.final_quality,
+            "use_case": item.use_case,
+            "reason": item.reason[:500] if item.reason else "",
+        })
+
+    evidence_entry = {
+        "memory_id": memory_id,
+        "created_at": created_at,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "evidence_judge_round": round_index,
+        "overall_evidence_state": parsed.overall_evidence_state,
+        "decision_summary": (parsed.decision_summary or "")[:1000],
+        "evidence_count": len(parsed.judged_evidence),
+        "kept_count": sum(1 for item in parsed.judged_evidence if item.keep),
+        "judged_summaries": judged_summaries,
+    }
+
+    gap_entries: list[dict] = []
+    for gap in parsed.coverage_gaps:
+        gap_entries.append({
+            "memory_id": f"{memory_id}:gap:{gap.subject}:{gap.role}",
+            "created_at": created_at,
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "subject": gap.subject,
+            "role": gap.role,
+            "gap": gap.gap,
+            "suggested_search_query": gap.suggested_search_query,
+            "purpose": gap.purpose,
+            "priority": gap.priority,
+        })
+
+    emit_a3_trace(
+        logger,
+        "evidence_memory_summary_build",
+        {
+            "evidence_state": parsed.overall_evidence_state,
+            "kept_count": evidence_entry["kept_count"],
+            "gap_count": len(gap_entries),
+            "summary_chars": len(evidence_entry["decision_summary"]),
+            "memory_id": memory_id,
+            "persisted": True,
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+
+    return [evidence_entry], gap_entries
+
+
+# ── Evidence summary output (controlled stop) ──────────────────────────────
+
+def _render_evidence_summary_output(state: LearningState) -> str:
+    """Render a short Markdown output when evidence is insufficient."""
+    gaps = state.get("evidence_coverage_gaps") or []
+    judge_output = state.get("evidence_judge_output") or {}
+    decision = judge_output.get("decision_summary", "") or "证据不足，无法提供完整回答。"
+
+    lines = [
+        "## 📋 证据检索摘要",
+        "",
+        f"**状态**: {decision}",
+        "",
+    ]
+
+    kept_ids = []
+    evidence_candidates = state.get("evidence_candidates") or []
+    for candidate in evidence_candidates:
+        eid = candidate.get("evidence_id", "")
+        if candidate.get("keep"):
+            kept_ids.append(eid)
+
+    if kept_ids:
+        lines.append(f"**已保存的证据**: {len(kept_ids)} 条")
+        lines.append("")
+
+    if gaps:
+        lines.append("### 🔍 发现的覆盖缺口")
+        lines.append("")
+        for gap in gaps[:5]:
+            lines.append(f"- **{gap.get('subject', '')}** ({gap.get('role', '')}): {gap.get('gap', '')}")
+        lines.append("")
+
+    lines.append("### 💡 建议的后续搜索")
+    followups = state.get("proposed_followup_search_queries") or []
+    for fq in followups[:5]:
+        q = fq.get("query", "") or fq.get("suggested_search_query", "")
+        if q:
+            lines.append(f"- `{q}`")
+
+    lines.append("")
+    lines.append("> ℹ️ 已保存当前证据摘要，您可以尝试更具体的问题或稍后重试。")
+
+    return "\n".join(lines)
+
+
+@traced_node
+async def evidence_summary_output(state: LearningState) -> dict:
+    """Controlled stop: emit summary when evidence is insufficient.
+
+    This is a successful controlled stop, NOT a server error.
+    The frontend should show 'done/controlled stop', not 'node error'.
+    """
+    markdown = _render_evidence_summary_output(state)
+    return {
+        "plan": markdown,
+    }
+
+
+# ── Node 0a: academic router ──────────────────────────────────────────────
+
 @traced_node
 async def academic_router(state: LearningState) -> dict:
-    """Router node for parallel fan-out. Clears context on retry path."""
-    if state.get("retry_count", 0) > 0:
+    """Router node for parallel fan-out.
+
+    Clears context on retry path only — NOT on new requests (that is
+    handled by initial_request_reset_transient_state at /stream entry).
+    """
+    if _is_retry_rewrite_active(state):
         return {"context": CONTEXT_CLEAR}
     return {}
 
 
-# ── Node 0b: query rewriting (retry path only) ──────────────────
+# ── Node 0b: query rewriting (retry path only, fail-fast) ─────────────────
 
 @traced_node
 async def rewrite_query(state: LearningState) -> dict:
-    """Rewrite the user's query using hallucination feedback for better retrieval."""
+    """Rewrite the user's query using hallucination feedback.
+
+    Uses invoke_plain_llm_fail_fast — on failure, raises instead of
+    falling back to the original query.  Does NOT clear persistent
+    state or current judged context via CONTEXT_CLEAR; that is the
+    academic_router's responsibility on the retry path.
+    """
+    from src.graph.llm import invoke_plain_llm_fail_fast
+
     original_query = _last_human_query(state)
     reason = state.get("hallucination_reason", "")
+    retry_count = state.get("retry_count", 0)
 
-    llm = get_node_llm("supervisor")
     rewrite_prompt = load_prompt("rewrite_query").format(
         original_query=original_query,
         hallucination_reason=reason,
     )
 
     try:
-        response = await llm.ainvoke([
-            SystemMessage(content="你是一个查询改写助手。根据反馈改进用户的搜索查询。"),
-            HumanMessage(content=rewrite_prompt),
-        ])
-        rewritten = response.content.strip()
-    except Exception:
-        logger.warning("Query rewrite failed, using original query")
-        rewritten = original_query
+        rewritten = await invoke_plain_llm_fail_fast(
+            node_name="rewrite_query",
+            llm_node="supervisor",
+            messages=[
+                SystemMessage(content="你是一个查询改写助手。根据反馈改进用户的搜索查询。"),
+                HumanMessage(content=rewrite_prompt),
+            ],
+            state=state,
+        )
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "rewrite_query_retry_failed",
+            {
+                "fallback_used": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:2000],
+                "retry_count": retry_count,
+                "hallucination_reason": reason,
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+        )
+        raise
 
-    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
         "rewrite_query_retry",
         {
-            "retry_count": state.get("retry_count", 0),
+            "retry_count": retry_count,
             "hallucination_reason": reason,
             "rewritten_query": rewritten,
-            "retrieval_plan_cleared": True,
+            "fallback_used": False,
         },
         state=state,
         env_flag="LOG_RETRY_TRACE",
     )
 
-    return {"rewritten_query": rewritten, **_clear_retrieval_plan_state()}
+    return {
+        "rewritten_query": rewritten,
+        **_clear_retrieval_plan_state(),
+    }
 
 
 # ── Node 0c: initial search-query rewriting ───────────────────────────────
 
+async def _maintain_conversation_summary(state: LearningState) -> str:
+    """Update the compact conversation summary before query rewrite.
+
+    Only runs when the message history is long enough to justify
+    summarization.  Returns the updated summary text.
+    """
+    messages = state.get("messages") or []
+    existing_summary = str(state.get("conversation_summary") or "").strip()
+
+    # Only summarize if we have enough messages
+    human_messages = [
+        m for m in messages
+        if isinstance(m, HumanMessage)
+        or (isinstance(m, dict) and m.get("type") == "human")
+    ]
+    if len(human_messages) < 2:
+        return existing_summary or ""
+
+    # Build a compact prompt for the LLM
+    recent_texts: list[str] = []
+    for m in messages[-10:]:
+        content = ""
+        if isinstance(m, HumanMessage):
+            content = str(m.content or "")
+        elif isinstance(m, AIMessage):
+            content = str(m.content or "")[:200]
+        elif isinstance(m, dict):
+            content = str(m.get("content", ""))
+            if m.get("type") == "ai":
+                content = content[:200]
+        if content.strip():
+            role = "用户" if (isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("type") == "human")) else "助手"
+            recent_texts.append(f"{role}: {content.strip()[:300]}")
+
+    if not recent_texts:
+        return existing_summary or ""
+
+    try:
+        from src.graph.llm import invoke_plain_llm_fail_fast
+
+        prompt = (
+            "将以下对话总结为一段简洁的中文摘要（不超过200字）。"
+            "保留用户的学习目标和关键话题，忽略闲聊。\n\n"
+            + ("现有摘要: " + existing_summary + "\n\n" if existing_summary else "")
+            + "\n".join(recent_texts[-8:])
+        )
+        summary = await invoke_plain_llm_fail_fast(
+            node_name="conversation_summary",
+            llm_node="supervisor",
+            messages=[HumanMessage(content=prompt)],
+            state=state,
+            temperature=0.0,
+            max_raw_chars=800,
+        )
+        return summary.strip()[:500]
+    except Exception:
+        logger.debug("Conversation summarization failed, keeping existing summary", exc_info=True)
+        return existing_summary or ""
+
+
 @traced_node
 async def search_query_rewriter(state: LearningState) -> dict:
-    """Rewrite the original request into RAG and web-search queries."""
-    if state.get("rewritten_query"):
-        return _clear_retrieval_plan_state()
+    """Rewrite the original request into RAG and web-search queries.
 
+    Query rewrite runs for every new request — stale rewritten_query from
+    a previous turn does NOT skip it.
+    """
     original_query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
     subject_candidates = state.get("subject_candidates", [])
     available_subjects = get_available_subjects_from_data()
+
+    # Maintain conversation summary before query rewrite
+    conversation_summary = await _maintain_conversation_summary(state)
+
+    # Select compact memory summaries — never full history
+    selected_memories = select_relevant_memory_summaries(
+        state,
+        current_query=original_query,
+        subject=subject,
+        requested_resource_type=requested_resource_type,
+    )
 
     prompt = _render_prompt(
         "search_query_rewriter",
@@ -3252,10 +3641,22 @@ async def search_query_rewriter(state: LearningState) -> dict:
             "subject": subject or "other",
             "subject_candidates": "、".join(subject_candidates) if subject_candidates else "无",
             "available_subjects": "、".join(available_subjects) if available_subjects else "无",
+            "conversation_summary": conversation_summary or "无",
+            "evidence_memory_summaries": json.dumps(
+                [
+                    {
+                        "summary": m.get("summary", ""),
+                        "subject": m.get("subject", ""),
+                        "resource_type": m.get("resource_type", ""),
+                    }
+                    for m in selected_memories
+                ],
+                ensure_ascii=False,
+            ) if selected_memories else "无",
         },
     )
     messages = [
-        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON."),
+        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON. Current user query is highest priority. Conversation/evidence memory is optional background only. Never rewrite a current request into an old topic because of history. If current query says one topic and memory contains another, follow the current query unless the user explicitly asks to connect them."),
         HumanMessage(content=prompt),
     ]
 
@@ -3295,6 +3696,16 @@ async def search_query_rewriter(state: LearningState) -> dict:
         }
         retrieval_plan, normalize_debug = _normalize_retrieval_plan(parsed.retrieval_plan, state)
         primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
+
+        # ── Subject conflict fail-fast ──────────────────────────────────
+        _maybe_fail_subject_conflict(
+            parsed_primary=parsed.primary_subject,
+            normalized_primary=primary_subject,
+            supervisor_subject=subject,
+            available_subjects=available_subjects,
+            retrieval_plan=retrieval_plan,
+        )
+
         multi_subject_payload = {
             "retrieval_plan": retrieval_plan,
             "learning_goal": parsed.learning_goal.strip(),
@@ -3371,6 +3782,7 @@ async def search_query_rewriter(state: LearningState) -> dict:
         "search_query_rewrite_reason": result_payload["reason"],
         "search_query_rewrite_error": "",
         "search_query_rewrite_raw_preview": raw_preview,
+        "conversation_summary": conversation_summary,
         **multi_subject_payload,
     }
 

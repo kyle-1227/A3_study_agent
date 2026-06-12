@@ -20,6 +20,12 @@
 ## 当前知识库 available subjects / available_subjects
 {available_subjects}
 
+## 对话历史摘要 (conversation_summary)
+{conversation_summary}
+
+## 先前证据记忆摘要 (evidence_memory_summaries)
+{evidence_memory_summaries}
+
 ## 任务
 将用户自然语言请求改写成适合本地知识库检索和网络搜索的查询。项目知识库包含中文和英文高校课程资料，因此检索查询必须支持中英双语召回。
 
@@ -44,6 +50,7 @@
 core_concept、implementation_tool、application_context、prerequisite、comparison、extension、method_for_domain、case_carrier、constraint、supporting_context
 
 ## 查询改写规则
+0. **当前用户查询拥有最高优先级。** conversation_summary 和 evidence_memory_summaries 只是可选的背景参考。如果当前查询讨论一个话题而记忆包含另一个话题，必须遵循当前查询，除非用户明确要求关联历史。绝不允许因为历史摘要将当前请求改写为旧话题。
 1. 不要回答用户问题，只改写检索查询。
 2. rag_query 应偏向课程知识点、概念、章节、前置知识，并同时包含用户原始关键词和对应英文/中文教材术语扩展。
 3. web_search_query 应偏向能搜到高质量资料的关键词，并保留中英双语表达，适合检索课程讲义、教材说明、官方文档、tutorial、course notes 等资料。

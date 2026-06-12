@@ -38,7 +38,7 @@ class TestAcademicRouterRetry:
 
 
 class TestRewriteQuery:
-    @patch("src.graph.academic.get_node_llm")
+    @patch("src.graph.llm.get_node_llm")
     async def test_produces_rewritten_query(self, mock_get_llm):
         mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="improved retrieval query"))
@@ -48,24 +48,28 @@ class TestRewriteQuery:
             "messages": [HumanMessage(content="original question")],
             "hallucination_reason": "fabricated detail",
             "retry_count": 1,
+            "request_id": "test-req",
+            "thread_id": "test-thread",
         })
 
         assert result["rewritten_query"] == "improved retrieval query"
         assert result["retrieval_plan"] == []
 
-    @patch("src.graph.academic.get_node_llm")
-    async def test_falls_back_to_original_on_retry_rewrite_failure(self, mock_get_llm):
+    @patch("src.graph.llm.get_node_llm")
+    async def test_fail_fast_on_retry_rewrite_failure(self, mock_get_llm):
+        """Rewrite query now fails fast — no fallback to original query."""
         mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM error"))
         mock_get_llm.return_value = mock_llm
 
-        result = await rewrite_query({
-            "messages": [HumanMessage(content="original question")],
-            "hallucination_reason": "bad",
-            "retry_count": 1,
-        })
-
-        assert result["rewritten_query"] == "original question"
+        with pytest.raises(RuntimeError, match="LLM error"):
+            await rewrite_query({
+                "messages": [HumanMessage(content="original question")],
+                "hallucination_reason": "bad",
+                "retry_count": 1,
+                "request_id": "test-req",
+                "thread_id": "test-thread",
+            })
 
 
 class TestSearchQueryRewriter:
@@ -106,17 +110,49 @@ class TestSearchQueryRewriter:
         assert result["primary_subject"] == "python"
         mock_invoke.assert_awaited_once()
 
-    async def test_noops_when_retry_rewritten_query_exists(self):
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
+    @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
+    async def test_always_rewrites_even_with_stale_rewritten_query(
+        self, mock_summary, mock_invoke, mock_available_subjects
+    ):
+        """Query rewrite always runs for every new request — stale
+        rewritten_query from a previous turn does NOT skip it."""
+        mock_available_subjects.return_value = ["python"]
+        mock_summary.return_value = ""
+        parsed = SearchQueryRewriteOutput(
+            rag_query="fresh rag query",
+            web_search_query="fresh web query",
+            expanded_keypoints=["fresh"],
+            reason="rewritten for new request",
+            learning_goal="",
+            primary_subject="python",
+            subject_relation_summary="",
+            retrieval_plan=[
+                RetrievalPlanItem(
+                    subject="python",
+                    role="core_concept",
+                    rag_query="fresh rag query",
+                    web_search_query="fresh web query",
+                    priority=1.0,
+                ),
+            ],
+        )
+        mock_invoke.return_value = SimpleNamespace(parsed=parsed, raw_output='{"ok": true}')
+
         result = await search_query_rewriter({
-            "messages": [HumanMessage(content="original")],
-            "rewritten_query": "retry query",
+            "messages": [HumanMessage(content="new request")],
+            "rewritten_query": "stale retry query from previous turn",
+            "subject": "python",
+            "subject_candidates": ["python"],
         })
-        assert result["retrieval_plan"] == []
-        assert result["learning_goal"] == ""
-        assert result["primary_subject"] == ""
-        assert result["subject_relation_summary"] == ""
-        assert result["evidence_candidates"] == []
-        assert result["dual_source_mode"] is False
+
+        assert result["search_rag_query"] == "fresh rag query"
+        assert result["search_web_query"] == "fresh web query"
+        assert result["retrieval_plan"][0]["subject"] == "python"
+        # Stale rewritten_query does NOT suppress the fresh retrieval plan
+        assert result["primary_subject"] == "python"
+        mock_invoke.assert_awaited_once()
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     def test_normalize_retrieval_plan_returns_debug(self, mock_available_subjects):
