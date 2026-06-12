@@ -31,16 +31,50 @@ logger = logging.getLogger(__name__)
 
 class SupervisorOutput(BaseModel):
     """Structured output for supervisor intent classification."""
-    intent: Literal["academic", "planning", "emotional", "unknown"]
+    intent: Literal["academic", "emotional", "unknown"]
     keywords: list[str]
     confidence: float
     subject_candidates: list[str] = []
+    requested_resource_type: str = ""
 
 
-_VALID_INTENTS = set(get_setting(
-    "supervisor.valid_intents",
-    ["academic", "planning", "emotional", "unknown"],
-))
+_VALID_INTENTS: set[str] = set()
+
+_VALID_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc"})
+
+
+def _sanitize_valid_intents() -> set[str]:
+    """Sanitize supervisor.valid_intents config — planning is no longer legal."""
+    configured = get_setting(
+        "supervisor.valid_intents",
+        ["academic", "planning", "emotional", "unknown"],
+    )
+    if not isinstance(configured, list):
+        configured = ["academic", "emotional", "unknown"]
+    removed = [i for i in configured if i == "planning"]
+    sanitized = [i for i in configured if i != "planning"]
+    if removed:
+        logger.warning(
+            "supervisor.valid_intents contains 'planning' — sanitized. "
+            "Removed intents: %s. Effective intents: %s",
+            removed,
+            sanitized,
+        )
+        emit_a3_trace(
+            logger,
+            "supervisor_config_sanitize",
+            {
+                "configured": configured,
+                "removed_intents": removed,
+                "effective_intents": sanitized,
+            },
+            state={},
+            env_flag="LOG_A3_TRACE",
+        )
+    return set(sanitized)
+
+
+_VALID_INTENTS = _sanitize_valid_intents()
 
 
 def validate_supervisor_output(parsed: BaseModel) -> str:
@@ -55,6 +89,16 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
         return "keywords must be a list"
     if not isinstance(parsed.subject_candidates, list):
         return "subject_candidates must be a list"
+    # ── Intent/resource combination validation ─────────────────────
+    resource_type = (parsed.requested_resource_type or "").strip()
+    if resource_type:
+        if parsed.intent in ("emotional", "unknown"):
+            if resource_type in _VALID_RESOURCE_TYPES:
+                return (
+                    f"intent={parsed.intent} may not carry "
+                    f"requested_resource_type={resource_type}. "
+                    f"Only academic intent supports resource generation."
+                )
     return ""
 
 
@@ -115,13 +159,14 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    requested_resource_type = _detect_requested_resource_type(user_text)
-    if intent == "planning" and not requested_resource_type:
-        requested_resource_type = "study_plan"
-    needs_mindmap = requested_resource_type == "mindmap"
+    # Use LLM's requested_resource_type first, fall back to deterministic detection
+    llm_resource = (result.requested_resource_type or "").strip()
+    deterministic_resource = _detect_requested_resource_type(user_text)
+    requested_resource_type = llm_resource or deterministic_resource
 
-    if requested_resource_type:
-        intent = "academic"
+    # academic intent with resource type stays academic
+    # emotional/unknown with resource type was already blocked by validation
+    needs_mindmap = requested_resource_type == "mindmap"
 
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
@@ -180,7 +225,9 @@ async def handle_unknown(state: LearningState) -> dict:
 def route_by_intent(state: LearningState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
     intent = state.get("intent", "academic")
-    return "academic" if intent == "planning" else intent
+    if intent not in ("academic", "emotional", "unknown"):
+        intent = "unknown"
+    return intent
 
 
 _RESOURCE_ACTION_MARKERS = (

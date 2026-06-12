@@ -457,7 +457,7 @@ class TestSettingsValues:
         from src.config import get_setting
 
         intents = get_setting("supervisor.valid_intents")
-        assert set(intents) == {"academic", "planning", "emotional", "unknown"}
+        assert set(intents) == {"academic", "emotional", "unknown"}
 
     def test_multi_subject_rag_settings(self):
         from src.config import get_setting

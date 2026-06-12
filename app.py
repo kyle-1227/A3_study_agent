@@ -137,7 +137,7 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"handle_unknown", "mindmap_output", "exercise_output", "review_doc_output", "study_plan_output"}
+TEXT_EMIT_NODES = {"handle_unknown", "evidence_summary_output", "mindmap_output", "exercise_output", "review_doc_output", "study_plan_output"}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -147,6 +147,7 @@ GRAPH_NODES = {
     "rag_retrieve",
     "web_search",
     "evidence_judge",
+    "evidence_summary_output",
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",

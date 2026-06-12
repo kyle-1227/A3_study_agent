@@ -24,6 +24,7 @@ def _result(
     keywords: list[str] | None = None,
     confidence: float = 0.9,
     subject_candidates: list[str] | None = None,
+    requested_resource_type: str = "",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         parsed=SupervisorOutput(
@@ -31,6 +32,7 @@ def _result(
             keywords=keywords or [],
             confidence=confidence,
             subject_candidates=subject_candidates or [],
+            requested_resource_type=requested_resource_type,
         ),
         raw_output="{}",
     )
@@ -83,8 +85,12 @@ class TestSupervisorNode:
         assert payload["subject"] == "python"
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
-    async def test_planning_intent_is_normalized_to_study_plan_resource(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="planning", keywords=[], confidence=0.9)
+    async def test_academic_with_study_plan_resource_type(self, mock_invoke):
+        """academic intent with requested_resource_type=study_plan stays academic."""
+        mock_invoke.return_value = _result(
+            intent="academic", keywords=["learning plan"], confidence=0.9,
+            requested_resource_type="study_plan",
+        )
 
         state = {"messages": [HumanMessage(content="Help me make a learning plan")]}
         result = await supervisor_node(state)
@@ -223,8 +229,9 @@ class TestRouteByIntent:
     def test_routes_academic(self):
         assert route_by_intent({"intent": "academic"}) == "academic"
 
-    def test_routes_planning_to_academic_path(self):
-        assert route_by_intent({"intent": "planning"}) == "academic"
+    def test_routes_planning_to_unknown(self):
+        """Planning is no longer a valid intent — routes to unknown."""
+        assert route_by_intent({"intent": "planning"}) == "unknown"
 
     def test_routes_emotional(self):
         assert route_by_intent({"intent": "emotional"}) == "emotional"
@@ -240,8 +247,10 @@ class TestValidIntents:
     def test_valid_intents_includes_unknown(self):
         assert "unknown" in _VALID_INTENTS
 
-    def test_valid_intents_keeps_planning_as_compat_intent(self):
-        assert _VALID_INTENTS == {"academic", "planning", "emotional", "unknown"}
+    def test_valid_intents_no_longer_includes_planning(self):
+        """Planning is no longer a valid intent — supervisor sanitizes it."""
+        assert _VALID_INTENTS == {"academic", "emotional", "unknown"}
+        assert "planning" not in _VALID_INTENTS
 
 
 class TestHandleUnknown:

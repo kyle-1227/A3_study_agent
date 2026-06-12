@@ -20,20 +20,23 @@ def test_graph_compiles_offline():
     assert compiled is not None
 
 
-def test_planning_intent_routes_to_academic_path():
-    assert route_by_intent({"intent": "planning"}) == "academic"
+def test_planning_intent_no_longer_valid():
+    """Planning is no longer a valid intent — routes to unknown."""
+    assert route_by_intent({"intent": "planning"}) == "unknown"
 
 
 @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
-async def test_study_plan_request_is_normalized_to_academic_resource(mock_invoke):
+async def test_study_plan_request_stays_academic_with_resource_type(mock_invoke):
+    """academic intent with requested_resource_type=study_plan stays academic."""
     from src.graph.supervisor import SupervisorOutput
 
     mock_invoke.return_value = type("Result", (), {
         "parsed": SupervisorOutput(
-            intent="planning",
+            intent="academic",
             keywords=["learning plan"],
             confidence=0.9,
             subject_candidates=[],
+            requested_resource_type="study_plan",
         ),
         "raw_output": "{}",
     })()

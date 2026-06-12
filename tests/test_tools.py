@@ -88,7 +88,6 @@ class TestPrompts:
         prompt = load_prompt("supervisor_system")
         assert len(prompt) > 100
         assert "academic" in prompt
-        assert "planning" in prompt
         assert "emotional" in prompt
 
     def test_academic_prompts_have_placeholders(self):

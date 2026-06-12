@@ -19,7 +19,7 @@ checkpointer:
 web_search:
   provider: tavily                       # Tavily is the only Web Search provider; no fallback
   conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
-  skip_general_when_conditional: true     # Skip old fan-out web_search for academic/planning
+  skip_general_when_conditional: true     # Skip old fan-out web_search for academic intent
   skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
   timeout_seconds: 30                      # Timeout per Tavily web supplement attempt
   max_total_attempts: 3                   # Global dynamic web attempts per request
@@ -300,7 +300,6 @@ supervisor:
   temperature: 0.0                      # Deterministic intent routing
   valid_intents:
     - academic
-    - planning
     - emotional
     - unknown
 

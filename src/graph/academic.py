@@ -87,10 +87,48 @@ class SearchQueryRewriteOutput(BaseModel):
         default_factory=list,
         description="Per-subject retrieval plan",
     )
+    memory_context_notes: list[str] = Field(
+        default_factory=list,
+        description="Notes about how conversation/evidence memory relates to current query",
+    )
+    memory_used_for_retrieval: bool = Field(
+        default=False,
+        description="Whether evidence memory influenced the retrieval plan",
+    )
+    memory_use_reason: str = Field(
+        default="",
+        description="Why memory was or was not used for retrieval",
+    )
 
 
-def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
-    """Business validation for retrieval query rewriting."""
+_HISTORY_REFERENCE_PATTERNS = (
+    "之前", "上次", "刚才", "刚刚", "前面", "前面说", "前面讲",
+    "历史", "刚才说", "刚才讲", "之前说", "之前讲",
+    "前述", "前文", "上文", "上回", "继续", "接着说", "接着讲",
+    "previously", "before", "last time", "earlier", "history",
+    "previous", "above", "aforementioned", "继续上面的",
+)
+
+
+def _has_explicit_history_reference(query: str) -> bool:
+    """Check if the user query contains explicit history-reference language.
+
+    This is a lightweight pattern match — no hardcoded discipline keywords.
+    """
+    lowered = (query or "").lower()
+    return any(pattern.lower() in lowered for pattern in _HISTORY_REFERENCE_PATTERNS)
+
+
+def validate_search_query_rewrite_output(
+    parsed: BaseModel,
+    *,
+    current_query: str = "",
+) -> str:
+    """Business validation for retrieval query rewriting.
+
+    If memory_used_for_retrieval is true but the current query does NOT
+    contain explicit history-reference language, fail validation.
+    """
     if not isinstance(parsed, SearchQueryRewriteOutput):
         return "root expected SearchQueryRewriteOutput"
     if not str(parsed.rag_query or "").strip():
@@ -105,6 +143,22 @@ def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
             return f"{prefix}.subject must be a string"
         if item.role and not str(item.role).strip():
             return f"{prefix}.role must be a string"
+    # ── Memory use validation ───────────────────────────────────────
+    # Two valid paths for memory to influence retrieval:
+    # 1. Current query contains explicit history-reference language, OR
+    # 2. LLM marks memory_used_for_retrieval=true with a non-empty reason.
+    if parsed.memory_used_for_retrieval:
+        has_explicit_ref = _has_explicit_history_reference(current_query)
+        has_valid_reason = bool((parsed.memory_use_reason or "").strip())
+        if not has_explicit_ref and not has_valid_reason:
+            return (
+                "memory_used_for_retrieval=true but current query does not "
+                "contain explicit history-reference language and "
+                "memory_use_reason is empty. "
+                "Memory may only influence retrieval when the user "
+                "explicitly references previous conversation or the LLM "
+                "provides a valid reason."
+            )
     return ""
 
 
@@ -316,9 +370,10 @@ def select_relevant_memory_summaries(
 ) -> list[dict]:
     """Select compact evidence memory summaries relevant to the current query.
 
+    Reads ``summary`` first, falls back to ``decision_summary``.
+    Tolerates missing fields and traces missing-field counts.
     Returns only compact summaries — never raw docs, full old context, or
-    full historical answers.  Selection uses lightweight
-    recency/resource/subject metadata; no hardcoded discipline keyword maps.
+    full historical answers.
     """
     memory_entries = state.get("evidence_summary_memory") or []
     if not memory_entries:
@@ -327,13 +382,27 @@ def select_relevant_memory_summaries(
     query_lower = (current_query or "").lower()
     subject_lower = (subject or "").lower()
     resource_lower = (requested_resource_type or "").lower()
+    missing_field_counts: dict[str, int] = {}
+
+    def _get_summary(entry: dict) -> str:
+        val = str(entry.get("summary") or "")
+        if val.strip():
+            return val.strip()
+        val = str(entry.get("decision_summary") or "")
+        return val.strip()
 
     scored: list[tuple[float, dict]] = []
-    for entry in memory_entries:
+
+    for idx, entry in enumerate(memory_entries):
+        # ── Track missing fields ────────────────────────────────────
+        for field in ("summary", "subject", "resource_type", "decision_summary"):
+            if not entry.get(field):
+                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+
         score = 0.0
         entry_subject = str(entry.get("subject") or "").lower()
-        entry_resource = str(entry.get("resource_type") or "").lower()
-        entry_summary = str(entry.get("summary") or "").lower()
+        entry_resource = str(entry.get("resource_type") or entry.get("requested_resource_type") or "").lower()
+        entry_summary = _get_summary(entry).lower()
 
         # Recency bonus
         score += 0.2
@@ -348,7 +417,7 @@ def select_relevant_memory_summaries(
         if resource_lower and entry_resource == resource_lower:
             score += 0.2
 
-        # Query term overlap (minimal — just a lightweight signal)
+        # Query term overlap (lightweight signal only)
         if query_lower and entry_summary:
             query_terms = set(query_lower.split())
             summary_terms = set(entry_summary.split())
@@ -374,7 +443,8 @@ def select_relevant_memory_summaries(
             "selected_count": len(selected),
             "selected_ids": selected_ids,
             "selection_reason": f"scored {len(memory_entries)} entries, selected top {len(selected)}",
-            "prompt_chars_added": sum(len(str(e.get('summary', ''))) for e in selected),
+            "missing_field_counts": missing_field_counts,
+            "prompt_chars_added": sum(len(_get_summary(e)) for e in selected),
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -383,15 +453,16 @@ def select_relevant_memory_summaries(
 
 
 def _query_source(state: LearningState) -> tuple[str, str]:
+    """Priority: search_rag_query > active retry rewritten_query > expanded_keypoints > keypoints > original query."""
     rewritten = state.get("rewritten_query", "")
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
     keypoints = state.get("keypoints", [])
-    # rewritten_query is only used when retry rewrite is active
-    if rewritten and _is_retry_rewrite_active(state):
-        return rewritten, "rewritten_query"
     if search_rag_query:
         return search_rag_query, "search_rag_query"
+    # rewritten_query is diagnostic only; used for retrieval only when retry rewrite is active
+    if rewritten and _is_retry_rewrite_active(state):
+        return rewritten, "rewritten_query"
     if expanded_keypoints:
         return " ".join(expanded_keypoints), "expanded_keypoints"
     if keypoints:
@@ -3334,30 +3405,62 @@ def build_evidence_memory_summary(
 ) -> tuple[list[dict], list[dict]]:
     """Build compact evidence memory and gap memory entries.
 
-    Stores only:
-    - compact summary
-    - source/evidence ids
-    - url/source
-    - quality/use case
-    - coverage gaps
-    - follow-up queries
-    - request/thread metadata
+    Includes selector-facing fields: subject, resource_type, summary,
+    decision_summary, evidence_state, followup_search_queries, and
+    kept_evidence_summary with short safe metadata only.
 
-    Never stores raw docs or full old context.
+    Never stores raw docs, content, full context, full historical
+    answers, or raw originals.
     Returns (new_evidence_entries, new_gap_entries).
     """
     memory_id = f"{thread_id}:{request_id}:evidence_judge_round_{round_index}"
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    judged_summaries: list[dict] = []
+    # ── kept_evidence_summary: short safe metadata only ──────────────
+    kept_evidence_summary: list[dict] = []
+    judged_by_id: dict[str, EvidenceJudgeItem] = {}
     for item in parsed.judged_evidence:
-        judged_summaries.append({
-            "evidence_id": item.evidence_id,
-            "keep": item.keep,
-            "final_quality": item.final_quality,
-            "use_case": item.use_case,
-            "reason": item.reason[:500] if item.reason else "",
+        judged_by_id[item.evidence_id] = item
+
+    candidates = state.get("evidence_candidates") or []
+    originals = {**state.get("local_evidence_originals", {}), **state.get("web_evidence_originals", {})}
+    candidate_by_id: dict[str, dict] = {}
+    for c in candidates:
+        cid = c.get("evidence_id", "")
+        if cid:
+            candidate_by_id[cid] = c
+
+    for eid, judge_item in judged_by_id.items():
+        if not judge_item.keep:
+            continue
+        candidate = candidate_by_id.get(eid, {})
+        source = candidate.get("source", "")
+        url = candidate.get("url", "")
+        # Pull source/url from originals if not in candidate
+        if (not source or not url) and eid in originals:
+            orig = originals[eid]
+            source = source or orig.get("source", "")
+            url = url or orig.get("url", "")
+        kept_evidence_summary.append({
+            "evidence_id": eid,
+            "subject": candidate.get("subject", ""),
+            "source_type": candidate.get("source_type", ""),
+            "source": source[:300] if source else "",
+            "url": url[:500] if url else "",
+            "final_quality": judge_item.final_quality,
+            "use_case": judge_item.use_case,
+            "short_summary": (judge_item.reason or "")[:200],
         })
+
+    # ── followup queries from coverage gaps ──────────────────────────
+    followup_queries: list[str] = []
+    for gap in parsed.coverage_gaps:
+        q = gap.suggested_search_query.strip()
+        if q and q not in followup_queries:
+            followup_queries.append(q)
+
+    decision_summary_text = (parsed.decision_summary or "")[:1000]
+    summary_text = decision_summary_text
 
     evidence_entry = {
         "memory_id": memory_id,
@@ -3365,11 +3468,21 @@ def build_evidence_memory_summary(
         "request_id": request_id,
         "thread_id": thread_id,
         "evidence_judge_round": round_index,
+        # ── Selector-facing fields ────────────────────────────────
+        "subject": state.get("subject", ""),
+        "requested_resource_type": state.get("requested_resource_type", ""),
+        "resource_type": state.get("requested_resource_type", ""),
+        "summary": summary_text,
+        "decision_summary": decision_summary_text,
+        "evidence_state": parsed.overall_evidence_state,
         "overall_evidence_state": parsed.overall_evidence_state,
-        "decision_summary": (parsed.decision_summary or "")[:1000],
+        "need_more_web_search": parsed.need_more_web_search,
+        "coverage_gap_count": len(parsed.coverage_gaps),
+        "followup_search_queries": followup_queries,
         "evidence_count": len(parsed.judged_evidence),
         "kept_count": sum(1 for item in parsed.judged_evidence if item.keep),
-        "judged_summaries": judged_summaries,
+        # ── Compact metadata only (no raw docs/content) ──────────
+        "kept_evidence_summary": kept_evidence_summary,
     }
 
     gap_entries: list[dict] = []
@@ -3394,7 +3507,7 @@ def build_evidence_memory_summary(
             "evidence_state": parsed.overall_evidence_state,
             "kept_count": evidence_entry["kept_count"],
             "gap_count": len(gap_entries),
-            "summary_chars": len(evidence_entry["decision_summary"]),
+            "summary_chars": len(summary_text),
             "memory_id": memory_id,
             "persisted": True,
         },
@@ -3456,11 +3569,16 @@ async def evidence_summary_output(state: LearningState) -> dict:
     """Controlled stop: emit summary when evidence is insufficient.
 
     This is a successful controlled stop, NOT a server error.
-    The frontend should show 'done/controlled stop', not 'node error'.
+    Returns messages so the frontend displays it as a normal response,
+    with metadata marking it as a controlled stop.
     """
     markdown = _render_evidence_summary_output(state)
     return {
         "plan": markdown,
+        "messages": [AIMessage(content=markdown)],
+        "evidence_controlled_stop": True,
+        "final_response_type": "evidence_summary",
+        "evidence_controlled_stop_reason": state.get("evidence_controlled_stop_reason", "evidence_insufficient"),
     }
 
 
@@ -3539,9 +3657,15 @@ async def rewrite_query(state: LearningState) -> dict:
         env_flag="LOG_RETRY_TRACE",
     )
 
+    # rewritten_query is diagnostic only; actual retrieval uses
+    # search_rag_query / search_web_query.
+    cleared = _clear_retrieval_plan_state()
     return {
         "rewritten_query": rewritten,
-        **_clear_retrieval_plan_state(),
+        "search_rag_query": rewritten,
+        "search_web_query": rewritten,
+        "retrieval_plan": [],
+        **{k: v for k, v in cleared.items() if k not in ("retrieval_plan",)},
     }
 
 
@@ -3601,9 +3725,37 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
             temperature=0.0,
             max_raw_chars=800,
         )
-        return summary.strip()[:500]
-    except Exception:
-        logger.debug("Conversation summarization failed, keeping existing summary", exc_info=True)
+        result = summary.strip()[:500]
+        emit_a3_trace(
+            logger,
+            "conversation_summary",
+            {
+                "success": True,
+                "summary_chars": len(result),
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        return result
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "conversation_summary",
+            {
+                "success": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+                "action": "keep_existing_summary",
+                "fallback_used": False,
+                "enhancement_only": True,
+                "summary_chars": len(existing_summary),
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        fail_fast = bool(get_setting("development.fail_fast_conversation_summary", False))
+        if fail_fast:
+            raise
         return existing_summary or ""
 
 
@@ -3675,7 +3827,9 @@ async def search_query_rewriter(state: LearningState) -> dict:
                 messages=messages,
                 output_mode=get_llm_output_mode("search_query_rewriter"),
                 fallback_modes=get_fallback_modes("search_query_rewriter"),
-                business_validator=validate_search_query_rewrite_output,
+                business_validator=lambda p: validate_search_query_rewrite_output(
+                    p, current_query=original_query
+                ),
                 state=state,
                 max_raw_chars=get_max_raw_chars("search_query_rewriter"),
             )
@@ -3683,6 +3837,32 @@ async def search_query_rewriter(state: LearningState) -> dict:
         if not isinstance(parsed, SearchQueryRewriteOutput):
             raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
         raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
+
+        # ── Memory use trace ─────────────────────────────────────────
+        history_ref = _has_explicit_history_reference(original_query)
+        has_reason = bool((parsed.memory_use_reason or "").strip())
+        if parsed.memory_used_for_retrieval:
+            if history_ref:
+                action = "allow"
+            elif has_reason:
+                action = "allow_by_llm_reason"
+            else:
+                action = "reject"
+        else:
+            action = "background_only"
+        emit_a3_trace(
+            logger,
+            "query_rewrite_memory_use",
+            {
+                "memory_count": len(selected_memories),
+                "memory_used_for_retrieval": parsed.memory_used_for_retrieval,
+                "memory_use_reason": parsed.memory_use_reason,
+                "current_query_has_history_reference": history_ref,
+                "action": action,
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
 
         result_payload = {
             "rag_query": parsed.rag_query.strip(),

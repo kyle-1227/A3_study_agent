@@ -123,7 +123,6 @@ def build_graph() -> StateGraph:
         route_by_intent,    # judge users intent
         {
             "academic": "search_query_rewriter",
-            "planning": "search_query_rewriter",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
