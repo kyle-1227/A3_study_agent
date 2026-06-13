@@ -64,7 +64,7 @@ function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
   return raw
     .map((item: any) => {
       const threadId = typeof item?.threadId === "string" ? item.threadId : typeof item?.id === "string" ? item.id : ""
-      const title = typeof item?.title === "string" && item.title.trim() ? item.title : "New chat"
+      const title = typeof item?.title === "string" && item.title.trim() ? item.title : "新对话"
       return threadId
         ? {
             id: threadId,
@@ -91,7 +91,7 @@ function normalizeMessages(raw: unknown): Message[] {
 
 function makeChatTitle(content: string): string {
   const compact = content.trim().replace(/\s+/g, " ")
-  if (!compact) return "New chat"
+  if (!compact) return "新对话"
   return compact.slice(0, 30) + (compact.length > 30 ? "..." : "")
 }
 
@@ -114,6 +114,7 @@ const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
   rag_retrieve: { title: "本地 RAG", detail: "从本地课程资料库检索候选证据。" },
   web_search: { title: "Tavily 网络搜索", detail: "检索外部学习资料与官方文档候选证据。" },
   evidence_judge: { title: "证据评审", detail: "裁决本地和网络候选证据，只保留可信上下文。" },
+  evidence_summary_output: { title: "证据摘要输出", detail: "证据不足时输出摘要、缺口和后续检索建议。" },
   generate_answer: { title: "生成学习回答", detail: "基于已裁决证据生成课程答疑或学习资源建议。" },
   evaluate_hallucination: { title: "可信度校验", detail: "检查回答与证据的一致性。" },
   rewrite_query: { title: "重写检索问题", detail: "根据校验反馈准备下一轮检索。" },
@@ -186,7 +187,7 @@ export default function Home() {
   const [storageReady, setStorageReady] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([
-    { type: "info", message: "[INFO] System initialized.", ts: timestamp() },
+    { type: "info", message: "[INFO] 系统已初始化。", ts: "--:--:--" },
   ])
   const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([])
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
@@ -222,6 +223,16 @@ export default function Home() {
     setCurrentThreadId(activeThreadId)
     setMessages(activeThreadId ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), [])) : [])
     setStorageReady(true)
+  }, [])
+
+  // Fix hydration: update initial log timestamp on client only
+  useEffect(() => {
+    setLogs((prev) => {
+      if (prev.length === 1 && prev[0].ts === "--:--:--") {
+        return [{ ...prev[0], ts: timestamp() }]
+      }
+      return prev
+    })
   }, [])
 
   useEffect(() => {
@@ -271,7 +282,7 @@ export default function Home() {
     setSelectedChatId(undefined)
     setMessages([])
     setNodeEvents([])
-    setLogs([{ type: "info", message: "[INFO] New chat session started.", ts: timestamp() }])
+    setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
@@ -312,7 +323,7 @@ export default function Home() {
     setInterruptDraft("")
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
-    setLogs([{ type: "info", message: "[INFO] Chat history cleared.", ts: timestamp() }])
+    setLogs([{ type: "info", message: "[INFO] 对话历史已清空。", ts: timestamp() }])
   }, [setActiveThreadId])
 
   /** Process a single SSE data payload shared between /stream and /resume */
@@ -352,7 +363,7 @@ export default function Home() {
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "warning", message: "[HIL] Graph interrupted - awaiting user plan review", ts: timestamp() },
+        { type: "warning", message: "[HIL] 图执行已暂停，等待你审核学习计划。", ts: timestamp() },
       ])
       return
     }
@@ -581,10 +592,10 @@ export default function Home() {
         ]
       })
 
-      const label = status === "start" ? "Entering" : data.error ? "Failed" : "Leaving"
+      const label = status === "start" ? "进入" : data.error ? "失败" : "完成"
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: `[INFO] ${label} node: ${node}`, ts: now },
+        { type: data.error ? "error" : "info", message: `${data.error ? "[ERROR]" : "[INFO]"} 节点 ${node} ${label}`, ts: now },
       ])
 
       if (status === "end" && data.duration_ms != null) {
@@ -593,8 +604,8 @@ export default function Home() {
           {
             type: data.error ? "error" : "perf",
             message: data.error
-              ? `[ERROR] Node "${node}" failed after ${data.duration_ms}ms`
-              : `[PERF] Node "${node}" completed in ${data.duration_ms}ms`,
+              ? `[ERROR] 节点 "${node}" 在 ${data.duration_ms}ms 后失败`
+              : `[PERF] 节点 "${node}" 完成，用时 ${data.duration_ms}ms`,
             ts: now,
           },
         ])
@@ -603,7 +614,7 @@ export default function Home() {
       if (status === "end" && data.error) {
         setLogs((prev) => [
           ...prev,
-          { type: "error", message: `[ERROR] Node "${node}": ${data.error}`, ts: now },
+          { type: "error", message: `[ERROR] 节点 "${node}"：${data.error}`, ts: now },
         ])
       }
       return
@@ -626,7 +637,7 @@ export default function Home() {
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "usage", message: `[USAGE] ${data.node}: ${data.input_tokens} in / ${data.output_tokens} out`, ts: now },
+        { type: "usage", message: `[USAGE] ${data.node}: 输入 ${data.input_tokens} / 输出 ${data.output_tokens}`, ts: now },
       ])
     }
   }, [setActiveThreadId, updateAssistantResourceStatus])
@@ -681,7 +692,7 @@ export default function Home() {
       ])
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] 401 Unauthorized - invalid or missing access token", ts: timestamp() },
+        { type: "error", message: "[ERROR] 401 未授权：访问令牌缺失或无效", ts: timestamp() },
       ])
       if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
       return null
@@ -709,7 +720,7 @@ export default function Home() {
     setInterruptDraft("")
     setLogs((prev) => [
       ...prev,
-      { type: "info" as const, message: `[INFO] User query: ${content.slice(0, 60)}`, ts: timestamp() },
+      { type: "info" as const, message: `[INFO] 用户问题：${content.slice(0, 60)}`, ts: timestamp() },
     ])
     console.debug("[A3_CHAT] sending", { threadId, selectedChatId, messageCount: messages.length + 1 })
 
@@ -739,7 +750,7 @@ export default function Home() {
         ...prev,
         {
           type: streamHadErrorRef.current ? "error" : "info",
-          message: streamHadErrorRef.current ? "[ERROR] Stream ended after error." : "[INFO] Stream complete.",
+          message: streamHadErrorRef.current ? "[ERROR] 流式响应因错误结束。" : "[INFO] 流式响应完成。",
           ts: timestamp(),
         },
       ])
@@ -758,7 +769,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id - cannot resume", ts: timestamp() },
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法继续执行。", ts: timestamp() },
       ])
       return
     }
@@ -766,7 +777,7 @@ export default function Home() {
     setIsResuming(true)
     setLogs((prev) => [
       ...prev,
-      { type: "info", message: "[INFO] Resuming graph with edited plan...", ts: timestamp() },
+      { type: "info", message: "[INFO] 正在使用已编辑方案继续执行图流程...", ts: timestamp() },
     ])
 
     try {
@@ -785,7 +796,7 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Resume stream complete.", ts: timestamp() },
+        { type: "info", message: "[INFO] 继续执行的流式响应已完成。", ts: timestamp() },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -803,7 +814,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id - cannot send feedback", ts: timestamp() },
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法发送反馈。", ts: timestamp() },
       ])
       return
     }
@@ -839,7 +850,7 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Feedback revision complete.", ts: timestamp() },
+        { type: "info", message: "[INFO] 反馈修订已完成。", ts: timestamp() },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -853,7 +864,7 @@ export default function Home() {
   }, [fetchWithErrorHandling, consumeSSEStream])
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="a3-app-shell flex overflow-hidden">
       <LeftSidebar
         chatHistory={chatHistory}
         onNewChat={handleNewChat}
@@ -861,7 +872,7 @@ export default function Home() {
         onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
       />
-      <div className="flex-1 flex flex-col h-full">
+      <div className="flex min-w-0 flex-1 flex-col h-full">
         <ChatArea
           messages={messages}
           onSendMessage={handleSendMessage}
