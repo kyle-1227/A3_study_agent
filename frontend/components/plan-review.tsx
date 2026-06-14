@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useEffect, useState } from "react"
+import { Download, FilePenLine, MessageSquareText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -26,25 +27,25 @@ export function PlanReview({ draft, onConfirm, onFeedback, isSubmitting }: PlanR
   const [feedbackText, setFeedbackText] = useState("")
   const isModified = editedPlan !== draft
 
-  // Sync when draft prop changes (re-interrupt after feedback revision)
   useEffect(() => {
     setEditedPlan(draft)
     setFeedbackText("")
   }, [draft])
 
   return (
-    <div className="bg-[#FFF9E6] border border-[#E8A87C] rounded-2xl p-5 my-4 max-w-3xl mx-auto">
-      <div className="flex items-center gap-2 mb-3">
-        <span className="text-sm font-semibold text-[#5C3D2E]">📋 学习计划草稿 — 请审阅</span>
+    <section className="mx-auto my-4 max-w-3xl rounded-2xl border border-[var(--warning)] bg-[var(--warning-soft)] p-5">
+      <div className="mb-3 flex items-center gap-2">
+        <FilePenLine className="h-4 w-4 text-[var(--warning)]" />
+        <span className="text-sm font-semibold text-[var(--warning)]">学习计划草稿等待审核</span>
       </div>
 
       <textarea
         value={editedPlan}
         onChange={(e) => setEditedPlan(e.target.value)}
         className={cn(
-          "w-full min-h-[200px] max-h-[400px] resize-y rounded-lg border border-[#E8E5D8] bg-white",
-          "p-3 text-sm leading-relaxed font-mono",
-          "focus:outline-none focus:ring-2 focus:ring-[#3D5A40]/30 focus:border-[#3D5A40]"
+          "min-h-[200px] max-h-[400px] w-full resize-y rounded-lg border border-border bg-card",
+          "p-3 font-mono text-sm leading-relaxed text-card-foreground",
+          "focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/25"
         )}
         disabled={isSubmitting}
       />
@@ -53,31 +54,32 @@ export function PlanReview({ draft, onConfirm, onFeedback, isSubmitting }: PlanR
         <textarea
           value={feedbackText}
           onChange={(e) => setFeedbackText(e.target.value)}
-          placeholder="例如：把周三的数学改成物理"
+          placeholder="例如：把第三周的项目任务拆得更细一些。"
           className={cn(
-            "w-full min-h-[60px] max-h-[120px] resize-y rounded-lg border border-[#E8E5D8] bg-white",
-            "p-3 text-sm leading-relaxed",
-            "focus:outline-none focus:ring-2 focus:ring-[#E8A87C]/30 focus:border-[#E8A87C]"
+            "min-h-[60px] max-h-[120px] w-full resize-y rounded-lg border border-border bg-card",
+            "p-3 text-sm leading-relaxed text-card-foreground placeholder:text-muted-foreground",
+            "focus:border-[var(--warning)] focus:outline-none focus:ring-2 focus:ring-[var(--warning)]/25"
           )}
           disabled={isSubmitting}
         />
-        <p className="text-xs text-muted-foreground mt-1 mb-2">修改意见</p>
+        <p className="mb-2 mt-1 text-xs text-muted-foreground">修改意见</p>
       </div>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
           {editedPlan.length} 字符
-          {isModified && <span className="ml-2 text-[#E8A87C]">（已修改）</span>}
+          {isModified && <span className="ml-2 text-[var(--warning)]">已修改</span>}
         </span>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
             size="sm"
             onClick={() => downloadPlan(editedPlan)}
             disabled={isSubmitting}
-            className="text-xs border-[#3D5A40]/30 text-[#3D5A40] hover:bg-[#3D5A40]/5"
+            className="gap-1.5 border-primary/30 text-xs text-primary hover:bg-primary/5"
           >
+            <Download className="h-3.5 w-3.5" />
             下载计划
           </Button>
           <Button
@@ -85,20 +87,21 @@ export function PlanReview({ draft, onConfirm, onFeedback, isSubmitting }: PlanR
             size="sm"
             onClick={() => onFeedback(feedbackText)}
             disabled={isSubmitting || !feedbackText.trim()}
-            className="text-xs border-[#E8A87C] text-[#5C3D2E] hover:bg-[#E8A87C]/10"
+            className="gap-1.5 border-[var(--warning)] text-xs text-[var(--warning)] hover:bg-[var(--warning)]/10"
           >
+            <MessageSquareText className="h-3.5 w-3.5" />
             {isSubmitting ? "处理中..." : "要求修改"}
           </Button>
           <Button
             size="sm"
             onClick={() => onConfirm(editedPlan)}
             disabled={isSubmitting}
-            className="bg-[#3D5A40] hover:bg-[#4A6B4D] text-white text-xs px-4"
+            className="a3-button-primary px-4 text-xs"
           >
             {isSubmitting ? "提交中..." : isModified ? "修改后确认" : "确认计划"}
           </Button>
         </div>
       </div>
-    </div>
+    </section>
   )
 }

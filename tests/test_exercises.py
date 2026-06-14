@@ -1,9 +1,11 @@
-"""Tests for collaborative leveled-exercise resource generation nodes."""
+"""Tests for fail-fast leveled-exercise resource generation nodes."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.exercises import (
@@ -19,110 +21,128 @@ from src.graph.exercises import (
 def _exercise_item(level: str) -> ExerciseItem:
     return ExerciseItem(
         level=level,
-        question=f"{level}题干",
-        answer=f"{level}答案",
-        explanation=f"{level}解析",
-        pitfall=f"{level}易错提醒",
-        tags=["过拟合"],
+        question=f"{level} question",
+        answer=f"{level} answer",
+        explanation=f"{level} explanation",
+        pitfall=f"{level} pitfall",
+        tags=["machine learning"],
     )
 
 
-@patch("src.graph.exercises.get_fallback_llm")
-@patch("src.graph.exercises.get_node_llm")
-async def test_exercise_agent_generates_structured_items(
-    mock_get_llm,
-    mock_get_fallback,
-):
-    artifact = ExerciseArtifact(
-        title="过拟合分层练习题",
+def _artifact() -> ExerciseArtifact:
+    return ExerciseArtifact(
+        title="Machine Learning Exercises",
         items=[
-            _exercise_item("基础题"),
-            _exercise_item("进阶题"),
-            _exercise_item("应用题"),
-            _exercise_item("自我检查题"),
+            _exercise_item("foundation"),
+            _exercise_item("intermediate"),
+            _exercise_item("application"),
+            _exercise_item("self_check"),
         ],
     )
-    llm = MagicMock()
-    llm.ainvoke = AsyncMock(
-        return_value=AIMessage(
-            content=artifact.model_dump_json() if hasattr(artifact, "model_dump_json") else artifact.json()
-        )
-    )
-    mock_get_llm.return_value = llm
-
-    fallback_llm = MagicMock()
-    fallback_llm.with_structured_output.return_value = MagicMock()
-    mock_get_fallback.return_value = fallback_llm
-
-    result = await exercise_agent({
-        "messages": [HumanMessage(content="请生成机器学习过拟合的分层练习题")],
-        "keypoints": ["机器学习", "过拟合"],
-        "context": [{"content": "过拟合是模型泛化能力不足", "source": "ml.md"}],
-        "exercise_outline": "基础题：概念；进阶题：判断；应用题：案例；自我检查题：复盘",
-        "exercise_round": 0,
-    })
-
-    assert result["exercise_artifact"]["title"] == "过拟合分层练习题"
-    assert result["exercise_round"] == 1
-    assert {item["level"] for item in result["exercise_items"]} == {"基础题", "进阶题", "应用题", "自我检查题"}
 
 
-async def test_exercise_reviewer_rejects_incomplete_items():
-    result = await exercise_reviewer({
-        "messages": [HumanMessage(content="请生成过拟合分层练习题")],
-        "exercise_outline": "基础题、进阶题、应用题、自我检查题",
-        "exercise_items": [
+@pytest.mark.anyio
+async def test_exercise_agent_generates_structured_items():
+    artifact = _artifact()
+    with patch("src.graph.exercises.invoke_structured_llm", return_value=SimpleNamespace(parsed=artifact)):
+        result = await exercise_agent(
             {
-                "level": "基础题",
-                "question": "什么是过拟合？",
-                "answer": "泛化能力不足。",
-                "explanation": "",
-                "pitfall": "不要只看训练集。",
+                "messages": [HumanMessage(content="Create machine learning exercises")],
+                "context": [{"content": "Course notes", "source": "ml.md"}],
+                "exercise_outline": "foundation, intermediate, application, self_check",
+                "exercise_round": 0,
             }
-        ],
-    })
+        )
+
+    assert result["exercise_artifact"]["title"] == "Machine Learning Exercises"
+    assert result["exercise_round"] == 1
+    assert {item["level"] for item in result["exercise_items"]} == {
+        "foundation",
+        "intermediate",
+        "application",
+        "self_check",
+    }
+
+
+@pytest.mark.anyio
+async def test_exercise_agent_empty_outline_raises():
+    with pytest.raises(ValueError, match="outline"):
+        await exercise_agent({"exercise_outline": ""})
+
+
+@pytest.mark.anyio
+async def test_exercise_reviewer_rejects_incomplete_items():
+    result = await exercise_reviewer(
+        {
+            "messages": [HumanMessage(content="Create exercises")],
+            "exercise_outline": "foundation, intermediate, application, self_check",
+            "exercise_items": [
+                {
+                    "level": "foundation",
+                    "question": "What is overfitting?",
+                    "answer": "Weak generalization.",
+                    "explanation": "",
+                    "pitfall": "Do not only inspect training loss.",
+                }
+            ],
+        }
+    )
 
     assert result["exercise_review_verdict"] == "reject"
-    assert "至少" in result["exercise_review_reason"] or "缺少" in result["exercise_review_reason"]
+    assert "too low" in result["exercise_review_reason"]
 
 
-async def test_exercise_reviewer_rejects_missing_level():
+@pytest.mark.anyio
+async def test_exercise_reviewer_rejects_missing_required_field():
     items = []
-    for level in ["基础题", "进阶题", "应用题", "基础题"]:
+    for level in ["foundation", "intermediate", "application", "self_check"]:
         item = _exercise_item(level)
         items.append(item.model_dump() if hasattr(item, "model_dump") else item.dict())
+    items[2]["explanation"] = ""
 
-    result = await exercise_reviewer({
-        "messages": [HumanMessage(content="请生成过拟合分层练习题")],
-        "exercise_outline": "基础题、进阶题、应用题、自我检查题",
-        "exercise_items": items,
-    })
+    result = await exercise_reviewer(
+        {
+            "messages": [HumanMessage(content="Create exercises")],
+            "exercise_outline": "foundation, intermediate, application, self_check",
+            "exercise_items": items,
+        }
+    )
 
     assert result["exercise_review_verdict"] == "reject"
-    assert "自我检查题" in result["exercise_review_reason"]
+    assert "missing explanation" in result["exercise_review_reason"]
 
 
+@pytest.mark.anyio
 async def test_exercise_output_renders_markdown():
     items = []
-    for level in ["基础题", "进阶题", "应用题", "自我检查题"]:
+    for level in ["foundation", "intermediate", "application", "self_check"]:
         item = _exercise_item(level)
         items.append(item.model_dump() if hasattr(item, "model_dump") else item.dict())
 
-    result = await exercise_output({
-        "exercise_items": items,
-        "exercise_artifact": {"title": "过拟合分层练习题"},
-        "exercise_review_verdict": "approve",
-        "exercise_review_reason": "通过",
-    })
+    result = await exercise_output(
+        {
+            "exercise_items": items,
+            "exercise_artifact": {"title": "Machine Learning Exercises"},
+            "exercise_review_verdict": "approve",
+            "exercise_review_reason": "approved",
+        }
+    )
 
     content = result["messages"][0].content
-    assert result["exercise_artifact"]["title"] == "过拟合分层练习题"
+    assert result["exercise_artifact"]["title"] == "Machine Learning Exercises"
     assert isinstance(result["messages"][0], AIMessage)
-    for text in ["基础题", "进阶题", "应用题", "自我检查题", "答案", "解析", "易错提醒"]:
+    for text in ["foundation", "intermediate", "application", "self_check", "answer", "explanation"]:
         assert text in content
+
+
+@pytest.mark.anyio
+async def test_exercise_output_empty_artifact_raises():
+    with pytest.raises(ValueError, match="exercise items"):
+        await exercise_output({})
 
 
 def test_should_rewrite_exercise_caps_retry_rounds():
     assert should_rewrite_exercise({"exercise_review_verdict": "approve", "exercise_round": 1}) == "output"
     assert should_rewrite_exercise({"exercise_review_verdict": "reject", "exercise_round": 1}) == "rewrite"
-    assert should_rewrite_exercise({"exercise_review_verdict": "reject", "exercise_round": 3}) == "output"
+    with pytest.raises(RuntimeError, match="max rounds"):
+        should_rewrite_exercise({"exercise_review_verdict": "reject", "exercise_round": 3})

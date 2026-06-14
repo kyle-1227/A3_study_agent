@@ -198,7 +198,7 @@ def extractor_from_env() -> ProfileExtractor:
 
     from langchain_openai import ChatOpenAI
 
-    model = os.getenv("PROFILE_EXTRACTION_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model = os.getenv("PROFILE_EXTRACTION_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     api_key = os.getenv("DEEPSEEK_API_KEY", "")
     base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 

@@ -1,27 +1,27 @@
-# v0.2.0 架构图
+﻿# v0.2.0 鏋舵瀯鍥?
 
-本文档包含 v0.2.0 系统架构的 Mermaid 图解。Mermaid 节点标签及代码片段保留英文，以便与代码库保持一致。
+鏈枃妗ｅ寘鍚?v0.2.0 绯荤粺鏋舵瀯鐨?Mermaid 鍥捐В銆侻ermaid 鑺傜偣鏍囩鍙婁唬鐮佺墖娈典繚鐣欒嫳鏂囷紝浠ヤ究涓庝唬鐮佸簱淇濇寔涓€鑷淬€?
 
 ---
 
-## 1. 全系统架构总览
+## 1. 鍏ㄧ郴缁熸灦鏋勬€昏
 
 ```mermaid
 flowchart TD
-    User(["👤 User"])
+    User(["馃懁 User"])
 
-    subgraph Frontend["Frontend — Next.js 16"]
+    subgraph Frontend["Frontend 鈥?Next.js 16"]
         Chat["Chat Area\n(SSE consumer\nMarkdown renderer)"]
         RightPanel["Right Panel\n(DAG viz / Node Trail\nSystem Logs\nToken Usage)"]
         Sidebar["Left Sidebar\n(Chat History)"]
     end
 
-    subgraph Backend["Backend — FastAPI"]
+    subgraph Backend["Backend 鈥?FastAPI"]
         API["POST /stream\nStreamingResponse\n(text/event-stream)"]
         SSE["generate_sse()\nastream_events v2"]
     end
 
-    subgraph Graph["LangGraph StateGraph — TutorState"]
+    subgraph Graph["LangGraph StateGraph 鈥?LearningState"]
         Supervisor["supervisor\nQwen2.5-7B\nSiliconFlow\ntemperature=0.0"]
         subgraph Academic["Academic Branch"]
             AR["academic_router"]
@@ -31,8 +31,8 @@ flowchart TD
             EH["evaluate_hallucination\nDeepSeek-V3 structured"]
         end
         subgraph Planner["Planner Branch"]
-            SP["gather_planning_context\nPlanning context retrieval"]
-            GP["generate_plan\nDeepSeek-V3"]
+            SP["study_plan_emotional_intel\nPlanning context retrieval"]
+            GP["study_plan_agent\nDeepSeek-V3"]
         end
         ER["emotional_response\nDeepSeek-V3"]
     end
@@ -57,7 +57,7 @@ flowchart TD
     Chat --> RightPanel
 
     Supervisor -->|academic| AR
-    Supervisor -->|planning| SP
+    Supervisor -->|academic study_plan| SP
     Supervisor -->|emotional| ER
 
     AR --> RAG
@@ -65,7 +65,7 @@ flowchart TD
     RAG --> GA
     WS --> GA
     GA --> EH
-    EH -->|"retry (count ≤ max_retries)"| AR
+    EH -->|"retry (count 鈮?max_retries)"| AR
     EH -->|end| DONE1(["END"])
 
     SP --> GP
@@ -84,7 +84,7 @@ flowchart TD
 
 ---
 
-## 2. LangGraph 节点拓扑（状态流转）
+## 2. LangGraph 鑺傜偣鎷撴墤锛堢姸鎬佹祦杞級
 
 ```mermaid
 flowchart TD
@@ -96,7 +96,7 @@ flowchart TD
     START --> supervisor
 
     supervisor -->|"intent = academic"| academic_router
-    supervisor -->|"intent = planning"| gather_planning_context
+    supervisor -->|"requested_resource_type = study_plan"| study_plan_emotional_intel
     supervisor -->|"intent = emotional"| emotional_response
 
     subgraph fan_out["Fan-out / Fan-in (parallel)"]
@@ -108,54 +108,54 @@ flowchart TD
 
     generate_answer --> evaluate_hallucination
 
-    evaluate_hallucination -->|"hallucination_detected=True\nretry_count ≤ max_retries"| academic_router
+    evaluate_hallucination -->|"hallucination_detected=True\nretry_count 鈮?max_retries"| academic_router
     evaluate_hallucination -->|"faithful OR retries exhausted"| END1
 
-    gather_planning_context --> generate_plan
-    generate_plan --> END2
+    study_plan_emotional_intel --> study_plan_agent
+    study_plan_agent --> END2
 
     emotional_response --> END3
 
     style fan_out fill:#f0f4f0,stroke:#7a9e7e
 ```
 
-**`TutorState` 关键字段与写入方归属：**
+**`LearningState` 鍏抽敭瀛楁涓庡啓鍏ユ柟褰掑睘锛?*
 
-| 字段 | 写入方 | 消费方 |
+| 瀛楁 | 鍐欏叆鏂?| 娑堣垂鏂?|
 |------|--------|--------|
-| `messages` | supervisor（初始化）、generate_answer、generate_plan、emotional_response | 所有节点 |
-| `intent` | supervisor | builder（条件边） |
-| `subject` | supervisor | rag_retrieve（元数据过滤） |
-| `keypoints` | supervisor | rag_retrieve（查询构造） |
-| `context` | rag_retrieve、web_search（通过 `operator.add` 合并） | generate_answer |
-| `search_results` | gather_planning_context | generate_plan |
+| `messages` | supervisor锛堝垵濮嬪寲锛夈€乬enerate_answer銆乬enerate_plan銆乪motional_response | 鎵€鏈夎妭鐐?|
+| `intent` | supervisor | builder锛堟潯浠惰竟锛?|
+| `subject` | supervisor | rag_retrieve锛堝厓鏁版嵁杩囨护锛?|
+| `keypoints` | supervisor | rag_retrieve锛堟煡璇㈡瀯閫狅級 |
+| `context` | rag_retrieve銆亀eb_search锛堥€氳繃 `operator.add` 鍚堝苟锛?| generate_answer |
+| `study_plan_artifact` | study_plan_emotional_intel | study_plan_agent |
 | `retry_count` | evaluate_hallucination | should_retry_or_end |
 | `hallucination_detected` | evaluate_hallucination | should_retry_or_end |
 
 ---
 
-## 3. 混合 RAG 流水线
+## 3. 娣峰悎 RAG 娴佹按绾?
 
 ```mermaid
 flowchart LR
     Q["User Query\n(joined keypoints)"]
 
-    subgraph Stage1["Stage 1 — Retrieval (parallel)"]
+    subgraph Stage1["Stage 1 鈥?Retrieval (parallel)"]
         V["Vector Search\nChromaDB + BGE-M3\ntop_k = 10\nsubject filter applied"]
         B["BM25 Search\njieba tokenize\ntop_k = 10\nno subject filter"]
     end
 
-    subgraph Stage2["Stage 2 — Merge"]
+    subgraph Stage2["Stage 2 鈥?Merge"]
         M["Merge + Dedup\n(MD5 content hash)\nvector results first"]
     end
 
-    subgraph Stage3["Stage 3 — Rerank"]
+    subgraph Stage3["Stage 3 鈥?Rerank"]
         R["BGE Reranker\nSiliconFlow API\nbge-reranker-v2-m3\ntop_n = 5"]
     end
 
     OUT["Top-N docs\n{content, source, score,\nrerank_score, metadata}"]
 
-    FALLBACK["Graceful Degradation:\nreranker API fails → sorted by original score\nBM25 empty → pure vector results\nChromaDB empty → empty result"]
+    FALLBACK["Graceful Degradation:\nreranker API fails 鈫?sorted by original score\nBM25 empty 鈫?pure vector results\nChromaDB empty 鈫?empty result"]
 
     Q --> V
     Q --> B
@@ -167,7 +167,7 @@ flowchart LR
     FALLBACK --> OUT
 ```
 
-**`config/settings.yaml` 配置参数说明：**
+**`config/settings.yaml` 閰嶇疆鍙傛暟璇存槑锛?*
 
 ```yaml
 rag:
@@ -180,7 +180,7 @@ rag:
 
 ---
 
-## 4. SSE 事件流格式规范
+## 4. SSE 浜嬩欢娴佹牸寮忚鑼?
 
 ```mermaid
 sequenceDiagram
@@ -195,7 +195,7 @@ sequenceDiagram
         LG-->>BE: on_chain_start {name, metadata.langgraph_node}
         BE-->>FE: data: {"type":"node_event","status":"start","node":"supervisor"}
 
-        alt LLM node (generate_answer / generate_plan / emotional_response)
+        alt LLM node (generate_answer / study_plan_agent / emotional_response)
             loop token streaming
                 LG-->>BE: on_chat_model_stream {chunk.content}
                 BE-->>FE: data: {"type":"token","content":"..."}
@@ -209,27 +209,27 @@ sequenceDiagram
     end
 ```
 
-**前端 SSE 事件消费映射：**
+**鍓嶇 SSE 浜嬩欢娑堣垂鏄犲皠锛?*
 
-| SSE 事件 | 前端处理逻辑 |
+| SSE 浜嬩欢 | 鍓嶇澶勭悊閫昏緫 |
 |----------|------------|
-| `node_event` start | `nodeEvents` 状态：追加 `{node, status: "running", ts}` |
-| `node_event` end | `nodeEvents`：标记 `status: "done"`，附加 `durationMs`；向日志追加 `[PERF]` 条目 |
-| `node_event` end with error | `nodeEvents`：标记完成；向日志追加 `[ERROR]` 条目 |
-| `token` | 将 `content` 追加到当前助手消息（流式打字机效果） |
-| `usage` | 累加到 `tokenUsage` 状态；向日志追加 `[USAGE]` 条目 |
+| `node_event` start | `nodeEvents` 鐘舵€侊細杩藉姞 `{node, status: "running", ts}` |
+| `node_event` end | `nodeEvents`锛氭爣璁?`status: "done"`锛岄檮鍔?`durationMs`锛涘悜鏃ュ織杩藉姞 `[PERF]` 鏉＄洰 |
+| `node_event` end with error | `nodeEvents`锛氭爣璁板畬鎴愶紱鍚戞棩蹇楄拷鍔?`[ERROR]` 鏉＄洰 |
+| `token` | 灏?`content` 杩藉姞鍒板綋鍓嶅姪鎵嬫秷鎭紙娴佸紡鎵撳瓧鏈烘晥鏋滐級 |
+| `usage` | 绱姞鍒?`tokenUsage` 鐘舵€侊紱鍚戞棩蹇楄拷鍔?`[USAGE]` 鏉＄洰 |
 
 ---
 
-## 5. LLM 配置架构
+## 5. LLM 閰嶇疆鏋舵瀯
 
 ```mermaid
 flowchart TD
     subgraph Settings["config/settings.yaml"]
         SUP_CFG["supervisor:\n  model: Qwen/Qwen2.5-7B-Instruct\n  base_url: siliconflow\n  api_key_env: SILICONFLOW_API_KEY\n  temperature: 0.0"]
-        AC_CFG["academic:\n  temperature: 0.7\n  (no model override → DEEPSEEK_*)"]
-        PL_CFG["planner:\n  temperature: 0.7\n  (no model override → DEEPSEEK_*)"]
-        EM_CFG["emotional:\n  temperature: 0.8\n  (no model override → DEEPSEEK_*)"]
+        AC_CFG["academic:\n  temperature: 0.7\n  (no model override 鈫?DEEPSEEK_*)"]
+        PL_CFG["planner:\n  temperature: 0.7\n  (no model override 鈫?DEEPSEEK_*)"]
+        EM_CFG["emotional:\n  temperature: 0.8\n  (no model override 鈫?DEEPSEEK_*)"]
     end
 
     Factory["get_node_llm(node_name, **overrides)\nsrc/graph/llm.py"]
@@ -242,7 +242,7 @@ flowchart TD
     subgraph Env[".env"]
         DS["DEEPSEEK_API_KEY\nDEEPSEEK_BASE_URL\nDEEPSEEK_MODEL"]
         SF["SILICONFLOW_API_KEY\n(shared by: embedding,\nreranker, supervisor,\nfallback)"]
-        FB["FALLBACK_MODEL\nFALLBACK_API_KEY\nFALLBACK_BASE_URL\n(→ SiliconFlow + Qwen2.5-7B)"]
+        FB["FALLBACK_MODEL\nFALLBACK_API_KEY\nFALLBACK_BASE_URL\n(鈫?SiliconFlow + Qwen2.5-7B)"]
     end
 
     DS --> Factory
@@ -255,3 +255,4 @@ flowchart TD
 
     FB --> Fallback["Fallback ChatOpenAI\nQwen2.5-7B @ SiliconFlow\n(auto-triggered by invoke_with_fallback)"]
 ```
+

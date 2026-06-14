@@ -17,6 +17,9 @@ data/
 # artifacts
 artifacts/
 
+#reports
+reports/
+
 # Jetbrains IDE
 .idea/
 

@@ -8,12 +8,12 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.tracing import traced_llm_call, traced_node
 
 
 @traced_node
-async def emotional_response(state: TutorState) -> dict:
+async def emotional_response(state: LearningState) -> dict:
     """Respond with warm, practical emotional support."""
     llm = get_node_llm("emotional")
 
@@ -25,7 +25,7 @@ async def emotional_response(state: TutorState) -> dict:
     fallback = get_fallback_llm(temperature=temperature)
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         node_name="emotional_response",
         temperature=temperature,
     ) as span:

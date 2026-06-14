@@ -1,4 +1,4 @@
-"""Hybrid retrieval: vector search + BM25 keyword search + BGE reranker."""
+"""Hybrid retrieval: vector search + BM25 keyword search + OpenRouter reranker."""
 
 from __future__ import annotations
 

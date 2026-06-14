@@ -1,7 +1,7 @@
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 
 __all__ = [
-    "TutorState",
+    "LearningState",
     "build_graph",
     "get_compiled_graph",
 ]

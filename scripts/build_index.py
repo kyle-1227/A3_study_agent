@@ -5,6 +5,7 @@ Business scenario:
 - Course materials: Python, Machine Learning, Big Data, Higher Mathematics, Computer Basics
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,8 +16,17 @@ from dotenv import load_dotenv
 
 load_dotenv(project_root / ".env")
 
-from src.rag.loader import load_documents
-from src.rag.indexer import build_index
+try:
+    from src.rag.loader import load_documents
+    from src.rag.indexer import build_index
+except ModuleNotFoundError as e:
+    missing = str(e).split("'")[1] if "'" in str(e) else str(e)
+    print(f"Missing Python dependency: {missing}")
+    print("Run:")
+    print(f"  {sys.executable} -m pip install -r requirements.txt")
+    print("Then retry:")
+    print("  python scripts/build_index.py")
+    raise SystemExit(1)
 
 DATA_DIR = project_root / "data"
 
@@ -32,6 +42,14 @@ COURSE_DOC_TYPE = "course_material"
 
 
 def main() -> None:
+    # Startup diagnostics
+    print("=== build_index startup ===")
+    print(f"Project root      : {project_root}")
+    print(f"Data dir          : {DATA_DIR}")
+    print(f"Chroma persist dir: {os.getenv('CHROMA_PERSIST_DIR', 'NOT SET')}")
+    print(f"Course dirs       : {list(COURSE_DIRS.keys())}")
+    print()
+
     all_docs = []
 
     for subject, directory in COURSE_DIRS.items():
@@ -46,7 +64,11 @@ def main() -> None:
             splitter=None,
         )
 
-        print(f"[OK]   {subject}: loaded {len(docs)} chunks from {directory}")
+        # Count unique source files from document metadata
+        source_files = {doc.metadata.get("source_file", "") for doc in docs}
+        file_count = len(source_files - {""})
+
+        print(f"[OK]   {subject} — {file_count} files, {len(docs)} chunks")
         all_docs.extend(docs)
 
     if not all_docs:

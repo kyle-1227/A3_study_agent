@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for A3 Study Agent unit tests.
+﻿"""Shared pytest fixtures for A3 Study Agent unit tests.
 
 All unit tests mock external dependencies (LLM APIs, ChromaDB, web search)
 so they run offline without API keys.
@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 @pytest.fixture
 def human_msg():
     """Factory fixture for creating HumanMessage objects."""
-    def _make(content: str = "你好") -> HumanMessage:
+    def _make(content: str = "浣犲ソ") -> HumanMessage:
         return HumanMessage(content=content)
     return _make
 
@@ -35,28 +35,29 @@ def human_msg():
 @pytest.fixture
 def ai_msg():
     """Factory fixture for creating AIMessage objects."""
-    def _make(content: str = "你好，同学！") -> AIMessage:
+    def _make(content: str = "浣犲ソ锛屽悓瀛︼紒") -> AIMessage:
         return AIMessage(content=content)
     return _make
 
 
 @pytest.fixture
 def sample_state(human_msg):
-    """Minimal TutorState dict for testing."""
+    """Minimal LearningState dict for testing."""
     return {
-        "messages": [human_msg("二次函数的判别式怎么用？")],
+        "messages": [human_msg("How do I use a quadratic discriminant?")],
         "intent": "academic",
         "subject": "math",
-        "keypoints": ["二次函数", "判别式"],
+        "keypoints": ["quadratic function", "discriminant"],
         "context": [],
-        "plan": "",
         "retry_count": 0,
         "hallucination_detected": False,
         "rewritten_query": "",
         "hallucination_reason": "",
-        "emotional_intel": "",
-        "resource_intel": "",
-        "intel_summary": "",
+        "study_plan_emotional_intel": "",
+        "study_plan_emotional_profile": {},
+        "study_plan_outline": "",
+        "study_plan_artifact": {},
+        "study_plan_markdown": "",
     }
 
 
@@ -74,8 +75,8 @@ def mock_llm_response():
 def sample_retrieved_docs():
     """Sample retrieved documents for RAG tests."""
     return [
-        {"content": "判别式 Δ=b²-4ac 用于判断二次方程根的情况。", "source": "math_2024.pdf", "score": 0.85, "metadata": {"subject": "math"}},
-        {"content": "当 Δ>0 时有两个不等实根。", "source": "math_2024.pdf", "score": 0.72, "metadata": {"subject": "math"}},
+        {"content": "The discriminant b^2 - 4ac helps classify quadratic roots.", "source": "math_2024.pdf", "score": 0.85, "metadata": {"subject": "math"}},
+        {"content": "When the discriminant is positive, a quadratic has two distinct real roots.", "source": "math_2024.pdf", "score": 0.72, "metadata": {"subject": "math"}},
     ]
 
 
@@ -83,10 +84,9 @@ def sample_retrieved_docs():
 def sample_search_results():
     """Sample web search results."""
     return [
-        {"content": "2026年机器学习课程项目安排包含数据处理、建模和评估。", "title": "课程安排", "url": "https://example.com/1"},
-        {"content": "数据科学学习路线建议覆盖 Python、统计基础、机器学习和项目实践。", "title": "学习路线", "url": "https://example.com/2"},
+        {"content": "A machine learning course project plan includes data processing, modeling, and evaluation.", "title": "Course project plan", "url": "https://example.com/1"},
+        {"content": "A data science learning path can cover Python, statistics, machine learning, and project practice.", "title": "Learning path", "url": "https://example.com/2"},
     ]
-
 
 def _reset_trace_provider():
     """Force-reset the global TracerProvider so tests can set their own."""
@@ -106,3 +106,4 @@ def in_memory_exporter():
     exporter.clear()
     provider.shutdown()
     _reset_trace_provider()
+

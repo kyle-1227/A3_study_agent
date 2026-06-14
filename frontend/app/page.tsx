@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { LeftSidebar } from "@/components/left-sidebar"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
@@ -13,7 +13,86 @@ import { PlanReview } from "@/components/plan-review"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-const initialChatHistory: any[] = []
+const A3_CHAT_HISTORY_KEY = "a3_chat_history"
+const A3_CURRENT_CHAT_ID_KEY = "a3_current_chat_id"
+const A3_CURRENT_THREAD_ID_KEY = "a3_current_thread_id"
+const A3_MESSAGES_KEY_PREFIX = "a3_messages:"
+
+type ChatHistoryItem = {
+  id: string
+  threadId: string
+  title: string
+  updatedAt?: number
+}
+const initialChatHistory: ChatHistoryItem[] = []
+
+function isBrowser(): boolean {
+  return typeof window !== "undefined"
+}
+
+function readJSON<T>(key: string, fallback: T): T {
+  if (!isBrowser()) return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeJSON(key: string, value: unknown) {
+  if (!isBrowser()) return
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Ignore storage quota / serialization issues; chat should keep working in memory.
+  }
+}
+
+function removeStorageItem(key: string) {
+  if (!isBrowser()) return
+  localStorage.removeItem(key)
+}
+
+function messageStorageKey(threadId: string): string {
+  return `${A3_MESSAGES_KEY_PREFIX}${threadId}`
+}
+
+function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item: any) => {
+      const threadId = typeof item?.threadId === "string" ? item.threadId : typeof item?.id === "string" ? item.id : ""
+      const title = typeof item?.title === "string" && item.title.trim() ? item.title : "新对话"
+      return threadId
+        ? {
+            id: threadId,
+            threadId,
+            title,
+            updatedAt: typeof item?.updatedAt === "number" ? item.updatedAt : undefined,
+          }
+        : null
+    })
+    .filter(Boolean) as ChatHistoryItem[]
+}
+
+function normalizeMessages(raw: unknown): Message[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((item: any) => {
+    return (
+      item &&
+      typeof item.id === "string" &&
+      (item.role === "user" || item.role === "assistant") &&
+      typeof item.content === "string"
+    )
+  }) as Message[]
+}
+
+function makeChatTitle(content: string): string {
+  const compact = content.trim().replace(/\s+/g, " ")
+  if (!compact) return "新对话"
+  return compact.slice(0, 30) + (compact.length > 30 ? "..." : "")
+}
 
 function timestamp(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
@@ -28,148 +107,42 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
-  supervisor: {
-    title: "解析学习需求",
-    detail: "识别专业课程、学习目标、知识短板和需要生成的资源类型。",
-  },
-  academic_router: {
-    title: "选择课程资源链路",
-    detail: "判断当前任务更适合课程讲解、资料生成、练习设计还是综合答疑。",
-  },
-  search_query_rewriter: {
-    title: "改写检索查询",
-    detail: "将学习者原始问题转换为适合课程知识库和网络搜索的精准查询。",
-  },
-  rag_retrieve: {
-    title: "检索课程知识库",
-    detail: "从初始课程文档集和知识库中抽取可引用的课程依据。",
-  },
-  web_search: {
-    title: "补充前沿资料",
-    detail: "补充高校课程、项目实践和拓展阅读相关参考信息。",
-  },
-  generate_answer: {
-    title: "生成学习资源",
-    detail: "生成课程讲解、练习题、实操案例、拓展阅读或多模态脚本内容。",
-  },
-  evaluate_hallucination: {
-    title: "内容可信校验",
-    detail: "检查学术事实、引用依据和内容安全，降低幻觉风险。",
-  },
-  rewrite_query: {
-    title: "重写检索问题",
-    detail: "根据校验反馈补全查询，准备再次检索关键课程资料。",
-  },
-  gather_planning_context: {
-    title: "检索规划上下文",
-    detail: "检索课程资料、学习目标、资源约束和学习路径参考。",
-  },
-  gather_intel: {
-    title: "汇总画像与情报",
-    detail: "整合学习者基础、知识短板、目标课程和资源生成需求。",
-  },
-  drafter: {
-    title: "起草个性化方案",
-    detail: "生成学习路径、资源清单、练习安排和项目实践建议。",
-  },
-  reviewer_academic: {
-    title: "学术质量审查",
-    detail: "审查知识准确性、课程逻辑、难度递进和资源覆盖度。",
-  },
-  reviewer_emotional: {
-    title: "学习负荷审查",
-    detail: "检查学习节奏、任务压力和执行可持续性。",
-  },
-  consensus_check: {
-    title: "协同评审汇总",
-    detail: "汇总多智能体审查结论，判断方案是否可以输出。",
-  },
-  adv_rewrite: {
-    title: "修订资源方案",
-    detail: "根据审查意见优化学习路径、资源顺序和任务颗粒度。",
-  },
-  plan_output: {
-    title: "输出资源方案",
-    detail: "整理最终的个性化学习路径与多类型资源生成结果。",
-  },
-  feedback_router: {
-    title: "分析用户反馈",
-    detail: "判断反馈需要局部微调还是重新生成资源方案。",
-  },
-  plan_tweak: {
-    title: "微调学习方案",
-    detail: "根据反馈更新学习路径、资源推荐和练习安排。",
-  },
-  mindmap_agent: {
-    title: "生成 JSON Tree",
-    detail: "将知识结构蓝图转换为统一 JSON Tree，供多格式导图预览与导出使用。",
-  },
-  mindmap_planner: {
-    title: "规划知识结构蓝图",
-    detail: "整合课程资料、关键词和学习目标，规划具体到知识点的导图结构。",
-  },
-  mindmap_reviewer: {
-    title: "审查导图质量",
-    detail: "检查导图层级、具体知识点覆盖、易错辨析、实践案例和学术准确性。",
-  },
-  mindmap_rewrite: {
-    title: "根据审查意见重写",
-    detail: "根据审查反馈补充课程核心知识点，优化分支层级和资源可用性。",
-  },
-  mindmap_output: {
-    title: "导出多格式导图",
-    detail: "生成 XMind 下载文件，并准备 Mermaid、Markdown、SVG、PNG 和交互树预览。",
-  },
-  exercise_planner: {
-    title: "规划练习结构",
-    detail: "结合课程资料、关键词和学习目标，规划基础题、进阶题、应用题和自我检查题。",
-  },
-  exercise_agent: {
-    title: "生成分层题目",
-    detail: "生成包含答案、解析和易错提醒的分层练习题。",
-  },
-  exercise_reviewer: {
-    title: "审查题目质量",
-    detail: "检查题型覆盖、难度递进、答案解析、易错提醒和课程主题匹配度。",
-  },
-  exercise_rewrite: {
-    title: "修订练习题",
-    detail: "根据审查意见补齐题型层级、解析细节和易错提醒。",
-  },
-  exercise_output: {
-    title: "输出练习资源",
-    detail: "整理最终分层练习题，包含基础题、进阶题、应用题、自我检查题和解析。",
-  },
-  review_doc_planner: {
-    title: "规划复习文档",
-    detail: "规划复习文档",
-  },
-  review_doc_agent: {
-    title: "生成 Markdown 文档",
-    detail: "生成 Markdown 文档",
-  },
-  review_doc_reviewer: {
-    title: "审查文档质量",
-    detail: "审查文档质量",
-  },
-  review_doc_rewrite: {
-    title: "修订复习文档",
-    detail: "修订复习文档",
-  },
-  review_doc_output: {
-    title: "输出复习文档",
-    detail: "输出复习文档",
-  },
-  emotional_response: {
-    title: "生成学习支持建议",
-    detail: "围绕学习压力、专业适应和执行困难生成支持性建议。",
-  },
-  handle_unknown: {
-    title: "确认服务范围",
-    detail: "判断请求是否属于高校课程学习与个性化资源生成范围。",
-  },
+  supervisor: { title: "解析学习需求", detail: "识别课程主题、学习目标和需要生成的资源类型。" },
+  search_query_rewriter: { title: "改写检索查询", detail: "将原始问题改写为适合本地课程库和网络搜索的查询。" },
+  academic_router: { title: "选择学习资源链路", detail: "调度本地 RAG、网络搜索和资源生成子 Agent。" },
+  rag_retrieve: { title: "本地 RAG", detail: "从本地课程资料库检索候选证据。" },
+  web_search: { title: "Tavily 网络搜索", detail: "检索外部学习资料与官方文档候选证据。" },
+  evidence_judge: { title: "证据评审", detail: "裁决本地和网络候选证据，只保留可信上下文。" },
+  evidence_summary_output: { title: "证据摘要输出", detail: "证据不足时输出摘要、缺口和后续检索建议。" },
+  generate_answer: { title: "生成学习回答", detail: "基于已裁决证据生成课程答疑或学习资源建议。" },
+  evaluate_hallucination: { title: "可信度校验", detail: "检查回答与证据的一致性。" },
+  rewrite_query: { title: "重写检索问题", detail: "根据校验反馈准备下一轮检索。" },
+  study_plan_emotional_intel: { title: "情绪画像分析", detail: "分析学习负担、节奏风险和支持需求。" },
+  study_plan_planner: { title: "学习计划规划", detail: "基于证据、目标和学习者状态规划学习计划蓝图。" },
+  study_plan_agent: { title: "学习计划生成", detail: "生成结构化个性化学习计划。" },
+  study_plan_reviewer_academic: { title: "学习计划学术审查", detail: "检查阶段递进、证据一致性和资源可靠性。" },
+  study_plan_reviewer_emotional: { title: "学习计划负担审查", detail: "检查任务负担、复盘休息和执行可持续性。" },
+  study_plan_consensus: { title: "学习计划共识检查", detail: "汇总双 reviewer 结论，决定输出或修订。" },
+  study_plan_rewrite: { title: "学习计划修订", detail: "根据审查意见准备下一轮生成。" },
+  study_plan_output: { title: "学习计划输出", detail: "渲染 Markdown 学习计划并生成文档 artifact。" },
+  mindmap_planner: { title: "规划知识结构", detail: "规划课程知识点的导图结构。" },
+  mindmap_agent: { title: "生成导图", detail: "生成结构化 JSON Tree。" },
+  mindmap_reviewer: { title: "审查导图质量", detail: "检查层级、覆盖和学术准确性。" },
+  mindmap_rewrite: { title: "修订导图", detail: "根据审查意见重写导图。" },
+  mindmap_output: { title: "导出导图", detail: "生成 XMind 等导图 artifact。" },
+  exercise_planner: { title: "规划练习结构", detail: "规划基础、进阶、应用和自检练习。" },
+  exercise_agent: { title: "生成分层练习", detail: "生成包含答案、解析和易错提醒的练习题。" },
+  exercise_reviewer: { title: "审查练习质量", detail: "检查题型覆盖、难度递进和解析完整性。" },
+  exercise_rewrite: { title: "修订练习", detail: "根据审查意见重写练习。" },
+  exercise_output: { title: "输出练习资源", detail: "整理最终分层练习资源。" },
+  review_doc_planner: { title: "规划复习文档", detail: "规划 Markdown 复习文档结构。" },
+  review_doc_agent: { title: "生成复习文档", detail: "生成 Markdown 课程复习文档。" },
+  review_doc_reviewer: { title: "审查文档质量", detail: "检查结构、证据使用和内容完整性。" },
+  review_doc_rewrite: { title: "修订复习文档", detail: "根据审查意见重写文档。" },
+  review_doc_output: { title: "输出复习文档", detail: "生成 Markdown/DOCX 文档 artifact。" },
+  emotional_response: { title: "生成学业支持建议", detail: "围绕学习压力、适应和执行困难生成支持性建议。" },
+  handle_unknown: { title: "确认服务范围", detail: "判断请求是否属于高校课程学习与个性化资源生成范围。" },
 }
-
 function createInitialResourceStatus(): ResourceGenerationStatus {
   return {
     state: "running",
@@ -208,10 +181,12 @@ function findLastRunningStepIndex(steps: ResourceGenerationStep[], node: string)
 export default function Home() {
   const [chatHistory, setChatHistory] = useState(initialChatHistory)
   const [selectedChatId, setSelectedChatId] = useState<string | undefined>()
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [storageReady, setStorageReady] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([
-    { type: "info", message: "[INFO] System initialized.", ts: timestamp() },
+    { type: "info", message: "[INFO] 系统已初始化。", ts: "--:--:--" },
   ])
   const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([])
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
@@ -222,6 +197,70 @@ export default function Home() {
   const [isResuming, setIsResuming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const assistantMessageIdRef = useRef<string>("")
+  const pendingChatTitleRef = useRef<string>("")
+  const streamHadErrorRef = useRef(false)
+
+  const setActiveThreadId = useCallback((threadId: string | null) => {
+    threadIdRef.current = threadId
+    setCurrentThreadId(threadId)
+    if (!threadId) {
+      removeStorageItem(A3_CURRENT_THREAD_ID_KEY)
+      return
+    }
+    if (isBrowser()) localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, threadId)
+  }, [])
+
+  useEffect(() => {
+    const storedHistory = normalizeChatHistory(readJSON<unknown>(A3_CHAT_HISTORY_KEY, []))
+    const storedThreadId = isBrowser() ? localStorage.getItem(A3_CURRENT_THREAD_ID_KEY) : null
+    const storedChatId = isBrowser() ? localStorage.getItem(A3_CURRENT_CHAT_ID_KEY) : null
+    const activeThreadId = storedThreadId || storedChatId || storedHistory[0]?.threadId || null
+
+    setChatHistory(storedHistory)
+    setSelectedChatId(activeThreadId ?? undefined)
+    threadIdRef.current = activeThreadId
+    setCurrentThreadId(activeThreadId)
+    setMessages(activeThreadId ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), [])) : [])
+    setStorageReady(true)
+  }, [])
+
+  // Fix hydration: update initial log timestamp on client only
+  useEffect(() => {
+    setLogs((prev) => {
+      if (prev.length === 1 && prev[0].ts === "--:--:--") {
+        return [{ ...prev[0], ts: timestamp() }]
+      }
+      return prev
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (chatHistory.length > 0) {
+      writeJSON(A3_CHAT_HISTORY_KEY, chatHistory)
+    } else {
+      removeStorageItem(A3_CHAT_HISTORY_KEY)
+    }
+  }, [chatHistory, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (selectedChatId) {
+      localStorage.setItem(A3_CURRENT_CHAT_ID_KEY, selectedChatId)
+    } else {
+      removeStorageItem(A3_CURRENT_CHAT_ID_KEY)
+    }
+  }, [selectedChatId, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) return
+    if (currentThreadId) {
+      localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, currentThreadId)
+      writeJSON(messageStorageKey(currentThreadId), messages)
+    } else {
+      removeStorageItem(A3_CURRENT_THREAD_ID_KEY)
+    }
+  }, [currentThreadId, messages, storageReady])
 
   const updateAssistantResourceStatus = useCallback((
     messageId: string,
@@ -242,31 +281,71 @@ export default function Home() {
     setSelectedChatId(undefined)
     setMessages([])
     setNodeEvents([])
-    setLogs([{ type: "info", message: "[INFO] New chat session started.", ts: timestamp() }])
+    setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
-  }, [])
+    setActiveThreadId(null)
+    pendingChatTitleRef.current = ""
+  }, [setActiveThreadId])
 
   const handleSelectChat = useCallback((id: string) => {
-    setSelectedChatId(id)
-    setMessages([])
+    const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
+    const threadId = chat?.threadId || id
+    setSelectedChatId(threadId)
+    setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
     setNodeEvents([])
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
-  }, [])
+    setActiveThreadId(threadId)
+    setLogs((prev) => [
+      ...prev,
+      { type: "info", message: `[INFO] Restored chat thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
+    ])
+  }, [chatHistory, setActiveThreadId])
 
-  /** Process a single SSE data payload — shared between /stream and /resume */
+  const handleClearChatHistory = useCallback(() => {
+    if (isBrowser()) {
+      localStorage.removeItem(A3_CHAT_HISTORY_KEY)
+      localStorage.removeItem(A3_CURRENT_CHAT_ID_KEY)
+      localStorage.removeItem(A3_CURRENT_THREAD_ID_KEY)
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith(A3_MESSAGES_KEY_PREFIX))
+        .forEach((key) => localStorage.removeItem(key))
+    }
+    setChatHistory([])
+    setSelectedChatId(undefined)
+    setMessages([])
+    setNodeEvents([])
+    setTokenUsage({ input: 0, output: 0, total: 0 })
+    setIsInterrupted(false)
+    setInterruptDraft("")
+    setActiveThreadId(null)
+    pendingChatTitleRef.current = ""
+    setLogs([{ type: "info", message: "[INFO] 对话历史已清空。", ts: timestamp() }])
+  }, [setActiveThreadId])
+
+  /** Process a single SSE data payload shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
 
     if (data.type === "thread_id") {
-      threadIdRef.current = data.thread_id
+      const threadId = data.thread_id
+      setActiveThreadId(threadId)
+      setSelectedChatId(threadId)
+      setChatHistory((prev) => {
+        const existing = prev.find((item) => item.id === threadId || item.threadId === threadId)
+        const nextItem: ChatHistoryItem = {
+          id: threadId,
+          threadId,
+          title: existing?.title || makeChatTitle(pendingChatTitleRef.current),
+          updatedAt: Date.now(),
+        }
+        return [nextItem, ...prev.filter((item) => item.id !== threadId && item.threadId !== threadId)]
+      })
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: `[INFO] Thread: ${data.thread_id.slice(0, 8)}...`, ts: timestamp() },
+        { type: "info", message: `[INFO] Thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
       ])
       return
     }
@@ -274,16 +353,16 @@ export default function Home() {
     if (data.type === "interrupt") {
       setInterruptDraft(data.draft)
       setIsInterrupted(true)
-      if (data.thread_id) threadIdRef.current = data.thread_id
+      if (data.thread_id) setActiveThreadId(data.thread_id)
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "waiting_review",
-        summary: "个性化学习路径与资源方案已生成，等待确认或反馈后继续优化。",
+        summary: "个性化学习资源生成状态已更新。",
         waitingForReview: true,
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "warning", message: "[HIL] Graph interrupted — awaiting user plan review", ts: timestamp() },
+        { type: "warning", message: "[HIL] 图执行已暂停，等待你审核学习计划。", ts: timestamp() },
       ])
       return
     }
@@ -319,7 +398,7 @@ export default function Home() {
             ? {
                 ...msg,
                 mindmap: {
-                  title: data.title || "知识点思维导图",
+                  title: data.title || "Knowledge Mindmap",
                   tree: data.tree,
                   xmindUrl,
                 },
@@ -345,7 +424,7 @@ export default function Home() {
             ? {
                 ...msg,
                 reviewDoc: {
-                  title: data.title || "Markdown复习文档",
+                  title: data.title || "Review Document",
                   filename: data.filename || "",
                   markdownUrl: markdownUrl || "",
                   docxFilename: data.docx_filename || "",
@@ -390,7 +469,7 @@ export default function Home() {
             : artifact.docx_url
         return {
           subject: artifact.subject || "",
-          title: artifact.title || "Markdown复习文档",
+          title: artifact.title || "Review Document",
           filename: artifact.filename || "",
           markdownUrl: artifactMarkdownUrl || "",
           docxFilename: artifact.docx_filename || "",
@@ -415,7 +494,7 @@ export default function Home() {
                 content: finalAnswer || msg.content,
                 mindmap: mindmap
                   ? {
-                      title: mindmap.title || "鐭ヨ瘑鐐规€濈淮瀵煎浘",
+                      title: mindmap.title || "Knowledge Mindmap",
                       tree: mindmap.tree,
                       xmindUrl: xmindUrl || "",
                     }
@@ -425,7 +504,7 @@ export default function Home() {
                   : reviewDoc
                   ? {
                       subject: reviewDoc.subject || "",
-                      title: reviewDoc.title || "Markdown复习文档",
+                      title: reviewDoc.title || "Review Document",
                       filename: reviewDoc.filename || "",
                       markdownUrl: markdownUrl || "",
                       docxFilename: reviewDoc.docx_filename || "",
@@ -436,7 +515,7 @@ export default function Home() {
                 reviewDocs: reviewDocs.length > 1 ? reviewDocs : msg.reviewDocs,
                 exercise: exerciseArtifact
                   ? {
-                      title: exerciseArtifact.title || "练习题资源",
+                      title: exerciseArtifact.title || "Exercise Resource",
                       filename: exerciseArtifact.filename || "",
                       markdownUrl: exerciseMarkdownUrl || "",
                       docxFilename: exerciseArtifact.docx_filename || "",
@@ -454,17 +533,18 @@ export default function Home() {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: status.state === "error" ? "error" : "done",
-        summary: "个性化学习资源已生成，可继续根据反馈调整。",
+        summary: "个性化学习资源生成状态已更新。",
         waitingForReview: false,
       }))
       return
     }
 
     if (data.type === "error") {
+      streamHadErrorRef.current = true
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "error",
-        summary: "个性化资源生成遇到异常，请稍后重试或调整输入。",
+        summary: "个性化学习资源生成状态已更新。",
         error: data.message,
         waitingForReview: false,
       }))
@@ -526,30 +606,60 @@ export default function Home() {
         if (status === "start") {
           return [...prev, { node, status: "running", ts: now }]
         }
-        return prev.map((e) =>
-          e.node === node && e.status === "running"
-            ? { ...e, status: "done", endTs: now, durationMs: data.duration_ms ?? undefined }
-            : e
-        )
+        const nextStatus: NodeEvent["status"] = data.error ? "error" : "done"
+        let updated = false
+        const nextEvents = prev.map((e) => {
+          if (e.node === node && e.status === "running") {
+            updated = true
+            return {
+              ...e,
+              status: nextStatus,
+              endTs: now,
+              durationMs: data.duration_ms ?? undefined,
+              error: data.error ?? undefined,
+              synthetic: Boolean(data.synthetic),
+            }
+          }
+          return e
+        })
+        if (updated) return nextEvents
+        return [
+          ...nextEvents,
+          {
+            node,
+            status: nextStatus,
+            ts: now,
+            endTs: now,
+            durationMs: data.duration_ms ?? undefined,
+            error: data.error ?? undefined,
+            synthetic: Boolean(data.synthetic),
+          },
+        ]
       })
 
-      const label = status === "start" ? "Entering" : "Leaving"
+      const label = status === "start" ? "进入" : data.error ? "失败" : "完成"
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: `[INFO] ${label} node: ${node}`, ts: now },
+        { type: data.error ? "error" : "info", message: `${data.error ? "[ERROR]" : "[INFO]"} 节点 ${node} ${label}`, ts: now },
       ])
 
       if (status === "end" && data.duration_ms != null) {
         setLogs((prev) => [
           ...prev,
-          { type: "perf", message: `[PERF] Node "${node}" completed in ${data.duration_ms}ms`, ts: now },
+          {
+            type: data.error ? "error" : "perf",
+            message: data.error
+              ? `[ERROR] 节点 "${node}" 在 ${data.duration_ms}ms 后失败`
+              : `[PERF] 节点 "${node}" 完成，用时 ${data.duration_ms}ms`,
+            ts: now,
+          },
         ])
       }
 
       if (status === "end" && data.error) {
         setLogs((prev) => [
           ...prev,
-          { type: "error", message: `[ERROR] Node "${node}": ${data.error}`, ts: now },
+          { type: "error", message: `[ERROR] 节点 "${node}"：${data.error}`, ts: now },
         ])
       }
       return
@@ -572,10 +682,10 @@ export default function Home() {
       }))
       setLogs((prev) => [
         ...prev,
-        { type: "usage", message: `[USAGE] ${data.node}: ${data.input_tokens} in / ${data.output_tokens} out`, ts: now },
+        { type: "usage", message: `[USAGE] ${data.node}: 输入 ${data.input_tokens} / 输出 ${data.output_tokens}`, ts: now },
       ])
     }
-  }, [updateAssistantResourceStatus])
+  }, [setActiveThreadId, updateAssistantResourceStatus])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
@@ -611,7 +721,7 @@ export default function Home() {
     if (response.status === 429) {
       setMessages((prev) => [
         ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "⚠️ 服务繁忙，请稍后重试。" },
+        { id: (Date.now() + 1).toString(), role: "assistant", content: "服务繁忙，请稍后重试。" },
       ])
       setLogs((prev) => [
         ...prev,
@@ -623,11 +733,11 @@ export default function Home() {
     if (response.status === 401) {
       setMessages((prev) => [
         ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "🔑 访问未授权，请检查访问令牌是否正确。" },
+        { id: (Date.now() + 1).toString(), role: "assistant", content: "访问未授权，请检查访问令牌。" },
       ])
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] 401 Unauthorized — invalid or missing access token", ts: timestamp() },
+        { type: "error", message: "[ERROR] 401 未授权：访问令牌缺失或无效", ts: timestamp() },
       ])
       if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
       return null
@@ -640,30 +750,33 @@ export default function Home() {
   }, [])
 
   const handleSendMessage = useCallback(async (content: string) => {
+    const threadId = threadIdRef.current
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
       content,
     }
 
+    pendingChatTitleRef.current = content
     setMessages((prev) => [...prev, userMessage])
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
-    threadIdRef.current = null
     setLogs((prev) => [
       ...prev,
-      { type: "info" as const, message: `[INFO] User query: ${content.slice(0, 60)}`, ts: timestamp() },
+      { type: "info" as const, message: `[INFO] 用户问题：${content.slice(0, 60)}`, ts: timestamp() },
     ])
+    console.debug("[A3_CHAT] sending", { threadId, selectedChatId, messageCount: messages.length + 1 })
 
     setIsLoading(true)
 
     try {
+      streamHadErrorRef.current = false
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query: content }),
+        body: JSON.stringify({ query: content, thread_id: threadId }),
       })
 
       if (!body) return
@@ -680,7 +793,11 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Stream complete.", ts: timestamp() },
+        {
+          type: streamHadErrorRef.current ? "error" : "info",
+          message: streamHadErrorRef.current ? "[ERROR] 流式响应因错误结束。" : "[INFO] 流式响应完成。",
+          ts: timestamp(),
+        },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -689,24 +806,15 @@ export default function Home() {
       ])
     } finally {
       setIsLoading(false)
-
-      if (!selectedChatId) {
-        const newChat = {
-          id: Date.now().toString(),
-          title: content.slice(0, 30) + (content.length > 30 ? "..." : ""),
-        }
-        setChatHistory((prev) => [newChat, ...prev])
-        setSelectedChatId(newChat.id)
-      }
     }
-  }, [selectedChatId, fetchWithErrorHandling, consumeSSEStream])
+  }, [selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream])
 
   const handleResume = useCallback(async (editedPlan: string) => {
     const threadId = threadIdRef.current
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id — cannot resume", ts: timestamp() },
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法继续执行。", ts: timestamp() },
       ])
       return
     }
@@ -714,7 +822,7 @@ export default function Home() {
     setIsResuming(true)
     setLogs((prev) => [
       ...prev,
-      { type: "info", message: "[INFO] Resuming graph with edited plan...", ts: timestamp() },
+      { type: "info", message: "[INFO] 正在使用已编辑方案继续执行图流程...", ts: timestamp() },
     ])
 
     try {
@@ -733,7 +841,7 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Resume stream complete.", ts: timestamp() },
+        { type: "info", message: "[INFO] 继续执行的流式响应已完成。", ts: timestamp() },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -751,7 +859,7 @@ export default function Home() {
     if (!threadId) {
       setLogs((prev) => [
         ...prev,
-        { type: "error", message: "[ERROR] No thread_id — cannot send feedback", ts: timestamp() },
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法发送反馈。", ts: timestamp() },
       ])
       return
     }
@@ -787,7 +895,7 @@ export default function Home() {
 
       setLogs((prev) => [
         ...prev,
-        { type: "info", message: "[INFO] Feedback revision complete.", ts: timestamp() },
+        { type: "info", message: "[INFO] 反馈修订已完成。", ts: timestamp() },
       ])
     } catch (error: any) {
       setLogs((prev) => [
@@ -801,14 +909,15 @@ export default function Home() {
   }, [fetchWithErrorHandling, consumeSSEStream])
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="a3-app-shell flex overflow-hidden">
       <LeftSidebar
         chatHistory={chatHistory}
         onNewChat={handleNewChat}
         onSelectChat={handleSelectChat}
+        onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
       />
-      <div className="flex-1 flex flex-col h-full">
+      <div className="flex min-w-0 flex-1 flex-col h-full">
         <ChatArea
           messages={messages}
           onSendMessage={handleSendMessage}

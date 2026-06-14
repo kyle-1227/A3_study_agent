@@ -3,7 +3,7 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: '高校学习 AI 助手',
-  description: 'AI-powered learning assistant for college students',
+  description: '面向高校学习者的个性化学习资源生成助手',
   generator: 'v0.app',
   icons: {
     icon: [
@@ -30,7 +30,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body className="font-sans antialiased">
         {children}
       </body>

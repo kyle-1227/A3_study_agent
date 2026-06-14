@@ -11,6 +11,11 @@ interface PrintPayload {
   markdown: string
 }
 
+const fallbackPayload: PrintPayload = {
+  title: "Markdown 复习文档",
+  markdown: "# Markdown 复习文档\n\n未找到可打印的复习文档内容。",
+}
+
 const markdownComponents: Components = {
   h1: ({ children }) => <h1>{children}</h1>,
   h2: ({ children }) => <h2>{children}</h2>,
@@ -30,25 +35,22 @@ const markdownComponents: Components = {
 }
 
 export default function ReviewDocPrintPage() {
-  const [payload, setPayload] = useState<PrintPayload>({
-    title: "Markdown复习文档",
-    markdown: "# Markdown复习文档\n\n未找到可打印的复习文档内容。",
-  })
+  const [payload, setPayload] = useState<PrintPayload>(fallbackPayload)
 
   useEffect(() => {
     const raw = window.sessionStorage.getItem(PRINT_PAYLOAD_KEY)
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw)
-        setPayload({
-          title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title : "Markdown复习文档",
-          markdown: typeof parsed.markdown === "string" && parsed.markdown.trim()
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw)
+      setPayload({
+        title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title : fallbackPayload.title,
+        markdown:
+          typeof parsed.markdown === "string" && parsed.markdown.trim()
             ? parsed.markdown
-            : "# Markdown复习文档\n\n未找到可打印的复习文档内容。",
-        })
-      } catch {
-        // Keep the fallback payload.
-      }
+            : fallbackPayload.markdown,
+      })
+    } catch {
+      setPayload(fallbackPayload)
     }
   }, [])
 
@@ -222,10 +224,6 @@ export default function ReviewDocPrintPage() {
             width: auto;
             margin: 0;
             padding: 0;
-          }
-
-          body {
-            background: #ffffff;
           }
         }
       `}</style>

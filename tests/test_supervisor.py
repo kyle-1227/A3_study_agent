@@ -1,9 +1,10 @@
-"""Unit tests for the Supervisor node (intent routing + keypoint extraction)."""
+"""Unit tests for the supervisor node and routing normalization."""
 
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -18,61 +19,61 @@ from src.graph.supervisor import (
 )
 
 
-def _mock_supervisor_output(intent="academic", keywords=None, confidence=0.9, subject_candidates=None):
-    """Helper to create a SupervisorOutput instance for mocking."""
-    return SupervisorOutput(
-        intent=intent,
-        keywords=keywords or [],
-        confidence=confidence,
-        subject_candidates=subject_candidates or [],
+def _result(
+    intent: str = "academic",
+    keywords: list[str] | None = None,
+    confidence: float = 0.9,
+    subject_candidates: list[str] | None = None,
+    requested_resource_type: str = "",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        parsed=SupervisorOutput(
+            intent=intent,
+            keywords=keywords or [],
+            confidence=confidence,
+            subject_candidates=subject_candidates or [],
+            requested_resource_type=requested_resource_type,
+        ),
+        raw_output="{}",
     )
 
 
 class TestSupervisorNode:
-
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_academic_intent(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_academic_intent(self, mock_invoke):
+        mock_invoke.return_value = _result(
             intent="academic",
-            keywords=["Python", "函数/function"],
+            keywords=["Python", "function"],
             confidence=0.95,
             subject_candidates=["python"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+        )
 
-        state = {"messages": [HumanMessage(content="Python 函数怎么理解？")]}
+        state = {"messages": [HumanMessage(content="How do Python functions work?")]}
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python", "math"]):
             result = await supervisor_node(state)
 
         assert result["intent"] == "academic"
         assert result["subject"] == "python"
         assert result["subject_candidates"] == ["python"]
-        assert "函数/function" in result["keypoints"]
-        mock_llm.with_structured_output.assert_called_once_with(SupervisorOutput, method="json_mode")
+        assert "function" in result["keypoints"]
+        mock_invoke.assert_awaited_once()
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_emits_a3_trace_when_enabled(self, mock_get_llm, caplog, monkeypatch):
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_emits_a3_trace_when_enabled(self, mock_invoke, caplog, monkeypatch):
         monkeypatch.setenv("LOG_SUPERVISOR_RESULT", "true")
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+        mock_invoke.return_value = _result(
             intent="academic",
             keywords=["Python"],
             confidence=0.95,
             subject_candidates=["python"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
-
+        )
         state = {
-            "messages": [HumanMessage(content="Python 函数怎么理解？")],
+            "messages": [HumanMessage(content="Explain Python functions")],
             "request_id": "req-1",
             "session_id": "sess-1",
             "thread_id": "thread-1",
         }
+
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
             with caplog.at_level("WARNING"):
                 await supervisor_node(state)
@@ -83,269 +84,154 @@ class TestSupervisorNode:
         assert payload["request_id"] == "req-1"
         assert payload["subject"] == "python"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_planning_intent(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="planning", keywords=[], confidence=0.9,
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_academic_with_study_plan_resource_type(self, mock_invoke):
+        """academic intent with requested_resource_type=study_plan stays academic."""
+        mock_invoke.return_value = _result(
+            intent="academic", keywords=["learning plan"], confidence=0.9,
+            requested_resource_type="study_plan",
+        )
 
-        state = {"messages": [HumanMessage(content="帮我制定学习计划")]}
+        state = {"messages": [HumanMessage(content="Help me make a learning plan")]}
         result = await supervisor_node(state)
 
-        assert result["intent"] == "planning"
-        assert result["keypoints"] == []
+        assert result["intent"] == "academic"
+        assert result["requested_resource_type"] == "study_plan"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_emotional_intent(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="emotional", keywords=[], confidence=0.85,
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_emotional_intent(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="emotional", keywords=[], confidence=0.85)
 
-        state = {"messages": [HumanMessage(content="我好焦虑")]}
+        state = {"messages": [HumanMessage(content="I feel overwhelmed by coursework")]}
         result = await supervisor_node(state)
 
         assert result["intent"] == "emotional"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_unknown_intent(self, mock_get_llm):
-        """Unknown intent is returned when the query is off-topic."""
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="unknown", keywords=[], confidence=0.3,
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_unknown_intent(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="unknown", keywords=[], confidence=0.3)
 
-        state = {"messages": [HumanMessage(content="今天天气怎么样")]}
+        state = {"messages": [HumanMessage(content="What is the weather today?")]}
         result = await supervisor_node(state)
 
         assert result["intent"] == "unknown"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_subject_candidates_select_available_subject(self, mock_get_llm):
-        """Supervisor subject selection is based on available subjects, not keyword maps."""
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_subject_candidates_select_available_subject(self, mock_invoke):
+        mock_invoke.return_value = _result(
             intent="academic",
-            keywords=["Python", "函数/function"],
+            keywords=["Python", "function"],
             confidence=0.95,
             subject_candidates=["python", "math"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+        )
 
-        state = {"messages": [HumanMessage(content="Python 函数 参数 返回值")]}
+        state = {"messages": [HumanMessage(content="Python function parameters and return values")]}
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["math", "python"]):
             result = await supervisor_node(state)
 
-        assert result["intent"] == "academic"
         assert result["subject"] == "python"
         assert result["subject_candidates"] == ["python", "math"]
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_structured_output_failure_falls_back(self, mock_get_llm):
-        """When structured output fails, fall back to academic defaults."""
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(side_effect=Exception("LLM error"))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_structured_output_failure_raises(self, mock_invoke):
+        mock_invoke.side_effect = RuntimeError("structured failure")
 
         state = {"messages": [HumanMessage(content="test")]}
-        result = await supervisor_node(state)
+        with pytest.raises(RuntimeError, match="structured failure"):
+            await supervisor_node(state)
 
-        assert result["intent"] == "academic"
-        assert result["subject"] == "other"
-        assert result["keypoints"] == []
-
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_uses_with_structured_output(self, mock_get_llm):
-        """Verify with_structured_output is called (no json.loads)."""
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output())
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_uses_structured_runtime(self, mock_invoke):
+        mock_invoke.return_value = _result()
 
         state = {"messages": [HumanMessage(content="test")]}
         await supervisor_node(state)
 
-        mock_llm.with_structured_output.assert_called_once_with(SupervisorOutput, method="json_mode")
-        structured_llm.ainvoke.assert_called_once()
+        kwargs = mock_invoke.await_args.kwargs
+        assert kwargs["node_name"] == "supervisor"
+        assert kwargs["llm_node"] == "supervisor"
+        assert kwargs["schema"] is SupervisorOutput
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_keywords_mapped_to_keypoints(self, mock_get_llm):
-        """SupervisorOutput.keywords should be mapped to state keypoints."""
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="academic", keywords=["椭圆", "离心率"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
-
-        state = {"messages": [HumanMessage(content="椭圆的离心率怎么求？")]}
-        result = await supervisor_node(state)
-
-        assert result["keypoints"] == ["椭圆", "离心率"]
-
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_python_function_not_hardcoded_as_math(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_unavailable_subject_candidates_are_filtered(self, mock_invoke):
+        mock_invoke.return_value = _result(
             intent="academic",
-            keywords=["Python", "函数/function"],
-            subject_candidates=["python"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
-
-        state = {"messages": [HumanMessage(content="Python 函数 参数 返回值 作用域")]}
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["math", "python"]):
-            result = await supervisor_node(state)
-
-        assert result["subject"] == "python"
-
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_unavailable_subject_candidates_are_filtered(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="academic",
-            keywords=["合同法/contract law"],
+            keywords=["contract law"],
             subject_candidates=["law", "python"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+        )
 
-        state = {"messages": [HumanMessage(content="合同法的要约和承诺是什么？")]}
+        state = {"messages": [HumanMessage(content="What are contract law requirements?")]}
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
             result = await supervisor_node(state)
 
         assert result["subject"] == "python"
         assert result["subject_candidates"] == ["python"]
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_no_matching_subject_candidates_returns_other(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_no_matching_subject_candidates_returns_other(self, mock_invoke):
+        mock_invoke.return_value = _result(
             intent="academic",
-            keywords=["合同法/contract law"],
+            keywords=["contract law"],
             subject_candidates=["law"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+        )
 
-        state = {"messages": [HumanMessage(content="合同法的要约和承诺是什么？")]}
+        state = {"messages": [HumanMessage(content="What are contract law requirements?")]}
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
             result = await supervisor_node(state)
 
         assert result["subject"] == "other"
         assert result["subject_candidates"] == []
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_ignores_llm_mindmap_flag_for_plain_question(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        llm_result = MagicMock(
-            intent="academic",
-            keywords=["思维导图"],
-            confidence=0.95,
-            requested_resource_type="mindmap",
-            needs_mindmap=True,
-        )
-        structured_llm.ainvoke = AsyncMock(return_value=llm_result)
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_study_plan_request_sets_resource_type(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="academic", keywords=["machine learning"])
 
-        state = {"messages": [HumanMessage(content="思维导图是什么？")]}
+        state = {"messages": [HumanMessage(content="Please create a machine learning study plan")]}
         result = await supervisor_node(state)
 
-        assert result["needs_mindmap"] is False
-        assert result["requested_resource_type"] == ""
+        assert result["intent"] == "academic"
+        assert result["requested_resource_type"] == "study_plan"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_mindmap_request_sets_route_flag(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="academic", keywords=["数据结构", "栈", "队列"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_mindmap_request_sets_route_flag(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="academic", keywords=["data structures"])
 
-        state = {"messages": [HumanMessage(content="给我做一个数据结构栈和队列的思维导图")]}
+        state = {"messages": [HumanMessage(content="Please create a data structures mindmap")]}
         result = await supervisor_node(state)
 
         assert result["needs_mindmap"] is True
         assert result["requested_resource_type"] == "mindmap"
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_plain_mindmap_question_does_not_route_to_mindmap(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="academic", keywords=["思维导图"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_plain_mindmap_question_does_not_route_to_mindmap(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="academic", keywords=["mindmap"])
 
-        state = {"messages": [HumanMessage(content="思维导图是什么？")]}
+        state = {"messages": [HumanMessage(content="What is a mindmap?")]}
         result = await supervisor_node(state)
 
         assert result["needs_mindmap"] is False
         assert result["requested_resource_type"] == ""
 
-    @patch("src.graph.supervisor.get_node_llm")
-    async def test_other_resource_request_is_detected_without_mindmap_route(self, mock_get_llm):
-        mock_llm = MagicMock()
-        structured_llm = MagicMock()
-        structured_llm.ainvoke = AsyncMock(return_value=_mock_supervisor_output(
-            intent="academic", keywords=["机器学习", "练习题"],
-        ))
-        mock_llm.with_structured_output.return_value = structured_llm
-        mock_get_llm.return_value = mock_llm
-
-        state = {"messages": [HumanMessage(content="请生成机器学习过拟合的分层练习题")]}
-        result = await supervisor_node(state)
-
-        assert result["needs_mindmap"] is False
-        assert result["requested_resource_type"] == "quiz"
-
 
 class TestResourceTypeDetection:
-
     def test_detects_explicit_mindmap_generation(self):
-        assert _detect_requested_resource_type("生成机器学习过拟合的思维导图") == "mindmap"
+        assert _detect_requested_resource_type("Please create a machine learning mindmap") == "mindmap"
 
     def test_does_not_detect_mindmap_explanation_question(self):
-        assert _detect_requested_resource_type("思维导图是什么？") == ""
+        assert _detect_requested_resource_type("What is a mindmap?") == ""
 
-    def test_detects_other_resource_types(self):
-        assert _detect_requested_resource_type("请生成数据库第一章练习题") == "quiz"
-        assert _detect_requested_resource_type("帮我制作人工智能导论 PPT") == "ppt"
-        assert _detect_requested_resource_type("给我做一个 Python 代码案例") == "code_case"
+    def test_detects_study_plan_requests(self):
+        assert _detect_requested_resource_type("Please create a Python study plan") == "study_plan"
+        assert _detect_requested_resource_type("Give me a machine learning roadmap") == "study_plan"
 
 
 class TestRouteByIntent:
-
     def test_routes_academic(self):
         assert route_by_intent({"intent": "academic"}) == "academic"
 
-    def test_routes_planning(self):
-        assert route_by_intent({"intent": "planning"}) == "planning"
+    def test_routes_planning_to_unknown(self):
+        """Planning is no longer a valid intent — routes to unknown."""
+        assert route_by_intent({"intent": "planning"}) == "unknown"
 
     def test_routes_emotional(self):
         assert route_by_intent({"intent": "emotional"}) == "emotional"
@@ -353,53 +239,41 @@ class TestRouteByIntent:
     def test_routes_unknown(self):
         assert route_by_intent({"intent": "unknown"}) == "unknown"
 
-    def test_routes_mindmap_request_as_academic(self):
-        assert route_by_intent({"intent": "academic", "needs_mindmap": True}) == "academic"
-
     def test_missing_intent_defaults_to_academic(self):
         assert route_by_intent({}) == "academic"
 
 
 class TestValidIntents:
-
     def test_valid_intents_includes_unknown(self):
         assert "unknown" in _VALID_INTENTS
 
-    def test_valid_intents_set(self):
-        assert _VALID_INTENTS == {"academic", "planning", "emotional", "unknown"}
+    def test_valid_intents_no_longer_includes_planning(self):
+        """Planning is no longer a valid intent — supervisor sanitizes it."""
+        assert _VALID_INTENTS == {"academic", "emotional", "unknown"}
+        assert "planning" not in _VALID_INTENTS
 
 
 class TestHandleUnknown:
-
     async def test_returns_friendly_message(self):
-        state = {"messages": [HumanMessage(content="今天天气怎么样")]}
+        state = {"messages": [HumanMessage(content="What is the weather today?")]}
         result = await handle_unknown(state)
 
         assert "messages" in result
         assert len(result["messages"]) == 1
         assert isinstance(result["messages"][0], AIMessage)
-        # Should contain a friendly message in Chinese
         assert len(result["messages"][0].content) > 0
-
-    async def test_message_is_ai_message(self):
-        state = {"messages": [HumanMessage(content="帮我订外卖")]}
-        result = await handle_unknown(state)
-
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
 
 
 class TestSupervisorOutput:
-
     def test_valid_output(self):
         output = SupervisorOutput(
             intent="academic",
-            keywords=["数学/mathematics"],
+            keywords=["mathematics"],
             confidence=0.9,
             subject_candidates=["math"],
         )
         assert output.intent == "academic"
-        assert output.keywords == ["数学/mathematics"]
+        assert output.keywords == ["mathematics"]
         assert output.confidence == 0.9
         assert output.subject_candidates == ["math"]
 

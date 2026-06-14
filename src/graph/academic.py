@@ -1,4 +1,4 @@
-"""SubGraph A — Academic Tutor: parallel retrieval (fan-out/fan-in),
+"""SubGraph A — Academic Learning Assistant: parallel retrieval (fan-out/fan-in),
 answer generation, and hallucination evaluation with retry loop.
 
 Keypoint extraction is handled by the supervisor node (merged for latency),
@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.config import get_setting, load_prompt
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
-from src.graph.state import CONTEXT_CLEAR, TutorState
+from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
 from src.llm.structured_output import (
     StructuredLLMResult,
     StructuredOutputError,
@@ -87,10 +87,48 @@ class SearchQueryRewriteOutput(BaseModel):
         default_factory=list,
         description="Per-subject retrieval plan",
     )
+    memory_context_notes: list[str] = Field(
+        default_factory=list,
+        description="Notes about how conversation/evidence memory relates to current query",
+    )
+    memory_used_for_retrieval: bool = Field(
+        default=False,
+        description="Whether evidence memory influenced the retrieval plan",
+    )
+    memory_use_reason: str = Field(
+        default="",
+        description="Why memory was or was not used for retrieval",
+    )
 
 
-def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
-    """Business validation for retrieval query rewriting."""
+_HISTORY_REFERENCE_PATTERNS = (
+    "之前", "上次", "刚才", "刚刚", "前面", "前面说", "前面讲",
+    "历史", "刚才说", "刚才讲", "之前说", "之前讲",
+    "前述", "前文", "上文", "上回", "继续", "接着说", "接着讲",
+    "previously", "before", "last time", "earlier", "history",
+    "previous", "above", "aforementioned", "继续上面的",
+)
+
+
+def _has_explicit_history_reference(query: str) -> bool:
+    """Check if the user query contains explicit history-reference language.
+
+    This is a lightweight pattern match — no hardcoded discipline keywords.
+    """
+    lowered = (query or "").lower()
+    return any(pattern.lower() in lowered for pattern in _HISTORY_REFERENCE_PATTERNS)
+
+
+def validate_search_query_rewrite_output(
+    parsed: BaseModel,
+    *,
+    current_query: str = "",
+) -> str:
+    """Business validation for retrieval query rewriting.
+
+    If memory_used_for_retrieval is true but the current query does NOT
+    contain explicit history-reference language, fail validation.
+    """
     if not isinstance(parsed, SearchQueryRewriteOutput):
         return "root expected SearchQueryRewriteOutput"
     if not str(parsed.rag_query or "").strip():
@@ -105,6 +143,22 @@ def validate_search_query_rewrite_output(parsed: BaseModel) -> str:
             return f"{prefix}.subject must be a string"
         if item.role and not str(item.role).strip():
             return f"{prefix}.role must be a string"
+    # ── Memory use validation ───────────────────────────────────────
+    # Two valid paths for memory to influence retrieval:
+    # 1. Current query contains explicit history-reference language, OR
+    # 2. LLM marks memory_used_for_retrieval=true with a non-empty reason.
+    if parsed.memory_used_for_retrieval:
+        has_explicit_ref = _has_explicit_history_reference(current_query)
+        has_valid_reason = bool((parsed.memory_use_reason or "").strip())
+        if not has_explicit_ref and not has_valid_reason:
+            return (
+                "memory_used_for_retrieval=true but current query does not "
+                "contain explicit history-reference language and "
+                "memory_use_reason is empty. "
+                "Memory may only influence retrieval when the user "
+                "explicitly references previous conversation or the LLM "
+                "provides a valid reason."
+            )
     return ""
 
 
@@ -209,7 +263,7 @@ ALLOWED_SUPPLEMENT_PURPOSES = {
 }
 
 
-def _last_human_query(state: TutorState) -> str:
+def _last_human_query(state: LearningState) -> str:
     """Extract the last HumanMessage content (robust for retry loops)."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -298,15 +352,117 @@ def _clear_retrieval_plan_state() -> dict:
     }
 
 
-def _query_source(state: TutorState) -> tuple[str, str]:
+def _is_retry_rewrite_active(state: LearningState) -> bool:
+    """True only when a hallucination retry rewrite is in progress."""
+    return bool(
+        (state.get("retry_count") or 0) > 0
+        or state.get("hallucination_reason", "")
+    )
+
+
+def select_relevant_memory_summaries(
+    state: LearningState,
+    current_query: str,
+    subject: str,
+    requested_resource_type: str,
+    *,
+    max_selected: int = 3,
+) -> list[dict]:
+    """Select compact evidence memory summaries relevant to the current query.
+
+    Reads ``summary`` first, falls back to ``decision_summary``.
+    Tolerates missing fields and traces missing-field counts.
+    Returns only compact summaries — never raw docs, full old context, or
+    full historical answers.
+    """
+    memory_entries = state.get("evidence_summary_memory") or []
+    if not memory_entries:
+        return []
+
+    query_lower = (current_query or "").lower()
+    subject_lower = (subject or "").lower()
+    resource_lower = (requested_resource_type or "").lower()
+    missing_field_counts: dict[str, int] = {}
+
+    def _get_summary(entry: dict) -> str:
+        val = str(entry.get("summary") or "")
+        if val.strip():
+            return val.strip()
+        val = str(entry.get("decision_summary") or "")
+        return val.strip()
+
+    scored: list[tuple[float, dict]] = []
+
+    for idx, entry in enumerate(memory_entries):
+        # ── Track missing fields ────────────────────────────────────
+        for field in ("summary", "subject", "resource_type", "decision_summary"):
+            if not entry.get(field):
+                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+
+        score = 0.0
+        entry_subject = str(entry.get("subject") or "").lower()
+        entry_resource = str(entry.get("resource_type") or entry.get("requested_resource_type") or "").lower()
+        entry_summary = _get_summary(entry).lower()
+
+        # Recency bonus
+        score += 0.2
+
+        # Subject match
+        if subject_lower and entry_subject == subject_lower:
+            score += 0.3
+        elif subject_lower and entry_subject and subject_lower in entry_subject:
+            score += 0.15
+
+        # Resource type match
+        if resource_lower and entry_resource == resource_lower:
+            score += 0.2
+
+        # Query term overlap (lightweight signal only)
+        if query_lower and entry_summary:
+            query_terms = set(query_lower.split())
+            summary_terms = set(entry_summary.split())
+            if query_terms and summary_terms:
+                overlap = len(query_terms & summary_terms) / max(len(query_terms), 1)
+                score += min(overlap * 0.3, 0.3)
+
+        scored.append((score, entry))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = [
+        entry
+        for _, entry in scored[:max_selected]
+        if _ > 0.0
+    ]
+
+    selected_ids = [e.get("memory_id", "") for e in selected]
+    emit_a3_trace(
+        logger,
+        "memory_summary_selection",
+        {
+            "available_count": len(memory_entries),
+            "selected_count": len(selected),
+            "selected_ids": selected_ids,
+            "selection_reason": f"scored {len(memory_entries)} entries, selected top {len(selected)}",
+            "missing_field_counts": missing_field_counts,
+            "prompt_chars_added": sum(len(_get_summary(e)) for e in selected),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return selected
+
+
+def _query_source(state: LearningState) -> tuple[str, str]:
+    """Priority: search_rag_query > active retry rewritten_query > expanded_keypoints > keypoints > original query."""
     rewritten = state.get("rewritten_query", "")
     search_rag_query = state.get("search_rag_query", "")
     expanded_keypoints = state.get("expanded_keypoints", [])
     keypoints = state.get("keypoints", [])
-    if rewritten:
-        return rewritten, "rewritten_query"
     if search_rag_query:
         return search_rag_query, "search_rag_query"
+    # rewritten_query is diagnostic only; used for retrieval only when retry rewrite is active
+    if rewritten and _is_retry_rewrite_active(state):
+        return rewritten, "rewritten_query"
     if expanded_keypoints:
         return " ".join(expanded_keypoints), "expanded_keypoints"
     if keypoints:
@@ -472,7 +628,7 @@ def _clamp_priority(value) -> float:
     return max(0.0, min(1.0, priority))
 
 
-def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
+def _allowed_retrieval_subjects(state: LearningState) -> set[str]:
     """Build the subject hard boundary for retrieval plans."""
     available = set(get_available_subjects_from_data())
     if available:
@@ -483,7 +639,7 @@ def _allowed_retrieval_subjects(state: TutorState) -> set[str]:
 
 def _normalize_retrieval_plan(
     raw_plan: list[RetrievalPlanItem],
-    state: TutorState,
+    state: LearningState,
 ) -> tuple[list[dict], dict]:
     """Filter and normalize LLM-produced per-subject retrieval plan."""
     allowed_subjects = _allowed_retrieval_subjects(state)
@@ -550,20 +706,76 @@ def _normalize_primary_subject(parsed_primary: str, plan: list[dict]) -> str:
     return plan[0]["subject"] if plan else ""
 
 
-def _web_query_source(state: TutorState) -> tuple[str, str]:
+def _maybe_fail_subject_conflict(
+    *,
+    parsed_primary: str,
+    normalized_primary: str,
+    supervisor_subject: str,
+    available_subjects: list[str],
+    retrieval_plan: list[dict],
+) -> None:
+    """Fail-fast if the LLM subject conflicts with supervisor/available subjects
+    in a way normalization cannot justify."""
+    raw = (parsed_primary or "").strip().lower()
+    if not raw:
+        return  # LLM made no subject claim — no conflict to check
+
+    sv = (supervisor_subject or "").strip().lower()
+    if not sv or sv in ("unknown", "other"):
+        return  # Supervisor did not classify — no conflict baseline
+
+    norm = (normalized_primary or "").strip().lower()
+    available_lower = {s.lower() for s in available_subjects}
+    plan_subjects_lower = {item.get("subject", "").lower() for item in retrieval_plan}
+
+    # No conflict: normalized matches supervisor's subject
+    if norm == sv:
+        return
+    # No conflict: normalized is in available subjects
+    if norm and norm in available_lower:
+        return
+    # No conflict: LLM raw matches supervisor (normalization lost it)
+    if raw == sv:
+        return
+
+    # Conflict: raw is plausible (in available) but normalized mismatched
+    # — that's a normalization issue, not a conflict
+    if raw in available_lower:
+        return
+
+    # Genuine conflict: LLM proposes a subject that is neither the
+    # supervisor's subject nor in the available/plan set
+    if norm and plan_subjects_lower and norm not in plan_subjects_lower:
+        if norm not in available_lower:
+            raise ValueError(
+                f"search_query_rewriter subject conflict: "
+                f"LLM proposed '{parsed_primary}' (normalized '{normalized_primary}'), "
+                f"but supervisor subject is '{supervisor_subject}' "
+                f"and normalized subject is not in available subjects."
+            )
+
+
+def _web_query_source(state: LearningState) -> tuple[str, str]:
     search_web_query = state.get("search_web_query", "")
     rewritten = state.get("rewritten_query", "")
     if search_web_query:
         return search_web_query, "search_web_query"
-    if rewritten:
+    if rewritten and _is_retry_rewrite_active(state):
         return rewritten, "rewritten_query"
     return _last_human_query(state), "original_query"
 
 
-def _build_retrieval_branches(state: TutorState) -> tuple[list[dict], dict]:
-    """Build unified retrieval branches for multi- and single-subject paths."""
+def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
+    """Build unified retrieval branches for multi- and single-subject paths.
+
+    retrieval_plan always wins when non-empty.
+    Stale rewritten_query never suppresses retrieval plan.
+    """
     retrieval_plan = state.get("retrieval_plan") or []
-    if retrieval_plan and not state.get("rewritten_query"):
+    retry_active = _is_retry_rewrite_active(state)
+    rewritten_query = state.get("rewritten_query", "")
+
+    if retrieval_plan:
         branches = [dict(item, _synthetic_single_subject=False) for item in retrieval_plan]
         debug = {
             "mode": "multi_subject_plan",
@@ -571,6 +783,11 @@ def _build_retrieval_branches(state: TutorState) -> tuple[list[dict], dict]:
             "subjects": [item.get("subject") for item in branches],
             "synthetic_single_subject": False,
             "query_source": "retrieval_plan",
+            "rewritten_query_present": bool(rewritten_query),
+            "retry_rewrite_active": retry_active,
+            "ignored_stale_rewritten_query": bool(rewritten_query and not retry_active),
+            "used_retrieval_plan": True,
+            "retrieval_plan_count": len(branches),
         }
         return branches, debug
 
@@ -595,6 +812,11 @@ def _build_retrieval_branches(state: TutorState) -> tuple[list[dict], dict]:
         "subjects": [subject] if query else [],
         "synthetic_single_subject": True,
         "query_source": query_source,
+        "rewritten_query_present": bool(rewritten_query),
+        "retry_rewrite_active": retry_active,
+        "ignored_stale_rewritten_query": False,
+        "used_retrieval_plan": False,
+        "retrieval_plan_count": 0,
     }
     return ([branch] if query else []), debug
 
@@ -841,57 +1063,19 @@ def _clip_text(value: Any, limit: int) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-_WEB_KEY_PHRASES = (
-    "machine learning",
-    "deep learning",
-    "neural networks",
-    "neural network",
-    "scikit-learn",
-    "TensorFlow",
-    "PyTorch",
-    "practice problems",
-    "coding exercises",
-    "with solutions",
-    "classification regression",
-    "train test split",
-    "model evaluation",
-)
-
-_PURPOSE_QUERY_HINTS = {
-    "resource_enrichment": ("exercises", "with solutions", "practice problems", "quiz"),
-    "coverage_expansion": ("deep learning", "neural networks", "practice problems"),
-    "implementation_detail": ("scikit-learn", "classification regression", "Python"),
-    "tool_ecosystem": ("TensorFlow", "PyTorch", "scikit-learn"),
-    "case_example": ("project example", "case study"),
-}
-
-
 def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_chars: int = 160) -> str:
-    """Compact a bilingual supplement query for faster Web Search."""
+    """Pure compression only — never add subject, purpose, or discipline terms.
+
+    - Normalize whitespace
+    - Remove duplicate tokens while preserving input order
+    - Enforce max length
+    - Preserve terms already present in the input
+    """
     text = " ".join(str(query or "").replace("\n", " ").split())
     if len(text) <= max_chars and len(text.split()) <= 8:
         return text
 
-    lower_text = text.lower()
-    protected_phrases: list[str] = []
-    if bool(_web_setting("preserve_key_phrases", True)):
-        for phrase in _WEB_KEY_PHRASES:
-            if phrase.lower() in lower_text:
-                protected_phrases.append(phrase)
-    for phrase in _PURPOSE_QUERY_HINTS.get(purpose, ()):
-        if phrase.lower() in lower_text and phrase not in protected_phrases:
-            protected_phrases.append(phrase)
-
-    placeholder_text = text
-    for idx, phrase in enumerate(protected_phrases):
-        placeholder_text = re.sub(
-            re.escape(phrase),
-            f" __PHRASE_{idx}__ ",
-            placeholder_text,
-            flags=re.IGNORECASE,
-        )
-
-    raw_tokens = placeholder_text.split()
+    raw_tokens = text.split()
     seen: set[str] = set()
     english_tokens: list[str] = []
     other_tokens: list[str] = []
@@ -910,13 +1094,10 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
         "and",
         "or",
     }
-    phrase_by_placeholder = {f"__PHRASE_{idx}__": phrase for idx, phrase in enumerate(protected_phrases)}
     for token in raw_tokens:
         cleaned = token.strip(" ,;，；。.!?()[]{}<>\"'`")
         if not cleaned:
             continue
-        if cleaned in phrase_by_placeholder:
-            cleaned = phrase_by_placeholder[cleaned]
         key = cleaned.lower()
         if key in seen or key in filler_tokens:
             continue
@@ -927,11 +1108,7 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
             other_tokens.append(cleaned)
 
     selected: list[str] = []
-    subject_token = str(subject or "").replace("_", " ").strip()
-    prioritized = []
-    if subject_token and subject_token.lower() not in {item.lower() for item in english_tokens}:
-        prioritized.append(subject_token)
-    prioritized.extend(english_tokens)
+    prioritized = list(english_tokens)
     prioritized.extend(other_tokens[:4])
     for token in prioritized:
         candidate = " ".join([*selected, token]).strip()
@@ -1150,7 +1327,7 @@ def _targets_from_decision(
 
 async def _decide_web_supplement_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     retrieval_plan: list[dict],
     branch_evals: dict[str, dict],
     docs_by_subject: dict[str, list[dict]],
@@ -1325,7 +1502,7 @@ def _judge_response_schema() -> dict[str, Any]:
 
 def _build_judge_messages(
     *,
-    state: TutorState,
+    state: LearningState,
     subject: str,
     role: str,
     purpose: str,
@@ -1464,7 +1641,7 @@ def _judge_failure_debug(
 
 async def _judge_tavily_search_results_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     subject: str,
     role: str,
     purpose: str,
@@ -1693,7 +1870,7 @@ def _fail_fast_evidence_judge() -> bool:
     return bool(get_setting("development.fail_fast_evidence_judge", True))
 
 
-def _evidence_failure_phase(state: TutorState) -> str:
+def _evidence_failure_phase(state: LearningState) -> str:
     output = state.get("evidence_judge_output") or {}
     if isinstance(output, dict):
         return str(output.get("failure_phase") or output.get("degraded_reason") or "")
@@ -2058,7 +2235,7 @@ def _structured_result_to_evidence_failure_debug(
 
 async def _judge_evidence_candidates_with_llm(
     *,
-    state: TutorState,
+    state: LearningState,
     candidates: list[EvidenceCandidate],
     original_user_query: str,
     learning_goal: str,
@@ -2088,6 +2265,15 @@ async def _judge_evidence_candidates_with_llm(
             "coverage_gap_count": 0,
             "coverage_gaps": [],
             "raw_preview": "",
+            "raw_output_chars": 0,
+            "output_mode": str(_evidence_judge_output_setting("output_mode", "native_json_schema_pydantic") or "native_json_schema_pydantic"),
+            "fallback_modes": [],
+            "fallback_used": False,
+            "default_used": False,
+            "retry_count": 0,
+            "failure_phase": "",
+            "error_type": "",
+            "provider_error_body": "",
             "parsing_error": None,
             "validation_error": None,
         }
@@ -2149,6 +2335,12 @@ async def _judge_evidence_candidates_with_llm(
         "success": True,
         "output_mode": structured_result.output_mode,
         "fallback_modes": structured_result.fallback_modes,
+        "fallback_used": structured_result.fallback_used,
+        "default_used": structured_result.default_used,
+        "retry_count": structured_result.retry_count,
+        "failure_phase": "",
+        "error_type": "",
+        "provider_error_body": "",
         "overall_evidence_state": parsed.overall_evidence_state,
         "need_more_web_search": parsed.need_more_web_search,
         "input_candidate_count": len(candidates),
@@ -2158,6 +2350,7 @@ async def _judge_evidence_candidates_with_llm(
         "coverage_gap_count": len(parsed.coverage_gaps),
         "coverage_gaps": [gap.model_dump() for gap in parsed.coverage_gaps],
         "raw_preview": structured_result.raw_output[:4000],
+        "raw_output_chars": len(structured_result.raw_output or ""),
         "parsing_error": None,
         "validation_error": None,
         "structured_output_method": structured_result.output_mode,
@@ -2419,7 +2612,7 @@ def _followups_from_coverage_gaps(parsed: EvidenceJudgeOutput) -> list[dict]:
 
 async def _run_dynamic_web_supplement(
     *,
-    state: TutorState,
+    state: LearningState,
     targets: list[dict],
     decision_debug: dict,
     branch_mode: str,
@@ -2716,7 +2909,7 @@ async def _run_dynamic_web_supplement(
 
 # ── Node 0: academic router (fan-out trigger) ─────────────────────
 
-def _dual_source_web_query(state: TutorState, branch: dict) -> tuple[str, str]:
+def _dual_source_web_query(state: LearningState, branch: dict) -> tuple[str, str]:
     if branch.get("web_search_query"):
         return str(branch.get("web_search_query")), "retrieval_branch_web_search_query"
     if state.get("search_web_query"):
@@ -2732,7 +2925,7 @@ def _source_distribution(items: list[dict]) -> dict:
 
 async def _run_dual_source_first_round_web(
     *,
-    state: TutorState,
+    state: LearningState,
     branch: dict,
     query: str,
     original_user_query: str,
@@ -2788,28 +2981,12 @@ async def _run_dual_source_first_round_web(
     return (diagnostics.get("results") or [])[:max_results], diagnostics
 
 
-async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], branch_debug: dict) -> dict:
+async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
     original_user_query = _last_human_query(state)
     per_subject_top_k = int(_retrieval_setting("local_rag.per_subject_top_k", get_setting("rag.multi_subject_per_subject_top_k", 3)))
     local_enabled = bool(_retrieval_setting("local_rag.enabled", True))
-    web_enabled = bool(_retrieval_setting("web.enabled", True))
-    all_candidates: list[EvidenceCandidate] = []
+    local_candidates_all: list[EvidenceCandidate] = []
     originals: dict[str, dict] = {}
-    web_candidate_count_raw = 0
-
-    # TEMP A3_TRACE: remove after multi-source evidence validation.
-    emit_a3_trace(
-        logger,
-        "coverage_decision",
-        {
-            "skipped": True,
-            "skip_reason": "dual_source_evidence_mode_uses_evidence_judge",
-            "branch_mode": branch_debug.get("mode", ""),
-            "branch_count": len(branches),
-        },
-        state=state,
-        env_flag="LOG_RETRIEVAL_PLAN",
-    )
 
     with traced_retrieval(
         query=original_user_query,
@@ -2863,7 +3040,7 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
                     branch_status_score_source=branch_eval["branch_status_score_source"],
                 )
                 for candidate, original in zip(local_candidates, local_docs):
-                    all_candidates.append(candidate)
+                    local_candidates_all.append(candidate)
                     originals[candidate.evidence_id] = original
                 emit_a3_trace(
                     logger,
@@ -2892,51 +3069,161 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
                     env_flag="LOG_RAG_RESULT",
                 )
 
-            if web_enabled:
-                web_query, query_source = _dual_source_web_query(state, branch)
-                web_results, diagnostics = await _run_dual_source_first_round_web(
-                    state=state,
-                    branch=branch,
-                    query=web_query,
-                    original_user_query=original_user_query,
-                )
-                web_candidate_count_raw += len(web_results)
-                emit_a3_trace(
-                    logger,
-                    "dual_source_web_search",
-                    {
-                        "branch_mode": "dual_source_evidence",
-                        "subject": subject,
-                        "role": role,
-                        "query_source": query_source,
-                        "query": web_query,
-                        "provider": diagnostics.get("provider", "tavily"),
-                        "ok": diagnostics.get("ok", False),
-                        "result_count": diagnostics.get("result_count", len(web_results)),
-                        "used_result_count": len(web_results),
-                        "status_code": diagnostics.get("status_code"),
-                        "elapsed_ms": diagnostics.get("elapsed_ms"),
-                        "error_type": diagnostics.get("error_type", ""),
-                        "error_message": diagnostics.get("error_message", ""),
-                        "search_result_judge_disabled_by_dual_source": True,
-                    },
-                    state=state,
-                    env_flag="LOG_WEB_SEARCH_RESULT",
-                )
-                web_candidates = _build_web_evidence_candidates(
-                    tavily_results=web_results,
-                    subject=subject,
-                    role=role,
-                    purpose=str(branch.get("purpose") or "first_round_dual_source"),
-                    query=web_query,
-                    attempt_index=branch_index,
-                )
-                for candidate, original in zip(web_candidates, web_results):
-                    all_candidates.append(candidate)
-                    originals[candidate.evidence_id] = original
+    candidates = _cap_evidence_candidates(local_candidates_all)
+    emit_a3_trace(
+        logger,
+        "local_evidence_candidate_build",
+        {
+            "branch_mode": "dual_source_evidence",
+            "local_candidate_count": len(candidates),
+            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "candidate_preview": [
+                {
+                    "evidence_id": candidate.evidence_id,
+                    "source_type": candidate.source_type,
+                    "subject": candidate.subject,
+                    "rerank_score": candidate.rerank_score,
+                    "tavily_score": candidate.tavily_score,
+                    "source": candidate.source,
+                    "url": candidate.url,
+                }
+                for candidate in candidates[:10]
+            ],
+        },
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
 
-    candidates = _cap_evidence_candidates(all_candidates)
-    originals = {candidate.evidence_id: originals[candidate.evidence_id] for candidate in candidates if candidate.evidence_id in originals}
+    return {
+        "local_evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "local_evidence_originals": {
+            candidate.evidence_id: originals[candidate.evidence_id]
+            for candidate in candidates
+            if candidate.evidence_id in originals
+        },
+        "retrieval_branch_mode": branch_debug.get("mode", ""),
+    }
+
+
+async def _web_search_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+    original_user_query = _last_human_query(state)
+    web_enabled = bool(_retrieval_setting("web.enabled", True))
+    web_candidates_all: list[EvidenceCandidate] = []
+    originals: dict[str, dict] = {}
+
+    if not web_enabled:
+        emit_a3_trace(
+            logger,
+            "web_search",
+            {
+                "branch_mode": "dual_source_evidence",
+                "skipped": True,
+                "skip_reason": "retrieval_web_disabled",
+                "provider": "tavily",
+                "result_count": 0,
+                "used_result_count": 0,
+            },
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+        return {
+            "web_evidence_candidates": [],
+            "web_evidence_originals": {},
+        }
+
+    for branch_index, branch in enumerate(branches):
+        subject = str(branch.get("subject") or "")
+        role = str(branch.get("role") or "supporting_context")
+        web_query, query_source = _dual_source_web_query(state, branch)
+        web_results, diagnostics = await _run_dual_source_first_round_web(
+            state=state,
+            branch=branch,
+            query=web_query,
+            original_user_query=original_user_query,
+        )
+        emit_a3_trace(
+            logger,
+            "web_search",
+            {
+                "branch_mode": "dual_source_evidence",
+                "subject": subject,
+                "role": role,
+                "query_source": query_source,
+                "query": web_query,
+                "provider": diagnostics.get("provider", "tavily"),
+                "ok": diagnostics.get("ok", False),
+                "result_count": diagnostics.get("result_count", len(web_results)),
+                "used_result_count": len(web_results),
+                "status_code": diagnostics.get("status_code"),
+                "elapsed_ms": diagnostics.get("elapsed_ms"),
+                "error_type": diagnostics.get("error_type", ""),
+                "error_message": diagnostics.get("error_message", ""),
+                "search_result_judge_disabled_by_dual_source": True,
+            },
+            state=state,
+            env_flag="LOG_WEB_SEARCH_RESULT",
+        )
+        web_candidates = _build_web_evidence_candidates(
+            tavily_results=web_results,
+            subject=subject,
+            role=role,
+            purpose=str(branch.get("purpose") or "first_round_dual_source"),
+            query=web_query,
+            attempt_index=branch_index,
+        )
+        for candidate, original in zip(web_candidates, web_results):
+            web_candidates_all.append(candidate)
+            originals[candidate.evidence_id] = original
+
+    candidates = _cap_evidence_candidates(web_candidates_all)
+    emit_a3_trace(
+        logger,
+        "web_evidence_candidate_build",
+        {
+            "branch_mode": "dual_source_evidence",
+            "web_candidate_count": len(candidates),
+            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "candidate_preview": [
+                {
+                    "evidence_id": candidate.evidence_id,
+                    "source_type": candidate.source_type,
+                    "subject": candidate.subject,
+                    "tavily_score": candidate.tavily_score,
+                    "source": candidate.source,
+                    "url": candidate.url,
+                }
+                for candidate in candidates[:10]
+            ],
+        },
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+    )
+    return {
+        "web_evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "web_evidence_originals": {
+            candidate.evidence_id: originals[candidate.evidence_id]
+            for candidate in candidates
+            if candidate.evidence_id in originals
+        },
+    }
+
+
+@traced_node
+async def evidence_judge(state: LearningState) -> dict:
+    """Barrier fan-in: judge local and web candidates, then assemble final context."""
+    original_user_query = _last_human_query(state)
+    local_candidate_dicts = state.get("local_evidence_candidates") or []
+    web_candidate_dicts = state.get("web_evidence_candidates") or []
+    candidates = [
+        EvidenceCandidate.model_validate(item)
+        for item in [*local_candidate_dicts, *web_candidate_dicts]
+    ]
+    candidates = _cap_evidence_candidates(candidates)
+    local_originals = dict(state.get("local_evidence_originals") or {})
+    web_originals = dict(state.get("web_evidence_originals") or {})
+    all_originals = {**local_originals, **web_originals}
+    originals = {candidate.evidence_id: all_originals.get(candidate.evidence_id, {}) for candidate in candidates}
+
     emit_a3_trace(
         logger,
         "evidence_candidate_build",
@@ -2974,60 +3261,16 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
             round_index=1,
         )
     except StructuredOutputError as exc:
-        if _fail_fast_evidence_judge():
-            raise RuntimeError(
-                f"Evidence Judge failed: {exc.result.failure_phase}. "
-                f"Fix the root cause before retrying."
-            ) from exc
-        parsed = None
-        judge_debug = exc.result.to_debug_payload()
+        raise RuntimeError(
+            f"Evidence Judge failed: {exc.result.failure_phase}. "
+            f"Fix the root cause before retrying."
+        ) from exc
 
     if parsed is None:
-        if _fail_fast_evidence_judge():
-            raise RuntimeError(
-                f"Evidence Judge returned no parsed result: "
-                f"{judge_debug.get('failure_phase', 'unknown')}"
-            )
-        emit_a3_trace(
-            logger,
-            "context_assembly",
-            {
-                "mode": "dual_source_evidence",
-                "final_doc_count": 0,
-                "evidence_judge_failed": True,
-                "degraded_generation": True,
-                "degraded_reason": "evidence_judge_failed",
-                "source_type_distribution": {},
-                "web_evidence_count": 0,
-                "web_supplement_count": 0,
-            },
-            state=state,
-            env_flag="LOG_CONTEXT_ASSEMBLY",
+        raise RuntimeError(
+            f"Evidence Judge returned no parsed result: "
+            f"{judge_debug.get('failure_phase', 'unknown')}"
         )
-        return {
-            "context": [],
-            "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
-            "evidence_judge_output": judge_debug,
-            "evidence_judge_rounds": 1,
-            "evidence_judge_state": "failed",
-            "evidence_coverage_gaps": [],
-            "search_refinement_needed": False,
-            "search_refinement_deferred": False,
-            "search_refinement_deferred_reason": "",
-            "proposed_followup_search_queries": [],
-            "search_optimization_reserved": True,
-            "search_optimization_status": "reserved_not_implemented",
-            "dual_source_mode": True,
-            "evidence_judge_failed": True,
-            "degraded_generation": True,
-            "degraded_reason": "evidence_judge_failed",
-            "web_supplement_provider": "tavily",
-            "web_supplement_results": [],
-            "web_supplement_failed": bool(web_candidate_count_raw),
-            "web_supplement_failure_reason": "evidence_judge_failed",
-            "web_judge_provider": _evidence_judge_provider(),
-            "web_judge_model": _evidence_judge_model(),
-        }
 
     context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
     followups = _followups_from_coverage_gaps(parsed)
@@ -3053,7 +3296,7 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
     web_context_docs = _web_evidence_items(context_docs)
     local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
     web_evidence_count = len(web_context_docs)
-    web_failed = bool(web_enabled and web_candidate_count_raw and not web_context_docs)
+    web_failed = bool(web_candidate_dicts and not web_context_docs)
     emit_a3_trace(
         logger,
         "context_assembly",
@@ -3078,12 +3321,45 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         env_flag="LOG_CONTEXT_ASSEMBLY",
     )
 
+    # ── Evidence memory ──────────────────────────────────────────────
+    request_id = state.get("request_id", "")
+    thread_id = state.get("thread_id", "")
+    new_evidence, new_gaps = build_evidence_memory_summary(
+        state=state,
+        parsed=parsed,
+        request_id=request_id,
+        thread_id=thread_id,
+    )
+
+    # ── Controlled stop logic ────────────────────────────────────────
+    evidence_state = parsed.overall_evidence_state
+    controlled_stop = False
+    controlled_stop_reason = ""
+    degraded_generation = False
+    degraded_reason = ""
+
+    fail_fast_on_insufficient = bool(
+        get_setting("retrieval.evidence_memory.fail_fast_on_insufficient_evidence", False)
+    )
+
+    if evidence_state == "insufficient":
+        if fail_fast_on_insufficient:
+            raise RuntimeError(
+                "Evidence Judge declared evidence insufficient and "
+                "fail_fast_on_insufficient_evidence is enabled."
+            )
+        controlled_stop = True
+        controlled_stop_reason = "evidence_insufficient"
+    elif evidence_state == "partially_sufficient":
+        degraded_generation = True
+        degraded_reason = "evidence_partially_sufficient"
+
     return {
         "context": context_docs,
         "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
         "evidence_judge_output": parsed.model_dump(mode="json"),
         "evidence_judge_rounds": 1,
-        "evidence_judge_state": parsed.overall_evidence_state,
+        "evidence_judge_state": evidence_state,
         "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
         "search_refinement_needed": refinement_needed,
         "search_refinement_deferred": refinement_deferred,
@@ -3093,8 +3369,12 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
         "search_optimization_status": "reserved_not_implemented",
         "dual_source_mode": True,
         "evidence_judge_failed": False,
-        "degraded_generation": False,
-        "degraded_reason": "",
+        "degraded_generation": degraded_generation,
+        "degraded_reason": degraded_reason,
+        "evidence_controlled_stop": controlled_stop,
+        "evidence_controlled_stop_reason": controlled_stop_reason,
+        "evidence_summary_memory": new_evidence,
+        "evidence_gap_memory": new_gaps,
         "web_supplement_provider": "tavily",
         "web_supplement_results": web_context_docs,
         "web_evidence_count": web_evidence_count,
@@ -3113,69 +3393,396 @@ async def _rag_retrieve_dual_source(state: TutorState, branches: list[dict], bra
     }
 
 
+# ── Evidence memory builder ────────────────────────────────────────────────
+
+def build_evidence_memory_summary(
+    *,
+    state: LearningState,
+    parsed: EvidenceJudgeOutput,
+    request_id: str,
+    thread_id: str,
+    round_index: int = 1,
+) -> tuple[list[dict], list[dict]]:
+    """Build compact evidence memory and gap memory entries.
+
+    Includes selector-facing fields: subject, resource_type, summary,
+    decision_summary, evidence_state, followup_search_queries, and
+    kept_evidence_summary with short safe metadata only.
+
+    Never stores raw docs, content, full context, full historical
+    answers, or raw originals.
+    Returns (new_evidence_entries, new_gap_entries).
+    """
+    memory_id = f"{thread_id}:{request_id}:evidence_judge_round_{round_index}"
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # ── kept_evidence_summary: short safe metadata only ──────────────
+    kept_evidence_summary: list[dict] = []
+    judged_by_id: dict[str, EvidenceJudgeItem] = {}
+    for item in parsed.judged_evidence:
+        judged_by_id[item.evidence_id] = item
+
+    candidates = state.get("evidence_candidates") or []
+    originals = {**state.get("local_evidence_originals", {}), **state.get("web_evidence_originals", {})}
+    candidate_by_id: dict[str, dict] = {}
+    for c in candidates:
+        cid = c.get("evidence_id", "")
+        if cid:
+            candidate_by_id[cid] = c
+
+    for eid, judge_item in judged_by_id.items():
+        if not judge_item.keep:
+            continue
+        candidate = candidate_by_id.get(eid, {})
+        source = candidate.get("source", "")
+        url = candidate.get("url", "")
+        # Pull source/url from originals if not in candidate
+        if (not source or not url) and eid in originals:
+            orig = originals[eid]
+            source = source or orig.get("source", "")
+            url = url or orig.get("url", "")
+        kept_evidence_summary.append({
+            "evidence_id": eid,
+            "subject": candidate.get("subject", ""),
+            "source_type": candidate.get("source_type", ""),
+            "source": source[:300] if source else "",
+            "url": url[:500] if url else "",
+            "final_quality": judge_item.final_quality,
+            "use_case": judge_item.use_case,
+            "short_summary": (judge_item.reason or "")[:200],
+        })
+
+    # ── followup queries from coverage gaps ──────────────────────────
+    followup_queries: list[str] = []
+    for gap in parsed.coverage_gaps:
+        q = gap.suggested_search_query.strip()
+        if q and q not in followup_queries:
+            followup_queries.append(q)
+
+    decision_summary_text = (parsed.decision_summary or "")[:1000]
+    summary_text = decision_summary_text
+
+    evidence_entry = {
+        "memory_id": memory_id,
+        "created_at": created_at,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "evidence_judge_round": round_index,
+        # ── Selector-facing fields ────────────────────────────────
+        "subject": state.get("subject", ""),
+        "requested_resource_type": state.get("requested_resource_type", ""),
+        "resource_type": state.get("requested_resource_type", ""),
+        "summary": summary_text,
+        "decision_summary": decision_summary_text,
+        "evidence_state": parsed.overall_evidence_state,
+        "overall_evidence_state": parsed.overall_evidence_state,
+        "need_more_web_search": parsed.need_more_web_search,
+        "coverage_gap_count": len(parsed.coverage_gaps),
+        "followup_search_queries": followup_queries,
+        "evidence_count": len(parsed.judged_evidence),
+        "kept_count": sum(1 for item in parsed.judged_evidence if item.keep),
+        # ── Compact metadata only (no raw docs/content) ──────────
+        "kept_evidence_summary": kept_evidence_summary,
+    }
+
+    gap_entries: list[dict] = []
+    for gap in parsed.coverage_gaps:
+        gap_entries.append({
+            "memory_id": f"{memory_id}:gap:{gap.subject}:{gap.role}",
+            "created_at": created_at,
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "subject": gap.subject,
+            "role": gap.role,
+            "gap": gap.gap,
+            "suggested_search_query": gap.suggested_search_query,
+            "purpose": gap.purpose,
+            "priority": gap.priority,
+        })
+
+    emit_a3_trace(
+        logger,
+        "evidence_memory_summary_build",
+        {
+            "evidence_state": parsed.overall_evidence_state,
+            "kept_count": evidence_entry["kept_count"],
+            "gap_count": len(gap_entries),
+            "summary_chars": len(summary_text),
+            "memory_id": memory_id,
+            "persisted": True,
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+
+    return [evidence_entry], gap_entries
+
+
+# ── Evidence summary output (controlled stop) ──────────────────────────────
+
+def _render_evidence_summary_output(state: LearningState) -> str:
+    """Render a short Markdown output when evidence is insufficient."""
+    gaps = state.get("evidence_coverage_gaps") or []
+    judge_output = state.get("evidence_judge_output") or {}
+    decision = judge_output.get("decision_summary", "") or "证据不足，无法提供完整回答。"
+
+    lines = [
+        "## 📋 证据检索摘要",
+        "",
+        f"**状态**: {decision}",
+        "",
+    ]
+
+    kept_ids = []
+    evidence_candidates = state.get("evidence_candidates") or []
+    for candidate in evidence_candidates:
+        eid = candidate.get("evidence_id", "")
+        if candidate.get("keep"):
+            kept_ids.append(eid)
+
+    if kept_ids:
+        lines.append(f"**已保存的证据**: {len(kept_ids)} 条")
+        lines.append("")
+
+    if gaps:
+        lines.append("### 🔍 发现的覆盖缺口")
+        lines.append("")
+        for gap in gaps[:5]:
+            lines.append(f"- **{gap.get('subject', '')}** ({gap.get('role', '')}): {gap.get('gap', '')}")
+        lines.append("")
+
+    lines.append("### 💡 建议的后续搜索")
+    followups = state.get("proposed_followup_search_queries") or []
+    for fq in followups[:5]:
+        q = fq.get("query", "") or fq.get("suggested_search_query", "")
+        if q:
+            lines.append(f"- `{q}`")
+
+    lines.append("")
+    lines.append("> ℹ️ 已保存当前证据摘要，您可以尝试更具体的问题或稍后重试。")
+
+    return "\n".join(lines)
+
+
 @traced_node
-async def academic_router(state: TutorState) -> dict:
-    """Router node for parallel fan-out. Clears context on retry path."""
-    if state.get("retry_count", 0) > 0:
+async def evidence_summary_output(state: LearningState) -> dict:
+    """Controlled stop: emit summary when evidence is insufficient.
+
+    This is a successful controlled stop, NOT a server error.
+    Returns messages so the frontend displays it as a normal response,
+    with metadata marking it as a controlled stop.
+    """
+    markdown = _render_evidence_summary_output(state)
+    return {
+        "plan": markdown,
+        "messages": [AIMessage(content=markdown)],
+        "evidence_controlled_stop": True,
+        "final_response_type": "evidence_summary",
+        "evidence_controlled_stop_reason": state.get("evidence_controlled_stop_reason", "evidence_insufficient"),
+    }
+
+
+# ── Node 0a: academic router ──────────────────────────────────────────────
+
+@traced_node
+async def academic_router(state: LearningState) -> dict:
+    """Router node for parallel fan-out.
+
+    Clears context on retry path only — NOT on new requests (that is
+    handled by initial_request_reset_transient_state at /stream entry).
+    """
+    if _is_retry_rewrite_active(state):
         return {"context": CONTEXT_CLEAR}
     return {}
 
 
-# ── Node 0b: query rewriting (retry path only) ──────────────────
+# ── Node 0b: query rewriting (retry path only, fail-fast) ─────────────────
 
 @traced_node
-async def rewrite_query(state: TutorState) -> dict:
-    """Rewrite the user's query using hallucination feedback for better retrieval."""
+async def rewrite_query(state: LearningState) -> dict:
+    """Rewrite the user's query using hallucination feedback.
+
+    Uses invoke_plain_llm_fail_fast — on failure, raises instead of
+    falling back to the original query.  Does NOT clear persistent
+    state or current judged context via CONTEXT_CLEAR; that is the
+    academic_router's responsibility on the retry path.
+    """
+    from src.graph.llm import invoke_plain_llm_fail_fast
+
     original_query = _last_human_query(state)
     reason = state.get("hallucination_reason", "")
+    retry_count = state.get("retry_count", 0)
 
-    llm = get_node_llm("supervisor")
     rewrite_prompt = load_prompt("rewrite_query").format(
         original_query=original_query,
         hallucination_reason=reason,
     )
 
     try:
-        response = await llm.ainvoke([
-            SystemMessage(content="你是一个查询改写助手。根据反馈改进用户的搜索查询。"),
-            HumanMessage(content=rewrite_prompt),
-        ])
-        rewritten = response.content.strip()
-    except Exception:
-        logger.warning("Query rewrite failed, using original query")
-        rewritten = original_query
+        rewritten = await invoke_plain_llm_fail_fast(
+            node_name="rewrite_query",
+            llm_node="supervisor",
+            messages=[
+                SystemMessage(content="你是一个查询改写助手。根据反馈改进用户的搜索查询。"),
+                HumanMessage(content=rewrite_prompt),
+            ],
+            state=state,
+        )
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "rewrite_query_retry_failed",
+            {
+                "fallback_used": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:2000],
+                "retry_count": retry_count,
+                "hallucination_reason": reason,
+            },
+            state=state,
+            env_flag="LOG_RETRY_TRACE",
+        )
+        raise
 
-    # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
         logger,
         "rewrite_query_retry",
         {
-            "retry_count": state.get("retry_count", 0),
+            "retry_count": retry_count,
             "hallucination_reason": reason,
             "rewritten_query": rewritten,
-            "retrieval_plan_cleared": True,
+            "fallback_used": False,
         },
         state=state,
         env_flag="LOG_RETRY_TRACE",
     )
 
-    return {"rewritten_query": rewritten, **_clear_retrieval_plan_state()}
+    # rewritten_query is diagnostic only; actual retrieval uses
+    # search_rag_query / search_web_query.
+    cleared = _clear_retrieval_plan_state()
+    return {
+        "rewritten_query": rewritten,
+        "search_rag_query": rewritten,
+        "search_web_query": rewritten,
+        "retrieval_plan": [],
+        **{k: v for k, v in cleared.items() if k not in ("retrieval_plan",)},
+    }
 
 
 # ── Node 0c: initial search-query rewriting ───────────────────────────────
 
-@traced_node
-async def search_query_rewriter(state: TutorState) -> dict:
-    """Rewrite the original request into RAG and web-search queries."""
-    if state.get("rewritten_query"):
-        return _clear_retrieval_plan_state()
+async def _maintain_conversation_summary(state: LearningState) -> str:
+    """Update the compact conversation summary before query rewrite.
 
+    Only runs when the message history is long enough to justify
+    summarization.  Returns the updated summary text.
+    """
+    messages = state.get("messages") or []
+    existing_summary = str(state.get("conversation_summary") or "").strip()
+
+    # Only summarize if we have enough messages
+    human_messages = [
+        m for m in messages
+        if isinstance(m, HumanMessage)
+        or (isinstance(m, dict) and m.get("type") == "human")
+    ]
+    if len(human_messages) < 2:
+        return existing_summary or ""
+
+    # Build a compact prompt for the LLM
+    recent_texts: list[str] = []
+    for m in messages[-10:]:
+        content = ""
+        if isinstance(m, HumanMessage):
+            content = str(m.content or "")
+        elif isinstance(m, AIMessage):
+            content = str(m.content or "")[:200]
+        elif isinstance(m, dict):
+            content = str(m.get("content", ""))
+            if m.get("type") == "ai":
+                content = content[:200]
+        if content.strip():
+            role = "用户" if (isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("type") == "human")) else "助手"
+            recent_texts.append(f"{role}: {content.strip()[:300]}")
+
+    if not recent_texts:
+        return existing_summary or ""
+
+    try:
+        from src.graph.llm import invoke_plain_llm_fail_fast
+
+        prompt = (
+            "将以下对话总结为一段简洁的中文摘要（不超过200字）。"
+            "保留用户的学习目标和关键话题，忽略闲聊。\n\n"
+            + ("现有摘要: " + existing_summary + "\n\n" if existing_summary else "")
+            + "\n".join(recent_texts[-8:])
+        )
+        summary = await invoke_plain_llm_fail_fast(
+            node_name="conversation_summary",
+            llm_node="supervisor",
+            messages=[HumanMessage(content=prompt)],
+            state=state,
+            temperature=0.0,
+            max_raw_chars=800,
+        )
+        result = summary.strip()[:500]
+        emit_a3_trace(
+            logger,
+            "conversation_summary",
+            {
+                "success": True,
+                "summary_chars": len(result),
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        return result
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "conversation_summary",
+            {
+                "success": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+                "action": "keep_existing_summary",
+                "fallback_used": False,
+                "enhancement_only": True,
+                "summary_chars": len(existing_summary),
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        fail_fast = bool(get_setting("development.fail_fast_conversation_summary", False))
+        if fail_fast:
+            raise
+        return existing_summary or ""
+
+
+@traced_node
+async def search_query_rewriter(state: LearningState) -> dict:
+    """Rewrite the original request into RAG and web-search queries.
+
+    Query rewrite runs for every new request — stale rewritten_query from
+    a previous turn does NOT skip it.
+    """
     original_query = _last_human_query(state)
     keypoints = state.get("keypoints", [])
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
     subject_candidates = state.get("subject_candidates", [])
     available_subjects = get_available_subjects_from_data()
+
+    # Maintain conversation summary before query rewrite
+    conversation_summary = await _maintain_conversation_summary(state)
+
+    # Select compact memory summaries — never full history
+    selected_memories = select_relevant_memory_summaries(
+        state,
+        current_query=original_query,
+        subject=subject,
+        requested_resource_type=requested_resource_type,
+    )
 
     prompt = _render_prompt(
         "search_query_rewriter",
@@ -3186,10 +3793,22 @@ async def search_query_rewriter(state: TutorState) -> dict:
             "subject": subject or "other",
             "subject_candidates": "、".join(subject_candidates) if subject_candidates else "无",
             "available_subjects": "、".join(available_subjects) if available_subjects else "无",
+            "conversation_summary": conversation_summary or "无",
+            "evidence_memory_summaries": json.dumps(
+                [
+                    {
+                        "summary": m.get("summary", ""),
+                        "subject": m.get("subject", ""),
+                        "resource_type": m.get("resource_type", ""),
+                    }
+                    for m in selected_memories
+                ],
+                ensure_ascii=False,
+            ) if selected_memories else "无",
         },
     )
     messages = [
-        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON."),
+        SystemMessage(content="You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON. Current user query is highest priority. Conversation/evidence memory is optional background only. Never rewrite a current request into an old topic because of history. If current query says one topic and memory contains another, follow the current query unless the user explicitly asks to connect them."),
         HumanMessage(content=prompt),
     ]
 
@@ -3197,7 +3816,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
     parsing_error = None
     try:
         with traced_llm_call(
-            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
+            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
             node_name="search_query_rewriter",
             temperature=0.0,
         ):
@@ -3208,7 +3827,9 @@ async def search_query_rewriter(state: TutorState) -> dict:
                 messages=messages,
                 output_mode=get_llm_output_mode("search_query_rewriter"),
                 fallback_modes=get_fallback_modes("search_query_rewriter"),
-                business_validator=validate_search_query_rewrite_output,
+                business_validator=lambda p: validate_search_query_rewrite_output(
+                    p, current_query=original_query
+                ),
                 state=state,
                 max_raw_chars=get_max_raw_chars("search_query_rewriter"),
             )
@@ -3216,6 +3837,32 @@ async def search_query_rewriter(state: TutorState) -> dict:
         if not isinstance(parsed, SearchQueryRewriteOutput):
             raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
         raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
+
+        # ── Memory use trace ─────────────────────────────────────────
+        history_ref = _has_explicit_history_reference(original_query)
+        has_reason = bool((parsed.memory_use_reason or "").strip())
+        if parsed.memory_used_for_retrieval:
+            if history_ref:
+                action = "allow"
+            elif has_reason:
+                action = "allow_by_llm_reason"
+            else:
+                action = "reject"
+        else:
+            action = "background_only"
+        emit_a3_trace(
+            logger,
+            "query_rewrite_memory_use",
+            {
+                "memory_count": len(selected_memories),
+                "memory_used_for_retrieval": parsed.memory_used_for_retrieval,
+                "memory_use_reason": parsed.memory_use_reason,
+                "current_query_has_history_reference": history_ref,
+                "action": action,
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
 
         result_payload = {
             "rag_query": parsed.rag_query.strip(),
@@ -3229,6 +3876,16 @@ async def search_query_rewriter(state: TutorState) -> dict:
         }
         retrieval_plan, normalize_debug = _normalize_retrieval_plan(parsed.retrieval_plan, state)
         primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
+
+        # ── Subject conflict fail-fast ──────────────────────────────────
+        _maybe_fail_subject_conflict(
+            parsed_primary=parsed.primary_subject,
+            normalized_primary=primary_subject,
+            supervisor_subject=subject,
+            available_subjects=available_subjects,
+            retrieval_plan=retrieval_plan,
+        )
+
         multi_subject_payload = {
             "retrieval_plan": retrieval_plan,
             "learning_goal": parsed.learning_goal.strip(),
@@ -3305,6 +3962,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
         "search_query_rewrite_reason": result_payload["reason"],
         "search_query_rewrite_error": "",
         "search_query_rewrite_raw_preview": raw_preview,
+        "conversation_summary": conversation_summary,
         **multi_subject_payload,
     }
 
@@ -3312,7 +3970,7 @@ async def search_query_rewriter(state: TutorState) -> dict:
 # ── Node 1: RAG retrieval (parallel branch A) ─────────────────────
 
 @traced_node
-async def rag_retrieve(state: TutorState) -> dict:
+async def rag_retrieve(state: LearningState) -> dict:
     """Retrieve local course evidence, then run branch-aware Web supplement when needed."""
     branches, branch_debug = _build_retrieval_branches(state)
     branch_mode = branch_debug.get("mode", "unknown")
@@ -3642,15 +4300,19 @@ _SEARCH_TIMEOUT = _web_timeout_seconds()
 
 
 @traced_node
-async def web_search(state: TutorState) -> dict:
+async def web_search(state: LearningState) -> dict:
     """Fan-out web search — runs in parallel with rag_retrieve."""
     rewritten = state.get("rewritten_query", "")
     search_web_query = state.get("search_web_query", "")
     retrieval_plan = state.get("retrieval_plan") or []
+    if _dual_source_enabled():
+        branches, branch_debug = _build_retrieval_branches(state)
+        return await _web_search_dual_source(state, branches, branch_debug)
+
     if (
         _web_conditional_enabled()
         and bool(_web_setting("skip_general_when_conditional", True))
-        and state.get("intent") in {"academic", "planning"}
+        and state.get("intent") == "academic"
     ):
         branch_mode = "multi_subject_plan" if retrieval_plan else "single_subject_synthetic"
         skip_reason = (
@@ -3899,7 +4561,7 @@ _RESOURCE_OFFER_SECTION = """请在回答末尾追加以下小节。注意：这
 _NO_RESOURCE_OFFER = "不要追加“还可以继续生成的个性化学习资源”小节，只处理用户当前明确要求的资源或问题。"
 
 
-def _resource_offer_instruction(state: TutorState) -> str:
+def _resource_offer_instruction(state: LearningState) -> str:
     """Return prompt instruction for optional follow-up resource offers."""
     if state.get("needs_mindmap") or state.get("requested_resource_type"):
         return _NO_RESOURCE_OFFER
@@ -3907,7 +4569,7 @@ def _resource_offer_instruction(state: TutorState) -> str:
 
 
 @traced_node
-async def generate_answer(state: TutorState) -> dict:
+async def generate_answer(state: LearningState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
     question = _last_human_query(state)
     if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
@@ -4026,7 +4688,7 @@ async def generate_answer(state: TutorState) -> dict:
     ]
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         node_name="generate_answer",
         temperature=temperature,
     ) as span:
@@ -4062,7 +4724,7 @@ def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation
 
 
 @traced_node
-async def evaluate_hallucination(state: TutorState) -> dict:
+async def evaluate_hallucination(state: LearningState) -> dict:
     """Evaluate whether the generated answer hallucinates beyond retrieved context.
 
     Uses fail-fast structured LLM output to judge faithfulness. On detection,
@@ -4091,7 +4753,7 @@ async def evaluate_hallucination(state: TutorState) -> dict:
         }
 
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
-    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content
@@ -4198,7 +4860,7 @@ async def evaluate_hallucination(state: TutorState) -> dict:
     return result
 
 
-def should_retry_or_end(state: TutorState) -> str:
+def should_retry_or_end(state: LearningState) -> str:
     """Conditional edge: retry via academic_router or route to END.
 
     Allows up to MAX_RETRIES re-retrieval attempts when hallucination

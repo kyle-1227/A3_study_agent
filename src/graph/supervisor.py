@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
-from src.graph.state import TutorState
+from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
     get_llm_output_mode,
@@ -31,16 +31,50 @@ logger = logging.getLogger(__name__)
 
 class SupervisorOutput(BaseModel):
     """Structured output for supervisor intent classification."""
-    intent: Literal["academic", "planning", "emotional", "unknown"]
+    intent: Literal["academic", "emotional", "unknown"]
     keywords: list[str]
     confidence: float
     subject_candidates: list[str] = []
+    requested_resource_type: str = ""
 
 
-_VALID_INTENTS = set(get_setting(
-    "supervisor.valid_intents",
-    ["academic", "planning", "emotional", "unknown"],
-))
+_VALID_INTENTS: set[str] = set()
+
+_VALID_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc"})
+
+
+def _sanitize_valid_intents() -> set[str]:
+    """Sanitize supervisor.valid_intents config — planning is no longer legal."""
+    configured = get_setting(
+        "supervisor.valid_intents",
+        ["academic", "emotional", "unknown"],
+    )
+    if not isinstance(configured, list):
+        configured = ["academic", "emotional", "unknown"]
+    removed = [i for i in configured if i == "planning"]
+    sanitized = [i for i in configured if i != "planning"]
+    if removed:
+        logger.warning(
+            "supervisor.valid_intents contains 'planning' — sanitized. "
+            "Removed intents: %s. Effective intents: %s",
+            removed,
+            sanitized,
+        )
+        emit_a3_trace(
+            logger,
+            "supervisor_config_sanitize",
+            {
+                "configured": configured,
+                "removed_intents": removed,
+                "effective_intents": sanitized,
+            },
+            state={},
+            env_flag="LOG_A3_TRACE",
+        )
+    return set(sanitized)
+
+
+_VALID_INTENTS = _sanitize_valid_intents()
 
 
 def validate_supervisor_output(parsed: BaseModel) -> str:
@@ -55,11 +89,21 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
         return "keywords must be a list"
     if not isinstance(parsed.subject_candidates, list):
         return "subject_candidates must be a list"
+    # ── Intent/resource combination validation ─────────────────────
+    resource_type = (parsed.requested_resource_type or "").strip()
+    if resource_type:
+        if parsed.intent in ("emotional", "unknown"):
+            if resource_type in _VALID_RESOURCE_TYPES:
+                return (
+                    f"intent={parsed.intent} may not carry "
+                    f"requested_resource_type={resource_type}. "
+                    f"Only academic intent supports resource generation."
+                )
     return ""
 
 
 @traced_node
-async def supervisor_node(state: TutorState) -> dict:
+async def supervisor_node(state: LearningState) -> dict:
     """Classify intent, detect subject, and extract keypoints in one LLM call.
 
     Uses the fail-fast structured-output runtime for reliable parsing.
@@ -84,7 +128,7 @@ async def supervisor_node(state: TutorState) -> dict:
     )
 
     temperature = get_setting("supervisor.temperature", 0.0)
-    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     with traced_llm_call(
         model_name=model_name,
         node_name="supervisor",
@@ -115,11 +159,14 @@ async def supervisor_node(state: TutorState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    requested_resource_type = _detect_requested_resource_type(user_text)
-    needs_mindmap = requested_resource_type == "mindmap"
+    # Use LLM's requested_resource_type first, fall back to deterministic detection
+    llm_resource = (result.requested_resource_type or "").strip()
+    deterministic_resource = _detect_requested_resource_type(user_text)
+    requested_resource_type = llm_resource or deterministic_resource
 
-    if requested_resource_type:
-        intent = "academic"
+    # academic intent with resource type stays academic
+    # emotional/unknown with resource type was already blocked by validation
+    needs_mindmap = requested_resource_type == "mindmap"
 
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
@@ -162,7 +209,7 @@ def _filter_subject_candidates(candidates: list[str], available_subjects: set[st
 
 
 @traced_node
-async def handle_unknown(state: TutorState) -> dict:
+async def handle_unknown(state: LearningState) -> dict:
     """Handle off-topic queries with a friendly redirect message."""
     return {
         "messages": [AIMessage(
@@ -175,9 +222,12 @@ async def handle_unknown(state: TutorState) -> dict:
     }
 
 
-def route_by_intent(state: TutorState) -> str:
+def route_by_intent(state: LearningState) -> str:
     """Conditional edge function: route to the appropriate subgraph."""
-    return state.get("intent", "academic")
+    intent = state.get("intent", "academic")
+    if intent not in ("academic", "emotional", "unknown"):
+        intent = "unknown"
+    return intent
 
 
 _RESOURCE_ACTION_MARKERS = (
@@ -233,6 +283,7 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("project_case", ("项目案例", "实践项目", "项目实战", "课程项目", "实验项目")),
     ("video_script", ("视频脚本", "动画脚本", "讲解视频", "教学视频", "分镜")),
     ("review_doc", ("复习资料", "复习文档", "学习文档", "学习材料", "考试讲义", "复习讲义", "知识整理", "知识点整理", "章节复习", "期末复习")),
+    ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
     ("reading", ("拓展阅读", "阅读材料", "参考资料", "文献清单", "资料清单")),
     ("volunteer", ("志愿填报", "高考志愿", "填报志愿", "志愿", "择校", "选专业", "分数线", "院校推荐", "专业推荐")),
     ("other", ("讲义", "学习资源", "资源清单", "知识卡片")),
@@ -243,12 +294,18 @@ def _detect_requested_resource_type(text: str) -> str:
     """Deterministically identify explicit resource-generation requests.
 
     A resource type only counts when the user asks to create/export/produce it.
-    Explanation questions such as "思维导图是什么" remain ordinary tutoring.
+    Explanation questions such as "思维导图是什么" remain ordinary academic support.
     """
     lowered = text.lower()
     has_strong_action = any(marker.lower() in lowered for marker in _RESOURCE_ACTION_MARKERS)
     has_weak_request = any(marker.lower() in lowered for marker in _WEAK_REQUEST_MARKERS)
     asks_explanation = any(marker.lower() in lowered for marker in _EXPLANATION_MARKERS)
+    study_plan_markers = next(
+        (markers for resource_type, markers in _RESOURCE_TYPE_MARKERS if resource_type == "study_plan"),
+        (),
+    )
+    if any(marker.lower() in lowered for marker in study_plan_markers):
+        return "study_plan"
 
     if not has_strong_action and (not has_weak_request or asks_explanation):
         return ""

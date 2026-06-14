@@ -184,11 +184,11 @@ async def stream_chat(request: ChatRequest):
     )
 ```
 
-3. In TutorState, add a profile_context field:
+3. In LearningState, add a profile_context field:
 
 ```python
 # In src/graph/state.py
-class TutorState(TypedDict):
+class LearningState(TypedDict):
     ...
     profile_context: str  # Injected profile summary
     user_id: str          # For profile lookups

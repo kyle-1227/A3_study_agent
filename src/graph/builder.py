@@ -1,4 +1,4 @@
-"""Graph construction — assemble Supervisor + 3 branches, compile."""
+﻿"""Graph construction 鈥?assemble Supervisor + 3 branches, compile."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
+    evidence_judge,
+    evidence_summary_output,
     evaluate_hallucination,
     generate_answer,
     rag_retrieve,
@@ -39,21 +41,18 @@ from src.graph.review_doc import (
     review_doc_rewrite,
     should_rewrite_review_doc,
 )
-from src.graph.plan_adversarial import (
-    adv_rewrite_node,
-    consensus_check_node,
-    drafter_node,
-    feedback_router,
-    plan_output_node,
-    plan_tweak_node,
-    reviewer_academic_node,
-    reviewer_emotional_node,
-    route_after_hil,
-    route_feedback,
-    should_output_or_revise,
+from src.graph.state import LearningState
+from src.graph.study_plan import (
+    route_after_study_plan_consensus,
+    study_plan_agent,
+    study_plan_consensus,
+    study_plan_emotional_intel,
+    study_plan_output,
+    study_plan_planner,
+    study_plan_reviewer_academic,
+    study_plan_reviewer_emotional,
+    study_plan_rewrite,
 )
-from src.graph.planner import gather_intel, gather_planning_context
-from src.graph.state import TutorState
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 
 
@@ -61,32 +60,23 @@ def build_graph() -> StateGraph:
     """Construct the full LangGraph StateGraph (uncompiled)."""
 
     # Build graph
-    graph = StateGraph(TutorState)
+    graph = StateGraph(LearningState)
 
-    # ── Nodes ────────────────────────────────────────────────────────
+    # 鈹€鈹€ Nodes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     graph.add_node("supervisor", supervisor_node)
 
-    # SubGraph A — Academic (parallel retrieval + answer generation)
+    # SubGraph A 鈥?Academic (parallel retrieval + answer generation)
     graph.add_node("academic_router", academic_router)
     graph.add_node("search_query_rewriter", search_query_rewriter)
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
+    graph.add_node("evidence_judge", evidence_judge)
+    graph.add_node("evidence_summary_output", evidence_summary_output)
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
 
-    # Planner (gather intel → flattened adversarial planning)
-    graph.add_node("gather_planning_context", gather_planning_context)
-    graph.add_node("gather_intel", gather_intel)
-    graph.add_node("drafter", drafter_node)
-    graph.add_node("reviewer_academic", reviewer_academic_node)
-    graph.add_node("reviewer_emotional", reviewer_emotional_node)
-    graph.add_node("consensus_check", consensus_check_node)
-    graph.add_node("adv_rewrite", adv_rewrite_node)
-    graph.add_node("plan_output", plan_output_node)
-    graph.add_node("feedback_router", feedback_router)
-    graph.add_node("plan_tweak", plan_tweak_node)
-
+    # Planner (gather intel 鈫?flattened adversarial planning)
     # Emotional
     graph.add_node("emotional_response", emotional_response)
 
@@ -111,10 +101,20 @@ def build_graph() -> StateGraph:
     graph.add_node("review_doc_rewrite", review_doc_rewrite)
     graph.add_node("review_doc_output", review_doc_output)
 
+    # Study plan resource generation
+    graph.add_node("study_plan_emotional_intel", study_plan_emotional_intel)
+    graph.add_node("study_plan_planner", study_plan_planner)
+    graph.add_node("study_plan_agent", study_plan_agent)
+    graph.add_node("study_plan_reviewer_academic", study_plan_reviewer_academic)
+    graph.add_node("study_plan_reviewer_emotional", study_plan_reviewer_emotional)
+    graph.add_node("study_plan_consensus", study_plan_consensus)
+    graph.add_node("study_plan_rewrite", study_plan_rewrite)
+    graph.add_node("study_plan_output", study_plan_output)
+
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
-    # ── Edges ────────────────────────────────────────────────────────
+    # 鈹€鈹€ Edges 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     graph.set_entry_point("supervisor")
 
     # Conditional fork edges
@@ -123,7 +123,6 @@ def build_graph() -> StateGraph:
         route_by_intent,    # judge users intent
         {
             "academic": "search_query_rewriter",
-            "planning": "search_query_rewriter",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
@@ -135,36 +134,30 @@ def build_graph() -> StateGraph:
         route_after_query_rewrite,
         {
             "academic": "academic_router",
-            "planning": "gather_planning_context",
         },
     )
 
-    # Academic flow — fan-out/fan-in parallel retrieval
+    # Academic flow 鈥?fan-out/fan-in parallel retrieval
     graph.add_edge("academic_router", "rag_retrieve")
     graph.add_edge("academic_router", "web_search")
 
-    # Fan-in: ordinary academic requests converge at answer generation;
-    # resource requests reuse retrieval first, then enter sibling resource chains.
+    # Barrier fan-in: Evidence Judge runs once after Local RAG and Tavily both finish.
+    graph.add_edge(["rag_retrieve", "web_search"], "evidence_judge")
+
+    # Fan-in routing: only judged context may enter answer/resource generation.
     graph.add_conditional_edges(
-        "rag_retrieve",
-        route_after_academic_retrieval,
+        "evidence_judge",
+        route_after_evidence_judge,
         {
             "answer": "generate_answer",
             "mindmap": "mindmap_planner",
             "exercise": "exercise_planner",
             "review_doc": "review_doc_planner",
+            "study_plan": "study_plan_emotional_intel",
+            "evidence_summary_output": "evidence_summary_output",
         },
     )
-    graph.add_conditional_edges(
-        "web_search",
-        route_after_academic_retrieval,
-        {
-            "answer": "generate_answer",
-            "mindmap": "mindmap_planner",
-            "exercise": "exercise_planner",
-            "review_doc": "review_doc_planner",
-        },
-    )
+    graph.add_edge("evidence_summary_output", END)
 
     # Hallucination evaluation with retry loop
     graph.add_edge("generate_answer", "evaluate_hallucination")
@@ -178,35 +171,7 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("rewrite_query", "academic_router")
 
-    # Planner flow: gather_planning_context → gather_intel → adversarial loop → plan_output → END
-    graph.add_edge("gather_planning_context", "gather_intel")
-    graph.add_edge("gather_intel", "drafter")
-    graph.add_edge("drafter", "reviewer_academic")
-    graph.add_edge("drafter", "reviewer_emotional")
-    graph.add_edge("reviewer_academic", "consensus_check")
-    graph.add_edge("reviewer_emotional", "consensus_check")
-    graph.add_conditional_edges(
-        "consensus_check",
-        should_output_or_revise,
-        {
-            "output": "plan_output",
-            "revise": "adv_rewrite",
-        },
-    )
-    graph.add_edge("adv_rewrite", "drafter")
-    graph.add_conditional_edges(
-        "plan_output",
-        route_after_hil,
-        {"end": END, "feedback": "feedback_router"},
-    )
-    graph.add_conditional_edges(
-        "feedback_router",
-        route_feedback,
-        {"tweak": "plan_tweak", "rewrite": "drafter"},
-    )
-    graph.add_edge("plan_tweak", "plan_output")
-
-    # Emotional — direct to END
+    # Emotional support ends after the response node.
     graph.add_edge("emotional_response", END)
 
     # Mindmap resource generation: plan -> JSON tree -> review -> export
@@ -251,14 +216,33 @@ def build_graph() -> StateGraph:
     graph.add_edge("review_doc_rewrite", "review_doc_agent")
     graph.add_edge("review_doc_output", END)
 
-    # Unknown — direct to END
+    graph.add_edge("study_plan_emotional_intel", "study_plan_planner")
+    graph.add_edge("study_plan_planner", "study_plan_agent")
+    graph.add_edge("study_plan_agent", "study_plan_reviewer_academic")
+    graph.add_edge("study_plan_agent", "study_plan_reviewer_emotional")
+    graph.add_edge(["study_plan_reviewer_academic", "study_plan_reviewer_emotional"], "study_plan_consensus")
+    graph.add_conditional_edges(
+        "study_plan_consensus",
+        route_after_study_plan_consensus,
+        {
+            "rewrite": "study_plan_rewrite",
+            "output": "study_plan_output",
+        },
+    )
+    graph.add_edge("study_plan_rewrite", "study_plan_agent")
+    graph.add_edge("study_plan_output", END)
+
+    # Unknown 鈥?direct to END
     graph.add_edge("handle_unknown", END)
 
     return graph
 
 
-def route_after_academic_retrieval(state: TutorState) -> str:
-    """Route retrieval fan-in to answer generation or resource chains."""
+def route_after_evidence_judge(state: LearningState) -> str:
+    """Route judged evidence to answer generation, resource chains, or controlled stop."""
+    if state.get("evidence_controlled_stop"):
+        return "evidence_summary_output"
+
     resource_type = state.get("requested_resource_type")
     if resource_type == "mindmap":
         return "mindmap"
@@ -266,12 +250,18 @@ def route_after_academic_retrieval(state: TutorState) -> str:
         return "exercise"
     if resource_type == "review_doc":
         return "review_doc"
+    if resource_type == "study_plan":
+        return "study_plan"
     return "answer"
 
 
-def route_after_query_rewrite(state: TutorState) -> str:
-    """Route shared query rewrite output to planning or academic flow."""
-    return "planning" if state.get("intent") == "planning" else "academic"
+# Backward-compatible import alias for older tests/tools; do not attach this to retrieval nodes.
+route_after_academic_retrieval = route_after_evidence_judge
+
+
+def route_after_query_rewrite(state: LearningState) -> str:
+    """Route shared query rewrite output into the academic evidence path."""
+    return "academic"
 
 
 def get_compiled_graph(checkpointer=None):

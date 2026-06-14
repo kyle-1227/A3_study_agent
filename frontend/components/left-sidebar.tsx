@@ -1,16 +1,27 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { ChevronLeft, ChevronRight, MessageSquarePlus, MessageSquare, Settings, GraduationCap } from "lucide-react"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
+import {
+  BrainCircuit,
+  ChevronLeft,
+  ChevronRight,
+  GraduationCap,
+  MessageSquare,
+  MessageSquarePlus,
+  Settings,
+} from "lucide-react"
+
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-import { useRouter } from "next/navigation"
 
 interface ChatHistoryItem {
   id: string
   title: string
+  threadId?: string
+  updatedAt?: number
 }
 
 export interface VolunteerHistoryItem {
@@ -24,6 +35,7 @@ interface LeftSidebarProps {
   chatHistory: ChatHistoryItem[]
   onNewChat: () => void
   onSelectChat: (id: string) => void
+  onClearChatHistory?: () => void
   selectedChatId?: string
 }
 
@@ -44,7 +56,13 @@ export function saveVolunteerHistory(items: VolunteerHistoryItem[]) {
   localStorage.setItem(VOLUNTEER_STORAGE_KEY, JSON.stringify(items))
 }
 
-export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChatId }: LeftSidebarProps) {
+export function LeftSidebar({
+  chatHistory,
+  onNewChat,
+  onSelectChat,
+  onClearChatHistory,
+  selectedChatId,
+}: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
   const router = useRouter()
@@ -56,7 +74,6 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
     return () => window.removeEventListener("storage", onStorage)
   }, [])
 
-  // Re-read from localStorage when sidebar gains focus / becomes visible
   useEffect(() => {
     const onFocus = () => setVolunteerHistory(getVolunteerHistory())
     window.addEventListener("focus", onFocus)
@@ -72,12 +89,13 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
   }
 
   return (
-    <div
+    <aside
       className={cn(
-        "relative h-full border-r border-border bg-sidebar flex flex-col",
-        "transition-all duration-300 ease-in-out",
-        isCollapsed ? "w-12" : "w-72"
+        "relative flex h-[100dvh] shrink-0 self-stretch flex-col overflow-hidden border-r border-sidebar-border bg-sidebar text-sidebar-foreground",
+        "transition-[width] duration-200 ease-out",
+        isCollapsed ? "w-12" : "w-72",
       )}
+      aria-label="主导航"
     >
       {isCollapsed ? (
         <>
@@ -85,16 +103,18 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
             variant="ghost"
             size="icon"
             onClick={() => setIsCollapsed(false)}
-            className="absolute top-4 right-1 h-8 w-8 text-muted-foreground hover:text-foreground"
+            className="absolute right-1 top-4 h-8 w-8 text-muted-foreground hover:text-foreground"
+            title="展开侧边栏"
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
-          <div className="mt-12 flex flex-col items-center gap-4">
+          <div className="mt-12 flex flex-col items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
               onClick={onNewChat}
               className="h-10 w-10 text-primary hover:bg-sidebar-accent"
+              title="发起新对话"
             >
               <MessageSquarePlus className="h-5 w-5" />
             </Button>
@@ -102,7 +122,7 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
               variant="ghost"
               size="icon"
               onClick={handleNewVolunteer}
-              className="h-10 w-10 text-[#3D5A40] hover:bg-sidebar-accent"
+              className="h-10 w-10 text-primary hover:bg-sidebar-accent"
               title="志愿填报"
             >
               <GraduationCap className="h-5 w-5" />
@@ -111,162 +131,141 @@ export function LeftSidebar({ chatHistory, onNewChat, onSelectChat, selectedChat
         </>
       ) : (
         <>
-          {/* Collapse Button */}
           <Button
             variant="ghost"
             size="icon"
             onClick={() => setIsCollapsed(true)}
-            className="absolute top-4 right-2 h-8 w-8 text-muted-foreground hover:text-foreground z-10"
+            className="absolute right-2 top-4 z-10 h-8 w-8 text-muted-foreground hover:text-foreground"
+            title="收起侧边栏"
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
 
-          {/* Header */}
           <div className="p-4 pr-12">
             <div className="flex items-start gap-3">
-              {/* Phoenix Icon */}
-              <div className="relative flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-[#3D5A40] to-[#5A7A5E]">
-                <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M16 28C16 28 12 24 12 18C12 14 14 10 16 8"
-                    stroke="#FFCC99"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 28C16 28 20 24 20 18C20 14 18 10 16 8"
-                    stroke="#FFCC99"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 12C16 12 10 10 6 12C4 13 3 15 4 17C5 19 8 18 10 16C12 14 14 13 16 14"
-                    stroke="white"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 12C16 12 22 10 26 12C28 13 29 15 28 17C27 19 24 18 22 16C20 14 18 13 16 14"
-                    stroke="white"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M16 8C16 8 14 5 16 3C18 5 16 8 16 8Z"
-                    fill="#FFCC99"
-                    stroke="#FFCC99"
-                    strokeWidth="1"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <circle cx="16" cy="14" r="1.5" fill="#FFCC99" />
-                </svg>
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+                <BrainCircuit className="h-6 w-6 text-[#f4d6b8]" strokeWidth={1.9} />
               </div>
-              <div className="flex-1 min-w-0">
-                <h1 className="text-base font-semibold text-[#3D5A40] leading-tight">高校学习 AI 助手</h1>
-                <div className="flex flex-wrap gap-1 mt-1.5">
-                  <Badge variant="secondary" className="text-xs px-1.5 py-0 bg-[#3D5A40]/10 text-[#3D5A40] border-0">
-                    学科答疑
+              <div className="min-w-0 flex-1">
+                <h1 className="truncate text-base font-semibold leading-tight text-primary">高校学习 AI 助手</h1>
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  <Badge variant="secondary" className="border-0 bg-primary/10 px-1.5 py-0 text-xs text-primary">
+                    课程答疑
                   </Badge>
-                  <Badge variant="secondary" className="text-xs px-1.5 py-0 bg-[#FFCC99]/40 text-[#8B5A3C] border-0">
-                    情绪支持
+                  <Badge
+                    variant="secondary"
+                    className="border-0 bg-[var(--warning-soft)] px-1.5 py-0 text-xs text-[var(--warning)]"
+                  >
+                    学业支持
                   </Badge>
-                  <Badge variant="secondary" className="text-xs px-1.5 py-0 bg-[#7A9E7E]/20 text-[#3D5A40] border-0">
-                    计划制定
+                  <Badge
+                    variant="secondary"
+                    className="border-0 bg-[var(--success-soft)] px-1.5 py-0 text-xs text-[var(--success)]"
+                  >
+                    计划生成
                   </Badge>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* 志愿填报历史纪录 */}
           <div className="px-4 pb-3">
             <div className="flex items-center justify-between pb-2">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">志愿填报</span>
+              <span className="text-xs font-semibold text-muted-foreground">志愿填报</span>
               <button
+                type="button"
                 onClick={handleNewVolunteer}
-                className="text-xs text-[#3D5A40] hover:text-[#4A6B4D] font-medium"
+                className="rounded px-1.5 py-0.5 text-xs font-medium text-primary hover:bg-sidebar-accent"
               >
                 + 新建
               </button>
             </div>
             {volunteerHistory.length > 0 ? (
-              <div className="flex flex-col gap-0.5 max-h-36 overflow-y-auto">
+              <div className="flex max-h-36 flex-col gap-0.5 overflow-y-auto">
                 {volunteerHistory.map((item) => (
                   <button
                     key={item.id}
+                    type="button"
                     onClick={() => handleSelectVolunteer(item.id)}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-lg transition-colors text-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   >
-                    <GraduationCap className="h-4 w-4 flex-shrink-0 text-[#3D5A40]" />
+                    <GraduationCap className="h-4 w-4 shrink-0 text-primary" />
                     <div className="min-w-0">
-                      <span className="truncate block">{item.title}</span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {item.homeRegion} → {item.targetRegion}
+                      <span className="block truncate">{item.title}</span>
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        {item.homeRegion} -&gt; {item.targetRegion}
                       </span>
                     </div>
                   </button>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground px-3 py-1">暂无志愿填报记录</p>
+              <p className="rounded-lg bg-sidebar-accent/50 px-3 py-2 text-xs text-muted-foreground">
+                暂无志愿填报记录
+              </p>
             )}
           </div>
 
-          {/* New Chat Button */}
           <div className="px-4 pb-4">
-            <Button
-              onClick={onNewChat}
-              className="w-full justify-start gap-2 bg-[#3D5A40] hover:bg-[#4A6B4D] text-white"
-            >
+            <Button onClick={onNewChat} className="a3-button-primary w-full justify-start gap-2">
               <MessageSquarePlus className="h-4 w-4" />
               发起新对话
             </Button>
           </div>
 
-          {/* Chat History */}
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 pb-2">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">对话</span>
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex items-center justify-between px-4 pb-2">
+              <span className="text-xs font-semibold text-muted-foreground">对话</span>
+              {chatHistory.length > 0 && onClearChatHistory ? (
+                <button
+                  type="button"
+                  onClick={onClearChatHistory}
+                  className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                >
+                  清空
+                </button>
+              ) : null}
             </div>
-            <ScrollArea className="flex-1 px-2">
-              <div className="flex flex-col gap-1 pb-4">
-                {chatHistory.map((chat) => (
-                  <button
-                    key={chat.id}
-                    onClick={() => onSelectChat(chat.id)}
-                    className={cn(
-                      "w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-lg transition-colors",
-                      "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                      selectedChatId === chat.id
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                        : "text-foreground"
-                    )}
-                  >
-                    <MessageSquare className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-                    <span className="truncate">{chat.title}</span>
-                  </button>
-                ))}
-              </div>
-            </ScrollArea>
+            <div className="flex-1 min-h-0">
+              <ScrollArea className="h-full px-2">
+                <div className="flex flex-col gap-1 pb-4">
+                  {chatHistory.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">
+                      开始一次课程学习对话后，历史会显示在这里。
+                    </p>
+                  ) : (
+                    chatHistory.map((chat) => (
+                      <button
+                        key={chat.id}
+                        type="button"
+                        onClick={() => onSelectChat(chat.id)}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                          selectedChatId === chat.id
+                            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                            : "text-foreground",
+                        )}
+                        title={chat.title}
+                      >
+                        <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <span className="truncate">{chat.title}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
           </div>
 
-          {/* Settings & Help */}
-          <div className="p-4 border-t border-border">
-            <Button
-              variant="ghost"
-              className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-            >
+          <div className="border-t border-sidebar-border p-4">
+            <Button variant="ghost" className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground">
               <Settings className="h-4 w-4" />
               设置与帮助
             </Button>
           </div>
         </>
       )}
-    </div>
+    </aside>
   )
 }
