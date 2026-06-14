@@ -38,6 +38,12 @@ REVIEW_DOC_AGENT_RETRY_ERRORS = (
     httpx.TimeoutException,
 )
 
+REVIEW_DOC_SUBJECT_TITLES = {
+    "python": "Python",
+    "computer": "计算机科学导论",
+    "big_data": "大数据",
+}
+
 
 class ReviewDocReviewVerdict(BaseModel):
     """Structured quality gate output for review_doc_reviewer."""
@@ -196,6 +202,59 @@ def _topic_from_query(query: str, keypoints: list[str]) -> str:
     return query[:24].strip() or "课程"
 
 
+def _subject_display_name(subject: str) -> str:
+    subject_key = str(subject or "").strip()
+    if not subject_key:
+        return "课程"
+    if subject_key in REVIEW_DOC_SUBJECT_TITLES:
+        return REVIEW_DOC_SUBJECT_TITLES[subject_key]
+    return subject_key.replace("_", " ").strip().title()
+
+
+def _review_doc_title_for_subject(subject: str) -> str:
+    return f"{_subject_display_name(subject)} 复习资料"
+
+
+def _retrieval_subjects(state: TutorState) -> list[str]:
+    subjects: list[str] = []
+    for item in state.get("retrieval_plan") or []:
+        subject = str((item or {}).get("subject") or "").strip()
+        if subject and subject != "other" and subject not in subjects:
+            subjects.append(subject)
+    return subjects
+
+
+def _doc_subject_values(item: dict) -> set[str]:
+    metadata = item.get("metadata") or {}
+    values = {
+        item.get("retrieval_subject"),
+        item.get("supplement_for_subject"),
+        item.get("subject"),
+        metadata.get("subject") if isinstance(metadata, dict) else "",
+    }
+    return {str(value).strip() for value in values if str(value or "").strip()}
+
+
+def _context_for_subject(context: list[dict], subject: str) -> list[dict]:
+    filtered = [item for item in context if subject in _doc_subject_values(item)]
+    return filtered or context
+
+
+def _ensure_markdown_title(markdown: str, title: str) -> str:
+    text = markdown.strip()
+    if not text:
+        return f"# {title}\n"
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if line.lstrip().startswith("# "):
+            lines[idx] = f"# {title}"
+            return "\n".join(lines).strip()
+        return f"# {title}\n\n{text}"
+    return f"# {title}\n"
+
+
 def _fallback_review_doc_markdown(
     *,
     query: str,
@@ -248,6 +307,145 @@ def _extract_outline_items(outline: str) -> list[str]:
         if 2 <= len(cleaned) <= 30 and cleaned not in items:
             items.append(cleaned)
     return items
+
+
+async def _generate_review_doc_markdown(
+    *,
+    state: TutorState,
+    query: str,
+    keypoints: list[str],
+    outline: str,
+    revision_notes: str,
+    context: list[dict],
+    round_no: int,
+    llm,
+    fallback,
+    temperature: float,
+    model_name: str,
+    timeout_seconds: float,
+    max_retries: int,
+    subject: str = "",
+    title: str = "",
+) -> dict:
+    subject_note = ""
+    if subject and title:
+        subject_note = (
+            f"\n\n请只生成《{title}》，只围绕 subject={subject} 的课程内容，"
+            "不要把其他 subject 合并进本篇文档。"
+        )
+    prompt = _render_prompt(
+        "review_doc_agent",
+        {
+            "question": f"{query}{subject_note}",
+            "keypoints": _format_keypoints(state),
+            "context": _format_context(context),
+            "review_doc_outline": outline,
+            "revision_notes": revision_notes or "暂无审查修订意见。",
+        },
+    )
+    prompt += _review_doc_length_instruction()
+
+    messages = [
+        SystemMessage(content="你是高校课程 Markdown 复习文档生成智能体。只输出 Markdown 正文，默认生成中等长度复习文档。"),
+        HumanMessage(content=prompt),
+    ]
+
+    markdown = ""
+    fallback_used = False
+    last_error_type = ""
+    last_error_message = ""
+    retries_used = 0
+
+    for attempt in range(max_retries + 1):
+        try:
+            with traced_llm_call(model_name=model_name, node_name="review_doc_agent", temperature=temperature) as span:
+                result = await asyncio.wait_for(
+                    async_invoke_with_fallback(
+                        llm,
+                        messages,
+                        fallback=fallback,
+                        span=span,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            markdown = str(getattr(result, "content", result)).strip()
+            if markdown:
+                break
+            last_error_type = "EmptyResponse"
+            last_error_message = "LLM returned empty Markdown content"
+        except Exception as exc:
+            last_error_type = _review_doc_error_type(exc)
+            last_error_message = str(exc)
+            retryable = _is_retriable_review_doc_error(exc)
+            if attempt < max_retries and retryable:
+                retries_used = attempt + 1
+                logger.warning(
+                    "review_doc_agent retry %s/%s after %s: %s",
+                    retries_used,
+                    max_retries,
+                    last_error_type,
+                    last_error_message,
+                )
+                emit_a3_trace(
+                    logger,
+                    "review_doc_agent_retry",
+                    {
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "error_type": last_error_type,
+                        "error_message": last_error_message[:300],
+                        "timeout_seconds": timeout_seconds,
+                        "subject": subject,
+                    },
+                    state=state,
+                    env_flag="LOG_GENERATION_SUMMARY",
+                )
+                await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
+                continue
+            logger.warning(
+                "review_doc_agent generation failed; using fallback Markdown (%s: %s)",
+                last_error_type,
+                last_error_message,
+            )
+            break
+
+    if not markdown:
+        fallback_used = True
+        fallback_reason = last_error_type or "UnknownGenerationError"
+        markdown = _fallback_review_doc_markdown(
+            query=title or query,
+            keypoints=[title] if title else keypoints,
+            outline=outline,
+            context=context,
+            reason=fallback_reason,
+        )
+        emit_a3_trace(
+            logger,
+            "review_doc_agent_fallback",
+            {
+                "fallback_used": True,
+                "review_doc_agent_error_type": fallback_reason,
+                "error_message": last_error_message[:300],
+                "retries_used": retries_used,
+                "timeout_seconds": timeout_seconds,
+                "markdown_chars": len(markdown),
+                "subject": subject,
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+
+    if title:
+        markdown = _ensure_markdown_title(markdown, title)
+
+    return {
+        "markdown": markdown,
+        "fallback_used": fallback_used,
+        "last_error_type": last_error_type,
+        "last_error_message": last_error_message,
+        "retries_used": retries_used,
+        "round": round_no,
+    }
 
 
 @traced_node
@@ -315,7 +513,9 @@ async def review_doc_planner(state: TutorState) -> dict:
     return {
         "review_doc_outline": outline,
         "review_doc_markdown": "",
+        "review_doc_markdowns": [],
         "review_doc_artifact": {},
+        "review_doc_artifacts": [],
         "review_doc_review_verdict": "",
         "review_doc_review_reason": "",
         "review_doc_revision_notes": "",
@@ -337,6 +537,88 @@ async def review_doc_agent(state: TutorState) -> dict:
         return {
             "error": "复习文档大纲为空，无法生成有质量保障的 Markdown 复习文档。",
             "review_doc_round": round_no,
+        }
+
+    subjects = _retrieval_subjects(state)
+    multi_document = len(subjects) > 1
+    if multi_document:
+        llm = get_node_llm("review_doc")
+        fallback = get_fallback_llm(temperature=get_setting("review_doc.temperature", 0.2))
+        temperature = get_setting("review_doc.temperature", 0.2)
+        model_name = get_setting("review_doc.model", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+        timeout_seconds = float(get_setting("review_doc.timeout_seconds", 90) or 90)
+        max_retries = int(get_setting("review_doc.agent_max_retries", 2) or 2)
+        documents: list[dict] = []
+        fallback_used_any = False
+        last_error_types: list[str] = []
+        retries_used_total = 0
+
+        for subject in subjects:
+            title = _review_doc_title_for_subject(subject)
+            subject_context = _context_for_subject(context, subject)
+            subject_outline = (
+                f"# {title}\n\n{outline}\n\n"
+                f"请将以上大纲聚焦到 {title}，只使用 subject={subject} 的资料生成独立复习文档。"
+            )
+            result = await _generate_review_doc_markdown(
+                state=state,
+                query=query,
+                keypoints=keypoints,
+                outline=subject_outline,
+                revision_notes=revision_notes,
+                context=subject_context,
+                round_no=round_no,
+                llm=llm,
+                fallback=fallback,
+                temperature=temperature,
+                model_name=model_name,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                subject=subject,
+                title=title,
+            )
+            markdown = str(result.get("markdown") or "").strip()
+            documents.append({"subject": subject, "title": title, "markdown": markdown})
+            fallback_used_any = fallback_used_any or bool(result.get("fallback_used"))
+            if result.get("last_error_type"):
+                last_error_types.append(str(result.get("last_error_type")))
+            retries_used_total += int(result.get("retries_used") or 0)
+
+        combined_markdown = "\n\n---\n\n".join(doc["markdown"] for doc in documents if doc.get("markdown"))
+        emit_a3_trace(
+            logger,
+            "review_doc_agent",
+            {
+                "multi_document": True,
+                "document_count": len(documents),
+                "subjects": subjects,
+                "markdown_chars": len(combined_markdown),
+                "round": round_no,
+                "has_outline": bool(outline.strip()),
+                "has_revision_notes": bool(revision_notes.strip()),
+                "context_count": len(context),
+                "fallback_used": fallback_used_any,
+                "review_doc_agent_error_type": ",".join(last_error_types),
+                "retries_used": retries_used_total,
+                "timeout_seconds": timeout_seconds,
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        return {
+            "review_doc_markdown": combined_markdown,
+            "review_doc_markdowns": documents,
+            "review_doc_round": round_no,
+            "review_doc_artifact": {
+                "fallback_used": fallback_used_any,
+                "fallback_reason": ",".join(last_error_types),
+                "multi_document": True,
+                "document_count": len(documents),
+                "subjects": subjects,
+            },
+            "review_doc_artifacts": [],
+            "review_doc_review_verdict": "",
+            "review_doc_review_reason": "",
         }
 
     prompt = _render_prompt(
@@ -449,6 +731,9 @@ async def review_doc_agent(state: TutorState) -> dict:
         logger,
         "review_doc_agent",
         {
+            "multi_document": False,
+            "document_count": 1 if markdown else 0,
+            "subjects": subjects,
             "markdown_chars": len(markdown),
             "round": round_no,
             "has_outline": bool(outline.strip()),
@@ -465,11 +750,13 @@ async def review_doc_agent(state: TutorState) -> dict:
 
     return {
         "review_doc_markdown": markdown,
+        "review_doc_markdowns": [],
         "review_doc_round": round_no,
         "review_doc_artifact": {
             "fallback_used": fallback_used,
             "fallback_reason": last_error_type,
         },
+        "review_doc_artifacts": [],
         "review_doc_review_verdict": "",
         "review_doc_review_reason": "",
     }
@@ -609,12 +896,70 @@ async def review_doc_output(state: TutorState) -> dict:
     review_verdict = state.get("review_doc_review_verdict", "")
     review_reason = state.get("review_doc_review_reason", "")
     prior_artifact = state.get("review_doc_artifact") or {}
+    review_doc_markdowns = state.get("review_doc_markdowns") or []
+    if review_doc_markdowns:
+        review_doc_artifacts: list[dict] = []
+        for doc in review_doc_markdowns:
+            doc_markdown = str(doc.get("markdown") or "").strip()
+            if not doc_markdown:
+                continue
+            doc_title = str(doc.get("title") or _extract_markdown_title(doc_markdown))
+            artifact = create_markdown_artifact(doc_markdown, doc_title)
+            review_doc_artifacts.append(
+                {
+                    **artifact,
+                    "subject": str(doc.get("subject") or ""),
+                    "title": doc_title,
+                    "markdown": doc_markdown,
+                    "quality_warning": review_verdict == "reject",
+                    "review_reason": review_reason,
+                }
+            )
+
+        first_artifact = review_doc_artifacts[0] if review_doc_artifacts else {}
+        combined_markdown = "\n\n---\n\n".join(
+            artifact["markdown"] for artifact in review_doc_artifacts if artifact.get("markdown")
+        )
+        subjects = [artifact.get("subject", "") for artifact in review_doc_artifacts if artifact.get("subject")]
+        emit_a3_trace(
+            logger,
+            "review_doc_output",
+            {
+                "multi_document": True,
+                "document_count": len(review_doc_markdowns),
+                "artifact_count": len(review_doc_artifacts),
+                "subjects": subjects,
+                "markdown_chars": len(combined_markdown),
+                "quality_warning": review_verdict == "reject",
+                "review_reason": review_reason,
+                "emits_ai_message": True,
+                "fallback_used": bool(prior_artifact.get("fallback_used")),
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        return {
+            "review_doc_markdown": combined_markdown,
+            "review_doc_artifact": {
+                **prior_artifact,
+                **first_artifact,
+                "multi_document": True,
+                "document_count": len(review_doc_artifacts),
+                "subjects": subjects,
+            },
+            "review_doc_artifacts": review_doc_artifacts,
+            "messages": [AIMessage(content=combined_markdown)],
+        }
+
     title = _extract_markdown_title(markdown)
     artifact = create_markdown_artifact(markdown, title)
     emit_a3_trace(
         logger,
         "review_doc_output",
         {
+            "multi_document": False,
+            "document_count": 1,
+            "artifact_count": 1,
             "markdown_chars": len(markdown),
             "quality_warning": review_verdict == "reject",
             "review_reason": review_reason,
@@ -627,14 +972,17 @@ async def review_doc_output(state: TutorState) -> dict:
         env_flag="LOG_GENERATION_SUMMARY",
     )
 
+    final_artifact = {
+        **prior_artifact,
+        **artifact,
+        "markdown": markdown,
+        "quality_warning": review_verdict == "reject",
+        "review_reason": review_reason,
+    }
+
     return {
-        "review_doc_artifact": {
-            **prior_artifact,
-            **artifact,
-            "markdown": markdown,
-            "quality_warning": review_verdict == "reject",
-            "review_reason": review_reason,
-        },
+        "review_doc_artifact": final_artifact,
+        "review_doc_artifacts": [final_artifact],
         "messages": [AIMessage(content=markdown)],
     }
 

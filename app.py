@@ -30,7 +30,7 @@ from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.schemas import ChatRequest, ResumeRequest
 from src.observability.a3_trace import emit_a3_trace
-from src.tools.document_tool import get_review_doc_artifact_dir
+from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
@@ -198,13 +198,14 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     exercise_items = final_state.get("exercise_items") or []
     exercise_artifact = final_state.get("exercise_artifact") or {}
     review_doc_artifact = final_state.get("review_doc_artifact") or {}
+    review_doc_artifacts = final_state.get("review_doc_artifacts") or []
 
     if resource_type not in {"mindmap", "quiz", "review_doc"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
             resource_type = "quiz"
-        elif review_doc_artifact:
+        elif review_doc_artifact or review_doc_artifacts:
             resource_type = "review_doc"
         else:
             return None
@@ -238,12 +239,27 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     if resource_type == "review_doc" and review_doc_artifact:
         payload["review_doc"] = {
+            "subject": review_doc_artifact.get("subject", ""),
             "title": review_doc_artifact.get("title", "Markdown复习文档"),
             "filename": review_doc_artifact.get("filename", ""),
             "docx_filename": review_doc_artifact.get("docx_filename", ""),
             "markdown_url": review_doc_artifact.get("markdown_url", ""),
             "docx_url": review_doc_artifact.get("docx_url", ""),
+            "markdown": review_doc_artifact.get("markdown", ""),
         }
+    if resource_type == "review_doc" and review_doc_artifacts:
+        payload["review_doc_artifacts"] = [
+            {
+                "subject": artifact.get("subject", ""),
+                "title": artifact.get("title", "Markdown复习文档"),
+                "filename": artifact.get("filename", ""),
+                "docx_filename": artifact.get("docx_filename", ""),
+                "markdown_url": artifact.get("markdown_url", ""),
+                "docx_url": artifact.get("docx_url", ""),
+                "markdown": artifact.get("markdown", ""),
+            }
+            for artifact in review_doc_artifacts
+        ]
 
     return payload
 
@@ -432,6 +448,8 @@ async def _stream_graph_events(
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
+                "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
+                "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
             },
             state=final_state,
@@ -554,6 +572,31 @@ async def download_mindmap_artifact(artifact_id: str, filename: str):
 @app.get("/artifacts/review-docs/{artifact_id}/{filename}")
 async def download_review_doc_artifact(artifact_id: str, filename: str):
     root = get_review_doc_artifact_dir()
+    artifact_path = (root / artifact_id / filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {".md", ".docx"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if artifact_path.suffix.lower() == ".docx"
+        else "text/markdown; charset=utf-8"
+    )
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+@app.get("/artifacts/exercises/{artifact_id}/{filename}")
+async def download_exercise_artifact(artifact_id: str, filename: str):
+    root = get_exercise_artifact_dir()
     artifact_path = (root / artifact_id / filename).resolve()
     try:
         artifact_path.relative_to(root)

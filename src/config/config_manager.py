@@ -32,8 +32,11 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _load_xml_prompt(path: Path) -> str:
-    tree = ET.parse(path)
-    root = tree.getroot()
+    xml_text = path.read_text(encoding="utf-8-sig").lstrip("\ufeff \t\r\n")
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ET.ParseError(f"Failed to parse prompt XML at {path}: {exc}") from exc
     text = "".join(root.itertext())
     return text.strip()
 
