@@ -24,7 +24,7 @@ class TestLearningState:
         assert isinstance(state["messages"], list)
 
     def test_state_accepts_all_intents(self):
-        for intent in ("academic", "planning", "emotional"):
+        for intent in ("academic", "emotional"):
             state: LearningState = {
                 "messages": [],
                 "intent": intent,

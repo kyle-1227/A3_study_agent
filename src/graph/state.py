@@ -175,7 +175,7 @@ class LearningState(TypedDict):
     request_id: str                                                      # Per-request trace identifier
     session_id: str                                                      # Session identifier for trace grouping
     thread_id: str                                                       # LangGraph thread identifier
-    intent: Literal["academic", "planning", "emotional", "unknown"]    # User intent
+    intent: Literal["academic", "emotional", "unknown"]    # User intent
     subject: str                                                        # The topic being discussed
     subject_candidates: list[str]                                       # Ordered available-subject candidates
     keypoints: list[str]                                                # Key points

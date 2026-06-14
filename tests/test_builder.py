@@ -84,8 +84,7 @@ class TestBuildGraph:
         assert route_after_evidence_judge({}) == "answer"
         assert route_after_academic_retrieval({}) == "answer"
 
-    def test_route_after_query_rewrite_routes_planning_and_academic(self):
-        assert route_after_query_rewrite({"intent": "planning"}) == "academic"
+    def test_route_after_query_rewrite_routes_academic(self):
         assert route_after_query_rewrite({"intent": "academic"}) == "academic"
         assert route_after_query_rewrite({}) == "academic"
 

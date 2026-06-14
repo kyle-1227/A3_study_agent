@@ -47,7 +47,7 @@ def _sanitize_valid_intents() -> set[str]:
     """Sanitize supervisor.valid_intents config — planning is no longer legal."""
     configured = get_setting(
         "supervisor.valid_intents",
-        ["academic", "planning", "emotional", "unknown"],
+        ["academic", "emotional", "unknown"],
     )
     if not isinstance(configured, list):
         configured = ["academic", "emotional", "unknown"]

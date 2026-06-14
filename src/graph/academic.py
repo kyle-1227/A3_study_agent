@@ -4312,7 +4312,7 @@ async def web_search(state: LearningState) -> dict:
     if (
         _web_conditional_enabled()
         and bool(_web_setting("skip_general_when_conditional", True))
-        and state.get("intent") in {"academic", "planning"}
+        and state.get("intent") == "academic"
     ):
         branch_mode = "multi_subject_plan" if retrieval_plan else "single_subject_synthetic"
         skip_reason = (
