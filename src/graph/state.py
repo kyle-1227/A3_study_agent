@@ -59,6 +59,10 @@ def initial_request_reset_transient_state() -> dict:
         "subject_candidates": [],
         "keypoints": [],
         "requested_resource_type": "",
+        "requested_resource_types": [],
+        "multi_resource_mode": False,
+        "multi_resource_results": [],
+        "multi_resource_summary": "",
         "needs_mindmap": False,
         # query / retrieval plan
         "search_rag_query": "",
@@ -182,6 +186,10 @@ class LearningState(TypedDict):
     subject_candidates: list[str]                                       # Ordered available-subject candidates
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
+    requested_resource_types: list[str]                                  # Requested resource types in one turn
+    multi_resource_mode: bool                                            # Whether multiple resources were requested
+    multi_resource_results: list[dict]                                   # Per-resource generation result metadata
+    multi_resource_summary: str                                          # Summary of multi-resource generation output
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
     mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
     mindmap_tree: dict                                                  # Reviewed JSON tree draft

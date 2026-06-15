@@ -1,6 +1,6 @@
-﻿# A3 Study Agent
+# A3 Study Agent
 
-楂樻牎涓€у寲瀛︿範璧勬簮鐢熸垚鏅鸿兘浣撱€?
+高校个性化学习资源生成智能体。
 
 <p align="center">
   <a href="README_en.md">English README</a> |
@@ -19,77 +19,77 @@
   </a>
 </p>
 
-## 鍏充簬椤圭洰
+## 关于项目
 
-A3 Study Agent 鏄竴涓潰鍚戦珮鏍¤绋嬪涔犲満鏅殑澶氭櫤鑳戒綋瀛︿範璧勬簮鐢熸垚绯荤粺銆傚畠鍩轰簬 **LangGraph**銆?*FastAPI** 鍜?**Next.js** 鏋勫缓锛屽洿缁曞涔犺€呯殑璇剧▼闂銆佸涔犵洰鏍囧拰璧勬簮闇€姹傦紝鐢熸垚璇剧▼绛旂枒銆佸垎灞傜粌涔犮€佹€濈淮瀵煎浘鍜屽涔犺鍒掔瓑涓€у寲瀛︿範璧勬簮銆?
+A3 Study Agent 是一个面向高校课程学习场景的多智能体学习资源生成系统。它基于 **LangGraph**、**FastAPI** 和 **Next.js** 构建，围绕学习者的课程问题、学习目标和资源需求，生成课程答疑、分层练习、思维导图和学习规划等个性化学习资源。
 
-绯荤粺缁撳悎鏈湴璇剧▼璧勬枡 RAG銆丅M25銆丷eranker銆乀avily Web Search銆佺粨鏋勫寲 LLM 杈撳嚭鍜?OpenTelemetry 鍙娴嬫€э紝鏀寔鐪熷疄浜や簰閾捐矾涓殑妫€绱€佽瘉鎹鍐炽€佺敓鎴愬拰璇婃柇銆?
+系统结合本地课程资料 RAG、BM25、Reranker、Tavily Web Search、结构化 LLM 输出和 OpenTelemetry 可观测性，支持真实交互链路中的检索、证据裁决、生成和诊断。
 
-> 褰撳墠 React 鍓嶇涓昏鐢ㄤ簬婕旂ず澶嶆潅 Agent 浜や簰銆丼SE 娴佸紡杈撳嚭銆佽祫婧愮敓鎴愬拰杩愯杞ㄨ抗銆傚悗缁鍒掓ā鍧椾細缁х画鎵╁睍锛屼絾绗竴闃舵鏂囨。涓嶅啀瑕嗙洊涓撻」瑙勫垝椤甸潰銆?
+> 当前 React 前端主要用于演示复杂 Agent 交互、SSE 流式输出、资源生成和运行轨迹。后续规划模块会继续扩展，但第一阶段文档不再覆盖专项规划页面。
 
-## 鏍稿績鑳藉姏
+## 核心能力
 
-- **璇剧▼绛旂枒**锛氬熀浜庢湰鍦拌绋嬭祫鏂欏拰 Web evidence 鐨勫弻婧愯瘉鎹瀺鍚堬紝鐢熸垚闈㈠悜楂樻牎瀛︿範鑰呯殑瑙ｉ噴涓庣ず渚嬨€?
-- **涓€у寲瀛︿範璧勬簮鐢熸垚**锛氱敓鎴愬垎灞傜粌涔犻銆佹€濈淮瀵煎浘銆侀」鐩渚嬪拰瀛︿範鏉愭枡鎽樿銆?
-- **瀛︿範瑙勫垝**锛氶€氳繃澶?Agent 璧疯崏銆佸鏌ュ拰浜哄伐鍙嶉锛屾敮鎸侀樁娈靛寲瀛︿範瀹夋帓銆?
-- **鎯呯华涓庡涓氭敮鎸?*锛氫互楂樻牎瀛︿範瀵煎笀 / 瀛︿笟鏀寔瀵煎笀鐨勮姘旓紝鎻愪緵娓╂殩涓斿彲鎵ц鐨勫缓璁€?
-- **鍙娴嬫€?*锛氶€氳繃 A3_TRACE銆丱penTelemetry銆丼SE 鑺傜偣浜嬩欢鍜岀粨鏋勫寲璇婃柇鏃ュ織鎺掓煡鐪熷疄浜や簰閾捐矾銆?
-- **閰嶇疆椹卞姩**锛氶€氳繃 YAML 閰嶇疆鍜?XML prompt 绠＄悊杩愯鍙傛暟涓庢ā鍨嬭涓恒€?
+- **课程答疑**：基于本地课程资料和 Web evidence 的双源证据融合，生成面向高校学习者的解释与示例。
+- **个性化学习资源生成**：生成分层练习题、思维导图、项目案例和学习材料摘要。
+- **学习规划**：通过多 Agent 起草、审查和人工反馈，支持阶段化学习安排。
+- **情绪与学业支持**：以高校学习导师 / 学业支持导师的语气，提供温暖且可执行的建议。
+- **可观测性**：通过 A3_TRACE、OpenTelemetry、SSE 节点事件和结构化诊断日志排查真实交互链路。
+- **配置驱动**：通过 YAML 配置和 XML prompt 管理运行参数与模型行为。
 
-## 绯荤粺鏋舵瀯
+## 系统架构
 
 ```mermaid
 graph TD
-  START([瀛︿範鑰呰緭鍏) --> supervisor[鎰忓浘璇嗗埆]
+  START([学习者输入]) --> supervisor[意图识别]
 
-  supervisor -->|academic| academic_router[瀛︽湳瀛︿範璺敱]
-  supervisor -->|academic study_plan| study_plan_emotional_intel[瑙勫垝涓婁笅鏂囨绱
-  supervisor -->|emotional| emotional_response[瀛︿笟鏀寔鍥炲簲]
-  supervisor -->|unknown| handle_unknown[鏈煡鎰忓浘澶勭悊]
+  supervisor -->|academic| academic_router[学术学习路由]
+  supervisor -->|planning| gather_planning_context[规划上下文检索]
+  supervisor -->|emotional| emotional_response[学业支持回应]
+  supervisor -->|unknown| handle_unknown[未知意图处理]
 
-  academic_router --> rag_retrieve[RAG / Web Evidence 妫€绱
-  rag_retrieve --> generate_answer[鍥炵瓟鐢熸垚]
-  generate_answer --> evaluate_hallucination[蹇犲疄鎬ц瘎浼癩
-  evaluate_hallucination -->|閫氳繃| END_A([缁撴潫])
-  evaluate_hallucination -->|閲嶈瘯| rewrite_query[鏌ヨ鏀瑰啓]
+  academic_router --> rag_retrieve[RAG / Web Evidence 检索]
+  rag_retrieve --> generate_answer[回答生成]
+  generate_answer --> evaluate_hallucination[忠实性评估]
+  evaluate_hallucination -->|通过| END_A([结束])
+  evaluate_hallucination -->|重试| rewrite_query[查询改写]
   rewrite_query --> academic_router
 
-  study_plan_emotional_intel --> study_plan_planner[瑙勫垝淇℃伅鏀堕泦]
-  study_plan_planner --> study_plan_agent[璁″垝璧疯崏]
-  study_plan_agent --> study_plan_reviewer_academic[瀛︽湳瀹℃煡]
-  study_plan_agent --> study_plan_reviewer_emotional[鎯呯华瀹℃煡]
-  study_plan_reviewer_academic --> study_plan_consensus[鍏辫瘑妫€鏌
-  study_plan_reviewer_emotional --> study_plan_consensus
-  study_plan_consensus -->|閫氳繃| study_plan_output[璁″垝杈撳嚭 + HIL]
-  study_plan_consensus -->|鎵撳洖| study_plan_rewrite[璁″垝淇]
-  study_plan_rewrite --> study_plan_agent
+  gather_planning_context --> gather_intel[规划信息收集]
+  gather_intel --> drafter[计划起草]
+  drafter --> reviewer_academic[学术审查]
+  drafter --> reviewer_emotional[情绪审查]
+  reviewer_academic --> consensus_check[共识检查]
+  reviewer_emotional --> consensus_check
+  consensus_check -->|通过| plan_output[计划输出 + HIL]
+  consensus_check -->|打回| adv_rewrite[计划修订]
+  adv_rewrite --> drafter
 
-  study_plan_output -->|纭| END_P([缁撴潫])
-  study_plan_output -->|鍙嶉| study_plan_rewrite[鍙嶉鍒嗙被]
-  study_plan_rewrite -->|寰皟| study_plan_rewrite[璁″垝寰皟]
-  study_plan_rewrite -->|閲嶅啓| study_plan_agent
-  study_plan_rewrite --> study_plan_output
+  plan_output -->|确认| END_P([结束])
+  plan_output -->|反馈| feedback_router[反馈分类]
+  feedback_router -->|微调| plan_tweak[计划微调]
+  feedback_router -->|重写| drafter
+  plan_tweak --> plan_output
 
-  emotional_response --> END_E([缁撴潫])
-  handle_unknown --> END_U([缁撴潫])
+  emotional_response --> END_E([结束])
+  handle_unknown --> END_U([结束])
 ```
 
-璇︾粏鏋舵瀯鍥捐 [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md)銆?
+详细架构图见 [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md)。
 
-## 鎶€鏈爤
+## 技术栈
 
-| 灞傜骇 | 缁勪欢 |
+| 层级 | 组件 |
 | ---- | ---- |
-| 鍓嶇 | Next.js 16銆丷eact銆乀ailwind CSS銆丷eact Flow |
-| 鍚庣 API | FastAPI銆乁vicorn銆丼SE |
-| 缂栨帓 | LangGraph |
-| 鏈湴鐭ヨ瘑搴?| ChromaDB銆丅M25銆丷eranker |
+| 前端 | Next.js 16、React、Tailwind CSS、React Flow |
+| 后端 API | FastAPI、Uvicorn、SSE |
+| 编排 | LangGraph |
+| 本地知识库 | ChromaDB、BM25、Reranker |
 | Web Search | Tavily |
-| 鐘舵€佸揩鐓?| LangGraph Checkpointer锛岄粯璁?MemorySaver锛屽彲閫?PostgreSQL |
-| 鍙娴嬫€?| A3_TRACE銆丱penTelemetry銆丣aeger銆丼QLite fallback |
-| 閰嶇疆 | YAML settings銆乆ML prompts |
+| 状态快照 | LangGraph Checkpointer，默认 MemorySaver，可选 PostgreSQL |
+| 可观测性 | A3_TRACE、OpenTelemetry、Jaeger、SQLite fallback |
+| 配置 | YAML settings、XML prompts |
 
-## 蹇€熷惎鍔?
+## 快速启动
 
 ### Docker Compose
 
@@ -98,35 +98,33 @@ git clone https://github.com/kyle-1227/A3_study_agent.git
 cd A3_study_agent
 
 cp .env.example .env
-# 缂栬緫 .env锛屽～鍏ユ墍闇€妯″瀷銆佹悳绱㈠拰瑙傛祴閰嶇疆
+# 编辑 .env，填入所需模型、搜索和观测配置
 
 docker compose up -d
 
-# 鍙€夛細鍚敤 Jaeger tracing
+# 可选：启用 Jaeger tracing
 docker compose --profile observability up -d
 ```
 
-鍓嶇锛歚http://localhost:3000`
-鍚庣 API锛歚http://localhost:8000`
-Jaeger锛歚http://localhost:16686`
+前端：`http://localhost:3000`
+后端 API：`http://localhost:8000`
+Jaeger：`http://localhost:16686`
 
-### 鏈湴寮€鍙?
+### 本地开发
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+conda create -n a3_study_agent python=3.11 -y
+conda activate a3_study_agent
 
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
+pip install -e ".[dev]"
 
 cp .env.example .env
-# 缂栬緫 .env锛屽～鍏?API keys
+# 编辑 .env，填入 API keys
 ```
 
-#### 鏋勫缓鐭ヨ瘑搴?
+#### 构建知识库
 
-灏?PDF / MD / TXT 璇剧▼璧勬枡鏀惧叆浠ヤ笅鐩綍涓殑涓€涓垨澶氫釜锛?
+将 PDF / MD / TXT 课程资料放入以下目录中的一个或多个：
 
 - `data/big_data`
 - `data/computer`
@@ -134,52 +132,52 @@ cp .env.example .env
 - `data/math`
 - `data/python`
 
-鐒跺悗杩愯锛?
+然后运行：
 
 ```bash
 python scripts/build_index.py
 ```
 
-#### 鍚姩鏈嶅姟
+#### 启动服务
 
 ```bash
-# 缁堢 1锛氬悗绔?
+# 终端 1：后端
 uvicorn app:app --reload --port 8000
 
-# 缁堢 2锛氬墠绔?
+# 终端 2：前端
 cd frontend
 npm install
 npm run dev
 ```
 
-## 椤圭洰缁撴瀯
+## 项目结构
 
 ```text
 A3_study_agent/
-鈹溾攢鈹€ app.py                         # FastAPI SSE endpoints + lifespan
-鈹溾攢鈹€ docker-compose.yml             # Backend + PostgreSQL + Jaeger
-鈹溾攢鈹€ config/
-鈹?  鈹溾攢鈹€ settings.yaml              # Runtime parameters
-鈹?  鈹斺攢鈹€ prompts/                   # XML prompt templates
-鈹溾攢鈹€ src/
-鈹?  鈹溾攢鈹€ graph/                     # LangGraph nodes and state flow
-鈹?  鈹溾攢鈹€ rag/                       # Local retrieval and indexing
-鈹?  鈹溾攢鈹€ llm/                       # LLM factory and structured output runtime
-鈹?  鈹溾攢鈹€ database/                  # Checkpointer management
-鈹?  鈹溾攢鈹€ tracing/                   # OpenTelemetry setup
-鈹?  鈹斺攢鈹€ tools/                     # Web search and resource tools
-鈹溾攢鈹€ frontend/                      # Next.js UI
-鈹溾攢鈹€ data/                          # University course materials
-鈹溾攢鈹€ scripts/                       # Indexing and debug scripts
-鈹斺攢鈹€ tests/                         # Test suite
+├── app.py                         # FastAPI SSE endpoints + lifespan
+├── docker-compose.yml             # Backend + PostgreSQL + Jaeger
+├── config/
+│   ├── settings.yaml              # Runtime parameters
+│   └── prompts/                   # XML prompt templates
+├── src/
+│   ├── graph/                     # LangGraph nodes and state flow
+│   ├── rag/                       # Local retrieval and indexing
+│   ├── llm/                       # LLM factory and structured output runtime
+│   ├── database/                  # Checkpointer management
+│   ├── tracing/                   # OpenTelemetry setup
+│   └── tools/                     # Web search and resource tools
+├── frontend/                      # Next.js UI
+├── data/                          # University course materials
+├── scripts/                       # Indexing and debug scripts
+└── tests/                         # Test suite
 ```
 
-## 娴嬭瘯
+## 测试
 
 ```bash
 python -m pytest tests/test_config.py tests/test_app.py tests/test_rag.py tests/test_tracing.py -v
 
-# 鐜鍏佽鏃?
+# 环境允许时
 python -m pytest -q
 cd frontend && npm run build
 ```
@@ -187,4 +185,3 @@ cd frontend && npm run build
 ## License
 
 [MIT](./LICENSE)
-

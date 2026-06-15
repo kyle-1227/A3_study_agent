@@ -137,7 +137,15 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"handle_unknown", "evidence_summary_output", "mindmap_output", "exercise_output", "review_doc_output", "study_plan_output"}
+TEXT_EMIT_NODES = {
+    "handle_unknown",
+    "evidence_summary_output",
+    "mindmap_output",
+    "exercise_output",
+    "review_doc_output",
+    "study_plan_output",
+    "multi_resource_runner",
+}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -174,6 +182,7 @@ GRAPH_NODES = {
     "study_plan_consensus",
     "study_plan_rewrite",
     "study_plan_output",
+    "multi_resource_runner",
     "emotional_response",
     "handle_unknown",
 }
@@ -202,8 +211,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
+    multi_resource_results = final_state.get("multi_resource_results") or []
+    multi_resource_summary = final_state.get("multi_resource_summary") or ""
 
-    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan"}:
+    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan", "multi_resource"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
@@ -221,15 +232,25 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         "resource_type": resource_type,
         "answer": answer,
     }
+    if resource_type == "multi_resource":
+        payload["multi_resource_results"] = multi_resource_results
+        payload["multi_resource_summary"] = multi_resource_summary
 
-    if resource_type == "mindmap" and (mindmap_artifact or mindmap_tree):
+    include_mindmap = resource_type in {"mindmap", "multi_resource"} and (mindmap_artifact or mindmap_tree)
+    include_quiz = resource_type in {"quiz", "multi_resource"} and (exercise_items or exercise_artifact)
+    include_review_doc = resource_type in {"review_doc", "multi_resource"} and review_doc_artifact
+    include_review_doc_artifacts = resource_type in {"review_doc", "multi_resource"} and review_doc_artifacts
+
+    if include_mindmap:
         payload["mindmap"] = {
             "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
             "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
             "xmind_url": mindmap_artifact.get("xmind_url", ""),
         }
+        payload["mindmap_artifact"] = mindmap_artifact
+        payload["mindmap_tree"] = mindmap_artifact.get("tree") or mindmap_tree or {}
 
-    if resource_type == "quiz":
+    if include_quiz:
         if (not answer or len(answer.strip()) < 40) and exercise_items:
             title = str(exercise_artifact.get("title") or "Leveled exercises")
             answer = _render_exercise_markdown(
@@ -242,7 +263,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         payload["exercise_items"] = exercise_items
         payload["exercise_artifact"] = exercise_artifact
 
-    if resource_type == "review_doc" and review_doc_artifact:
+    if include_review_doc:
         payload["review_doc"] = {
             "subject": review_doc_artifact.get("subject", ""),
             "title": review_doc_artifact.get("title", "Markdown Review Document"),
@@ -252,7 +273,8 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             "docx_url": review_doc_artifact.get("docx_url", ""),
             "markdown": review_doc_artifact.get("markdown", ""),
         }
-    if resource_type == "review_doc" and review_doc_artifacts:
+        payload["review_doc_artifact"] = review_doc_artifact
+    if include_review_doc_artifacts:
         payload["review_doc_artifacts"] = [
             {
                 "subject": artifact.get("subject", ""),
@@ -486,6 +508,7 @@ async def _stream_graph_events(
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
+                "has_exercise": bool(resource_payload.get("exercise_artifact")),
                 "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
                 "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),

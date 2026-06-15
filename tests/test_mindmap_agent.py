@@ -16,6 +16,7 @@ from src.graph.mindmap import (
     mindmap_reviewer,
     should_rewrite_mindmap,
 )
+from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
 
 
 def _mindmap_artifact() -> MindmapArtifact:
@@ -55,6 +56,73 @@ async def test_mindmap_agent_generates_json_tree_from_outline():
 async def test_mindmap_agent_empty_outline_raises():
     with pytest.raises(ValueError, match="outline"):
         await mindmap_agent({"mindmap_outline": ""})
+
+
+@pytest.mark.anyio
+async def test_mindmap_agent_uses_fallback_on_structured_output_error():
+    structured_error = StructuredOutputError(
+        StructuredLLMResult(
+            success=False,
+            parsed=None,
+            node_name="mindmap_agent",
+            llm_node="mindmap",
+            schema_name="MindmapArtifact",
+            provider="test",
+            model="test",
+            output_mode="native_json_schema_pydantic",
+            failure_phase="parsing_error",
+            error_type="OutputParserException",
+            parsing_error="invalid JSON",
+        )
+    )
+    with patch("src.graph.mindmap.invoke_structured_llm", side_effect=structured_error):
+        result = await mindmap_agent(
+            {
+                "messages": [HumanMessage(content="帮我生成一份 Python 的思维导图")],
+                "primary_subject": "python",
+                "keypoints": ["函数", "数据类型"],
+                "expanded_keypoints": ["控制流", "异常处理"],
+                "learning_goal": "Python 复习",
+                "context": [{"content": "Python course notes", "source": "python.md"}],
+                "mindmap_outline": "Python 复习结构",
+                "mindmap_round": 0,
+            }
+        )
+
+    tree = result["mindmap_tree"]
+    assert tree["title"] == "Python 复习思维导图"
+    assert "简化模式" in tree["note"]
+    assert len(tree["children"]) >= 8
+    assert result["mindmap_round"] == 1
+
+    review = await mindmap_reviewer(
+        {
+            "messages": [HumanMessage(content="帮我生成一份 Python 的思维导图")],
+            "mindmap_outline": "Python 复习结构",
+            "mindmap_tree": tree,
+        }
+    )
+
+    assert review["mindmap_review_verdict"] == "approve"
+    with patch(
+        "src.graph.mindmap.create_xmind_artifact",
+        return_value={
+            "artifact_id": "fallback-1",
+            "filename": "python.xmind",
+            "path": "/tmp/python.xmind",
+            "xmind_url": "/artifacts/mindmaps/fallback-1/python.xmind",
+        },
+    ):
+        output = await mindmap_output(
+            {
+                "mindmap_tree": tree,
+                "mindmap_review_verdict": review["mindmap_review_verdict"],
+                "mindmap_review_reason": review["mindmap_review_reason"],
+            }
+        )
+
+    assert output["mindmap_artifact"]["tree"]["title"] == "Python 复习思维导图"
+    assert output["mindmap_artifact"]["xmind_url"].endswith(".xmind")
 
 
 @pytest.mark.anyio

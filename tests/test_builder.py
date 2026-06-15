@@ -59,6 +59,7 @@ class TestBuildGraph:
             "review_doc_reviewer",
             "review_doc_rewrite",
             "review_doc_output",
+            "multi_resource_runner",
             "emotional_response",
             "handle_unknown",
         }
@@ -81,6 +82,7 @@ class TestBuildGraph:
         assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
         assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "review_doc"
         assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "study_plan"
+        assert route_after_evidence_judge({"requested_resource_type": "multi_resource"}) == "multi_resource"
         assert route_after_evidence_judge({}) == "answer"
         assert route_after_academic_retrieval({}) == "answer"
 

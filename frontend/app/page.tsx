@@ -439,13 +439,10 @@ export default function Home() {
 
     if (data.type === "resource_final") {
       const finalAnswer = typeof data.answer === "string" ? data.answer : ""
-      const mindmap = data.resource_type === "mindmap" ? data.mindmap : null
-      const reviewDoc = data.resource_type === "review_doc" ? data.review_doc : null
-      const reviewDocArtifacts =
-        data.resource_type === "review_doc" && Array.isArray(data.review_doc_artifacts)
-          ? data.review_doc_artifacts
-          : []
-      const exerciseArtifact = data.resource_type === "quiz" ? data.exercise_artifact : null
+      const mindmap = data.mindmap ?? null
+      const reviewDoc = data.review_doc ?? null
+      const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
+      const exerciseArtifact = data.exercise_artifact ?? null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
@@ -499,7 +496,7 @@ export default function Home() {
                       xmindUrl: xmindUrl || "",
                     }
                   : msg.mindmap,
-                reviewDoc: reviewDocs.length > 1
+                reviewDoc: reviewDocs.length > 0
                   ? undefined
                   : reviewDoc
                   ? {
@@ -512,7 +509,7 @@ export default function Home() {
                       markdown: reviewDoc.markdown || "",
                     }
                   : msg.reviewDoc,
-                reviewDocs: reviewDocs.length > 1 ? reviewDocs : msg.reviewDocs,
+                reviewDocs: reviewDocs.length > 0 ? reviewDocs : msg.reviewDocs,
                 exercise: exerciseArtifact
                   ? {
                       title: exerciseArtifact.title || "Exercise Resource",

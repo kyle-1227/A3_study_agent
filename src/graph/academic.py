@@ -23,7 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import get_setting, load_prompt
-from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
+from src.graph.evidence import EvidenceCandidate, EvidenceJudgeItem, EvidenceJudgeOutput
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
 from src.llm.structured_output import (
@@ -2233,6 +2233,125 @@ def _structured_result_to_evidence_failure_debug(
     )
 
 
+def _fallback_evidence_type(candidate: EvidenceCandidate) -> str:
+    if candidate.source_type == "local_rag":
+        return "local_course_material"
+    return "web_article"
+
+
+def _build_fallback_evidence_judge_output(
+    candidates: list[EvidenceCandidate],
+    reason: str,
+) -> EvidenceJudgeOutput:
+    candidate_count = len(candidates)
+    fallback_reason = sanitize_error_message(reason, max_chars=800) or (
+        "Evidence Judge structured output failed validation."
+    )
+    return EvidenceJudgeOutput(
+        overall_evidence_state="partially_sufficient" if candidate_count > 0 else "insufficient",
+        need_more_web_search=candidate_count == 0,
+        judged_evidence=[
+            EvidenceJudgeItem(
+                evidence_id=candidate.evidence_id,
+                keep=True,
+                final_quality="medium",
+                relevance="medium",
+                authority="medium",
+                usefulness="medium",
+                risk="low",
+                evidence_type=_fallback_evidence_type(candidate),
+                use_case="background_context",
+                coverage_contribution=(
+                    "Fallback retained this candidate because Evidence Judge structured output failed."
+                ),
+                reason=(
+                    "Evidence Judge failed validation, so this candidate was retained by "
+                    f"deterministic fallback. Reason: {fallback_reason}"
+                ),
+            )
+            for candidate in candidates
+        ],
+        coverage_gaps=[],
+        decision_summary=(
+            "Evidence Judge validation failed; deterministic fallback retained available "
+            f"evidence candidates for degraded generation. Reason: {fallback_reason}"
+        ),
+    )
+
+
+def _fallback_failure_phase(debug: dict | None, reason: str) -> str:
+    debug = debug or {}
+    failure_phase = str(debug.get("failure_phase") or "").strip()
+    if failure_phase:
+        return failure_phase
+    lowered = str(reason or "").lower()
+    if "evidence_id" in lowered or "missing evidence_id" in lowered:
+        return "evidence_id_mismatch"
+    if "judged_evidence" in lowered:
+        return "judged_evidence_empty"
+    if "parsed" in lowered and "none" in lowered:
+        return "parsed_none"
+    return "structured_llm_failed"
+
+
+def _fallback_evidence_judge_debug(
+    *,
+    base_debug: dict | None,
+    fallback_output: EvidenceJudgeOutput,
+    candidates: list[EvidenceCandidate],
+    reason: str,
+) -> dict:
+    debug = dict(base_debug or {})
+    failure_phase = _fallback_failure_phase(debug, reason)
+    judged_count = len(fallback_output.judged_evidence)
+    debug.update(
+        {
+            "stage": "evidence_judge",
+            "success": False,
+            "fallback_used": True,
+            "failure_phase": failure_phase,
+            "input_candidate_count": len(candidates),
+            "fallback_judged_count": judged_count,
+            "overall_evidence_state": fallback_output.overall_evidence_state,
+            "need_more_web_search": fallback_output.need_more_web_search,
+            "kept_count": judged_count,
+            "rejected_count": 0,
+            "coverage_gap_count": 0,
+            "coverage_gaps": [],
+            "fallback_reason": sanitize_error_message(reason, max_chars=2000),
+            "fallback_evidence_ids": [item.evidence_id for item in fallback_output.judged_evidence],
+        }
+    )
+    if "error_type" not in debug or not debug.get("error_type"):
+        debug["error_type"] = "EvidenceJudgeFallback"
+    return debug
+
+
+def _fallback_evidence_judge_result(
+    *,
+    state: LearningState,
+    candidates: list[EvidenceCandidate],
+    reason: str,
+    base_debug: dict | None = None,
+) -> tuple[EvidenceJudgeOutput, dict]:
+    fallback_output = _build_fallback_evidence_judge_output(candidates, reason)
+    debug = _fallback_evidence_judge_debug(
+        base_debug=base_debug,
+        fallback_output=fallback_output,
+        candidates=candidates,
+        reason=reason,
+    )
+    emit_a3_trace(
+        logger,
+        "evidence_judge",
+        debug,
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+        max_chars=12000,
+    )
+    return fallback_output, debug
+
+
 async def _judge_evidence_candidates_with_llm(
     *,
     state: LearningState,
@@ -2311,8 +2430,43 @@ async def _judge_evidence_candidates_with_llm(
             original_user_query=original_user_query,
             candidates=candidates,
         )
-        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-        return None, debug
+        reason = (
+            exc.result.business_validation_error
+            or exc.result.validation_error
+            or exc.result.parsing_error
+            or exc.result.error_message
+            or str(exc)
+        )
+        return _fallback_evidence_judge_result(
+            state=state,
+            candidates=candidates,
+            reason=reason,
+            base_debug=debug,
+        )
+    except Exception as exc:
+        reason = str(exc)
+        if (
+            "BusinessValidationError" in type(exc).__name__
+            or "BusinessValidationError" in reason
+            or "evidence_id_mismatch" in reason
+            or "missing evidence_id values" in reason
+            or "judged_evidence" in reason
+        ):
+            return _fallback_evidence_judge_result(
+                state=state,
+                candidates=candidates,
+                reason=reason,
+                base_debug={
+                    "stage": "evidence_judge",
+                    "provider": _evidence_judge_provider(),
+                    "model": _evidence_judge_model(),
+                    "round_index": round_index,
+                    "failure_phase": _fallback_failure_phase({}, reason),
+                    "error_type": type(exc).__name__,
+                    "error_message": sanitize_error_message(reason, max_chars=2000),
+                },
+            )
+        raise
 
     if not structured_result.success or not isinstance(structured_result.parsed, EvidenceJudgeOutput):
         debug = _structured_result_to_evidence_failure_debug(
@@ -2320,10 +2474,45 @@ async def _judge_evidence_candidates_with_llm(
             original_user_query=original_user_query,
             candidates=candidates,
         )
-        emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-        return None, debug
+        reason = (
+            structured_result.business_validation_error
+            or structured_result.validation_error
+            or structured_result.parsing_error
+            or structured_result.error_message
+            or "Evidence Judge returned no parsed result."
+        )
+        return _fallback_evidence_judge_result(
+            state=state,
+            candidates=candidates,
+            reason=reason,
+            base_debug=debug,
+        )
 
     parsed = structured_result.parsed
+    business_error = _validate_evidence_judge_business_result(parsed, expected_ids=expected_ids)
+    if business_error or (len(candidates) > 0 and not parsed.judged_evidence):
+        if business_error and "evidence_id" in business_error:
+            failure_phase = "evidence_id_mismatch"
+        elif not parsed.judged_evidence:
+            failure_phase = "judged_evidence_empty"
+        else:
+            failure_phase = "business_validation_error"
+        return _fallback_evidence_judge_result(
+            state=state,
+            candidates=candidates,
+            reason=business_error or "judged_evidence is empty while candidates were provided.",
+            base_debug={
+                "stage": "evidence_judge",
+                "provider": _evidence_judge_provider(),
+                "model": _evidence_judge_model(),
+                "round_index": round_index,
+                "failure_phase": failure_phase,
+                "error_type": "BusinessValidationError",
+                "validation_error": business_error,
+                "raw_preview": structured_result.raw_output[:4000],
+                "raw_output_chars": len(structured_result.raw_output or ""),
+            },
+        )
     candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
     kept = [item for item in parsed.judged_evidence if item.keep]
     kept_distribution = Counter(candidate_by_id[item.evidence_id].source_type for item in kept)
@@ -3261,17 +3450,35 @@ async def evidence_judge(state: LearningState) -> dict:
             round_index=1,
         )
     except StructuredOutputError as exc:
-        raise RuntimeError(
-            f"Evidence Judge failed: {exc.result.failure_phase}. "
-            f"Fix the root cause before retrying."
-        ) from exc
-
-    if parsed is None:
-        raise RuntimeError(
-            f"Evidence Judge returned no parsed result: "
-            f"{judge_debug.get('failure_phase', 'unknown')}"
+        parsed, judge_debug = _fallback_evidence_judge_result(
+            state=state,
+            candidates=candidates,
+            reason=(
+                exc.result.business_validation_error
+                or exc.result.validation_error
+                or exc.result.parsing_error
+                or exc.result.error_message
+                or str(exc)
+            ),
+            base_debug=_structured_result_to_evidence_failure_debug(
+                result=exc.result,
+                original_user_query=original_user_query,
+                candidates=candidates,
+            ),
         )
 
+    if parsed is None:
+        parsed, judge_debug = _fallback_evidence_judge_result(
+            state=state,
+            candidates=candidates,
+            reason=(
+                "Evidence Judge returned no parsed result: "
+                f"{judge_debug.get('failure_phase', 'unknown')}"
+            ),
+            base_debug=judge_debug,
+        )
+
+    fallback_used = bool(judge_debug.get("fallback_used"))
     context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
     followups = _followups_from_coverage_gaps(parsed)
     refinement_needed = bool(parsed.need_more_web_search or followups)
@@ -3342,7 +3549,10 @@ async def evidence_judge(state: LearningState) -> dict:
         get_setting("retrieval.evidence_memory.fail_fast_on_insufficient_evidence", False)
     )
 
-    if evidence_state == "insufficient":
+    if fallback_used:
+        degraded_generation = True
+        degraded_reason = "Evidence Judge validation failed; fallback evidence selection was used."
+    elif evidence_state == "insufficient":
         if fail_fast_on_insufficient:
             raise RuntimeError(
                 "Evidence Judge declared evidence insufficient and "
@@ -3360,7 +3570,9 @@ async def evidence_judge(state: LearningState) -> dict:
         "evidence_judge_output": parsed.model_dump(mode="json"),
         "evidence_judge_rounds": 1,
         "evidence_judge_state": evidence_state,
-        "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
+        "evidence_coverage_gaps": []
+        if fallback_used
+        else [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
         "search_refinement_needed": refinement_needed,
         "search_refinement_deferred": refinement_deferred,
         "search_refinement_deferred_reason": deferred_reason,
@@ -3368,7 +3580,7 @@ async def evidence_judge(state: LearningState) -> dict:
         "search_optimization_reserved": True,
         "search_optimization_status": "reserved_not_implemented",
         "dual_source_mode": True,
-        "evidence_judge_failed": False,
+        "evidence_judge_failed": fallback_used,
         "degraded_generation": degraded_generation,
         "degraded_reason": degraded_reason,
         "evidence_controlled_stop": controlled_stop,

@@ -354,16 +354,21 @@ function MessageBubble({ message }: { message: Message }) {
         ) : (
           <div className="min-w-0 space-y-3">
             {message.resourceStatus && <ResourceGenerationStatusPanel status={message.resourceStatus} />}
-            {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.reviewDocs?.length
               ? message.reviewDocs.map((doc) => (
                   <ReviewDocCard
                     key={`${doc.subject || doc.title}-${doc.markdownUrl || doc.filename || doc.docxUrl}`}
                     reviewDoc={doc}
-                    markdownText={doc.markdown || message.content}
+                    markdownText={doc.markdown || ""}
                   />
                 ))
-              : message.reviewDoc && <ReviewDocCard reviewDoc={message.reviewDoc} markdownText={message.content} />}
+              : message.reviewDoc && (
+                  <ReviewDocCard
+                    reviewDoc={message.reviewDoc}
+                    markdownText={message.reviewDoc.markdown || ""}
+                  />
+                )}
+            {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
@@ -382,6 +387,8 @@ function MessageBubble({ message }: { message: Message }) {
 }
 
 function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult; markdownText: string }) {
+  const printableMarkdown = reviewDoc.markdown || markdownText
+
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
@@ -396,7 +403,7 @@ function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult
           <DownloadButton href={reviewDoc.markdownUrl} label="下载 .md" />
           {reviewDoc.docxUrl && <DownloadButton href={reviewDoc.docxUrl} label="下载 .docx" />}
           <SmallButton
-            onClick={() => openReviewDocPrintPage(reviewDoc.title, markdownText)}
+            onClick={() => openReviewDocPrintPage(reviewDoc.title, printableMarkdown)}
             label="导出 PDF"
             icon={<FileText className="h-3.5 w-3.5" />}
           />

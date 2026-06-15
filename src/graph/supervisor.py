@@ -36,11 +36,13 @@ class SupervisorOutput(BaseModel):
     confidence: float
     subject_candidates: list[str] = []
     requested_resource_type: str = ""
+    requested_resource_types: list[str] = []
 
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc"})
+_VALID_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc", "multi_resource"})
+_VALID_INDIVIDUAL_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc"})
 
 
 def _sanitize_valid_intents() -> set[str]:
@@ -89,11 +91,15 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
         return "keywords must be a list"
     if not isinstance(parsed.subject_candidates, list):
         return "subject_candidates must be a list"
+    if not isinstance(parsed.requested_resource_types, list):
+        return "requested_resource_types must be a list"
     # ── Intent/resource combination validation ─────────────────────
     resource_type = (parsed.requested_resource_type or "").strip()
-    if resource_type:
+    resource_types = [str(item).strip() for item in parsed.requested_resource_types or [] if str(item).strip()]
+    has_resource = bool(resource_type or resource_types)
+    if has_resource:
         if parsed.intent in ("emotional", "unknown"):
-            if resource_type in _VALID_RESOURCE_TYPES:
+            if resource_type in _VALID_RESOURCE_TYPES or any(item in _VALID_INDIVIDUAL_RESOURCE_TYPES for item in resource_types):
                 return (
                     f"intent={parsed.intent} may not carry "
                     f"requested_resource_type={resource_type}. "
@@ -159,14 +165,35 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    # Use LLM's requested_resource_type first, fall back to deterministic detection
+    # Deterministic resource detection has priority over LLM output.
     llm_resource = (result.requested_resource_type or "").strip()
-    deterministic_resource = _detect_requested_resource_type(user_text)
-    requested_resource_type = llm_resource or deterministic_resource
+    llm_resource_types = _normalize_requested_resource_types(
+        result.requested_resource_types or ([llm_resource] if llm_resource else [])
+    )
+    deterministic_resource_types = _detect_requested_resource_types(user_text)
+    if len(deterministic_resource_types) > 1:
+        requested_resource_type = "multi_resource"
+        requested_resource_types = deterministic_resource_types
+    elif len(deterministic_resource_types) == 1:
+        requested_resource_type = deterministic_resource_types[0]
+        requested_resource_types = deterministic_resource_types
+    elif len(llm_resource_types) > 1:
+        requested_resource_type = "multi_resource"
+        requested_resource_types = llm_resource_types
+    elif len(llm_resource_types) == 1:
+        requested_resource_type = llm_resource_types[0]
+        requested_resource_types = llm_resource_types
+    elif llm_resource in _VALID_RESOURCE_TYPES:
+        requested_resource_type = llm_resource
+        requested_resource_types = [] if llm_resource == "multi_resource" else [llm_resource]
+    else:
+        requested_resource_type = ""
+        requested_resource_types = []
+    multi_resource_mode = requested_resource_type == "multi_resource"
 
     # academic intent with resource type stays academic
     # emotional/unknown with resource type was already blocked by validation
-    needs_mindmap = requested_resource_type == "mindmap"
+    needs_mindmap = requested_resource_type == "mindmap" or "mindmap" in requested_resource_types
 
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
@@ -178,6 +205,8 @@ async def supervisor_node(state: LearningState) -> dict:
             "subject_candidates": subject_candidates,
             "keypoints": keypoints,
             "requested_resource_type": requested_resource_type,
+            "requested_resource_types": requested_resource_types,
+            "multi_resource_mode": multi_resource_mode,
             "needs_mindmap": needs_mindmap,
             "confidence": result.confidence if "result" in locals() else 0.0,
             "available_subjects": available_subjects,
@@ -194,6 +223,10 @@ async def supervisor_node(state: LearningState) -> dict:
         "subject_candidates": subject_candidates,
         "keypoints": keypoints,
         "requested_resource_type": requested_resource_type,
+        "requested_resource_types": requested_resource_types,
+        "multi_resource_mode": multi_resource_mode,
+        "multi_resource_results": [],
+        "multi_resource_summary": "",
         "needs_mindmap": needs_mindmap,
     }
 
@@ -232,6 +265,8 @@ def route_by_intent(state: LearningState) -> str:
 
 _RESOURCE_ACTION_MARKERS = (
     "生成",
+    "给我",
+    "帮我",
     "制作",
     "创建",
     "导出",
@@ -273,6 +308,51 @@ _EXPLANATION_MARKERS = (
     "区别",
     "作用",
     "用途",
+    "有什么用",
+    "有啥用",
+    "应该怎么",
+    "怎么整理",
+    "如何整理",
+)
+
+_RESOURCE_GENERATION_ACTION_MARKERS = (
+    "生成",
+    "给我",
+    "帮我",
+    "做一份",
+    "整理一份",
+    "输出",
+    "制作",
+    "创建",
+    "来一份",
+    "画一个",
+    "画一份",
+    "设计一份",
+    "generate",
+    "create",
+    "make",
+)
+
+_RESOURCE_TYPE_MARKERS_FOR_DETECTION: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "review_doc",
+        (
+            "复习资料",
+            "复习文档",
+            "学习资料",
+            "学习文档",
+            "知识点整理",
+            "知识整理",
+            "课程资料",
+            "讲义",
+            "笔记",
+            "期末复习",
+            "考前复习",
+        ),
+    ),
+    ("mindmap", ("思维导图", "脑图", "知识图谱", "mindmap", "xmind")),
+    ("quiz", ("练习题", "习题", "题库", "测试题", "测验", "quiz", "exercises")),
+    ("study_plan", ("学习计划", "学习路径", "学习路线", "roadmap")),
 )
 
 _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -290,27 +370,40 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _detect_requested_resource_type(text: str) -> str:
-    """Deterministically identify explicit resource-generation requests.
+def _normalize_requested_resource_types(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        resource_type = str(value or "").strip()
+        if resource_type == "multi_resource":
+            continue
+        if resource_type in _VALID_INDIVIDUAL_RESOURCE_TYPES and resource_type not in normalized:
+            normalized.append(resource_type)
+    return normalized
 
-    A resource type only counts when the user asks to create/export/produce it.
-    Explanation questions such as "思维导图是什么" remain ordinary academic support.
-    """
+
+def _detect_requested_resource_types(text: str) -> list[str]:
+    """Deterministically identify explicit one-turn resource requests."""
     lowered = text.lower()
     has_strong_action = any(marker.lower() in lowered for marker in _RESOURCE_ACTION_MARKERS)
     has_weak_request = any(marker.lower() in lowered for marker in _WEAK_REQUEST_MARKERS)
     asks_explanation = any(marker.lower() in lowered for marker in _EXPLANATION_MARKERS)
-    study_plan_markers = next(
-        (markers for resource_type, markers in _RESOURCE_TYPE_MARKERS if resource_type == "study_plan"),
-        (),
-    )
-    if any(marker.lower() in lowered for marker in study_plan_markers):
-        return "study_plan"
+    has_generation_action = any(marker.lower() in lowered for marker in _RESOURCE_GENERATION_ACTION_MARKERS)
 
-    if not has_strong_action and (not has_weak_request or asks_explanation):
-        return ""
+    if asks_explanation and not has_generation_action:
+        return []
+    if not has_strong_action and not has_weak_request:
+        return []
 
-    for resource_type, markers in _RESOURCE_TYPE_MARKERS:
+    detected: list[str] = []
+    for resource_type, markers in _RESOURCE_TYPE_MARKERS_FOR_DETECTION:
         if any(marker.lower() in lowered for marker in markers):
-            return resource_type
-    return ""
+            detected.append(resource_type)
+    return detected
+
+
+def _detect_requested_resource_type(text: str) -> str:
+    """Backward-compatible single-resource detector."""
+    detected = _detect_requested_resource_types(text)
+    if len(detected) > 1:
+        return "multi_resource"
+    return detected[0] if detected else ""

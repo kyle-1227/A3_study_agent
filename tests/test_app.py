@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -154,3 +155,111 @@ class TestMindmapArtifacts:
             response = client.get("/artifacts/mindmaps/a1/missing.xmind")
 
         assert response.status_code == 404
+
+
+class TestResourceFinalPayload:
+    def test_plain_answer_without_artifacts_has_no_resource_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "",
+                "messages": [SimpleNamespace(content="Python list 和 tuple 的区别是...")],
+            }
+        )
+
+        assert payload is None
+
+    def test_multi_resource_payload_includes_all_available_artifacts(self):
+        from app import _resource_final_payload
+
+        final_state = {
+            "requested_resource_type": "multi_resource",
+            "messages": [SimpleNamespace(content="# 已生成多类学习资源")],
+            "review_doc_artifact": {
+                "title": "Python 复习资料",
+                "filename": "python.md",
+                "docx_filename": "python.docx",
+                "markdown_url": "/artifacts/review-docs/r1/python.md",
+                "docx_url": "/artifacts/review-docs/r1/python.docx",
+                "markdown": "# Python 复习资料",
+            },
+            "review_doc_artifacts": [
+                {
+                    "title": "Python 复习资料",
+                    "filename": "python.md",
+                    "docx_filename": "python.docx",
+                    "markdown_url": "/artifacts/review-docs/r1/python.md",
+                    "docx_url": "/artifacts/review-docs/r1/python.docx",
+                    "markdown": "# Python 复习资料",
+                }
+            ],
+            "mindmap_artifact": {
+                "title": "Python 思维导图",
+                "tree": {"title": "Python", "children": []},
+                "xmind_url": "/artifacts/mindmaps/m1/python.xmind",
+            },
+            "mindmap_tree": {"title": "Python", "children": []},
+            "exercise_items": [{"question": "Q1"}],
+            "exercise_artifact": {
+                "title": "Python 练习题",
+                "markdown_url": "/artifacts/exercises/e1/python.md",
+                "docx_url": "/artifacts/exercises/e1/python.docx",
+            },
+            "multi_resource_results": [
+                {"resource_type": "review_doc", "status": "completed"},
+                {"resource_type": "mindmap", "status": "completed"},
+                {"resource_type": "quiz", "status": "completed"},
+            ],
+            "multi_resource_summary": "# 已生成多类学习资源",
+        }
+
+        payload = _resource_final_payload(final_state)
+
+        assert payload is not None
+        assert payload["resource_type"] == "multi_resource"
+        assert payload["answer"] == "# 已生成多类学习资源"
+        assert payload["review_doc_artifacts"]
+        assert payload["mindmap"]["title"] == "Python 思维导图"
+        assert payload["exercise_artifact"]["title"] == "Python 练习题"
+        assert payload["multi_resource_results"][0]["resource_type"] == "review_doc"
+
+    def test_single_resource_payloads_still_work(self):
+        from app import _resource_final_payload
+
+        review_doc_payload = _resource_final_payload(
+            {
+                "requested_resource_type": "review_doc",
+                "messages": [SimpleNamespace(content="# Python 复习资料")],
+                "review_doc_artifacts": [
+                    {
+                        "title": "Python 复习资料",
+                        "filename": "python.md",
+                        "markdown_url": "/artifacts/review-docs/r1/python.md",
+                    }
+                ],
+            }
+        )
+        quiz_payload = _resource_final_payload(
+            {
+                "requested_resource_type": "quiz",
+                "messages": [SimpleNamespace(content="练习题正文")],
+                "exercise_items": [{"question": "Q1"}],
+                "exercise_artifact": {"title": "Python 练习题"},
+            }
+        )
+        mindmap_payload = _resource_final_payload(
+            {
+                "requested_resource_type": "mindmap",
+                "messages": [SimpleNamespace(content="mindmap")],
+                "mindmap_artifact": {
+                    "title": "Python 思维导图",
+                    "tree": {"title": "Python", "children": []},
+                    "xmind_url": "/artifacts/mindmaps/m1/python.xmind",
+                },
+            }
+        )
+
+        assert review_doc_payload and review_doc_payload["review_doc_artifacts"]
+        assert quiz_payload and quiz_payload["exercise_artifact"]["title"] == "Python 练习题"
+        assert mindmap_payload and mindmap_payload["mindmap"]["title"] == "Python 思维导图"

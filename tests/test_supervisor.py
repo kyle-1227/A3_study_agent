@@ -13,6 +13,7 @@ from src.graph.supervisor import (
     SupervisorOutput,
     _VALID_INTENTS,
     _detect_requested_resource_type,
+    _detect_requested_resource_types,
     handle_unknown,
     route_by_intent,
     supervisor_node,
@@ -25,6 +26,7 @@ def _result(
     confidence: float = 0.9,
     subject_candidates: list[str] | None = None,
     requested_resource_type: str = "",
+    requested_resource_types: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         parsed=SupervisorOutput(
@@ -33,6 +35,7 @@ def _result(
             confidence=confidence,
             subject_candidates=subject_candidates or [],
             requested_resource_type=requested_resource_type,
+            requested_resource_types=requested_resource_types or [],
         ),
         raw_output="{}",
     )
@@ -212,6 +215,28 @@ class TestSupervisorNode:
         assert result["needs_mindmap"] is False
         assert result["requested_resource_type"] == ""
 
+    @pytest.mark.parametrize(
+        ("query", "expected_type", "expected_types"),
+        [
+            ("Python 的 list 和 tuple 有什么区别？", "", []),
+            ("给我一份 Python 复习资料", "review_doc", ["review_doc"]),
+            ("帮我生成 Python 思维导图", "mindmap", ["mindmap"]),
+            ("给我一份 Python 练习题", "quiz", ["quiz"]),
+            ("帮我生成一份 Python 的复习资料和思维导图", "multi_resource", ["review_doc", "mindmap"]),
+            ("帮我生成一份 Python 的复习资料和练习题", "multi_resource", ["review_doc", "quiz"]),
+            ("帮我生成一份 Python 的复习资料、思维导图和练习题", "multi_resource", ["review_doc", "mindmap", "quiz"]),
+        ],
+    )
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_resource_type_detection_outputs_list(self, mock_invoke, query, expected_type, expected_types):
+        mock_invoke.return_value = _result(intent="academic", keywords=["Python"])
+
+        result = await supervisor_node({"messages": [HumanMessage(content=query)]})
+
+        assert result["requested_resource_type"] == expected_type
+        assert result["requested_resource_types"] == expected_types
+        assert result["multi_resource_mode"] is (expected_type == "multi_resource")
+
 
 class TestResourceTypeDetection:
     def test_detects_explicit_mindmap_generation(self):
@@ -223,6 +248,21 @@ class TestResourceTypeDetection:
     def test_detects_study_plan_requests(self):
         assert _detect_requested_resource_type("Please create a Python study plan") == "study_plan"
         assert _detect_requested_resource_type("Give me a machine learning roadmap") == "study_plan"
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("Python 的 list 和 tuple 有什么区别？", []),
+            ("给我一份 Python 复习资料", ["review_doc"]),
+            ("帮我生成 Python 思维导图", ["mindmap"]),
+            ("给我一份 Python 练习题", ["quiz"]),
+            ("帮我生成一份 Python 的复习资料和思维导图", ["review_doc", "mindmap"]),
+            ("帮我生成一份 Python 的复习资料和练习题", ["review_doc", "quiz"]),
+            ("帮我生成一份 Python 的复习资料、思维导图和练习题", ["review_doc", "mindmap", "quiz"]),
+        ],
+    )
+    def test_detects_requested_resource_types(self, query, expected):
+        assert _detect_requested_resource_types(query) == expected
 
 
 class TestRouteByIntent:
