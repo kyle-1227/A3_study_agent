@@ -1,4 +1,4 @@
-﻿"use client"
+"use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
 import { LeftSidebar } from "@/components/left-sidebar"
@@ -581,6 +581,11 @@ export default function Home() {
 
       const mindmap = data.resource_type === "mindmap" ? data.mindmap : null
       const reviewDoc = data.resource_type === "review_doc" ? data.review_doc : null
+      const reviewDocArtifacts =
+        data.resource_type === "review_doc" && Array.isArray(data.review_doc_artifacts)
+          ? data.review_doc_artifacts
+          : []
+      const exerciseArtifact = data.resource_type === "quiz" ? data.exercise_artifact : null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
@@ -593,6 +598,33 @@ export default function Home() {
         reviewDoc && typeof reviewDoc.docx_url === "string" && reviewDoc.docx_url.startsWith("/")
           ? `${API_BASE_URL}${reviewDoc.docx_url}`
           : reviewDoc?.docx_url
+      const reviewDocs = reviewDocArtifacts.map((artifact: any) => {
+        const artifactMarkdownUrl =
+          typeof artifact.markdown_url === "string" && artifact.markdown_url.startsWith("/")
+            ? `${API_BASE_URL}${artifact.markdown_url}`
+            : artifact.markdown_url
+        const artifactDocxUrl =
+          typeof artifact.docx_url === "string" && artifact.docx_url.startsWith("/")
+            ? `${API_BASE_URL}${artifact.docx_url}`
+            : artifact.docx_url
+        return {
+          subject: artifact.subject || "",
+          title: artifact.title || "Review Document",
+          filename: artifact.filename || "",
+          markdownUrl: artifactMarkdownUrl || "",
+          docxFilename: artifact.docx_filename || "",
+          docxUrl: artifactDocxUrl || "",
+          markdown: artifact.markdown || "",
+        }
+      })
+      const exerciseMarkdownUrl =
+        exerciseArtifact && typeof exerciseArtifact.markdown_url === "string" && exerciseArtifact.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${exerciseArtifact.markdown_url}`
+          : exerciseArtifact?.markdown_url
+      const exerciseDocxUrl =
+        exerciseArtifact && typeof exerciseArtifact.docx_url === "string" && exerciseArtifact.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${exerciseArtifact.docx_url}`
+          : exerciseArtifact?.docx_url
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -607,15 +639,29 @@ export default function Home() {
                       xmindUrl: xmindUrl || "",
                     }
                   : msg.mindmap,
-                reviewDoc: reviewDoc
+                reviewDoc: reviewDocs.length > 1
+                  ? undefined
+                  : reviewDoc
                   ? {
+                      subject: reviewDoc.subject || "",
                       title: reviewDoc.title || "Review Document",
                       filename: reviewDoc.filename || "",
                       markdownUrl: markdownUrl || "",
                       docxFilename: reviewDoc.docx_filename || "",
                       docxUrl: docxUrl || "",
+                      markdown: reviewDoc.markdown || "",
                     }
                   : msg.reviewDoc,
+                reviewDocs: reviewDocs.length > 1 ? reviewDocs : msg.reviewDocs,
+                exercise: exerciseArtifact
+                  ? {
+                      title: exerciseArtifact.title || "Exercise Resource",
+                      filename: exerciseArtifact.filename || "",
+                      markdownUrl: exerciseMarkdownUrl || "",
+                      docxFilename: exerciseArtifact.docx_filename || "",
+                      docxUrl: exerciseDocxUrl || "",
+                    }
+                  : msg.exercise,
               }
             : msg
         )
@@ -1127,4 +1173,3 @@ export default function Home() {
     </div>
   )
 }
-

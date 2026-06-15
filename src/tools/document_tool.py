@@ -7,12 +7,45 @@ import re
 import uuid
 from pathlib import Path
 
-DEFAULT_REVIEW_DOC_ARTIFACT_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "review_docs"
+DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parents[2] / "artifacts"
+DEFAULT_REVIEW_DOC_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "review_docs"
+DEFAULT_EXERCISE_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "exercises"
+
+_ARTIFACT_KIND_CONFIG = {
+    "review_docs": {
+        "env_var": "REVIEW_DOC_ARTIFACT_DIR",
+        "default_dir": DEFAULT_REVIEW_DOC_ARTIFACT_DIR,
+        "url_prefix": "/artifacts/review-docs",
+        "filename_default": "review-doc",
+    },
+    "exercises": {
+        "env_var": "EXERCISE_ARTIFACT_DIR",
+        "default_dir": DEFAULT_EXERCISE_ARTIFACT_DIR,
+        "url_prefix": "/artifacts/exercises",
+        "filename_default": "exercises",
+    },
+}
 
 
 def get_review_doc_artifact_dir() -> Path:
     """Return the directory used for generated Markdown review documents."""
     root = Path(os.getenv("REVIEW_DOC_ARTIFACT_DIR", str(DEFAULT_REVIEW_DOC_ARTIFACT_DIR)))
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def get_exercise_artifact_dir() -> Path:
+    """Return the directory used for generated exercise documents."""
+    root = Path(os.getenv("EXERCISE_ARTIFACT_DIR", str(DEFAULT_EXERCISE_ARTIFACT_DIR)))
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def _get_document_artifact_dir(artifact_kind: str) -> Path:
+    config = _ARTIFACT_KIND_CONFIG.get(artifact_kind)
+    if not config:
+        raise ValueError(f"Unsupported document artifact kind: {artifact_kind}")
+    root = Path(os.getenv(str(config["env_var"]), str(config["default_dir"])))
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -102,24 +135,38 @@ def _write_docx_artifact(markdown_text: str, title: str, file_path: Path) -> Non
     document.save(file_path)
 
 
-def create_markdown_artifact(markdown_text: str, title: str) -> dict:
+def create_document_artifact(
+    markdown_text: str,
+    title: str,
+    artifact_kind: str = "review_docs",
+) -> dict:
     """Save Markdown text as .md and .docx artifacts and return public metadata."""
+    config = _ARTIFACT_KIND_CONFIG.get(artifact_kind)
+    if not config:
+        raise ValueError(f"Unsupported document artifact kind: {artifact_kind}")
+
     artifact_id = uuid.uuid4().hex
-    filename_stem = _safe_filename_stem(title)
+    filename_stem = _safe_filename_stem(title, default=str(config["filename_default"]))
     filename = f"{filename_stem}.md"
     docx_filename = f"{filename_stem}.docx"
-    artifact_dir = get_review_doc_artifact_dir() / artifact_id
+    artifact_dir = _get_document_artifact_dir(artifact_kind) / artifact_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     file_path = artifact_dir / filename
     docx_path = artifact_dir / docx_filename
     file_path.write_text(markdown_text.rstrip() + "\n", encoding="utf-8")
     _write_docx_artifact(markdown_text, title, docx_path)
+    url_prefix = str(config["url_prefix"])
 
     return {
         "artifact_id": artifact_id,
         "filename": filename,
         "docx_filename": docx_filename,
-        "markdown_url": f"/artifacts/review-docs/{artifact_id}/{filename}",
-        "docx_url": f"/artifacts/review-docs/{artifact_id}/{docx_filename}",
+        "markdown_url": f"{url_prefix}/{artifact_id}/{filename}",
+        "docx_url": f"{url_prefix}/{artifact_id}/{docx_filename}",
         "title": title,
     }
+
+
+def create_markdown_artifact(markdown_text: str, title: str) -> dict:
+    """Save review-doc Markdown text as .md and .docx artifacts."""
+    return create_document_artifact(markdown_text, title, artifact_kind="review_docs")

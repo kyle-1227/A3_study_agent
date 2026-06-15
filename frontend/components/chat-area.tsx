@@ -37,6 +37,8 @@ export interface Message {
   resourceStatus?: ResourceGenerationStatus
   mindmap?: MindmapResult
   reviewDoc?: ReviewDocResult
+  reviewDocs?: ReviewDocResult[]
+  exercise?: ExerciseResult
 }
 
 export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review"
@@ -77,6 +79,16 @@ export interface MindmapResult {
 export interface ReviewDocResult {
   title: string
   markdownUrl: string
+  docxUrl?: string
+  filename?: string
+  docxFilename?: string
+  subject?: string
+  markdown?: string
+}
+
+export interface ExerciseResult {
+  title: string
+  markdownUrl?: string
   docxUrl?: string
   filename?: string
   docxFilename?: string
@@ -343,7 +355,16 @@ function MessageBubble({ message }: { message: Message }) {
           <div className="min-w-0 space-y-3">
             {message.resourceStatus && <ResourceGenerationStatusPanel status={message.resourceStatus} />}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
-            {message.reviewDoc && <ReviewDocCard reviewDoc={message.reviewDoc} markdownText={message.content} />}
+            {message.reviewDocs?.length
+              ? message.reviewDocs.map((doc) => (
+                  <ReviewDocCard
+                    key={`${doc.subject || doc.title}-${doc.markdownUrl || doc.filename || doc.docxUrl}`}
+                    reviewDoc={doc}
+                    markdownText={doc.markdown || message.content}
+                  />
+                ))
+              : message.reviewDoc && <ReviewDocCard reviewDoc={message.reviewDoc} markdownText={message.content} />}
+            {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
@@ -376,6 +397,31 @@ function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult
           {reviewDoc.docxUrl && <DownloadButton href={reviewDoc.docxUrl} label="下载 .docx" />}
           <SmallButton
             onClick={() => openReviewDocPrintPage(reviewDoc.title, markdownText)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseResult; markdownText: string }) {
+  return (
+    <div className="rounded-lg border border-[#C8D6C9] bg-[#F8FAF6] overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <GraduationCap className="h-4 w-4 text-[#3D5A40] shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold text-[#3D5A40] truncate">练习题资源</p>
+            <p className="text-xs text-muted-foreground truncate">{exercise.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {exercise.markdownUrl && <DownloadButton href={exercise.markdownUrl} label="下载 .md" />}
+          {exercise.docxUrl && <DownloadButton href={exercise.docxUrl} label="下载 .docx" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(exercise.title || "练习题", markdownText)}
             label="导出 PDF"
             icon={<FileText className="h-3.5 w-3.5" />}
           />

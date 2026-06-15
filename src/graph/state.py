@@ -147,7 +147,9 @@ def initial_request_reset_transient_state() -> dict:
         "exercise_round": 0,
         "review_doc_outline": "",
         "review_doc_markdown": "",
+        "review_doc_markdowns": [],
         "review_doc_artifact": {},
+        "review_doc_artifacts": [],
         "review_doc_review_verdict": "",
         "review_doc_review_reason": "",
         "review_doc_revision_notes": "",
@@ -216,7 +218,9 @@ class LearningState(TypedDict):
     exercise_round: int                                                 # Exercise generation/review round
     review_doc_outline: str                                             # Planner-produced review document blueprint
     review_doc_markdown: str                                            # Reviewed Markdown review document draft
+    review_doc_markdowns: list[dict]                                    # Per-subject Markdown review documents
     review_doc_artifact: dict                                           # Generated review document content and artifact metadata
+    review_doc_artifacts: list[dict]                                    # Per-subject review document artifact metadata
     review_doc_review_verdict: str                                      # "approve" / "reject"
     review_doc_review_reason: str                                       # Review document reviewer reasoning
     review_doc_revision_notes: str                                      # Feedback for review_doc_agent regeneration

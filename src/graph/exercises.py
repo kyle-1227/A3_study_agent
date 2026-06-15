@@ -19,6 +19,7 @@ from src.llm.structured_output import (
     invoke_structured_llm,
 )
 from src.observability.a3_trace import emit_a3_trace
+from src.tools.document_tool import create_document_artifact
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
@@ -326,8 +327,33 @@ async def exercise_output(state: LearningState) -> dict:
         review_reason=str(state.get("exercise_review_reason") or ""),
         quality_warning=False,
     )
+    artifact: dict = {}
+    try:
+        artifact = create_document_artifact(
+            markdown_text=content,
+            title=title,
+            artifact_kind="exercises",
+        )
+    except Exception:
+        logger.exception("exercise_output document artifact generation failed")
+
+    emit_a3_trace(
+        logger,
+        "exercise_output",
+        {
+            "item_count": len(items),
+            "markdown_chars": len(content),
+            "markdown_url": artifact.get("markdown_url", ""),
+            "docx_url": artifact.get("docx_url", ""),
+            "has_document_artifact": bool(artifact),
+        },
+        state=state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
+
     return {
         "exercise_artifact": {
+            **artifact,
             "title": title,
             "items": items,
             "quality_warning": False,
