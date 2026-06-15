@@ -28,6 +28,7 @@ class TestBuildGraph:
         node_names = set(graph.nodes.keys())
         expected = {
             "supervisor",
+            "memory_use_decider",
             "academic_router",
             "search_query_rewriter",
             "rag_retrieve",
@@ -113,6 +114,8 @@ class TestBuildGraph:
 
     def test_search_query_rewriter_is_shared_after_supervisor(self):
         graph = build_graph()
+        assert ("memory_use_decider", "search_query_rewriter") in graph.edges
+        assert "memory_use_decider" in graph.nodes
         assert "search_query_rewriter" in graph.branches
         assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]
 
@@ -131,6 +134,9 @@ class TestBuildGraph:
 
         async def fake_supervisor(state):
             return {"intent": "academic"}
+
+        async def fake_memory_use_decider(state):
+            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
 
         async def fake_search_query_rewriter(state):
             return {}
@@ -165,6 +171,7 @@ class TestBuildGraph:
 
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
+            patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
             patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
@@ -188,6 +195,9 @@ class TestBuildGraph:
         async def fake_supervisor(state):
             return {"intent": "academic"}
 
+        async def fake_memory_use_decider(state):
+            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
+
         async def fake_search_query_rewriter(state):
             return {}
 
@@ -210,6 +220,7 @@ class TestBuildGraph:
 
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
+            patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
             patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),

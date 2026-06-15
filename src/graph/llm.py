@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
+import httpx
 
 from src.config import get_setting
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 # ---------------------------------------------------------------------------
 # Recoverable errors that trigger automatic fallback
@@ -267,6 +270,127 @@ def _provider_error_body(exc: BaseException, *, max_chars: int = 12000) -> str:
     return text[:max_chars]
 
 
+def _extract_status_code(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except Exception:
+        return None
+
+
+def _is_provider_transport_retryable(exc: BaseException) -> bool:
+    status_code = _extract_status_code(exc)
+    if status_code == 429 or (status_code is not None and 500 <= status_code <= 599):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.ConnectError, httpx.TimeoutException)):
+        return True
+    retryable_type_names = {
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+    }
+    return type(exc).__name__ in retryable_type_names
+
+
+def _provider_transport_max_retries() -> int:
+    raw = get_setting("provider_transport_retry.max_retries", 2)
+    try:
+        value = int(raw)
+    except Exception:
+        value = 2
+    return max(1, min(3, value))
+
+
+def _provider_transport_delay_seconds(attempt_index: int) -> float:
+    raw = get_setting("provider_transport_retry.base_delay_seconds", 0.25)
+    try:
+        base = float(raw)
+    except Exception:
+        base = 0.25
+    return max(0.0, base) * attempt_index
+
+
+async def invoke_with_provider_transport_retry(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    node_name: str,
+    llm_node: str,
+    provider: str,
+    model: str,
+    state: dict | None = None,
+) -> tuple[T, int]:
+    """Retry transient provider transport failures without fallback.
+
+    Retries only connection errors, timeouts, HTTP 429, and HTTP 5xx.
+    The caller supplies the exact same operation each time, so model, prompt,
+    schema, and request payload remain unchanged.
+    """
+    max_retries = _provider_transport_max_retries()
+    retry_count = 0
+    while True:
+        try:
+            return await operation(), retry_count
+        except Exception as exc:
+            if not _is_provider_transport_retryable(exc) or retry_count >= max_retries:
+                if retry_count > 0 and _is_provider_transport_retryable(exc):
+                    emit_a3_trace(
+                        logger,
+                        "final_failure_after_retries",
+                        {
+                            "node_name": node_name,
+                            "llm_node": llm_node,
+                            "provider": provider,
+                            "model": model,
+                            "retry_count": retry_count,
+                            "max_retries": max_retries,
+                            "fallback_used": False,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                            "status_code": _extract_status_code(exc),
+                            "provider_error_body": _provider_error_body(exc),
+                        },
+                        state=state or {},
+                        env_flag="LOG_A3_TRACE",
+                    )
+                raise
+
+            retry_count += 1
+            status_code = _extract_status_code(exc)
+            common_payload = {
+                "node_name": node_name,
+                "llm_node": llm_node,
+                "provider": provider,
+                "model": model,
+                "retry_count": retry_count,
+                "max_retries": max_retries,
+                "fallback_used": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "status_code": status_code,
+                "provider_error_body": _provider_error_body(exc),
+            }
+            emit_a3_trace(
+                logger,
+                "provider_transport_error",
+                common_payload,
+                state=state or {},
+                env_flag="LOG_A3_TRACE",
+            )
+            emit_a3_trace(
+                logger,
+                "provider_transport_retry_attempt",
+                {
+                    **common_payload,
+                    "next_attempt": retry_count + 1,
+                },
+                state=state or {},
+                env_flag="LOG_A3_TRACE",
+            )
+            await asyncio.sleep(_provider_transport_delay_seconds(retry_count))
+
+
 async def invoke_plain_llm_fail_fast(
     *,
     node_name: str,
@@ -295,7 +419,14 @@ async def invoke_plain_llm_fail_fast(
         "fallback_used": False,
     }
     try:
-        result = await llm.ainvoke(messages)
+        result, transport_retry_count = await invoke_with_provider_transport_retry(
+            lambda: llm.ainvoke(messages),
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=provider,
+            model=model,
+            state=state or {},
+        )
         raw = str(getattr(result, "content", result) or "")
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         if not raw.strip():
@@ -312,6 +443,7 @@ async def invoke_plain_llm_fail_fast(
                 "error_type": "",
                 "error_message": "",
                 "provider_error_body": "",
+                "provider_transport_retry_count": transport_retry_count,
             },
             state=state or {},
             env_flag="LOG_A3_TRACE",

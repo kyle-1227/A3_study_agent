@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -18,3 +20,4 @@ class ResumeRequest(BaseModel):
     thread_id: str
     edited_plan: str = Field(default="", max_length=16384)
     feedback: str | None = Field(default=None, max_length=4096)
+    memory_use_choice: Literal["use", "ignore"] | None = None

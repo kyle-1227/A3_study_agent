@@ -12,10 +12,13 @@ All mock graphs must provide aget_state as AsyncMock.
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from src.observability.a3_trace import emit_a3_trace
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +711,86 @@ class TestSSEMindmapResult:
         assert mindmap_events[0]["title"] == "Mock Mindmap"
         assert mindmap_events[0]["tree"]["title"] == "Mock Mindmap"
 
+
+class TestSSEEvidenceSummaryResourceFinal:
+    """Evidence controlled stop should emit a normal resource_final event."""
+
+    @pytest.mark.anyio
+    async def test_evidence_summary_resource_final_emitted(self):
+        from app import generate_sse
+
+        final_state = {
+            "evidence_controlled_stop": True,
+            "final_response_type": "evidence_summary",
+            "requested_resource_type": "study_plan",
+            "evidence_controlled_stop_reason": "evidence_insufficient",
+            "plan": "## Evidence summary\nEvidence is insufficient for a full resource.",
+            "study_plan_artifact": {},
+        }
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values=final_state),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
+        assert len(resource_events) == 1
+        assert resource_events[0]["resource_type"] == "evidence_summary"
+        assert resource_events[0]["controlled_stop"] is True
+        assert "study_plan" not in resource_events[0]
+        assert all_payloads[-1] == {"type": "done"}
+
+
+class TestSSEProviderRetryEvents:
+    """Provider transport retry traces should be visible to the frontend."""
+
+    @pytest.mark.anyio
+    async def test_provider_retry_trace_is_emitted_as_sse_event(self):
+        from app import generate_sse
+
+        async def events():
+            emit_a3_trace(
+                logging.getLogger("test_sse_provider_retry"),
+                "provider_transport_retry_attempt",
+                {
+                    "node_name": "evidence_judge",
+                    "llm_node": "evidence_judge",
+                    "provider": "openrouter",
+                    "model": "test-model",
+                    "retry_count": 1,
+                    "max_retries": 2,
+                    "next_attempt": 2,
+                    "fallback_used": False,
+                    "error_type": "ConnectError",
+                    "error_message": "connection failed",
+                    "status_code": None,
+                },
+                state={"request_id": "r1"},
+            )
+            yield _node_start("evidence_judge")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={}),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        retry_events = [payload for payload in payloads if payload.get("type") == "provider_retry"]
+        assert len(retry_events) == 1
+        assert retry_events[0]["stage"] == "provider_transport_retry_attempt"
+        assert retry_events[0]["node"] == "evidence_judge"
+        assert retry_events[0]["retry_count"] == 1
+        assert retry_events[0]["max_retries"] == 2
+
 # ---------------------------------------------------------------------------
 # TestSSEDoneEvent 鈥?"done" SSE event at stream completion (BUG-09)
 # ---------------------------------------------------------------------------
@@ -751,5 +834,50 @@ class TestSSEDoneEvent:
         done_events = [p for p in all_payloads if p.get("type") == "done"]
         assert len(done_events) == 0
 
+    @pytest.mark.anyio
+    async def test_memory_confirmation_interrupt_payload_is_typed(self):
+        """Memory confirmation interrupt should be distinguishable from plan review."""
+        from app import generate_sse
 
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "memory_confirmation",
+                "question": "Use memory?",
+                "reason": "ambiguous",
+                "selected_memory_count": 2,
+                "options": [
+                    {"label": "Use", "value": "use"},
+                    {"label": "Ignore", "value": "ignore"},
+                ],
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=("memory_use_decider",), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert interrupt_events == [
+            {
+                "type": "interrupt",
+                "interrupt_type": "memory_confirmation",
+                "question": "Use memory?",
+                "reason": "ambiguous",
+                "selected_memory_count": 2,
+                "options": [
+                    {"label": "Use", "value": "use"},
+                    {"label": "Ignore", "value": "ignore"},
+                ],
+                "thread_id": "t-1",
+            }
+        ]
+        assert not [p for p in all_payloads if p.get("type") == "done"]
 

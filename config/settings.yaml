@@ -11,6 +11,11 @@ academic:
 development:
   fail_fast_structured_output: true      # Structured Pydantic calls fail visibly in development
   fail_fast_evidence_judge: true         # Evidence Judge failure interrupts graph in development
+  enable_dev_memory_clear: true          # Dev-only API to clear persistent memory for a thread
+
+provider_transport_retry:
+  max_retries: 2                         # Retry transient provider transport errors 1-3 times
+  base_delay_seconds: 0.25               # Linear backoff base delay between retry attempts
 
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state

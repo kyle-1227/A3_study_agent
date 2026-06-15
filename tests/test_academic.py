@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.academic import (
     _best_doc_score,
+    _deterministic_memory_use_decision,
     _evaluate_retrieval_branch,
     _format_retrieved,
     _format_search,
@@ -19,6 +20,7 @@ from src.graph.academic import (
     SearchQueryRewriteOutput,
     academic_router,
     generate_answer,
+    memory_use_decider,
     rag_retrieve,
     rewrite_query,
     search_query_rewriter,
@@ -72,6 +74,41 @@ class TestRewriteQuery:
             })
 
 
+class TestMemoryUseDecision:
+    def test_empty_memory_ignores_without_prompt(self):
+        decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=0)
+        assert decision is not None
+        assert decision.decision == "ignore"
+
+    def test_explicit_history_reference_uses_memory(self):
+        decision = _deterministic_memory_use_decision("结合之前的内容，给我一份学习计划", selected_memory_count=1)
+        assert decision is not None
+        assert decision.decision == "use"
+
+    def test_explicit_history_exclusion_ignores_memory(self):
+        decision = _deterministic_memory_use_decision("不要参考之前，给我一份学习计划", selected_memory_count=1)
+        assert decision is not None
+        assert decision.decision == "ignore"
+
+    def test_ambiguous_revision_asks_user_when_memory_exists(self):
+        decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=1)
+        assert decision is not None
+        assert decision.decision == "ask_user"
+        assert decision.question_to_user
+
+    async def test_memory_use_decider_ignores_when_no_memory(self):
+        result = await memory_use_decider({
+            "messages": [HumanMessage(content="重新给我一份学习计划")],
+            "evidence_summary_memory": [],
+            "subject": "other",
+            "requested_resource_type": "study_plan",
+            "request_id": "req",
+            "thread_id": "thread",
+        })
+        assert result["memory_use_policy"] == "ignore"
+        assert result["selected_evidence_memory_summaries"] == []
+
+
 class TestSearchQueryRewriter:
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -102,6 +139,7 @@ class TestSearchQueryRewriter:
             "keypoints": ["Python"],
             "subject": "python",
             "subject_candidates": ["python"],
+            "memory_use_policy": "ignore",
         })
 
         assert result["search_rag_query"] == "Python functions parameters return values"
@@ -145,6 +183,7 @@ class TestSearchQueryRewriter:
             "rewritten_query": "stale retry query from previous turn",
             "subject": "python",
             "subject_candidates": ["python"],
+            "memory_use_policy": "ignore",
         })
 
         assert result["search_rag_query"] == "fresh rag query"
@@ -194,6 +233,7 @@ class TestSearchQueryRewriter:
                 "messages": [HumanMessage(content="Python practice")],
                 "keypoints": ["Python"],
                 "subject": "python",
+                "memory_use_policy": "ignore",
             })
 
 

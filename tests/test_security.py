@@ -15,7 +15,7 @@ class TestNoHardcodedSecrets:
 
     SECRET_PATTERNS = [
         re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-        re.compile(r"(DEEPSEEK_API_KEY|SILICONFLOW_API_KEY)\s*=\s*[\"'][a-zA-Z0-9]"),
+        re.compile(r"(DEEPSEEK_API_KEY|OPENROUTER_API_KEY)\s*=\s*[\"'][a-zA-Z0-9]"),
     ]
 
     def _scan_file(self, filepath: Path) -> list[str]:
@@ -68,7 +68,12 @@ class TestEnvExample:
 
     def test_env_example_has_required_keys(self):
         content = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
-        required = ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "SILICONFLOW_API_KEY"]
+        required = [
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_BASE_URL",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_BASE_URL",
+        ]
         for key in required:
             assert key in content, f".env.example missing key: {key}"
 

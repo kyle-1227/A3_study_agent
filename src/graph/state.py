@@ -11,6 +11,9 @@ from typing_extensions import TypedDict
 # Sentinel value: returning this from a node signals "clear all context"
 CONTEXT_CLEAR: list[dict] = [{"__clear__": True}]
 
+# Sentinel value: returning this to evidence memory reducers clears the list.
+MEMORY_CLEAR: list[dict] = [{"__memory_clear__": True}]
+
 # ── Evidence memory reducer ────────────────────────────────────────────────
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
 
@@ -23,6 +26,9 @@ def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[di
     - Retain only the most recent ``EVIDENCE_MEMORY_MAX_ENTRIES`` entries.
     - Never store raw docs or full old context.
     """
+    if update and update[0].get("__memory_clear__"):
+        return []
+
     merged: dict[str, dict] = {}
     for entry in existing:
         mid = entry.get("memory_id", "")
@@ -60,6 +66,13 @@ def initial_request_reset_transient_state() -> dict:
         "keypoints": [],
         "requested_resource_type": "",
         "needs_mindmap": False,
+        # memory use policy for current query rewrite
+        "memory_use_policy": "unset",
+        "memory_use_reason": "",
+        "memory_use_user_choice": "",
+        "memory_confirmation_required": False,
+        "memory_confirmation_question": "",
+        "selected_evidence_memory_summaries": [],
         # query / retrieval plan
         "search_rag_query": "",
         "search_web_query": "",
@@ -181,6 +194,12 @@ class LearningState(TypedDict):
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
+    memory_use_policy: Literal["use", "ignore", "ask_user", "unset"]    # Whether query rewrite may use selected memory
+    memory_use_reason: str                                              # Reason for the memory use policy
+    memory_use_user_choice: Literal["use", "ignore", ""]               # User choice after HIL confirmation
+    memory_confirmation_required: bool                                  # Whether memory use confirmation was requested
+    memory_confirmation_question: str                                   # HIL question shown to the user
+    selected_evidence_memory_summaries: list[dict]                      # Compact evidence summaries selected for current query
     mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
     mindmap_tree: dict                                                  # Reviewed JSON tree draft
     mindmap_artifact: dict                                              # Generated mindmap tree and artifact metadata

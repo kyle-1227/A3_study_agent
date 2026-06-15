@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+
 
 # ===========================================================================
 # TestInvokeWithFallback — sync core helper (kept for backward compat)
@@ -227,6 +229,124 @@ class TestAsyncInvokeWithFallback:
             await async_invoke_with_fallback(primary, ["msg"], fallback=fallback)
 
         fallback.ainvoke.assert_not_called()
+
+
+# ===========================================================================
+# TestProviderTransportRetry - same provider request, no business fallback
+# ===========================================================================
+
+class TestProviderTransportRetry:
+    """Transport retry should not change model, prompt, schema, or fallback flags."""
+
+    @pytest.mark.anyio
+    async def test_retries_timeout_and_returns_success(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import invoke_with_provider_transport_retry
+
+        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda: 2)
+        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
+
+        calls = 0
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            async def operation():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise TimeoutError("provider timed out")
+                return "ok"
+
+            result, retry_count = await invoke_with_provider_transport_retry(
+                operation,
+                node_name="evidence_judge",
+                llm_node="evidence_judge",
+                provider="openrouter",
+                model="test-model",
+                state={"request_id": "r1"},
+            )
+        finally:
+            reset_trace_event_sink(token)
+
+        assert result == "ok"
+        assert retry_count == 1
+        assert calls == 2
+        retry_events = [event for event in events if event["stage"].startswith("provider_transport")]
+        assert [event["stage"] for event in retry_events] == [
+            "provider_transport_error",
+            "provider_transport_retry_attempt",
+        ]
+        assert all(event["fallback_used"] is False for event in retry_events)
+
+    @pytest.mark.anyio
+    async def test_does_not_retry_programming_errors(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import invoke_with_provider_transport_retry
+
+        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda: 3)
+        monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
+
+        calls = 0
+
+        async def operation():
+            nonlocal calls
+            calls += 1
+            raise ValueError("bad schema")
+
+        with pytest.raises(ValueError):
+            await invoke_with_provider_transport_retry(
+                operation,
+                node_name="supervisor",
+                llm_node="supervisor",
+                provider="openrouter",
+                model="test-model",
+                state={},
+            )
+
+        assert calls == 1
+        llm_module.asyncio.sleep.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_retries_429_and_emits_final_failure(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import invoke_with_provider_transport_retry
+
+        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda: 2)
+        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
+
+        class Response:
+            status_code = 429
+            text = "rate limited"
+
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            async def operation():
+                exc = RuntimeError("rate limited")
+                exc.response = Response()
+                raise exc
+
+            with pytest.raises(RuntimeError):
+                await invoke_with_provider_transport_retry(
+                    operation,
+                    node_name="query_rewrite",
+                    llm_node="query_rewrite",
+                    provider="openrouter",
+                    model="test-model",
+                    state={"request_id": "r2"},
+                )
+        finally:
+            reset_trace_event_sink(token)
+
+        stages = [event["stage"] for event in events]
+        assert stages.count("provider_transport_error") == 2
+        assert stages.count("provider_transport_retry_attempt") == 2
+        assert stages[-1] == "final_failure_after_retries"
+        assert events[-1]["retry_count"] == 2
+        assert events[-1]["status_code"] == 429
+        assert events[-1]["fallback_used"] is False
 
 
 # ===========================================================================

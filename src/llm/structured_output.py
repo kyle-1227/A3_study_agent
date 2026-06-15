@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from src.config import get_setting
-from src.graph.llm import get_node_llm
+from src.graph.llm import get_node_llm, invoke_with_provider_transport_retry
 from src.llm.http_messages import (
     _InvalidHttpMessageFormatError,
     normalize_openai_messages,
@@ -471,6 +471,8 @@ async def _invoke_openrouter_native(
     messages: list,
     metrics: _InvokeMetrics,
     llm_node: str,
+    node_name: str,
+    state: dict | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     """Direct httpx call for OpenRouter native json_schema.
 
@@ -524,23 +526,33 @@ async def _invoke_openrouter_native(
 
     llm_started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
+        async def _post_request():
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                err = RuntimeError(
+                    f"Error code: {response.status_code} - {response.text}"
+                )
+                err.response = response  # for _extract_status_code / _extract_provider_error_body
+                raise err
+            return response
+
+        response, _transport_retry_count = await invoke_with_provider_transport_retry(
+            _post_request,
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=_provider(llm_node),
+            model=_model(llm_node),
+            state=state or {},
+        )
         metrics.llm_elapsed_ms = _round_ms(llm_started)
     except Exception as exc:
         metrics.llm_elapsed_ms = _round_ms(llm_started)
         raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
-
-    if response.status_code >= 400:
-        err = RuntimeError(
-            f"Error code: {response.status_code} - {response.text}"
-        )
-        err.response = response  # for _extract_status_code / _extract_provider_error_body
-        raise _InvokeOneModeError(err, metrics, raw_output="")
 
     try:
         data = response.json()
@@ -581,6 +593,7 @@ async def _invoke_one_mode(
     schema: type[BaseModel],
     messages: list,
     mode: str,
+    state: dict | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     llm = get_node_llm(llm_node)
     messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
@@ -600,7 +613,14 @@ async def _invoke_one_mode(
         if _provider(llm_node) == "openrouter":
             # Direct httpx: bypass ChatOpenAI default params (frequency_penalty,
             # presence_penalty, top_p, n) that break require_parameters=true.
-            return await _invoke_openrouter_native(schema, messages, metrics, llm_node)
+            return await _invoke_openrouter_native(
+                schema,
+                messages,
+                metrics,
+                llm_node,
+                node_name=node_name,
+                state=state,
+            )
 
         metrics.using_direct_openrouter_http = False
         metrics.provider_request_mode = "langchain_bind_native_schema"
@@ -616,7 +636,14 @@ async def _invoke_one_mode(
         )
         llm_started = time.perf_counter()
         try:
-            response = await runnable.ainvoke(messages)
+            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+                lambda: runnable.ainvoke(messages),
+                node_name=node_name,
+                llm_node=llm_node,
+                provider=_provider(llm_node),
+                model=_model(llm_node),
+                state=state or {},
+            )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
         except Exception as exc:
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -644,7 +671,14 @@ async def _invoke_one_mode(
         runnable = llm.bind(response_format={"type": "json_object"})
         llm_started = time.perf_counter()
         try:
-            response = await runnable.ainvoke(messages)
+            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+                lambda: runnable.ainvoke(messages),
+                node_name=node_name,
+                llm_node=llm_node,
+                provider=_provider(llm_node),
+                model=_model(llm_node),
+                state=state or {},
+            )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
         except Exception as exc:
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -672,7 +706,14 @@ async def _invoke_one_mode(
         runnable = llm.bind(tools=[_tool_schema(schema)], tool_choice={"type": "function", "function": {"name": schema.__name__}})
         llm_started = time.perf_counter()
         try:
-            response = await runnable.ainvoke(messages)
+            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+                lambda: runnable.ainvoke(messages),
+                node_name=node_name,
+                llm_node=llm_node,
+                provider=_provider(llm_node),
+                model=_model(llm_node),
+                state=state or {},
+            )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
         except Exception as exc:
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -712,7 +753,14 @@ async def _invoke_one_mode(
         metrics.provider_request_mode = "langchain_prompt_json"
         llm_started = time.perf_counter()
         try:
-            response = await llm.ainvoke(messages)
+            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+                lambda: llm.ainvoke(messages),
+                node_name=node_name,
+                llm_node=llm_node,
+                provider=_provider(llm_node),
+                model=_model(llm_node),
+                state=state or {},
+            )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
         except Exception as exc:
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -855,6 +903,7 @@ async def invoke_structured_llm(
                 schema=schema,
                 messages=messages,
                 mode=mode,
+                state=state,
             )
             # business validation with timing
             business_started = time.perf_counter()

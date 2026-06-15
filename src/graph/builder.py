@@ -1,4 +1,4 @@
-﻿"""Graph construction 鈥?assemble Supervisor + 3 branches, compile."""
+"""Graph construction: assemble Supervisor branches and compile."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from src.graph.academic import (
     evidence_summary_output,
     evaluate_hallucination,
     generate_answer,
+    memory_use_decider,
     rag_retrieve,
     rewrite_query,
     search_query_rewriter,
@@ -65,8 +66,9 @@ def build_graph() -> StateGraph:
     # 鈹€鈹€ Nodes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     graph.add_node("supervisor", supervisor_node)
 
-    # SubGraph A 鈥?Academic (parallel retrieval + answer generation)
+    # SubGraph A: Academic (parallel retrieval + answer generation)
     graph.add_node("academic_router", academic_router)
+    graph.add_node("memory_use_decider", memory_use_decider)
     graph.add_node("search_query_rewriter", search_query_rewriter)
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
@@ -76,8 +78,7 @@ def build_graph() -> StateGraph:
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
 
-    # Planner (gather intel 鈫?flattened adversarial planning)
-    # Emotional
+    # Emotional support
     graph.add_node("emotional_response", emotional_response)
 
     # Mindmap resource generation
@@ -122,13 +123,16 @@ def build_graph() -> StateGraph:
         "supervisor",
         route_by_intent,    # judge users intent
         {
-            "academic": "search_query_rewriter",
+            "academic": "memory_use_decider",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
     )
 
-    # Shared initial query rewrite, then route into academic or planning flow.
+    # Decide whether historical evidence memory may influence retrieval.
+    graph.add_edge("memory_use_decider", "search_query_rewriter")
+
+    # Shared initial query rewrite, then route into academic evidence flow.
     graph.add_conditional_edges(
         "search_query_rewriter",
         route_after_query_rewrite,
@@ -137,7 +141,7 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Academic flow 鈥?fan-out/fan-in parallel retrieval
+    # Academic flow: fan-out/fan-in parallel retrieval
     graph.add_edge("academic_router", "rag_retrieve")
     graph.add_edge("academic_router", "web_search")
 
@@ -232,7 +236,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("study_plan_rewrite", "study_plan_agent")
     graph.add_edge("study_plan_output", END)
 
-    # Unknown 鈥?direct to END
+    # Unknown: direct to END
     graph.add_edge("handle_unknown", END)
 
     return graph

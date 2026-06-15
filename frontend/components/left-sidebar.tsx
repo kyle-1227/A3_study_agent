@@ -10,6 +10,7 @@ import {
   MessageSquare,
   MessageSquarePlus,
   Settings,
+  Trash2,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -35,6 +36,7 @@ interface LeftSidebarProps {
   chatHistory: ChatHistoryItem[]
   onNewChat: () => void
   onSelectChat: (id: string) => void
+  onClearChat?: (id: string) => void
   onClearChatHistory?: () => void
   selectedChatId?: string
 }
@@ -60,6 +62,7 @@ export function LeftSidebar({
   chatHistory,
   onNewChat,
   onSelectChat,
+  onClearChat,
   onClearChatHistory,
   selectedChatId,
 }: LeftSidebarProps) {
@@ -235,22 +238,37 @@ export function LeftSidebar({
                     </p>
                   ) : (
                     chatHistory.map((chat) => (
-                      <button
+                      <div
                         key={chat.id}
-                        type="button"
-                        onClick={() => onSelectChat(chat.id)}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          "group flex items-center rounded-lg transition-colors",
                           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
                           selectedChatId === chat.id
                             ? "bg-sidebar-accent text-sidebar-accent-foreground"
                             : "text-foreground",
                         )}
-                        title={chat.title}
                       >
-                        <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="truncate">{chat.title}</span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => onSelectChat(chat.id)}
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded-l-lg px-3 py-2 text-left text-sm"
+                          title={chat.title}
+                        >
+                          <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="truncate">{chat.title}</span>
+                        </button>
+                        {onClearChat ? (
+                          <button
+                            type="button"
+                            onClick={() => onClearChat(chat.id)}
+                            className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-60 transition hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
+                            title="清除此对话"
+                            aria-label={`清除对话：${chat.title}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
                     ))
                   )}
                 </div>

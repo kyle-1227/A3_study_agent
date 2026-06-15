@@ -26,16 +26,22 @@ from src.database.checkpointer import (
     get_db_uri,
     make_thread_config,
 )
+from src.config import get_setting
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
-from src.graph.state import CONTEXT_CLEAR, initial_request_reset_transient_state
+from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_transient_state
 from src.schemas import ChatRequest, ResumeRequest
-from src.observability.a3_trace import emit_a3_trace
+from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
 from src.tools.document_tool import get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+PROVIDER_RETRY_TRACE_STAGES = {
+    "provider_transport_retry_attempt",
+    "provider_transport_error",
+    "final_failure_after_retries",
+}
 
 
 def _graph_checkpointer_type(graph) -> str:
@@ -142,6 +148,7 @@ TEXT_EMIT_NODES = {"handle_unknown", "evidence_summary_output", "mindmap_output"
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
     "supervisor",
+    "memory_use_decider",
     "academic_router",
     "search_query_rewriter",
     "rag_retrieve",
@@ -193,6 +200,16 @@ def _last_ai_message_content(final_state: dict) -> str:
 
 
 def _resource_final_payload(final_state: dict) -> dict | None:
+    if final_state.get("evidence_controlled_stop") is True or final_state.get("final_response_type") == "evidence_summary":
+        answer = _last_ai_message_content(final_state) or str(final_state.get("plan") or "")
+        return {
+            "type": "resource_final",
+            "resource_type": "evidence_summary",
+            "controlled_stop": True,
+            "controlled_stop_reason": final_state.get("evidence_controlled_stop_reason", ""),
+            "answer": answer,
+        }
+
     resource_type = str(final_state.get("requested_resource_type") or "")
     mindmap_artifact = final_state.get("mindmap_artifact") or {}
     mindmap_tree = final_state.get("mindmap_tree") or {}
@@ -262,6 +279,54 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     return payload
 
 
+def _dev_memory_clear_enabled() -> bool:
+    """Return whether the dev-only persistent-memory clear endpoint is enabled."""
+    env_values = {
+        (os.getenv("APP_ENV") or "").strip().lower(),
+        (os.getenv("A3_ENV") or "").strip().lower(),
+    }
+    if env_values & {"production", "prod"}:
+        return False
+    return bool(get_setting("development.enable_dev_memory_clear", False))
+
+
+async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
+    """Clear persistent memory fields for a thread in development mode."""
+    if not _dev_memory_clear_enabled():
+        raise HTTPException(status_code=403, detail="Dev memory clear is disabled")
+
+    config = make_thread_config(thread_id)
+    cleared_fields = [
+        "conversation_summary",
+        "evidence_summary_memory",
+        "evidence_gap_memory",
+    ]
+    values = {
+        "conversation_summary": "",
+        "evidence_summary_memory": MEMORY_CLEAR,
+        "evidence_gap_memory": MEMORY_CLEAR,
+    }
+    await graph.aupdate_state(config, values)
+
+    trace_state = {
+        "thread_id": thread_id,
+        "session_id": thread_id,
+        "cleared_fields": cleared_fields,
+    }
+    emit_a3_trace(
+        logger,
+        "dev_memory_clear",
+        {
+            "thread_id": thread_id,
+            "cleared_fields": cleared_fields,
+            "success": True,
+        },
+        state=trace_state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return {"ok": True, "thread_id": thread_id, "cleared_fields": cleared_fields}
+
+
 
 async def _stream_graph_events(
     graph,
@@ -276,9 +341,36 @@ async def _stream_graph_events(
     """
     node_start_times: dict[str, float] = {}
     active_nodes: list[str] = []
+    trace_events: list[dict] = []
+    trace_sink_token = set_trace_event_sink(trace_events)
+
+    def _drain_provider_retry_events() -> list[str]:
+        drained: list[str] = []
+        while trace_events:
+            event = trace_events.pop(0)
+            if event.get("stage") not in PROVIDER_RETRY_TRACE_STAGES:
+                continue
+            payload = {
+                "type": "provider_retry",
+                "stage": event.get("stage", ""),
+                "node": event.get("node_name", ""),
+                "llm_node": event.get("llm_node", ""),
+                "provider": event.get("provider", ""),
+                "model": event.get("model", ""),
+                "retry_count": event.get("retry_count", 0),
+                "max_retries": event.get("max_retries", 0),
+                "next_attempt": event.get("next_attempt", 0),
+                "error_type": event.get("error_type", ""),
+                "error_message": event.get("error_message", ""),
+                "status_code": event.get("status_code"),
+            }
+            drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+        return drained
 
     try:
         async for event in graph.astream_events(input_data, config=config, version="v2"):
+            for retry_payload in _drain_provider_retry_events():
+                yield retry_payload
             event_type = event["event"]
 
             # 鈹€鈹€ Node lifecycle events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -364,6 +456,8 @@ async def _stream_graph_events(
                                 ensure_ascii=False,
                             )
                             yield f"data: {review_doc_payload}\n\n"
+                    for retry_payload in _drain_provider_retry_events():
+                        yield retry_payload
 
             # 鈹€鈹€ Token streaming 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             elif event_type == "on_chat_model_stream":
@@ -395,6 +489,8 @@ async def _stream_graph_events(
                     )
                     yield f"data: {payload}\n\n"
     except Exception as e:
+        for retry_payload in _drain_provider_retry_events():
+            yield retry_payload
         logger.exception("Unhandled error in graph streaming")
         failed_node = active_nodes[-1] if active_nodes else None
         if failed_node:
@@ -418,6 +514,8 @@ async def _stream_graph_events(
         )
         yield f"data: {error_payload}\n\n"
         return
+    finally:
+        reset_trace_event_sink(trace_sink_token)
 
     # 鈹€鈹€ Check for interrupt after stream completes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     try:
@@ -448,11 +546,25 @@ async def _stream_graph_events(
     if state_snapshot.next:
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
-                draft = task.interrupts[0].value
-                payload = json.dumps(
-                    {"type": "interrupt", "draft": draft, "thread_id": thread_id},
-                    ensure_ascii=False,
-                )
+                interrupt_value = task.interrupts[0].value
+                if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "memory_confirmation":
+                    payload_data = {
+                        "type": "interrupt",
+                        "interrupt_type": "memory_confirmation",
+                        "question": interrupt_value.get("question", ""),
+                        "reason": interrupt_value.get("reason", ""),
+                        "selected_memory_count": interrupt_value.get("selected_memory_count", 0),
+                        "options": interrupt_value.get("options", []),
+                        "thread_id": thread_id,
+                    }
+                else:
+                    payload_data = {
+                        "type": "interrupt",
+                        "interrupt_type": "plan_review",
+                        "draft": interrupt_value,
+                        "thread_id": thread_id,
+                    }
+                payload = json.dumps(payload_data, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
                 return
 
@@ -469,6 +581,7 @@ async def _stream_graph_events(
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
+                "controlled_stop": bool(resource_payload.get("controlled_stop")),
             },
             state=final_state,
             env_flag="LOG_A3_TRACE",
@@ -527,6 +640,7 @@ async def generate_resume_sse(
     feedback: str | None,
     graph,
     thread_id: str,
+    memory_use_choice: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Resume an interrupted graph and stream remaining events as SSE.
 
@@ -538,7 +652,9 @@ async def generate_resume_sse(
     """
     config = make_thread_config(thread_id)
 
-    if feedback:
+    if memory_use_choice:
+        resume_value = {"type": "memory_confirmation", "choice": memory_use_choice}
+    elif feedback:
         resume_value = {"action": "feedback", "text": feedback}
     else:
         resume_value = edited_plan
@@ -565,9 +681,20 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
     return StreamingResponse(
-        generate_resume_sse(req.edited_plan, req.feedback, request.app.state.graph, req.thread_id),
+        generate_resume_sse(
+            req.edited_plan,
+            req.feedback,
+            request.app.state.graph,
+            req.thread_id,
+            memory_use_choice=req.memory_use_choice,
+        ),
         media_type="text/event-stream",
     )
+
+
+@app.post("/dev/threads/{thread_id}/memory/clear")
+async def clear_thread_memory_endpoint(thread_id: str, request: Request):
+    return await clear_persistent_memory_for_thread(request.app.state.graph, thread_id)
 
 
 @app.get("/artifacts/mindmaps/{artifact_id}/{filename}")
