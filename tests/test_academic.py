@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.config import get_setting
 from src.graph.academic import (
     _best_doc_score,
     _deterministic_memory_use_decision,
@@ -27,6 +28,7 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.state import CONTEXT_CLEAR
+from src.llm.structured_output import get_llm_output_mode
 
 
 class TestAcademicRouterRetry:
@@ -75,6 +77,12 @@ class TestRewriteQuery:
 
 
 class TestMemoryUseDecision:
+    def test_memory_use_decider_has_explicit_openrouter_config(self):
+        assert get_setting("llm.memory_use_decider.provider") == "openrouter"
+        assert get_setting("llm.memory_use_decider.base_url") == "https://openrouter.ai/api/v1"
+        assert get_setting("llm.memory_use_decider.api_key_env") == "OPENROUTER_API_KEY"
+        assert get_llm_output_mode("memory_use_decider") == "native_json_schema_pydantic"
+
     def test_empty_memory_ignores_without_prompt(self):
         decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=0)
         assert decision is not None

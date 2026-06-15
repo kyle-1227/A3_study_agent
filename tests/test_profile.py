@@ -1021,6 +1021,41 @@ class TestProfileExtractor:
         assert result.observations == []
 
     @pytest.mark.asyncio
+    async def test_extract_retries_failure_then_success(self, monkeypatch):
+        monkeypatch.setattr("src.profile.extractor.get_llm_call_max_retries", lambda _node: 2)
+        extractor, _, mock_structured = self._make_extractor()
+        mock_structured.ainvoke = AsyncMock(
+            side_effect=[
+                RuntimeError("temporary API error"),
+                ExtractedProfileInfo(skills_observed={"python": 0.4}),
+            ]
+        )
+
+        result = await extractor.extract(
+            user_message="hello",
+            assistant_response="world",
+        )
+
+        assert result.skills_observed == {"python": 0.4}
+        assert mock_structured.ainvoke.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_extract_returns_empty_after_retry_budget(self, monkeypatch):
+        monkeypatch.setattr("src.profile.extractor.get_llm_call_max_retries", lambda _node: 2)
+        extractor, _, mock_structured = self._make_extractor()
+        mock_structured.ainvoke = AsyncMock(side_effect=RuntimeError("API error"))
+
+        result = await extractor.extract(
+            user_message="hello",
+            assistant_response="world",
+        )
+
+        assert result.skills_observed == {}
+        assert result.style_signals == {}
+        assert result.observations == []
+        assert mock_structured.ainvoke.await_count == 3
+
+    @pytest.mark.asyncio
     async def test_extract_batch(self):
         extractor, _, mock_structured = self._make_extractor()
         # Return different results for each call

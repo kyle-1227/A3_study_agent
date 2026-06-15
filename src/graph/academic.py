@@ -3837,8 +3837,8 @@ async def memory_use_decider(state: LearningState) -> dict:
                 "reason": decision.reason,
                 "selected_memory_count": selected_memory_count,
                 "options": [
-                    {"label": "缁撳悎鍘嗗彶", "value": "use"},
-                    {"label": "鍙湅褰撳墠闂", "value": "ignore"},
+                    {"label": "\u7ed3\u5408\u5386\u53f2", "value": "use"},
+                    {"label": "\u53ea\u770b\u5f53\u524d\u95ee\u9898", "value": "ignore"},
                 ],
             }
         )

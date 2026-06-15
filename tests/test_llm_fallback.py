@@ -230,6 +230,50 @@ class TestAsyncInvokeWithFallback:
 
         fallback.ainvoke.assert_not_called()
 
+    async def test_retries_primary_before_fallback(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import async_invoke_with_fallback
+
+        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        primary = MagicMock()
+        primary.ainvoke = AsyncMock(
+            side_effect=[
+                TimeoutError("first"),
+                TimeoutError("second"),
+                "primary-ok",
+            ]
+        )
+        fallback = MagicMock()
+        fallback.ainvoke = AsyncMock(return_value="fallback-ok")
+
+        result = await async_invoke_with_fallback(primary, ["msg"], fallback=fallback)
+
+        assert result == "primary-ok"
+        assert primary.ainvoke.await_count == 3
+        fallback.ainvoke.assert_not_called()
+
+    async def test_falls_back_after_primary_retry_budget(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import async_invoke_with_fallback
+
+        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        primary = MagicMock()
+        primary.ainvoke = AsyncMock(
+            side_effect=[
+                TimeoutError("first"),
+                TimeoutError("second"),
+                TimeoutError("third"),
+            ]
+        )
+        fallback = MagicMock()
+        fallback.ainvoke = AsyncMock(return_value="fallback-ok")
+
+        result = await async_invoke_with_fallback(primary, ["msg"], fallback=fallback)
+
+        assert result == "fallback-ok"
+        assert primary.ainvoke.await_count == 3
+        fallback.ainvoke.assert_awaited_once()
+
 
 # ===========================================================================
 # TestProviderTransportRetry - same provider request, no business fallback
@@ -347,6 +391,34 @@ class TestProviderTransportRetry:
         assert events[-1]["retry_count"] == 2
         assert events[-1]["status_code"] == 429
         assert events[-1]["fallback_used"] is False
+
+
+class TestPlainLLMRetry:
+    @pytest.mark.anyio
+    async def test_retries_empty_output_then_succeeds(self, monkeypatch):
+        from src.graph import llm as llm_module
+        from src.graph.llm import invoke_plain_llm_fail_fast
+
+        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content="   "),
+                AIMessage(content=""),
+                AIMessage(content="usable answer"),
+            ]
+        )
+        monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
+
+        result = await invoke_plain_llm_fail_fast(
+            node_name="plain_retry",
+            llm_node="plain_retry",
+            messages=[HumanMessage(content="question")],
+            state={},
+        )
+
+        assert result == "usable answer"
+        assert mock_llm.ainvoke.await_count == 3
 
 
 # ===========================================================================

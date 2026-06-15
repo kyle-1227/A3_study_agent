@@ -16,6 +16,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.graph.llm import get_llm_call_max_retries
 from src.profile.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_prompt
 from src.profile.schema import ExtractedProfileInfo, UserProfile, profile_to_summary
 
@@ -104,14 +105,31 @@ class ProfileExtractor:
 
         user_prompt = build_extraction_prompt(conversation_text, existing_summary)
 
-        try:
-            result: ExtractedProfileInfo = await self._structured_llm.ainvoke([
-                SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ])
-        except Exception as exc:
-            logger.warning("Profile extraction LLM call failed: %s", exc)
-            return ExtractedProfileInfo()
+        messages = [
+            SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
+        max_retries = get_llm_call_max_retries("profile_extractor")
+        retry_count = 0
+        last_error: Exception | None = None
+
+        while retry_count <= max_retries:
+            try:
+                result: ExtractedProfileInfo = await self._structured_llm.ainvoke(messages)
+                break
+            except Exception as exc:
+                last_error = exc
+                if retry_count >= max_retries:
+                    logger.warning("Profile extraction LLM call failed: %s", last_error)
+                    return ExtractedProfileInfo()
+                retry_count += 1
+                logger.warning(
+                    "Profile extraction LLM call retry %s/%s after %s: %s",
+                    retry_count,
+                    max_retries,
+                    type(exc).__name__,
+                    exc,
+                )
 
         # Validate — filter out nonsense
         result = self._sanitize(result)
