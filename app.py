@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -15,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -30,7 +31,8 @@ from src.config import get_setting
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_transient_state
-from src.schemas import ChatRequest, ResumeRequest
+from src.profile import get_profile_manager
+from src.schemas import ChatRequest, OnboardRequest, ProfileResponse, ResumeRequest
 from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
 from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
@@ -615,6 +617,7 @@ async def generate_sse(
     query: str,
     graph,
     thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream LangGraph events as Server-Sent Events (SSE).
 
@@ -633,13 +636,27 @@ async def generate_sse(
         query: The user-provided string to be processed by the graph.
         graph: The compiled LangGraph instance from app.state.
         thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
+        user_id: Optional user ID for profile context injection and recording.
     """
     if thread_id is None:
         thread_id = str(uuid.uuid4())
     request_id = str(uuid.uuid4())
     config = make_thread_config(thread_id)
+
+    # Inject profile context as a SystemMessage if a user profile exists
+    messages = [HumanMessage(content=query)]
+    if user_id:
+        try:
+            manager = get_profile_manager()
+            profile_ctx = await manager.build_profile_context(user_id)
+            if profile_ctx:
+                messages.insert(0, SystemMessage(content=profile_ctx))
+                logger.info("注入画像上下文 user=%s (%d chars)", user_id, len(profile_ctx))
+        except Exception:
+            logger.exception("获取画像上下文失败 user=%s", user_id)
+
     state_input = {
-        "messages": [HumanMessage(content=query)],
+        "messages": messages,
         "request_id": request_id,
         "session_id": thread_id,
         "thread_id": thread_id,
@@ -648,11 +665,22 @@ async def generate_sse(
     }
     _emit_graph_config_trace(graph, config, state_input)
 
-    # Emit thread_id so frontend can use it for /resume
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
     async for chunk in _stream_graph_events(graph, state_input, config, thread_id):
         yield chunk
+
+    # Record the conversation turn for profile evolution (non-fatal)
+    if user_id:
+        try:
+            await manager.process_conversation(
+                user_id=user_id,
+                user_message=query,
+                assistant_response="",
+            )
+            logger.debug("画像轮次已记录 user=%s", user_id)
+        except Exception:
+            logger.exception("画像记录失败（非致命） user=%s", user_id)
 
 
 async def generate_resume_sse(
@@ -693,7 +721,7 @@ async def generate_resume_sse(
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
     return StreamingResponse(
-        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id),
+        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id, user_id=chat.user_id),
         media_type="text/event-stream",
     )
 
@@ -784,6 +812,124 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
         media_type=media_type,
         filename=filename,
     )
+
+
+# ── User profile & onboarding ────────────────────────────────────────────────
+
+
+@app.post("/onboard")
+async def onboard_endpoint(req: OnboardRequest):
+    """Create an initial user profile from the onboarding wizard.
+
+    All values are explicit self-reports → stored with confidence=0.9.
+    """
+    from src.profile.schema import (
+        AgentObservation,
+        Goal,
+        LearningStyle,
+        SkillEntry,
+        UserProfile,
+    )
+
+    manager = get_profile_manager()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Build skills from self-assessed levels
+    skills: dict[str, SkillEntry] = {}
+    for subject in req.subjects:
+        level = req.skill_levels.get(subject, 0.25)
+        skills[subject] = SkillEntry(
+            level=level,
+            confidence=0.9,
+            last_observed=now,
+            evidence_count=1,
+        )
+
+    # Build learning style from self-report
+    learning_style = LearningStyle()
+    for dim, val in req.learning_style.items():
+        if hasattr(learning_style, dim):
+            setattr(learning_style, dim, val)
+
+    # Build goals
+    goals = [
+        Goal(goal=g.strip(), importance=0.9, progress=0.0, created_at=now)
+        for g in req.goals
+        if g.strip()
+    ]
+
+    # Record observations about the onboarding
+    obs_list: list[AgentObservation] = []
+    if req.grade:
+        obs_list.append(AgentObservation(
+            content=f"用户自述年级: {req.grade}",
+            category="general",
+            importance=0.8,
+            created_at=now,
+        ))
+    if req.subjects:
+        obs_list.append(AgentObservation(
+            content=f"用户首次选择 {len(req.subjects)} 个学习方向: {', '.join(req.subjects)}",
+            category="general",
+            importance=0.8,
+            created_at=now,
+        ))
+
+    profile = UserProfile(
+        user_id=req.user_id,
+        skills=skills,
+        learning_style=learning_style,
+        goals=goals,
+        dislikes=req.dislikes or [],
+        agent_observations=obs_list,
+        extra={
+            "nickname": req.nickname,
+            "grade": req.grade,
+            "onboarding_completed": True,
+        },
+        created_at=now,
+        updated_at=now,
+    )
+
+    await manager.store.save(profile)
+    logger.info(
+        "Onboarding 画像已创建 user=%s nickname=%s subjects=%d goals=%d",
+        req.user_id, req.nickname, len(skills), len(goals),
+    )
+
+    return {
+        "user_id": req.user_id,
+        "summary": profile.to_summary(),
+        "skills_count": len(skills),
+        "goals_count": len(goals),
+    }
+
+
+@app.get("/profile/{user_id}")
+async def get_profile_endpoint(user_id: str):
+    """Return the current user profile, or 404 if not found."""
+    manager = get_profile_manager()
+    profile = await manager.store.load(user_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {
+        "user_id": user_id,
+        "has_profile": True,
+        "summary": profile.to_summary(),
+        "skills": {
+            name: {"level": entry.level, "confidence": entry.confidence}
+            for name, entry in profile.skills.items()
+        },
+        "goals": [{"goal": g.goal, "importance": g.importance} for g in profile.goals],
+    }
+
+
+@app.get("/subjects")
+async def get_subjects_endpoint():
+    """Return the list of available learning subjects discovered from data/."""
+    from src.rag.course_catalog import get_available_subjects_from_data
+
+    return {"subjects": get_available_subjects_from_data()}
 
 
 if __name__ == "__main__":
