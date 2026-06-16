@@ -33,6 +33,17 @@ from src.graph.evidence import (
 )
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
+from src.graph.web_research import (
+    WebResearchPlan,
+    WebResearchTask,
+    WebSourceSummary,
+    WebSourceSummaryBatch,
+    canonicalize_url,
+    dedupe_sources_by_canonical_url,
+    domain_from_url,
+    validate_web_research_plan,
+    validate_web_source_summary_batch,
+)
 from src.llm.structured_output import (
     StructuredLLMResult,
     StructuredOutputError,
@@ -592,6 +603,7 @@ def _clear_retrieval_plan_state() -> dict:
         "web_judge_model": "deepseek/deepseek-v4-flash",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
+        "web_research_v2_debug": {},
         "web_evidence_count": 0,
         "web_supplement_count": 0,
         "evidence_candidates": [],
@@ -1985,6 +1997,59 @@ def _dual_source_enabled() -> bool:
 
 def _block_generation_when_evidence_judge_failed() -> bool:
     return bool(_retrieval_setting("dual_source_evidence.block_generation_when_evidence_judge_failed", True))
+
+
+def _web_research_v2_setting(key: str, default: Any) -> Any:
+    return get_setting(f"retrieval.web_research_v2.{key}", default)
+
+
+def _web_research_v2_enabled() -> bool:
+    scope = str(_web_research_v2_setting("scope", "dual_source_evidence_only") or "").strip()
+    return bool(_web_research_v2_setting("enabled", True)) and scope == "dual_source_evidence_only"
+
+
+def _web_research_v2_max_total_tasks() -> int:
+    try:
+        return max(1, min(6, int(_web_research_v2_setting("max_total_tasks", 6))))
+    except (TypeError, ValueError):
+        return 6
+
+
+def _web_research_v2_max_tasks_per_subject() -> int:
+    try:
+        return max(1, int(_web_research_v2_setting("max_tasks_per_subject", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _web_research_v2_max_results_per_task() -> int:
+    try:
+        return max(1, int(_web_research_v2_setting("max_results_per_task", 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _web_research_v2_source_summary_batch_size() -> int:
+    try:
+        return max(1, min(12, int(_web_research_v2_setting("source_summary_batch_size", 6))))
+    except (TypeError, ValueError):
+        return 6
+
+
+def _web_research_v2_summarize_sources() -> bool:
+    return bool(_web_research_v2_setting("summarize_sources", True))
+
+
+def _web_research_v2_fallback_to_legacy() -> bool:
+    return bool(_web_research_v2_setting("fallback_to_legacy_web_supplement", True))
+
+
+def _web_research_v2_expose_fallback_trace() -> bool:
+    return bool(_web_research_v2_setting("expose_fallback_trace", True))
+
+
+def _web_research_v2_strict_observability() -> bool:
+    return bool(_web_research_v2_setting("strict_observability", True))
 
 
 def _fail_fast_evidence_judge() -> bool:
@@ -3675,6 +3740,805 @@ def _build_web_evidence_candidates(
     return candidates
 
 
+WEB_RESEARCH_V2_SKIP_REASON = "web_research_v2_uses_source_summarizer_and_evidence_judge_v2"
+
+
+def _new_web_research_debug(status: Literal["success", "fallback", "degraded", "failed"] = "success") -> dict:
+    return {
+        "web_research_version": "v2",
+        "status": status,
+        "used_fallback": False,
+        "fallback_chain": [],
+        "developer_warnings": [],
+        "stages": [],
+        "task_count": 0,
+        "result_count": 0,
+        "kept_count": 0,
+        "rejected_count": 0,
+        "duplicate_url_count": 0,
+        "search_result_judge_skipped": True,
+        "skip_reason": WEB_RESEARCH_V2_SKIP_REASON,
+    }
+
+
+def _emit_web_research_stage_trace(state: LearningState, stage_debug: dict) -> None:
+    if not _web_research_v2_expose_fallback_trace() and not stage_debug.get("is_fallback"):
+        return
+    emit_a3_trace(
+        logger,
+        str(stage_debug.get("stage") or "web_research_v2"),
+        stage_debug,
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+        level="warning" if stage_debug.get("status") in {"fallback", "degraded", "failed"} else "info",
+        max_chars=3000,
+    )
+
+
+def _append_web_research_stage(debug: dict, state: LearningState, stage_debug: dict) -> None:
+    debug.setdefault("stages", []).append(stage_debug)
+    if stage_debug.get("is_fallback") and stage_debug.get("fallback_from") and stage_debug.get("fallback_to"):
+        _append_fallback_chain(
+            debug,
+            fallback_from=str(stage_debug.get("fallback_from")),
+            fallback_to=str(stage_debug.get("fallback_to")),
+            reason=str(stage_debug.get("fallback_reason") or stage_debug.get("error_type") or "fallback_used"),
+        )
+    warning = stage_debug.get("developer_warning")
+    if warning:
+        _append_developer_warning(debug, str(warning))
+    _emit_web_research_stage_trace(state, stage_debug)
+
+
+def _finalize_web_research_debug(debug: dict) -> dict:
+    stages = debug.get("stages") or []
+    has_fallback_stage = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
+    has_degraded_stage = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
+    has_failed_stage = any(stage.get("status") == "failed" for stage in stages if isinstance(stage, dict))
+    if has_fallback_stage or debug.get("fallback_chain"):
+        debug["used_fallback"] = True
+    if debug.get("status") == "failed":
+        debug["status"] = "failed"
+    elif debug.get("used_fallback") or debug.get("fallback_chain"):
+        debug["status"] = "fallback"
+    elif has_failed_stage and not debug.get("kept_count"):
+        debug["status"] = "degraded"
+    elif has_degraded_stage:
+        debug["status"] = "degraded"
+    else:
+        debug["status"] = debug.get("status") or "success"
+    _assert_no_silent_web_research_fallback(debug)
+    return debug
+
+
+def _assert_no_silent_web_research_fallback(debug: dict) -> None:
+    stages = debug.get("stages") or []
+    stage_fallback = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
+    stage_degraded = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
+    fallback_chain = debug.get("fallback_chain") or []
+    problems: list[str] = []
+    if debug.get("status") == "success" and fallback_chain:
+        problems.append("status=success with non-empty fallback_chain")
+    if debug.get("status") == "success" and stage_degraded:
+        problems.append("status=success with degraded stage")
+    if stage_fallback and not debug.get("used_fallback"):
+        problems.append("stage fallback detected but final used_fallback is false")
+    if fallback_chain and not debug.get("used_fallback"):
+        problems.append("fallback_chain is non-empty but final used_fallback is false")
+    if not problems:
+        return
+    message = "Web Research V2 observability violation: " + "; ".join(problems)
+    logger.error(message)
+    if _web_research_v2_strict_observability():
+        raise RuntimeError(message)
+    if fallback_chain or stage_fallback:
+        debug["used_fallback"] = True
+        if debug.get("status") == "success":
+            debug["status"] = "fallback"
+    elif stage_degraded and debug.get("status") == "success":
+        debug["status"] = "degraded"
+
+
+def _web_research_allowed_subjects(branches: list[dict]) -> list[str]:
+    subjects: list[str] = []
+    for branch in branches:
+        subject = str(branch.get("subject") or "").strip()
+        if subject and subject not in subjects:
+            subjects.append(subject)
+    return subjects
+
+
+def _web_research_branch_payload(branches: list[dict]) -> list[dict]:
+    payload: list[dict] = []
+    for branch in branches:
+        payload.append({
+            "subject": str(branch.get("subject") or ""),
+            "role": str(branch.get("role") or "supporting_context"),
+            "purpose": _clip_text(branch.get("purpose", ""), 180),
+            "rag_query": _clip_text(branch.get("rag_query", ""), 180),
+            "web_search_query": _clip_text(branch.get("web_search_query", ""), 180),
+            "priority": _clamp_priority(branch.get("priority", 0.5)),
+            "expected_coverage": branch.get("expected_coverage", [])[:6]
+            if isinstance(branch.get("expected_coverage"), list)
+            else [],
+        })
+    return payload
+
+
+def _build_web_research_planner_messages(
+    *,
+    state: LearningState,
+    branches: list[dict],
+    original_user_query: str,
+) -> list[dict]:
+    prompt = _render_prompt(
+        "web_research_planner",
+        {
+            "original_user_query": _clip_text(original_user_query, 1000),
+            "learning_goal": _clip_text(state.get("learning_goal", ""), 500),
+            "requested_resource_type": _clip_text(state.get("requested_resource_type", ""), 120),
+            "max_total_tasks": str(_web_research_v2_max_total_tasks()),
+            "max_tasks_per_subject": str(_web_research_v2_max_tasks_per_subject()),
+            "branches_json": json.dumps(_web_research_branch_payload(branches), ensure_ascii=False),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You plan web research tasks for retrieval only. Return only valid JSON "
+                "matching the schema. Do not answer the user."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+async def _plan_web_research_tasks(
+    *,
+    state: LearningState,
+    branches: list[dict],
+    original_user_query: str,
+) -> tuple[WebResearchPlan | None, dict]:
+    output_mode = get_llm_output_mode("web_research_planner")
+    fallback_modes = get_fallback_modes("web_research_planner")
+    allowed_subjects = _web_research_allowed_subjects(branches)
+    messages = _build_web_research_planner_messages(
+        state=state,
+        branches=branches,
+        original_user_query=original_user_query,
+    )
+    try:
+        structured_result = await invoke_structured_llm(
+            node_name="web_research_planner",
+            llm_node="web_research_planner",
+            schema=WebResearchPlan,
+            messages=messages,
+            output_mode=output_mode,
+            fallback_modes=fallback_modes,
+            business_validator=lambda parsed: validate_web_research_plan(
+                parsed,
+                allowed_subjects=allowed_subjects,
+                max_total_tasks=_web_research_v2_max_total_tasks(),
+                max_tasks_per_subject=_web_research_v2_max_tasks_per_subject(),
+            ),
+            state=state,
+            max_raw_chars=get_max_raw_chars("web_research_planner"),
+        )
+    except StructuredOutputError as exc:
+        result = exc.result
+        stage = _make_execution_status(
+            node_name="web_research_planner",
+            stage="web_research_planner",
+            status="failed",
+            error_type=result.error_type or type(exc).__name__,
+            error_message=result.error_message or str(exc),
+            structured_output_mode=result.output_mode or output_mode,
+            fallback_modes_attempted=_attempted_modes(result),
+            retry_count=result.retry_count,
+            validation_errors=_validation_errors_from_text(result.business_validation_error or result.validation_error),
+            action_taken="return_failed_stage_for_web_research_dispatcher",
+            task_count=0,
+            raw_preview=_raw_preview(result.raw_output),
+            schema_size_chars=_schema_size_chars(WebResearchPlan),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        return None, stage
+    except Exception as exc:
+        stage = _make_execution_status(
+            node_name="web_research_planner",
+            stage="web_research_planner",
+            status="failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            structured_output_mode=output_mode,
+            fallback_modes_attempted=fallback_modes,
+            retry_count=0,
+            validation_errors=[],
+            action_taken="return_failed_stage_for_web_research_dispatcher",
+            task_count=0,
+            schema_size_chars=_schema_size_chars(WebResearchPlan),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        return None, stage
+
+    parsed = structured_result.parsed
+    if not structured_result.success or not isinstance(parsed, WebResearchPlan):
+        validation_errors = _validation_errors_from_text(
+            structured_result.business_validation_error
+            or structured_result.validation_error
+            or "parsed result is not WebResearchPlan"
+        )
+        stage = _make_execution_status(
+            node_name="web_research_planner",
+            stage="web_research_planner",
+            status="failed",
+            error_type=structured_result.error_type or "InvalidStructuredResult",
+            error_message=structured_result.error_message or "Web research planner returned no parsed plan.",
+            structured_output_mode=structured_result.output_mode or output_mode,
+            fallback_modes_attempted=_attempted_modes(structured_result),
+            retry_count=structured_result.retry_count,
+            validation_errors=validation_errors,
+            action_taken="return_failed_stage_for_web_research_dispatcher",
+            task_count=0,
+            raw_preview=_raw_preview(structured_result.raw_output),
+            schema_size_chars=_schema_size_chars(WebResearchPlan),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        return None, stage
+
+    validation_error_text = validate_web_research_plan(
+        parsed,
+        allowed_subjects=allowed_subjects,
+        max_total_tasks=_web_research_v2_max_total_tasks(),
+        max_tasks_per_subject=_web_research_v2_max_tasks_per_subject(),
+    )
+    if validation_error_text:
+        stage = _make_execution_status(
+            node_name="web_research_planner",
+            stage="web_research_planner",
+            status="failed",
+            error_type="BusinessValidationError",
+            error_message="Web research planner business validation failed.",
+            structured_output_mode=structured_result.output_mode,
+            fallback_modes_attempted=_attempted_modes(structured_result),
+            retry_count=structured_result.retry_count,
+            validation_errors=_validation_errors_from_text(validation_error_text),
+            action_taken="return_failed_stage_for_web_research_dispatcher",
+            task_count=len(parsed.tasks),
+            raw_preview=_raw_preview(structured_result.raw_output),
+            schema_size_chars=_schema_size_chars(WebResearchPlan),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        return None, stage
+
+    stage = _make_execution_status(
+        node_name="web_research_planner",
+        stage="web_research_planner",
+        status="fallback" if structured_result.fallback_used else "success",
+        is_fallback=structured_result.fallback_used,
+        fallback_from=output_mode if structured_result.fallback_used else None,
+        fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
+        fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+        structured_output_mode=structured_result.output_mode,
+        fallback_modes_attempted=_attempted_modes(structured_result),
+        retry_count=structured_result.retry_count,
+        validation_errors=[],
+        action_taken="accepted_web_research_plan",
+        task_count=len(parsed.tasks),
+        tasks=[
+            {
+                "task_id": task.task_id,
+                "subject": task.subject,
+                "role": task.role,
+                "purpose": _clip_text(task.purpose, 160),
+                "search_query": _clip_text(task.search_query, 200),
+                "priority": task.priority,
+            }
+            for task in parsed.tasks
+        ],
+        raw_preview=_raw_preview(structured_result.raw_output),
+        schema_size_chars=_schema_size_chars(WebResearchPlan),
+        search_result_judge_skipped=True,
+        skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+    )
+    return parsed, stage
+
+
+async def _execute_web_research_tasks(
+    *,
+    state: LearningState,
+    tasks: list[WebResearchTask],
+    original_user_query: str,
+) -> tuple[list[dict], list[dict]]:
+    timeout = float(_retrieval_setting("web.timeout_seconds", _web_timeout_seconds()))
+    max_results = _web_research_v2_max_results_per_task()
+    sources: list[dict] = []
+    stages: list[dict] = []
+    for task in tasks:
+        started = time.perf_counter()
+        diagnostics: dict
+        timed_out = False
+        try:
+            diagnostics = await asyncio.wait_for(
+                asyncio.to_thread(
+                    web_search_fn,
+                    task.search_query,
+                    original_user_query=original_user_query,
+                    subject=task.subject,
+                    role=task.role,
+                    purpose=task.purpose,
+                    max_results=max_results,
+                    timeout_seconds=timeout,
+                ),
+                timeout=timeout,
+            )
+            diagnostics = _coerce_web_search_diagnostics(
+                diagnostics,
+                query=task.search_query,
+                original_user_query=original_user_query,
+                subject=task.subject,
+                role=task.role,
+                purpose=task.purpose,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            diagnostics = _tavily_exception_diagnostics(
+                task.search_query,
+                TimeoutError(f"tavily search exceeded {timeout}s"),
+                original_user_query=original_user_query,
+                subject=task.subject,
+                role=task.role,
+                purpose=task.purpose,
+                elapsed_ms=round(timeout * 1000, 2),
+            )
+        except Exception as exc:
+            diagnostics = _tavily_exception_diagnostics(
+                task.search_query,
+                exc,
+                original_user_query=original_user_query,
+                subject=task.subject,
+                role=task.role,
+                purpose=task.purpose,
+            )
+        diagnostics.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000, 2))
+        raw_results = diagnostics.get("results") or []
+        used_results = raw_results[:max_results]
+        task_failed = not bool(diagnostics.get("ok")) or bool(diagnostics.get("error_type"))
+        task_status = "failed" if task_failed else ("degraded" if not used_results else "success")
+        stage = _make_execution_status(
+            node_name="web_search_executor",
+            stage="web_search_executor.task",
+            status=task_status,
+            error_type=diagnostics.get("error_type") or None,
+            error_message=diagnostics.get("error_message") or None,
+            action_taken="task_failed_continue" if task_failed else "accepted_tavily_results",
+            task_id=task.task_id,
+            subject=task.subject,
+            role=task.role,
+            purpose=_clip_text(task.purpose, 160),
+            search_query=_clip_text(task.search_query, 200),
+            priority=task.priority,
+            provider=diagnostics.get("provider", "tavily"),
+            ok=bool(diagnostics.get("ok")),
+            timed_out=timed_out or diagnostics.get("error_type") == "TimeoutError",
+            status_code=diagnostics.get("status_code"),
+            result_count=diagnostics.get("result_count", len(raw_results)),
+            used_result_count=len(used_results),
+            elapsed_ms=diagnostics.get("elapsed_ms"),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            top_results=[
+                {
+                    "title": _clip_text(item.get("title", ""), 160),
+                    "domain": domain_from_url(str(item.get("url") or "")),
+                    "score": item.get("score"),
+                }
+                for item in used_results[:3]
+            ],
+        )
+        stages.append(stage)
+        for rank, result in enumerate(used_results):
+            original_url = str(result.get("url") or "")
+            sources.append({
+                "task_id": task.task_id,
+                "task_priority": task.priority,
+                "subject": task.subject,
+                "role": task.role,
+                "purpose": task.purpose,
+                "search_query": task.search_query,
+                "rank": rank,
+                "title": str(result.get("title") or ""),
+                "original_url": original_url,
+                "canonical_url": canonicalize_url(original_url),
+                "domain": domain_from_url(original_url),
+                "content": str(result.get("content") or result.get("raw_content") or result.get("snippet") or ""),
+                "tavily_score": result.get("score", result.get("tavily_score")),
+                "favicon": result.get("favicon", ""),
+            })
+    return sources, stages
+
+
+def _dedupe_web_sources_by_canonical_url(sources: list[dict]) -> tuple[list[dict], dict]:
+    deduped, debug = dedupe_sources_by_canonical_url(sources)
+    for index, source in enumerate(deduped):
+        source["source_id"] = f"websrc:{index}"
+        source.setdefault("canonical_url", canonicalize_url(str(source.get("original_url") or "")))
+        source.setdefault("domain", domain_from_url(str(source.get("original_url") or "")))
+    return deduped, debug
+
+
+def _build_web_source_summarizer_messages(
+    *,
+    state: LearningState,
+    sources: list[dict],
+    original_user_query: str,
+) -> list[dict]:
+    source_payload = [
+        {
+            "source_id": source.get("source_id", ""),
+            "task_id": source.get("task_id", ""),
+            "subject": source.get("subject", ""),
+            "role": source.get("role", ""),
+            "purpose": _clip_text(source.get("purpose", ""), 160),
+            "title": _clip_text(source.get("title", ""), 160),
+            "domain": source.get("domain", ""),
+            "tavily_score": source.get("tavily_score"),
+            "content_preview": _clip_text(source.get("content", ""), 1200),
+        }
+        for source in sources
+    ]
+    prompt = _render_prompt(
+        "web_source_summarizer",
+        {
+            "original_user_query": _clip_text(original_user_query, 1000),
+            "learning_goal": _clip_text(state.get("learning_goal", ""), 500),
+            "requested_resource_type": _clip_text(state.get("requested_resource_type", ""), 120),
+            "sources_json": json.dumps(source_payload, ensure_ascii=False),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You summarize program-provided web sources for an evidence pipeline. "
+                "Return only valid JSON matching the schema. Do not answer the user."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _basic_web_source_summary(source: dict) -> dict:
+    title = str(source.get("title") or "")
+    content = str(source.get("content") or "")
+    summary = _clip_text(content or title, 700)
+    coverage = [_clip_text(title or source.get("domain", "") or "web source", 120)]
+    return {
+        "source_id": source.get("source_id", ""),
+        "keep": bool(summary),
+        "summary": summary,
+        "coverage_points": coverage if summary else [],
+        "reason": "Basic Tavily fallback summary used after source summarizer failure.",
+        "evidence_type": "unknown",
+        "use_case": "background_context" if summary else "discard",
+        "relevance": "medium" if summary else "low",
+        "usefulness": "medium" if summary else "low",
+        "risk": "medium",
+        "summary_source": "basic_tavily_fallback",
+        "source_summary_fallback_used": True,
+        "web_research_v2_stage": "summarizer_fallback",
+    }
+
+
+async def _summarize_web_sources(
+    *,
+    state: LearningState,
+    sources: list[dict],
+    original_user_query: str,
+) -> tuple[list[dict], list[dict]]:
+    if not sources:
+        return [], []
+
+    batch_size = _web_research_v2_source_summary_batch_size()
+    output_mode = get_llm_output_mode("web_source_summarizer")
+    fallback_modes = get_fallback_modes("web_source_summarizer")
+    all_summaries: list[dict] = []
+    stages: list[dict] = []
+    batches = [sources[index : index + batch_size] for index in range(0, len(sources), batch_size)]
+
+    for batch_index, batch in enumerate(batches):
+        expected_ids = [str(source.get("source_id") or "") for source in batch]
+        if not _web_research_v2_summarize_sources():
+            fallback_summaries = [_basic_web_source_summary(source) for source in batch]
+            stage = _make_execution_status(
+                node_name="web_source_summarizer",
+                stage="web_source_summarizer.batch",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="web_source_summarizer",
+                fallback_to="basic_tavily_fallback",
+                fallback_reason="web_research_v2_summarize_sources_disabled",
+                action_taken="used_basic_tavily_fallback",
+                developer_warning="Web source summarizer disabled; basic Tavily fallback used.",
+                batch_index=batch_index,
+                expected_source_ids=expected_ids,
+                returned_source_ids=expected_ids,
+                source_count=len(batch),
+                kept_count=sum(1 for summary in fallback_summaries if summary.get("keep")),
+                rejected_count=sum(1 for summary in fallback_summaries if not summary.get("keep")),
+                search_result_judge_skipped=True,
+                skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            )
+            all_summaries.extend(fallback_summaries)
+            stages.append(stage)
+            continue
+
+        messages = _build_web_source_summarizer_messages(
+            state=state,
+            sources=batch,
+            original_user_query=original_user_query,
+        )
+        try:
+            structured_result = await invoke_structured_llm(
+                node_name="web_source_summarizer",
+                llm_node="web_source_summarizer",
+                schema=WebSourceSummaryBatch,
+                messages=messages,
+                output_mode=output_mode,
+                fallback_modes=fallback_modes,
+                business_validator=lambda parsed, ids=expected_ids: validate_web_source_summary_batch(
+                    parsed,
+                    expected_source_ids=ids,
+                ),
+                state=state,
+                max_raw_chars=get_max_raw_chars("web_source_summarizer"),
+            )
+        except StructuredOutputError as exc:
+            result = exc.result
+            fallback_summaries = [_basic_web_source_summary(source) for source in batch]
+            stage = _make_execution_status(
+                node_name="web_source_summarizer",
+                stage="web_source_summarizer.batch",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="web_source_summarizer",
+                fallback_to="basic_tavily_fallback",
+                fallback_reason=result.failure_phase or result.error_type or type(exc).__name__,
+                error_type=result.error_type or type(exc).__name__,
+                error_message=result.error_message or str(exc),
+                structured_output_mode=result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(result),
+                retry_count=result.retry_count,
+                validation_errors=_validation_errors_from_text(result.business_validation_error or result.validation_error),
+                action_taken="used_basic_tavily_fallback",
+                developer_warning="Source summarizer failed; basic Tavily fallback used.",
+                batch_index=batch_index,
+                expected_source_ids=expected_ids,
+                returned_source_ids=expected_ids,
+                source_count=len(batch),
+                kept_count=sum(1 for summary in fallback_summaries if summary.get("keep")),
+                rejected_count=sum(1 for summary in fallback_summaries if not summary.get("keep")),
+                raw_preview=_raw_preview(result.raw_output),
+                schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
+                search_result_judge_skipped=True,
+                skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            )
+            all_summaries.extend(fallback_summaries)
+            stages.append(stage)
+            continue
+        except Exception as exc:
+            fallback_summaries = [_basic_web_source_summary(source) for source in batch]
+            stage = _make_execution_status(
+                node_name="web_source_summarizer",
+                stage="web_source_summarizer.batch",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="web_source_summarizer",
+                fallback_to="basic_tavily_fallback",
+                fallback_reason=type(exc).__name__,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                structured_output_mode=output_mode,
+                fallback_modes_attempted=fallback_modes,
+                retry_count=0,
+                action_taken="used_basic_tavily_fallback",
+                developer_warning="Source summarizer failed; basic Tavily fallback used.",
+                batch_index=batch_index,
+                expected_source_ids=expected_ids,
+                returned_source_ids=expected_ids,
+                source_count=len(batch),
+                kept_count=sum(1 for summary in fallback_summaries if summary.get("keep")),
+                rejected_count=sum(1 for summary in fallback_summaries if not summary.get("keep")),
+                schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
+                search_result_judge_skipped=True,
+                skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            )
+            all_summaries.extend(fallback_summaries)
+            stages.append(stage)
+            continue
+
+        parsed = structured_result.parsed
+        validation_error_text = (
+            validate_web_source_summary_batch(parsed, expected_source_ids=expected_ids)
+            if isinstance(parsed, WebSourceSummaryBatch)
+            else "parsed result is not WebSourceSummaryBatch"
+        )
+        if not structured_result.success or not isinstance(parsed, WebSourceSummaryBatch) or validation_error_text:
+            fallback_summaries = [_basic_web_source_summary(source) for source in batch]
+            stage = _make_execution_status(
+                node_name="web_source_summarizer",
+                stage="web_source_summarizer.batch",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="web_source_summarizer",
+                fallback_to="basic_tavily_fallback",
+                fallback_reason="business_validation_error" if validation_error_text else "invalid_structured_result",
+                error_type=structured_result.error_type or "BusinessValidationError",
+                error_message=structured_result.error_message or "Web source summarizer validation failed.",
+                structured_output_mode=structured_result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(structured_result),
+                retry_count=structured_result.retry_count,
+                validation_errors=_validation_errors_from_text(
+                    validation_error_text
+                    or structured_result.business_validation_error
+                    or structured_result.validation_error
+                ),
+                action_taken="used_basic_tavily_fallback",
+                developer_warning="Source summarizer failed; basic Tavily fallback used.",
+                batch_index=batch_index,
+                expected_source_ids=expected_ids,
+                returned_source_ids=expected_ids,
+                source_count=len(batch),
+                kept_count=sum(1 for summary in fallback_summaries if summary.get("keep")),
+                rejected_count=sum(1 for summary in fallback_summaries if not summary.get("keep")),
+                raw_preview=_raw_preview(structured_result.raw_output),
+                schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
+                search_result_judge_skipped=True,
+                skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            )
+            all_summaries.extend(fallback_summaries)
+            stages.append(stage)
+            continue
+
+        summary_dicts = []
+        for summary in parsed.summaries:
+            item = summary.model_dump(mode="json")
+            item.setdefault("summary_source", "llm_source_summarizer")
+            item.setdefault("source_summary_fallback_used", False)
+            item.setdefault("web_research_v2_stage", "source_summarizer")
+            summary_dicts.append(item)
+        stage = _make_execution_status(
+            node_name="web_source_summarizer",
+            stage="web_source_summarizer.batch",
+            status="fallback" if structured_result.fallback_used else "success",
+            is_fallback=structured_result.fallback_used,
+            fallback_from=output_mode if structured_result.fallback_used else None,
+            fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
+            fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+            structured_output_mode=structured_result.output_mode,
+            fallback_modes_attempted=_attempted_modes(structured_result),
+            retry_count=structured_result.retry_count,
+            validation_errors=[],
+            action_taken="accepted_source_summaries",
+            batch_index=batch_index,
+            expected_source_ids=expected_ids,
+            returned_source_ids=[summary.source_id for summary in parsed.summaries],
+            source_count=len(batch),
+            kept_count=sum(1 for summary in parsed.summaries if summary.keep),
+            rejected_count=sum(1 for summary in parsed.summaries if not summary.keep),
+            raw_preview=_raw_preview(structured_result.raw_output),
+            schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        all_summaries.extend(summary_dicts)
+        stages.append(stage)
+    return all_summaries, stages
+
+
+def _build_web_docs_from_summaries(
+    *,
+    sources: list[dict],
+    summaries: list[dict],
+) -> list[dict]:
+    source_by_id = {str(source.get("source_id") or ""): source for source in sources}
+    docs: list[dict] = []
+    for summary in summaries:
+        if not summary.get("keep"):
+            continue
+        source = source_by_id.get(str(summary.get("source_id") or ""))
+        if not source:
+            continue
+        coverage_points = [
+            _clip_text(point, 160)
+            for point in (summary.get("coverage_points") or [])
+            if str(point or "").strip()
+        ]
+        doc = {
+            "type": "web_evidence",
+            "legacy_type": "web_supplement",
+            "type_legacy": "web_supplement",
+            "source_type": "web",
+            "provider": "tavily",
+            "source_id": source.get("source_id", ""),
+            "task_id": source.get("task_id", ""),
+            "canonical_url": source.get("canonical_url", ""),
+            "original_url": source.get("original_url", ""),
+            "title": source.get("title", ""),
+            "domain": source.get("domain", ""),
+            "url": source.get("original_url", ""),
+            "source": source.get("original_url") or source.get("title") or "tavily",
+            "content": summary.get("summary", ""),
+            "supplement_for_subject": source.get("subject", ""),
+            "supplement_for_role": source.get("role", ""),
+            "supplement_purpose": source.get("purpose", ""),
+            "supplement_purposes": [source.get("purpose", "")] if source.get("purpose") else [],
+            "retrieval_subject": source.get("subject", ""),
+            "retrieval_role": source.get("role", ""),
+            "retrieval_query": source.get("search_query", ""),
+            "tavily_score": source.get("tavily_score"),
+            "summary_source": summary.get("summary_source", "llm_source_summarizer"),
+            "source_summary_fallback_used": bool(summary.get("source_summary_fallback_used", False)),
+            "web_research_v2_stage": summary.get("web_research_v2_stage", "source_summarizer"),
+            "coverage_points": coverage_points,
+            "web_research_summary": summary.get("summary", ""),
+            "web_research_reason": summary.get("reason", ""),
+            "evidence_type": summary.get("evidence_type", "unknown"),
+            "use_case": summary.get("use_case", "discard"),
+            "web_research_relevance": summary.get("relevance", "low"),
+            "web_research_usefulness": summary.get("usefulness", "low"),
+            "web_research_risk": summary.get("risk", "medium"),
+            "search_result_judge_skipped": True,
+            "skip_reason": WEB_RESEARCH_V2_SKIP_REASON,
+        }
+        docs.append(doc)
+    return docs
+
+
+def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[EvidenceCandidate]:
+    candidates: list[EvidenceCandidate] = []
+    for rank, doc in enumerate(docs):
+        subject = str(doc.get("retrieval_subject") or doc.get("supplement_for_subject") or "")
+        candidate = EvidenceCandidate(
+            evidence_id=f"web:{subject or 'other'}:v2:{rank}",
+            source_type="web",
+            provider="tavily",
+            subject=subject,
+            role=str(doc.get("retrieval_role") or doc.get("supplement_for_role") or ""),
+            purpose=str(doc.get("supplement_purpose") or "web_research_v2"),
+            title=str(doc.get("title") or ""),
+            source=str(doc.get("source") or doc.get("url") or doc.get("title") or "tavily"),
+            url=str(doc.get("url") or ""),
+            content_preview=_clip_text(doc.get("content", ""), 800),
+            tavily_score=doc.get("tavily_score"),
+            tavily_query=str(doc.get("retrieval_query") or ""),
+            metadata={
+                "source_id": doc.get("source_id", ""),
+                "task_id": doc.get("task_id", ""),
+                "canonical_url": doc.get("canonical_url", ""),
+                "original_url": doc.get("original_url", ""),
+                "domain": doc.get("domain", ""),
+                "title": doc.get("title", ""),
+                "tavily_score": doc.get("tavily_score"),
+                "summary_source": doc.get("summary_source", ""),
+                "source_summary_fallback_used": bool(doc.get("source_summary_fallback_used", False)),
+                "web_research_v2_stage": doc.get("web_research_v2_stage", ""),
+                "coverage_points": doc.get("coverage_points", []),
+                "web_research_summary": doc.get("web_research_summary", ""),
+                "web_research_reason": doc.get("web_research_reason", ""),
+                "search_result_judge_skipped": True,
+                "skip_reason": WEB_RESEARCH_V2_SKIP_REASON,
+            },
+        )
+        candidates.append(candidate)
+    return candidates
+
+
 def _cap_evidence_candidates(candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
     max_candidates = int(_retrieval_setting("fusion.max_evidence_candidates", 16))
     max_local = int(_retrieval_setting("fusion.max_local_candidates", 8))
@@ -4331,7 +5195,7 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
     }
 
 
-async def _web_search_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+async def _web_search_dual_source_legacy(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
     original_user_query = _last_human_query(state)
     web_enabled = bool(_retrieval_setting("web.enabled", True))
     web_candidates_all: list[EvidenceCandidate] = []
@@ -4432,6 +5296,252 @@ async def _web_search_dual_source(state: LearningState, branches: list[dict], br
             if candidate.evidence_id in originals
         },
     }
+
+
+async def _run_web_research_v2(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+    del branch_debug
+    original_user_query = _last_human_query(state)
+    debug = _new_web_research_debug()
+    dispatch_stage = _make_execution_status(
+        node_name="web_research_v2",
+        stage="web_research_v2.dispatch",
+        status="success",
+        action_taken="dispatch_to_web_research_v2",
+        web_research_v2_enabled=True,
+        scope=str(_web_research_v2_setting("scope", "dual_source_evidence_only")),
+        branch_count=len(branches),
+        max_total_tasks=_web_research_v2_max_total_tasks(),
+        max_tasks_per_subject=_web_research_v2_max_tasks_per_subject(),
+        max_results_per_task=_web_research_v2_max_results_per_task(),
+        source_summary_batch_size=_web_research_v2_source_summary_batch_size(),
+        summarize_sources=_web_research_v2_summarize_sources(),
+        search_result_judge_skipped=True,
+        skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+    )
+    _append_web_research_stage(debug, state, dispatch_stage)
+
+    plan, planner_stage = await _plan_web_research_tasks(
+        state=state,
+        branches=branches,
+        original_user_query=original_user_query,
+    )
+    _append_web_research_stage(debug, state, planner_stage)
+
+    if plan is None:
+        if _web_research_v2_fallback_to_legacy():
+            legacy_result = await _web_search_dual_source_legacy(state, branches, {"mode": "dual_source_evidence"})
+            legacy_stage = _make_execution_status(
+                node_name="web_research_v2",
+                stage="web_research_v2.legacy_fallback",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="web_research_v2",
+                fallback_to="legacy_dual_source_web_search",
+                fallback_reason=planner_stage.get("error_type") or "web_research_planner_failed",
+                error_type=planner_stage.get("error_type"),
+                error_message=planner_stage.get("error_message_sanitized"),
+                action_taken="used_legacy_dual_source_web_search",
+                developer_warning="Web Research V2 planner failed; legacy dual-source web search used.",
+                legacy_success=bool(legacy_result.get("web_evidence_candidates")),
+                legacy_candidate_count=len(legacy_result.get("web_evidence_candidates") or []),
+                search_result_judge_skipped=True,
+                skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            )
+            _append_web_research_stage(debug, state, legacy_stage)
+            debug["task_count"] = 0
+            debug["result_count"] = len(legacy_result.get("web_evidence_candidates") or [])
+            debug["kept_count"] = len(legacy_result.get("web_evidence_candidates") or [])
+            _finalize_web_research_debug(debug)
+            return {**legacy_result, "web_research_v2_debug": debug}
+
+        _append_developer_warning(
+            debug,
+            "Web Research V2 planner failed and legacy fallback is disabled; continuing with local evidence only.",
+        )
+        debug["status"] = "degraded"
+        _finalize_web_research_debug(debug)
+        return {
+            "web_evidence_candidates": [],
+            "web_evidence_originals": {},
+            "web_research_v2_debug": debug,
+        }
+
+    tasks = list(plan.tasks or [])
+    debug["task_count"] = len(tasks)
+    if not tasks:
+        _append_developer_warning(debug, "Web Research V2 planner returned no tasks; continuing with local evidence only.")
+        debug["status"] = "degraded"
+        final_stage = _make_execution_status(
+            node_name="web_research_v2",
+            stage="web_research_v2.final",
+            status="degraded",
+            action_taken="returned_empty_web_evidence",
+            task_count=0,
+            result_count=0,
+            kept_count=0,
+            rejected_count=0,
+            duplicate_url_count=0,
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+            developer_warning="Web Research V2 planner returned no tasks; continuing with local evidence only.",
+        )
+        _append_web_research_stage(debug, state, final_stage)
+        _finalize_web_research_debug(debug)
+        return {
+            "web_evidence_candidates": [],
+            "web_evidence_originals": {},
+            "web_research_v2_debug": debug,
+        }
+
+    raw_sources, executor_stages = await _execute_web_research_tasks(
+        state=state,
+        tasks=tasks,
+        original_user_query=original_user_query,
+    )
+    for stage in executor_stages:
+        _append_web_research_stage(debug, state, stage)
+    debug["result_count"] = len(raw_sources)
+
+    deduped_sources, dedupe_debug = _dedupe_web_sources_by_canonical_url(raw_sources)
+    debug["duplicate_url_count"] = int(dedupe_debug.get("duplicate_url_count") or 0)
+
+    if not deduped_sources:
+        warning = "All web research tasks failed; continuing with local evidence only."
+        _append_developer_warning(debug, warning)
+        debug["status"] = "degraded"
+        final_stage = _make_execution_status(
+            node_name="web_research_v2",
+            stage="web_research_v2.final",
+            status="degraded",
+            action_taken="returned_empty_web_evidence",
+            developer_warning=warning,
+            task_count=len(tasks),
+            result_count=0,
+            kept_count=0,
+            rejected_count=0,
+            duplicate_url_count=debug["duplicate_url_count"],
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        _append_web_research_stage(debug, state, final_stage)
+        _finalize_web_research_debug(debug)
+        return {
+            "web_evidence_candidates": [],
+            "web_evidence_originals": {},
+            "web_research_v2_debug": debug,
+        }
+
+    summaries, summarizer_stages = await _summarize_web_sources(
+        state=state,
+        sources=deduped_sources,
+        original_user_query=original_user_query,
+    )
+    for stage in summarizer_stages:
+        _append_web_research_stage(debug, state, stage)
+
+    docs = _build_web_docs_from_summaries(sources=deduped_sources, summaries=summaries)
+    candidates = _build_web_evidence_candidates_from_research_docs(docs)
+    capped_candidates = _cap_evidence_candidates(candidates)
+    originals_by_candidate_id: dict[str, dict] = {}
+    for candidate, doc in zip(candidates, docs):
+        originals_by_candidate_id[candidate.evidence_id] = doc
+    capped_originals = {
+        candidate.evidence_id: originals_by_candidate_id[candidate.evidence_id]
+        for candidate in capped_candidates
+        if candidate.evidence_id in originals_by_candidate_id
+    }
+    debug["kept_count"] = len(capped_candidates)
+    debug["rejected_count"] = max(0, len(deduped_sources) - len(docs))
+
+    build_stage = _make_execution_status(
+        node_name="web_source_candidate_build",
+        stage="web_source_candidate_build",
+        status="success" if capped_candidates else "degraded",
+        action_taken="built_web_evidence_candidates" if capped_candidates else "no_web_sources_kept",
+        task_count=len(tasks),
+        result_count=len(deduped_sources),
+        kept_count=len(capped_candidates),
+        rejected_count=max(0, len(deduped_sources) - len(docs)),
+        duplicate_url_count=debug["duplicate_url_count"],
+        search_result_judge_skipped=True,
+        skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        candidate_preview=[
+            {
+                "evidence_id": candidate.evidence_id,
+                "source_id": candidate.metadata.get("source_id", ""),
+                "task_id": candidate.metadata.get("task_id", ""),
+                "subject": candidate.subject,
+                "domain": candidate.metadata.get("domain", ""),
+                "tavily_score": candidate.tavily_score,
+            }
+            for candidate in capped_candidates[:10]
+        ],
+    )
+    _append_web_research_stage(debug, state, build_stage)
+
+    final_stage = _make_execution_status(
+        node_name="web_research_v2",
+        stage="web_research_v2.final",
+        status="success" if capped_candidates else "degraded",
+        action_taken="returned_web_evidence_candidates" if capped_candidates else "returned_empty_web_evidence",
+        task_count=len(tasks),
+        result_count=len(deduped_sources),
+        kept_count=len(capped_candidates),
+        rejected_count=max(0, len(deduped_sources) - len(docs)),
+        duplicate_url_count=debug["duplicate_url_count"],
+        search_result_judge_skipped=True,
+        skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        source_distribution=_source_distribution([doc for doc in capped_originals.values()]),
+    )
+    _append_web_research_stage(debug, state, final_stage)
+    _finalize_web_research_debug(debug)
+
+    return {
+        "web_evidence_candidates": [candidate.model_dump(mode="json") for candidate in capped_candidates],
+        "web_evidence_originals": capped_originals,
+        "web_research_v2_debug": debug,
+    }
+
+
+async def _web_search_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+    if not bool(_retrieval_setting("web.enabled", True)):
+        result = await _web_search_dual_source_legacy(state, branches, branch_debug)
+        result.setdefault("web_research_v2_debug", {})
+        return result
+    if not _web_research_v2_enabled():
+        debug = _new_web_research_debug(status="fallback")
+        disabled_stage = _make_execution_status(
+            node_name="web_research_v2",
+            stage="web_research_v2.dispatch",
+            status="skipped",
+            action_taken="skip_to_legacy_dual_source_web_search",
+            web_research_v2_enabled=False,
+            scope=str(_web_research_v2_setting("scope", "dual_source_evidence_only")),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        _append_web_research_stage(debug, state, disabled_stage)
+        legacy_result = await _web_search_dual_source_legacy(state, branches, branch_debug)
+        legacy_stage = _make_execution_status(
+            node_name="web_research_v2",
+            stage="web_research_v2.legacy_fallback",
+            status="fallback",
+            is_fallback=True,
+            fallback_from="web_research_v2",
+            fallback_to="legacy_dual_source_web_search",
+            fallback_reason="web_research_v2_disabled",
+            action_taken="used_legacy_dual_source_web_search",
+            legacy_success=bool(legacy_result.get("web_evidence_candidates")),
+            legacy_candidate_count=len(legacy_result.get("web_evidence_candidates") or []),
+            search_result_judge_skipped=True,
+            skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        )
+        _append_web_research_stage(debug, state, legacy_stage)
+        debug["result_count"] = len(legacy_result.get("web_evidence_candidates") or [])
+        debug["kept_count"] = len(legacy_result.get("web_evidence_candidates") or [])
+        _finalize_web_research_debug(debug)
+        return {**legacy_result, "web_research_v2_debug": debug}
+    return await _run_web_research_v2(state, branches, branch_debug)
 
 
 @traced_node
@@ -4884,8 +5994,16 @@ async def memory_use_decider(state: LearningState) -> dict:
                 content=(
                     "You decide whether a retrieval query rewriter may use previous compact memory. "
                     "Return only schema-valid JSON. Use only generic conversation-reference cues, "
-                    "never discipline, course, framework, or library keywords. If using memory and "
-                    "ignoring memory are both reasonable, choose ask_user."
+                    "never discipline, course, framework, or library keywords. "
+                    "If the current query has an explicit subject and explicit requested resource type, "
+                    "do not choose ask_user merely because selected memory has a different subject or could provide a reusable style. "
+                    "When selected memory is subject/resource mismatched with an otherwise explicit current query, choose ignore. "
+                    "Choose ask_user only when the current query contains a genuinely ambiguous history reference "
+                    "and the current subject or requested resource cannot be resolved safely from the current query alone. "
+                    "If the current query states a clear target such as a big data quiz, machine learning study plan, "
+                    "or Python review document, follow the current explicit target; if prior memory mismatches, choose ignore. "
+                    "Choose use or ask_user for history only when the current query explicitly asks to reuse prior format, "
+                    "structure, or content."
                 )
             ),
             HumanMessage(content=json.dumps(prompt_payload, ensure_ascii=False)),

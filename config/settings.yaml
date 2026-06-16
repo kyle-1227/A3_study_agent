@@ -62,6 +62,17 @@ retrieval:
     expose_fallback_trace: true
     strict_observability: true
     fallback_to_legacy_on_v2_failure: true
+  web_research_v2:
+    scope: dual_source_evidence_only
+    enabled: true
+    max_tasks_per_subject: 2
+    max_total_tasks: 6
+    max_results_per_task: 3
+    source_summary_batch_size: 6
+    summarize_sources: true
+    fallback_to_legacy_web_supplement: true
+    expose_fallback_trace: true
+    strict_observability: true
   local_rag:
     enabled: true
     per_subject_top_k: 3
@@ -147,6 +158,32 @@ llm:
     max_tokens: 1024
     thinking: disabled
     streaming: false
+  web_research_planner:
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    thinking: disabled
+    streaming: false
+    structured_output: true
+    strict_schema: true
+    include_raw: true
+  web_source_summarizer:
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1800
+    thinking: disabled
+    streaming: false
+    structured_output: true
+    strict_schema: true
+    include_raw: true
   search_result_judge:
     provider: deepseek_official
     model: "deepseek-v4-flash"
@@ -252,6 +289,18 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   web_coverage_decision:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  web_research_planner:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  web_source_summarizer:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block

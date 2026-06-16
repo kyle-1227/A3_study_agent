@@ -106,6 +106,7 @@ def initial_request_reset_transient_state() -> dict:
         "web_judge_model": "deepseek/deepseek-v4-flash",
         "web_judge_failed_subjects": [],
         "web_judge_rejected_all_subjects": [],
+        "web_research_v2_debug": {},
         # evidence
         "local_evidence_candidates": [],
         "web_evidence_candidates": [],
@@ -267,6 +268,7 @@ class LearningState(TypedDict):
     web_judge_model: str                                                # Search Result Judge model
     web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
     web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
+    web_research_v2_debug: dict                                          # Web Research V2 execution status/debug summary
     local_evidence_candidates: list[dict]                                # Local RAG EvidenceCandidate snapshots from rag_retrieve
     web_evidence_candidates: list[dict]                                  # Web EvidenceCandidate snapshots from web_search
     local_evidence_originals: dict                                       # Original local RAG docs keyed by evidence_id

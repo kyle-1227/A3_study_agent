@@ -18,6 +18,7 @@ from src.graph.academic import (
     _normalize_retrieval_plan,
     _judge_tavily_search_results_with_llm,
     _select_docs_with_subject_quota,
+    MemoryUseDecisionOutput,
     RetrievalPlanItem,
     SearchResultJudgeItem,
     SearchResultJudgeOutput,
@@ -240,6 +241,53 @@ class TestMemoryUseDecision:
         mock_interrupt.assert_not_called()
         assert result["memory_use_policy"] == "use"
         assert result["selected_evidence_memory_summaries"]
+
+    async def test_memory_use_decider_prompt_discourages_ask_user_for_explicit_mismatch(self):
+        captured: dict = {}
+
+        async def fake_invoke_structured_llm(**kwargs):
+            captured.update(kwargs)
+            return StructuredLLMResult(
+                success=True,
+                parsed=MemoryUseDecisionOutput(
+                    decision="ignore",
+                    reason="Current query is explicit and memory mismatches.",
+                    question_to_user="",
+                ),
+                node_name=kwargs["node_name"],
+                llm_node=kwargs["llm_node"],
+                schema_name=kwargs["schema"].__name__,
+                provider="unit",
+                model="unit",
+                output_mode=kwargs["output_mode"],
+            )
+
+        with (
+            patch("src.graph.academic._deterministic_memory_use_decision", return_value=None),
+            patch("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm),
+        ):
+            result = await memory_use_decider({
+                "messages": [HumanMessage(content="我还想要一份大数据的练习题")],
+                "evidence_summary_memory": [
+                    {
+                        "memory_id": "python-quiz",
+                        "subject": "python",
+                        "resource_type": "quiz",
+                        "summary": "Python functions practice quiz",
+                    }
+                ],
+                "subject": "big_data",
+                "requested_resource_type": "quiz",
+                "request_id": "req",
+                "thread_id": "thread",
+            })
+
+        system_prompt = captured["messages"][0].content
+        assert "explicit subject and explicit requested resource type" in system_prompt
+        assert "subject/resource mismatched" in system_prompt
+        assert "choose ignore" in system_prompt
+        assert "Choose ask_user only when the current query contains a genuinely ambiguous history reference" in system_prompt
+        assert result["memory_use_policy"] == "ignore"
 
 
 class TestSearchResultJudge:
