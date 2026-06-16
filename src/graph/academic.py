@@ -16,7 +16,7 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = get_setting("academic.max_retries", 2)
 
 
-# 鈹€鈹€ Structured output schema for hallucination evaluation 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Structured output schema for hallucination evaluation.
 class HallucinationEvaluation(BaseModel):
     """LLM-evaluated faithfulness judgment."""
 
@@ -60,43 +60,61 @@ class HallucinationEvaluation(BaseModel):
     )
 
 
+ShortText64 = Annotated[str, Field(max_length=64)]
+GoalText160 = Annotated[str, Field(max_length=160)]
+QueryText240 = Annotated[str, Field(max_length=240)]
+WebQueryText180 = Annotated[str, Field(max_length=180)]
+KeypointText120 = Annotated[str, Field(max_length=120)]
+NoteText240 = Annotated[str, Field(max_length=240)]
+ReasonText300 = Annotated[str, Field(max_length=300)]
+
+
 class RetrievalPlanItem(BaseModel):
     """Structured per-subject retrieval instruction."""
 
-    subject: str = ""
-    role: str = ""
-    rag_query: str = ""
-    web_search_query: str = ""
-    purpose: str = ""
-    relation_to_goal: str = ""
-    priority: float = 0.5
-    coverage_hint: str = ""
-    expected_coverage: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    subject: ShortText64 = ""
+    role: ShortText64 = ""
+    rag_query: QueryText240 = ""
+    web_search_query: WebQueryText180 = ""
+    purpose: NoteText240 = ""
+    relation_to_goal: NoteText240 = ""
+    priority: float = Field(default=0.5, ge=0.0, le=1.0)
+    coverage_hint: NoteText240 = ""
+    expected_coverage: list[KeypointText120] = Field(default_factory=list, max_length=8)
 
 
 class SearchQueryRewriteOutput(BaseModel):
     """Structured initial retrieval-query rewrite result."""
 
-    rag_query: str = Field(description="Query optimized for local course/RAG retrieval")
-    web_search_query: str = Field(description="Query optimized for external web search")
-    expanded_keypoints: list[str] = Field(description="Expanded concrete knowledge points")
-    reason: str = Field(description="Brief rationale for the rewrite")
-    learning_goal: str = Field(default="", description="Normalized learning goal")
-    primary_subject: str = Field(default="", description="Main subject for the user goal")
-    subject_relation_summary: str = Field(default="", description="How subjects relate to the goal")
+    model_config = ConfigDict(extra="forbid")
+
+    rag_query: QueryText240 = Field(description="Query optimized for local course/RAG retrieval")
+    web_search_query: WebQueryText180 = Field(description="Query optimized for external web search")
+    expanded_keypoints: list[KeypointText120] = Field(
+        description="Expanded concrete knowledge points",
+        max_length=8,
+    )
+    reason: ReasonText300 = Field(description="Brief rationale for the rewrite")
+    learning_goal: GoalText160 = Field(default="", description="Normalized learning goal")
+    primary_subject: ShortText64 = Field(default="", description="Main subject for the user goal")
+    subject_relation_summary: NoteText240 = Field(default="", description="How subjects relate to the goal")
     retrieval_plan: list[RetrievalPlanItem] = Field(
         default_factory=list,
         description="Per-subject retrieval plan",
+        max_length=4,
     )
-    memory_context_notes: list[str] = Field(
+    memory_context_notes: list[NoteText240] = Field(
         default_factory=list,
         description="Notes about how conversation/evidence memory relates to current query",
+        max_length=5,
     )
     memory_used_for_retrieval: bool = Field(
         default=False,
         description="Whether evidence memory influenced the retrieval plan",
     )
-    memory_use_reason: str = Field(
+    memory_use_reason: NoteText240 = Field(
         default="",
         description="Why memory was or was not used for retrieval",
     )
@@ -257,6 +275,7 @@ def validate_memory_use_decision_output(
     parsed: BaseModel,
     *,
     selected_memory_count: int,
+    current_query_is_ambiguous: bool = False,
 ) -> str:
     if not isinstance(parsed, MemoryUseDecisionOutput):
         return "root expected MemoryUseDecisionOutput"
@@ -264,10 +283,97 @@ def validate_memory_use_decision_output(
         return "decision must be use, ignore, or ask_user"
     if selected_memory_count <= 0 and parsed.decision != "ignore":
         return "decision must be ignore when selected memory is empty"
+    if parsed.decision == "ask_user" and not current_query_is_ambiguous:
+        return "decision ask_user requires an ambiguous history reference in the current query"
     if not str(parsed.reason or "").strip():
         return "reason must be non-empty"
     if parsed.decision == "ask_user" and not str(parsed.question_to_user or "").strip():
         return "question_to_user must be non-empty when decision is ask_user"
+    return ""
+
+
+_QUERY_REWRITE_FIXED_REPEAT_PHRASES = (
+    "检索意图",
+    "资源类型",
+    "练习题",
+    "答案",
+    "解析",
+    "实操任务",
+)
+_QUERY_REWRITE_FIELD_LIMITS = {
+    "rag_query": 240,
+    "web_search_query": 180,
+    "reason": 300,
+    "memory_use_reason": 240,
+    "retrieval_plan.rag_query": 240,
+    "retrieval_plan.web_search_query": 180,
+}
+_ENGLISH_TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _repeated_english_ngram(text: str, *, n: int = 4, max_occurrences: int = 2) -> str:
+    tokens = _ENGLISH_TOKEN_RE.findall((text or "").lower())
+    if len(tokens) < n * max_occurrences:
+        return ""
+    counts = Counter(" ".join(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1))
+    for gram, count in counts.items():
+        if count > max_occurrences:
+            return gram
+    return ""
+
+
+def _repeated_cjk_ngram(text: str, *, n: int = 8, max_occurrences: int = 2) -> str:
+    chars = "".join(_CJK_CHAR_RE.findall(text or ""))
+    if len(chars) < n * max_occurrences:
+        return ""
+    counts = Counter(chars[idx : idx + n] for idx in range(0, len(chars) - n + 1))
+    for gram, count in counts.items():
+        if count > max_occurrences:
+            return gram
+    return ""
+
+
+def _query_rewrite_text_error(field_name: str, text: str) -> str:
+    text = str(text or "").strip()
+    limit = _QUERY_REWRITE_FIELD_LIMITS.get(field_name)
+    if limit is not None and len(text) > limit:
+        return f"{field_name} query too long: max {limit} characters"
+    for phrase in _QUERY_REWRITE_FIXED_REPEAT_PHRASES:
+        if text.count(phrase) > 2:
+            return f"{field_name} repeated query phrase: {phrase}"
+    repeated_english = _repeated_english_ngram(text)
+    if repeated_english:
+        return f"{field_name} repeated query ngram: {repeated_english}"
+    repeated_cjk = _repeated_cjk_ngram(text)
+    if repeated_cjk:
+        return f"{field_name} repeated Chinese query ngram: {repeated_cjk}"
+    return ""
+
+
+def _validate_query_rewrite_text_quality(parsed: SearchQueryRewriteOutput) -> str:
+    checks = (
+        ("rag_query", parsed.rag_query),
+        ("web_search_query", parsed.web_search_query),
+        ("reason", parsed.reason),
+        ("memory_use_reason", parsed.memory_use_reason),
+    )
+    for field_name, text in checks:
+        error = _query_rewrite_text_error(field_name, text)
+        if error:
+            return error
+
+    for idx, item in enumerate(parsed.retrieval_plan or []):
+        for field_name, text in (
+            ("retrieval_plan.rag_query", item.rag_query),
+            ("retrieval_plan.web_search_query", item.web_search_query),
+            ("reason", item.purpose),
+            ("reason", item.relation_to_goal),
+            ("reason", item.coverage_hint),
+        ):
+            error = _query_rewrite_text_error(field_name, text)
+            if error:
+                return f"retrieval_plan.{idx}.{error}"
     return ""
 
 
@@ -288,15 +394,16 @@ def validate_search_query_rewrite_output(
         return "rag_query must be non-empty"
     if not str(parsed.web_search_query or "").strip():
         return "web_search_query must be non-empty"
+    text_quality_error = _validate_query_rewrite_text_quality(parsed)
+    if text_quality_error:
+        return text_quality_error
     for idx, item in enumerate(parsed.retrieval_plan or []):
         prefix = f"retrieval_plan.{idx}"
-        if item.priority < 0 or item.priority > 1:
-            return f"{prefix}.priority must be between 0 and 1"
         if item.subject and not str(item.subject).strip():
             return f"{prefix}.subject must be a string"
         if item.role and not str(item.role).strip():
             return f"{prefix}.role must be a string"
-    # 鈹€鈹€ Memory use validation 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Memory use validation.
     # Two valid paths for memory to influence retrieval:
     # 1. Current query contains explicit history-reference language, OR
     # 2. LLM marks memory_used_for_retrieval=true with a non-empty reason.
@@ -507,6 +614,152 @@ def _is_retry_rewrite_active(state: LearningState) -> bool:
     )
 
 
+def _memory_summary_text(entry: dict) -> str:
+    val = str(entry.get("summary") or "").strip()
+    if val:
+        return val
+    return str(entry.get("decision_summary") or "").strip()
+
+
+def _memory_terms(text: str) -> set[str]:
+    lowered = (text or "").lower()
+    terms = {term for term in _ENGLISH_TOKEN_RE.findall(lowered) if len(term) > 1}
+    cjk = "".join(_CJK_CHAR_RE.findall(lowered))
+    for n in (2, 3, 4):
+        if len(cjk) >= n:
+            terms.update(cjk[idx : idx + n] for idx in range(0, len(cjk) - n + 1))
+    return terms
+
+
+def _select_relevant_memory_summaries_with_debug(
+    state: LearningState,
+    current_query: str,
+    subject: str,
+    requested_resource_type: str,
+    *,
+    max_selected: int = 3,
+) -> tuple[list[dict], dict]:
+    """Select eligible compact evidence memory, then rank eligible entries only."""
+    memory_entries = state.get("evidence_summary_memory") or []
+    missing_field_counts: dict[str, int] = {}
+    debug = {
+        "available_count": len(memory_entries),
+        "eligible_memory_count": 0,
+        "selected_count": 0,
+        "selected_ids": [],
+        "memory_subject_match_count": 0,
+        "memory_resource_match_count": 0,
+        "memory_query_overlap_match_count": 0,
+        "memory_subject_keyword_in_summary_count": 0,
+        "memory_explicit_history_match_count": 0,
+        "memory_dropped_mismatch_count": 0,
+        "missing_field_counts": missing_field_counts,
+        "prompt_chars_added": 0,
+        "selection_reason": "no evidence summary memory available",
+    }
+    if not memory_entries:
+        return [], debug
+
+    query_lower = (current_query or "").lower()
+    subject_lower = (subject or "").lower().strip()
+    resource_lower = (requested_resource_type or "").lower().strip()
+    explicit_history_ref = _has_explicit_history_reference(current_query)
+    query_terms = _memory_terms(current_query)
+
+    eligible: list[tuple[float, int, dict]] = []
+    for idx, entry in enumerate(memory_entries):
+        for field in ("summary", "subject", "resource_type", "decision_summary"):
+            if not entry.get(field):
+                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+
+        entry_subject = str(entry.get("subject") or "").lower().strip()
+        entry_resource = str(entry.get("resource_type") or entry.get("requested_resource_type") or "").lower().strip()
+        entry_summary = _memory_summary_text(entry).lower()
+        summary_terms = _memory_terms(entry_summary)
+        overlap_terms = query_terms & summary_terms
+
+        subject_match = bool(
+            subject_lower
+            and entry_subject
+            and (
+                entry_subject == subject_lower
+                or subject_lower in entry_subject
+                or entry_subject in subject_lower
+            )
+        )
+        resource_match = bool(
+            resource_lower
+            and entry_resource
+            and (
+                entry_resource == resource_lower
+                or resource_lower in entry_resource
+                or entry_resource in resource_lower
+            )
+        )
+        query_overlap_match = bool(overlap_terms and (len(overlap_terms) >= 2 or not subject_lower))
+        subject_keyword_in_summary = bool(subject_lower and entry_summary and subject_lower in entry_summary)
+        is_eligible = (
+            subject_match
+            or resource_match
+            or query_overlap_match
+            or subject_keyword_in_summary
+            or explicit_history_ref
+        )
+
+        if subject_match:
+            debug["memory_subject_match_count"] += 1
+        if resource_match:
+            debug["memory_resource_match_count"] += 1
+        if query_overlap_match:
+            debug["memory_query_overlap_match_count"] += 1
+        if subject_keyword_in_summary:
+            debug["memory_subject_keyword_in_summary_count"] += 1
+        if explicit_history_ref:
+            debug["memory_explicit_history_match_count"] += 1
+
+        if not is_eligible:
+            debug["memory_dropped_mismatch_count"] += 1
+            continue
+
+        score = 0.0
+        if explicit_history_ref:
+            score += 0.5
+        if subject_match:
+            score += 1.0
+        if subject_keyword_in_summary:
+            score += 0.6
+        if resource_match:
+            score += 0.5
+        if query_overlap_match:
+            score += min(0.5, 0.08 * len(overlap_terms))
+        score += max(0.0, 0.2 - (idx * 0.02))
+        eligible.append((score, idx, entry))
+
+    eligible.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    selected = [entry for _, _, entry in eligible[:max_selected]]
+    debug["eligible_memory_count"] = len(eligible)
+    debug["selected_count"] = len(selected)
+    debug["selected_ids"] = [entry.get("memory_id", "") for entry in selected]
+    debug["prompt_chars_added"] = sum(len(_memory_summary_text(entry)) for entry in selected)
+    debug["selection_reason"] = (
+        f"eligible-first selection: {len(eligible)} eligible of {len(memory_entries)}, "
+        f"selected {len(selected)}"
+    )
+    if query_lower:
+        debug["query_terms_count"] = len(query_terms)
+    return selected, debug
+
+
+def _emit_memory_summary_selection_trace(state: LearningState, debug: dict) -> None:
+    emit_a3_trace(
+        logger,
+        "memory_summary_selection",
+        debug,
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+
+
 def select_relevant_memory_summaries(
     state: LearningState,
     current_query: str,
@@ -522,80 +775,14 @@ def select_relevant_memory_summaries(
     Returns only compact summaries; never raw docs, full old context, or
     full historical answers.
     """
-    memory_entries = state.get("evidence_summary_memory") or []
-    if not memory_entries:
-        return []
-
-    query_lower = (current_query or "").lower()
-    subject_lower = (subject or "").lower()
-    resource_lower = (requested_resource_type or "").lower()
-    missing_field_counts: dict[str, int] = {}
-
-    def _get_summary(entry: dict) -> str:
-        val = str(entry.get("summary") or "")
-        if val.strip():
-            return val.strip()
-        val = str(entry.get("decision_summary") or "")
-        return val.strip()
-
-    scored: list[tuple[float, dict]] = []
-
-    for idx, entry in enumerate(memory_entries):
-        # 鈹€鈹€ Track missing fields 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-        for field in ("summary", "subject", "resource_type", "decision_summary"):
-            if not entry.get(field):
-                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
-
-        score = 0.0
-        entry_subject = str(entry.get("subject") or "").lower()
-        entry_resource = str(entry.get("resource_type") or entry.get("requested_resource_type") or "").lower()
-        entry_summary = _get_summary(entry).lower()
-
-        # Recency bonus
-        score += 0.2
-
-        # Subject match
-        if subject_lower and entry_subject == subject_lower:
-            score += 0.3
-        elif subject_lower and entry_subject and subject_lower in entry_subject:
-            score += 0.15
-
-        # Resource type match
-        if resource_lower and entry_resource == resource_lower:
-            score += 0.2
-
-        # Query term overlap (lightweight signal only)
-        if query_lower and entry_summary:
-            query_terms = set(query_lower.split())
-            summary_terms = set(entry_summary.split())
-            if query_terms and summary_terms:
-                overlap = len(query_terms & summary_terms) / max(len(query_terms), 1)
-                score += min(overlap * 0.3, 0.3)
-
-        scored.append((score, entry))
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    selected = [
-        entry
-        for _, entry in scored[:max_selected]
-        if _ > 0.0
-    ]
-
-    selected_ids = [e.get("memory_id", "") for e in selected]
-    emit_a3_trace(
-        logger,
-        "memory_summary_selection",
-        {
-            "available_count": len(memory_entries),
-            "selected_count": len(selected),
-            "selected_ids": selected_ids,
-            "selection_reason": f"scored {len(memory_entries)} entries, selected top {len(selected)}",
-            "missing_field_counts": missing_field_counts,
-            "prompt_chars_added": sum(len(_get_summary(e)) for e in selected),
-        },
-        state=state,
-        env_flag="LOG_A3_TRACE",
+    selected, debug = _select_relevant_memory_summaries_with_debug(
+        state,
+        current_query=current_query,
+        subject=subject,
+        requested_resource_type=requested_resource_type,
+        max_selected=max_selected,
     )
+    _emit_memory_summary_selection_trace(state, debug)
     return selected
 
 
@@ -3054,7 +3241,7 @@ async def _run_dynamic_web_supplement(
     }
 
 
-# 鈹€鈹€ Node 0: academic router (fan-out trigger) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 0: academic router (fan-out trigger)
 
 def _dual_source_web_query(state: LearningState, branch: dict) -> tuple[str, str]:
     if branch.get("web_search_query"):
@@ -3468,17 +3655,19 @@ async def evidence_judge(state: LearningState) -> dict:
         env_flag="LOG_CONTEXT_ASSEMBLY",
     )
 
-    # 鈹€鈹€ Evidence memory 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Evidence memory.
     request_id = state.get("request_id", "")
     thread_id = state.get("thread_id", "")
     new_evidence, new_gaps = build_evidence_memory_summary(
         state=state,
         parsed=parsed,
+        candidates=candidates,
+        originals=originals,
         request_id=request_id,
         thread_id=thread_id,
     )
 
-    # 鈹€鈹€ Controlled stop logic 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Controlled stop logic.
     evidence_state = parsed.overall_evidence_state
     controlled_stop = False
     controlled_stop_reason = ""
@@ -3540,12 +3729,14 @@ async def evidence_judge(state: LearningState) -> dict:
     }
 
 
-# 鈹€鈹€ Evidence memory builder 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Evidence memory builder.
 
 def build_evidence_memory_summary(
     *,
     state: LearningState,
     parsed: EvidenceJudgeOutput,
+    candidates: list[EvidenceCandidate],
+    originals: dict[str, Any],
     request_id: str,
     thread_id: str,
     round_index: int = 1,
@@ -3563,43 +3754,52 @@ def build_evidence_memory_summary(
     memory_id = f"{thread_id}:{request_id}:evidence_judge_round_{round_index}"
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # 鈹€鈹€ kept_evidence_summary: short safe metadata only 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # kept_evidence_summary: short safe metadata only.
     kept_evidence_summary: list[dict] = []
     judged_by_id: dict[str, EvidenceJudgeItem] = {}
     for item in parsed.judged_evidence:
         judged_by_id[item.evidence_id] = item
 
-    candidates = state.get("evidence_candidates") or []
-    originals = {**state.get("local_evidence_originals", {}), **state.get("web_evidence_originals", {})}
-    candidate_by_id: dict[str, dict] = {}
-    for c in candidates:
-        cid = c.get("evidence_id", "")
-        if cid:
-            candidate_by_id[cid] = c
+    candidate_by_id: dict[str, EvidenceCandidate] = {
+        candidate.evidence_id: candidate
+        for candidate in candidates
+        if candidate.evidence_id
+    }
+    metadata_filled_count = 0
+    metadata_missing_count = 0
 
     for eid, judge_item in judged_by_id.items():
         if not judge_item.keep:
             continue
-        candidate = candidate_by_id.get(eid, {})
-        source = candidate.get("source", "")
-        url = candidate.get("url", "")
+        candidate = candidate_by_id.get(eid)
+        source = candidate.source if candidate else ""
+        url = candidate.url if candidate else ""
         # Pull source/url from originals if not in candidate
         if (not source or not url) and eid in originals:
             orig = originals[eid]
-            source = source or orig.get("source", "")
-            url = url or orig.get("url", "")
+            if isinstance(orig, dict):
+                source = source or str(orig.get("source") or "")
+                url = url or str(orig.get("url") or "")
+        subject_value = candidate.subject if candidate else ""
+        source_type_value = candidate.source_type if candidate else ""
+        for value in (subject_value, source_type_value, source, url):
+            if value:
+                metadata_filled_count += 1
+            else:
+                metadata_missing_count += 1
         kept_evidence_summary.append({
             "evidence_id": eid,
-            "subject": candidate.get("subject", ""),
-            "source_type": candidate.get("source_type", ""),
+            "subject": subject_value,
+            "source_type": source_type_value,
             "source": source[:300] if source else "",
             "url": url[:500] if url else "",
             "final_quality": judge_item.final_quality,
             "use_case": judge_item.use_case,
+            "coverage_contribution": (judge_item.coverage_contribution or "")[:240],
             "short_summary": (judge_item.reason or "")[:200],
         })
 
-    # 鈹€鈹€ followup queries from coverage gaps 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Followup queries from coverage gaps.
     followup_queries: list[str] = []
     for gap in parsed.coverage_gaps:
         q = gap.suggested_search_query.strip()
@@ -3615,7 +3815,7 @@ def build_evidence_memory_summary(
         "request_id": request_id,
         "thread_id": thread_id,
         "evidence_judge_round": round_index,
-        # 鈹€鈹€ Selector-facing fields 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+        # Selector-facing fields.
         "subject": state.get("subject", ""),
         "requested_resource_type": state.get("requested_resource_type", ""),
         "resource_type": state.get("requested_resource_type", ""),
@@ -3628,7 +3828,7 @@ def build_evidence_memory_summary(
         "followup_search_queries": followup_queries,
         "evidence_count": len(parsed.judged_evidence),
         "kept_count": sum(1 for item in parsed.judged_evidence if item.keep),
-        # 鈹€鈹€ Compact metadata only (no raw docs/content) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+        # Compact metadata only (no raw docs/content).
         "kept_evidence_summary": kept_evidence_summary,
     }
 
@@ -3657,6 +3857,11 @@ def build_evidence_memory_summary(
             "summary_chars": len(summary_text),
             "memory_id": memory_id,
             "persisted": True,
+            "candidate_metadata_source": "current_call_arguments",
+            "candidate_count": len(candidates),
+            "original_count": len(originals),
+            "candidate_metadata_filled_count": metadata_filled_count,
+            "candidate_metadata_missing_count": metadata_missing_count,
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -3665,7 +3870,7 @@ def build_evidence_memory_summary(
     return [evidence_entry], gap_entries
 
 
-# 鈹€鈹€ Evidence summary output (controlled stop) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Evidence summary output (controlled stop)
 
 def _render_evidence_summary_output(state: LearningState) -> str:
     """Render a short Markdown output when evidence is insufficient."""
@@ -3728,7 +3933,7 @@ async def evidence_summary_output(state: LearningState) -> dict:
     }
 
 
-# 鈹€鈹€ Node 0a: academic router 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 0a: academic router
 
 @traced_node
 async def academic_router(state: LearningState) -> dict:
@@ -3749,16 +3954,22 @@ async def memory_use_decider(state: LearningState) -> dict:
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
 
+    raw_selected_memories, memory_selection_debug = _select_relevant_memory_summaries_with_debug(
+        state,
+        current_query=current_query,
+        subject=subject,
+        requested_resource_type=requested_resource_type,
+    )
+    _emit_memory_summary_selection_trace(state, memory_selection_debug)
     selected_memories = [
         _compact_memory_for_prompt(entry)
-        for entry in select_relevant_memory_summaries(
-            state,
-            current_query=current_query,
-            subject=subject,
-            requested_resource_type=requested_resource_type,
-        )
+        for entry in raw_selected_memories
     ]
     selected_memory_count = len(selected_memories)
+    eligible_memory_count = int(memory_selection_debug.get("eligible_memory_count") or 0)
+    current_query_is_ambiguous = _contains_any_pattern(current_query, _MEMORY_AMBIGUOUS_PATTERNS)
+    current_query_explicit_use = _contains_any_pattern(current_query, _MEMORY_USE_PATTERNS)
+    current_query_explicit_ignore = _contains_any_pattern(current_query, _MEMORY_IGNORE_PATTERNS)
 
     decision = _deterministic_memory_use_decision(
         current_query,
@@ -3801,6 +4012,7 @@ async def memory_use_decider(state: LearningState) -> dict:
                 business_validator=lambda p: validate_memory_use_decision_output(
                     p,
                     selected_memory_count=selected_memory_count,
+                    current_query_is_ambiguous=current_query_is_ambiguous,
                 ),
                 state=state,
                 max_raw_chars=get_max_raw_chars("memory_use_decider"),
@@ -3817,13 +4029,24 @@ async def memory_use_decider(state: LearningState) -> dict:
         logger,
         "memory_use_decision",
         {
+            "eligible_memory_count": eligible_memory_count,
             "selected_memory_count": selected_memory_count,
+            "current_query_explicit_use_history": current_query_explicit_use,
+            "current_query_explicit_ignore_history": current_query_explicit_ignore,
+            "current_query_ambiguous_history_reference": current_query_is_ambiguous,
             "decision": decision.decision,
             "reason": decision.reason,
             "confidence": decision.confidence,
             "confirmation_required": confirmation_required,
             "question_to_user": question if confirmation_required else "",
             "decision_source": decision_source,
+            "memory_selection": {
+                "subject_match_count": memory_selection_debug.get("memory_subject_match_count", 0),
+                "resource_match_count": memory_selection_debug.get("memory_resource_match_count", 0),
+                "query_overlap_match_count": memory_selection_debug.get("memory_query_overlap_match_count", 0),
+                "dropped_mismatch_count": memory_selection_debug.get("memory_dropped_mismatch_count", 0),
+                "missing_field_counts": memory_selection_debug.get("missing_field_counts", {}),
+            },
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -3837,8 +4060,8 @@ async def memory_use_decider(state: LearningState) -> dict:
                 "reason": decision.reason,
                 "selected_memory_count": selected_memory_count,
                 "options": [
-                    {"label": "缁撳悎鍘嗗彶", "value": "use"},
-                    {"label": "鍙湅褰撳墠闂", "value": "ignore"},
+                    {"label": "\u7ed3\u5408\u5386\u53f2", "value": "use"},
+                    {"label": "\u53ea\u770b\u5f53\u524d\u95ee\u9898", "value": "ignore"},
                 ],
             }
         )
@@ -3869,6 +4092,7 @@ async def memory_use_decider(state: LearningState) -> dict:
             "memory_use_user_choice": choice,
             "memory_confirmation_required": False,
             "memory_confirmation_question": question,
+            "eligible_evidence_memory_count": eligible_memory_count,
             "selected_evidence_memory_summaries": selected_memories if choice == "use" else [],
         }
 
@@ -3878,11 +4102,12 @@ async def memory_use_decider(state: LearningState) -> dict:
         "memory_use_user_choice": "",
         "memory_confirmation_required": False,
         "memory_confirmation_question": "",
+        "eligible_evidence_memory_count": eligible_memory_count,
         "selected_evidence_memory_summaries": selected_memories if decision.decision == "use" else [],
     }
 
 
-# 鈹€鈹€ Node 0b: query rewriting (retry path only, fail-fast) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 0b: query rewriting (retry path only, fail-fast)
 
 @traced_node
 async def rewrite_query(state: LearningState) -> dict:
@@ -3955,7 +4180,7 @@ async def rewrite_query(state: LearningState) -> dict:
     }
 
 
-# 鈹€鈹€ Node 0c: initial search-query rewriting 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 0c: initial search-query rewriting
 
 async def _maintain_conversation_summary(state: LearningState) -> str:
     """Update the compact conversation summary before query rewrite.
@@ -4045,6 +4270,105 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
         return existing_summary or ""
 
 
+_QUERY_REWRITE_COMPLIANCE_RETRY_INSTRUCTION = """
+Previous response failed structured-output compliance. Retry once with the same schema.
+Return only one complete valid JSON object using exactly the field names below.
+Do not create combined field names such as rag_query_web_search_query or learning_goal_primary_subject.
+Keep this retry intentionally small:
+- rag_query <= 240 chars; web_search_query <= 180 chars.
+- retrieval_plan[*].rag_query <= 240 chars; retrieval_plan[*].web_search_query <= 180 chars.
+- expanded_keypoints <= 4 items, each <= 120 chars.
+- retrieval_plan <= 1 item for this retry; expected_coverage <= 3 items, each <= 120 chars.
+- memory_context_notes <= 2 items, each <= 240 chars.
+- Avoid repeated template phrases and repeated n-grams. Do not repeat these phrases more than twice:
+  检索意图, 资源类型, 练习题, 答案, 解析, 实操任务.
+Previous failure: {failure_phase} {error_type}: {error_message}
+Required JSON shape:
+{{
+  "rag_query": "concise local RAG query",
+  "web_search_query": "concise web search query",
+  "expanded_keypoints": ["point 1", "point 2"],
+  "reason": "brief reason",
+  "learning_goal": "brief learning goal",
+  "primary_subject": "one available subject or empty string",
+  "subject_relation_summary": "brief subject relation",
+  "retrieval_plan": [
+    {{
+      "subject": "one available subject",
+      "role": "core_concept",
+      "rag_query": "concise subject RAG query",
+      "web_search_query": "concise subject web query",
+      "purpose": "brief purpose",
+      "relation_to_goal": "brief relation",
+      "priority": 0.9,
+      "coverage_hint": "brief coverage hint",
+      "expected_coverage": ["coverage 1", "coverage 2"]
+    }}
+  ],
+  "memory_context_notes": [],
+  "memory_used_for_retrieval": false,
+  "memory_use_reason": ""
+}}
+""".strip()
+
+
+def _query_rewrite_compliance_retry_reason(exc: StructuredOutputError) -> str:
+    result = exc.result
+    phase = result.failure_phase or ""
+    if phase in {"parsing_error", "validation_error", "business_validation_error"}:
+        return phase
+    error_blob = " ".join(
+        str(part or "")
+        for part in (
+            result.error_type,
+            result.error_message,
+            result.parsing_error,
+            result.validation_error,
+            result.business_validation_error,
+        )
+    )
+    retry_markers = (
+        "JSONDecodeError",
+        "Unterminated string",
+        "Structured output JSON",
+        "validation",
+        "business validation",
+        "repeated query phrase",
+        "repeated query ngram",
+        "query too long",
+        "maxLength",
+        "max_length",
+    )
+    if any(marker.lower() in error_blob.lower() for marker in retry_markers):
+        return phase or "structured_compliance_error"
+    return ""
+
+
+async def _invoke_search_query_rewriter_structured(
+    *,
+    state: LearningState,
+    messages: list,
+    original_query: str,
+    memory_use_policy: str,
+    fallback_modes: list[str],
+) -> StructuredLLMResult:
+    return await invoke_structured_llm(
+        node_name="search_query_rewriter",
+        llm_node="query_rewrite",
+        schema=SearchQueryRewriteOutput,
+        messages=messages,
+        output_mode=get_llm_output_mode("search_query_rewriter"),
+        fallback_modes=fallback_modes,
+        business_validator=lambda p: validate_search_query_rewrite_output(
+            p,
+            current_query=original_query,
+            memory_use_policy=memory_use_policy,
+        ),
+        state=state,
+        max_raw_chars=get_max_raw_chars("search_query_rewriter"),
+    )
+
+
 @traced_node
 async def search_query_rewriter(state: LearningState) -> dict:
     """Rewrite the original request into RAG and web-search queries.
@@ -4094,7 +4418,19 @@ async def search_query_rewriter(state: LearningState) -> dict:
         },
     )
     messages = [
-        SystemMessage(content=f"You are a retrieval query rewriter for a university learning agent. Return only schema-valid JSON. Current user query is highest priority. Memory use policy for this turn is {memory_use_policy}. If policy is ignore, do not let prior conversation or evidence memory affect retrieval topics. If policy is use, selected evidence memory may be used as continuity context, but the current user query remains the primary source of retrieval intent."),
+        SystemMessage(
+            content=(
+                "You are a retrieval query rewriter for a university learning agent. "
+                "Return exactly one schema-valid JSON object. Use exact schema keys only; "
+                "do not combine keys or invent keys. Invalid keys include "
+                "rag_query_web_search_query, learning_goal_primary_subject, "
+                "primary_subject_relation_summary, and any retrieval_plan_* combined key. "
+                f"Current user query is highest priority. Memory use policy for this turn is {memory_use_policy}. "
+                "If policy is ignore, do not let prior conversation or evidence memory affect retrieval topics. "
+                "If policy is use, selected evidence memory may be used as continuity context, "
+                "but the current user query remains the primary source of retrieval intent."
+            )
+        ),
         HumanMessage(content=prompt),
     ]
 
@@ -4106,43 +4442,82 @@ async def search_query_rewriter(state: LearningState) -> dict:
             node_name="search_query_rewriter",
             temperature=0.0,
         ):
-            structured_result = await invoke_structured_llm(
-                node_name="search_query_rewriter",
-                llm_node="query_rewrite",
-                schema=SearchQueryRewriteOutput,
-                messages=messages,
-                output_mode=get_llm_output_mode("search_query_rewriter"),
-                fallback_modes=get_fallback_modes("search_query_rewriter"),
-                business_validator=lambda p: validate_search_query_rewrite_output(
-                    p,
-                    current_query=original_query,
+            try:
+                structured_result = await _invoke_search_query_rewriter_structured(
+                    state=state,
+                    messages=messages,
+                    original_query=original_query,
                     memory_use_policy=memory_use_policy,
-                ),
-                state=state,
-                max_raw_chars=get_max_raw_chars("search_query_rewriter"),
-            )
+                    fallback_modes=get_fallback_modes("search_query_rewriter"),
+                )
+            except StructuredOutputError as first_exc:
+                retry_reason = _query_rewrite_compliance_retry_reason(first_exc)
+                if not retry_reason:
+                    raise
+                first_result = first_exc.result
+                retry_messages = [
+                    *messages,
+                    HumanMessage(
+                        content=_QUERY_REWRITE_COMPLIANCE_RETRY_INSTRUCTION.format(
+                            failure_phase=first_result.failure_phase or "unknown",
+                            error_type=first_result.error_type or "unknown",
+                            error_message=(
+                                first_result.business_validation_error
+                                or first_result.validation_error
+                                or first_result.parsing_error
+                                or first_result.error_message
+                                or ""
+                            )[:1000],
+                        )
+                    ),
+                ]
+                try:
+                    structured_result = await _invoke_search_query_rewriter_structured(
+                        state=state,
+                        messages=retry_messages,
+                        original_query=original_query,
+                        memory_use_policy=memory_use_policy,
+                        fallback_modes=[],
+                    )
+                except StructuredOutputError as retry_exc:
+                    emit_a3_trace(
+                        logger,
+                        "query_rewrite_compliance_retry",
+                        {
+                            "success": False,
+                            "retry_count": 1,
+                            "retry_reason": retry_reason,
+                            "previous_error_type": first_result.error_type,
+                            "previous_failure_phase": first_result.failure_phase,
+                            "previous_raw_output_chars": len(first_result.raw_output or ""),
+                            "final_error_type": retry_exc.result.error_type,
+                            "final_failure_phase": retry_exc.result.failure_phase,
+                            "final_raw_output_chars": len(retry_exc.result.raw_output or ""),
+                            "fallback_used": False,
+                        },
+                        state=state,
+                        env_flag="LOG_A3_TRACE",
+                    )
+                    raise
+                emit_a3_trace(
+                    logger,
+                    "query_rewrite_compliance_retry",
+                    {
+                        "success": True,
+                        "retry_count": 1,
+                        "retry_reason": retry_reason,
+                        "previous_error_type": first_result.error_type,
+                        "previous_failure_phase": first_result.failure_phase,
+                        "previous_raw_output_chars": len(first_result.raw_output or ""),
+                        "fallback_used": False,
+                    },
+                    state=state,
+                    env_flag="LOG_A3_TRACE",
+                )
         parsed = structured_result.parsed
         if not isinstance(parsed, SearchQueryRewriteOutput):
             raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
         raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
-
-        # 鈹€鈹€ Memory use trace 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-        history_ref = _has_explicit_history_reference(original_query)
-        action = "allow" if memory_use_policy == "use" else "background_only"
-        emit_a3_trace(
-            logger,
-            "query_rewrite_memory_use",
-            {
-                "memory_count": len(selected_memories),
-                "memory_use_policy": memory_use_policy,
-                "memory_used_for_retrieval": parsed.memory_used_for_retrieval,
-                "memory_use_reason": parsed.memory_use_reason,
-                "current_query_has_history_reference": history_ref,
-                "action": action,
-            },
-            state=state,
-            env_flag="LOG_A3_TRACE",
-        )
 
         result_payload = {
             "rag_query": parsed.rag_query.strip(),
@@ -4156,8 +4531,41 @@ async def search_query_rewriter(state: LearningState) -> dict:
         }
         retrieval_plan, normalize_debug = _normalize_retrieval_plan(parsed.retrieval_plan, state)
         primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
+        history_ref = _has_explicit_history_reference(original_query)
+        memory_prompt_injected = memory_use_policy == "use" and bool(selected_memories)
+        eligible_memory_count = int(state.get("eligible_evidence_memory_count") or len(selected_memories))
+        retrieval_plan_subjects = [item.get("subject", "") for item in retrieval_plan if item.get("subject")]
+        memory_influence_detected_by_system = bool(memory_prompt_injected and parsed.memory_used_for_retrieval)
+        if memory_use_policy == "use":
+            action = "allow_memory_context" if memory_prompt_injected else "allow_no_selected_memory"
+        elif memory_use_policy == "ignore":
+            action = "memory_blocked_by_policy"
+        else:
+            action = "memory_policy_unset"
+        emit_a3_trace(
+            logger,
+            "query_rewrite_memory_use",
+            {
+                "memory_count": len(selected_memories),
+                "selected_memory_count": len(selected_memories),
+                "eligible_memory_count": eligible_memory_count,
+                "memory_use_policy": memory_use_policy,
+                "memory_policy_resolved": memory_use_policy in {"use", "ignore"},
+                "memory_prompt_injected": memory_prompt_injected,
+                "memory_used_for_retrieval": parsed.memory_used_for_retrieval,
+                "llm_reported_memory_used_for_retrieval": parsed.memory_used_for_retrieval,
+                "memory_use_reason": parsed.memory_use_reason,
+                "llm_reported_memory_use_reason": parsed.memory_use_reason,
+                "current_query_has_history_reference": history_ref,
+                "retrieval_plan_subjects": retrieval_plan_subjects,
+                "memory_influence_detected_by_system": memory_influence_detected_by_system,
+                "action": action,
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
 
-        # 鈹€鈹€ Subject conflict fail-fast 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+        # Subject conflict fail-fast.
         _maybe_fail_subject_conflict(
             parsed_primary=parsed.primary_subject,
             normalized_primary=primary_subject,
@@ -4247,7 +4655,7 @@ async def search_query_rewriter(state: LearningState) -> dict:
     }
 
 
-# 鈹€鈹€ Node 1: RAG retrieval (parallel branch A) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 1: RAG retrieval (parallel branch A)
 
 @traced_node
 async def rag_retrieve(state: LearningState) -> dict:
@@ -4725,7 +5133,7 @@ async def web_search(state: LearningState) -> dict:
     return {"context": [{"type": "web", **r} for r in search_results]}
 
 
-# 鈹€鈹€ Node 3: generate answer 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 3: generate answer
 
 def _format_retrieval_score_note(doc: dict) -> str:
     """Format retrieval diagnostics without treating raw Chroma scores as relevance."""
@@ -4923,7 +5331,7 @@ async def generate_answer(state: LearningState) -> dict:
     return {"messages": [AIMessage(content=response.content)]}
 
 
-# 鈹€鈹€ Node 4: hallucination evaluation (reflection loop) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Node 4: hallucination evaluation (reflection loop)
 
 
 # TEMP A3_TRACE: remove after diagnostics validation.

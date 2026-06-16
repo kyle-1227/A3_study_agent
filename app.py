@@ -1,4 +1,4 @@
-﻿"""A3 Study Agent 鈥?AI-powered university learning resource generation system."""
+"""A3 Study Agent - AI-powered university learning resource generation system."""
 
 from __future__ import annotations
 
@@ -391,7 +391,7 @@ async def _stream_graph_events(
                 yield retry_payload
             event_type = event["event"]
 
-            # 鈹€鈹€ Node lifecycle events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Node lifecycle events
             if event_type in ("on_chain_start", "on_chain_end"):
                 node_name = event.get("name")
                 meta_node = event.get("metadata", {}).get("langgraph_node")
@@ -477,7 +477,7 @@ async def _stream_graph_events(
                     for retry_payload in _drain_provider_retry_events():
                         yield retry_payload
 
-            # 鈹€鈹€ Token streaming 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Token streaming
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 if node_name in ALLOWED_NODES:
@@ -489,7 +489,7 @@ async def _stream_graph_events(
                         )
                         yield f"data: {payload}\n\n"
 
-            # 鈹€鈹€ Token usage events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Token usage events
             elif event_type == "on_chat_model_end":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 output = event.get("data", {}).get("output")
@@ -535,7 +535,7 @@ async def _stream_graph_events(
     finally:
         reset_trace_event_sink(trace_sink_token)
 
-    # 鈹€鈹€ Check for interrupt after stream completes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Check for interrupt after stream completes
     try:
         state_snapshot = await graph.aget_state(config)
     except Exception:
@@ -624,13 +624,13 @@ async def generate_sse(
     Yields SSE payload types:
 
     * ``{"type": "thread_id", "thread_id": "..."}``
-      鈥?emitted once at stream start so frontend can use it for /resume.
+      - emitted once at stream start so frontend can use it for /resume.
     * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
-      鈥?emitted when a graph node begins or finishes execution.
+      - emitted when a graph node begins or finishes execution.
     * ``{"type": "token", "content": "<text>"}``
-      鈥?emitted for each streamed token from an allowed LLM node.
+      - emitted for each streamed token from an allowed LLM node.
     * ``{"type": "interrupt", "draft": "...", "thread_id": "..."}``
-      鈥?emitted when the graph pauses for human review (HIL).
+      - emitted when the graph pauses for human review (HIL).
 
     Args:
         query: The user-provided string to be processed by the graph.

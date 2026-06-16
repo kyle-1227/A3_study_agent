@@ -21,7 +21,11 @@ from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from src.config import get_setting
-from src.graph.llm import get_node_llm, invoke_with_provider_transport_retry
+from src.graph.llm import (
+    get_llm_call_max_retries,
+    get_node_llm,
+    invoke_with_provider_transport_retry,
+)
 from src.llm.http_messages import (
     _InvalidHttpMessageFormatError,
     normalize_openai_messages,
@@ -408,6 +412,17 @@ def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics 
     if isinstance(exc, ValueError):
         return "validation_error"
     return "llm_exception"
+
+
+def _is_semantic_retryable_failure(phase: str) -> bool:
+    return phase in {"parsing_error", "validation_error"}
+
+
+def _semantic_retry_count(attempts: list[StructuredLLMAttempt]) -> int:
+    attempts_by_mode: dict[str, int] = {}
+    for attempt in attempts:
+        attempts_by_mode[attempt.output_mode] = attempts_by_mode.get(attempt.output_mode, 0) + 1
+    return sum(max(0, count - 1) for count in attempts_by_mode.values())
 
 
 def _is_second_layer_unsupported(exc: Exception, mode: str) -> bool:
@@ -802,15 +817,16 @@ async def invoke_structured_llm(
 ) -> StructuredLLMResult:
     """Invoke a structured-output LLM.
 
-    In development fail-fast mode, the first failure raises
-    :class:`StructuredOutputError`; fallback modes remain configuration-only
-    and are not executed.
+    Retryable parsing/schema failures are retried before fail-fast raises.
+    Fallback modes remain configuration-only in development fail-fast mode.
     """
     llm_node = llm_node or node_name
     fail_fast = _fail_fast_enabled()
     requested_fallback_modes = list(fallback_modes or [])
     effective_fallback_modes = [] if fail_fast else requested_fallback_modes
-    modes = [output_mode, *effective_fallback_modes]
+    base_modes = [output_mode, *effective_fallback_modes]
+    max_retries = get_llm_call_max_retries(node_name)
+    modes = [mode for mode in base_modes for _ in range(max_retries + 1)]
     provider = _provider(llm_node)
     model = _model(llm_node)
     schema_name = schema.__name__
@@ -818,6 +834,7 @@ async def invoke_structured_llm(
     failure_policy = _failure_policy(node_name)
     schema_size_chars = _safe_schema_size_chars(schema)
     attempts: list[StructuredLLMAttempt] = []
+    terminal_modes: set[str] = set()
 
     def _make_metrics_from_attempt(attempt: StructuredLLMAttempt) -> _InvokeMetrics:
         return _InvokeMetrics(
@@ -834,6 +851,7 @@ async def invoke_structured_llm(
         )
 
     def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
+        result.retry_count = _semantic_retry_count(attempts)
         emit_a3_trace(
             logger,
             "structured_llm_output",
@@ -842,12 +860,46 @@ async def invoke_structured_llm(
             env_flag="LOG_STRUCTURED_LLM_OUTPUT",
             max_chars=raw_limit,
         )
+        attempts_for_mode = sum(1 for attempt in attempts if attempt.output_mode == result.output_mode)
+        should_retry = (
+            not result.success
+            and _is_semantic_retryable_failure(result.failure_phase)
+            and attempts_for_mode <= max_retries
+        )
+        if should_retry:
+            emit_a3_trace(
+                logger,
+                "structured_llm_retry_attempt",
+                {
+                    "node_name": node_name,
+                    "llm_node": llm_node,
+                    "schema_name": schema_name,
+                    "provider": provider,
+                    "model": model,
+                    "output_mode": result.output_mode,
+                    "failure_phase": result.failure_phase,
+                    "error_type": result.error_type,
+                    "error_message": _sanitize(result.error_message, max_chars=1200),
+                    "retry_count": attempts_for_mode,
+                    "max_retries": max_retries,
+                    "next_attempt": attempts_for_mode + 1,
+                    "fallback_used": result.fallback_used,
+                },
+                state=state,
+                env_flag="LOG_STRUCTURED_LLM_OUTPUT",
+                max_chars=raw_limit,
+            )
+            return
+        if not result.success:
+            terminal_modes.add(result.output_mode)
         if fail_fast and not result.success:
             if exc is not None:
                 raise StructuredOutputError(result) from exc
             raise StructuredOutputError(result)
 
     for mode in modes:
+        if mode in terminal_modes:
+            continue
         attempt_started = time.perf_counter()
         metrics = _InvokeMetrics()
         try:
@@ -909,7 +961,10 @@ async def invoke_structured_llm(
             business_started = time.perf_counter()
             business_error = ""
             if business_validator is not None:
-                validation_result = business_validator(parsed)
+                try:
+                    validation_result = business_validator(parsed)
+                except Exception as exc:
+                    validation_result = str(exc)
                 if isinstance(validation_result, list):
                     business_error = "; ".join(str(item) for item in validation_result if item)
                 elif validation_result:
@@ -1186,9 +1241,9 @@ async def invoke_structured_llm(
         raw_output_chars=last.raw_output_chars,
         schema_size_chars=schema_size_chars,
         fail_fast=fail_fast,
-        fallback_used=False,
+        fallback_used=(last.output_mode != output_mode),
         default_used=False,
-        retry_count=0,
+        retry_count=_semantic_retry_count(attempts),
         failure_policy=failure_policy,
         using_direct_openrouter_http=last.using_direct_openrouter_http,
         provider_request_mode=last.provider_request_mode,

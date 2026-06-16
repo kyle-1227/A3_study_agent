@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.config import get_setting
 from src.graph.academic import (
     _best_doc_score,
     _deterministic_memory_use_decision,
@@ -19,14 +20,70 @@ from src.graph.academic import (
     RetrievalPlanItem,
     SearchQueryRewriteOutput,
     academic_router,
+    build_evidence_memory_summary,
     generate_answer,
     memory_use_decider,
     rag_retrieve,
     rewrite_query,
     search_query_rewriter,
+    select_relevant_memory_summaries,
+    validate_search_query_rewrite_output,
     web_search,
 )
+from src.graph.evidence import EvidenceCandidate, EvidenceJudgeItem, EvidenceJudgeOutput
 from src.graph.state import CONTEXT_CLEAR
+from src.llm.structured_output import StructuredLLMResult, StructuredOutputError, get_llm_output_mode
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+
+
+def _valid_query_rewrite_output() -> SearchQueryRewriteOutput:
+    return SearchQueryRewriteOutput(
+        rag_query="Python functions 参数 return value scope",
+        web_search_query="Python function parameters return value course notes tutorial",
+        expanded_keypoints=["Python functions", "参数 parameter", "return value"],
+        reason="Expanded concise bilingual retrieval terms.",
+        learning_goal="Understand Python functions",
+        primary_subject="python",
+        subject_relation_summary="single subject",
+        retrieval_plan=[
+            RetrievalPlanItem(
+                subject="python",
+                role="core_concept",
+                rag_query="Python functions 参数 return value scope",
+                web_search_query="Python function parameters tutorial course notes",
+                priority=0.9,
+                expected_coverage=["function definition", "parameter passing"],
+            )
+        ],
+    )
+
+
+def _structured_output_error(
+    *,
+    phase: str = "parsing_error",
+    error_type: str = "JSONDecodeError",
+    error_message: str = "invalid json",
+    raw_output: str = "{bad",
+) -> StructuredOutputError:
+    return StructuredOutputError(
+        StructuredLLMResult(
+            success=False,
+            parsed=None,
+            node_name="search_query_rewriter",
+            llm_node="query_rewrite",
+            schema_name="SearchQueryRewriteOutput",
+            provider="test",
+            model="test",
+            output_mode="native_json_schema_pydantic",
+            raw_output=raw_output,
+            failure_phase=phase,
+            error_type=error_type,
+            error_message=error_message,
+            parsing_error=error_message if phase == "parsing_error" else "",
+            validation_error=error_message if phase == "validation_error" else "",
+            business_validation_error=error_message if phase == "business_validation_error" else "",
+        )
+    )
 
 
 class TestAcademicRouterRetry:
@@ -75,6 +132,12 @@ class TestRewriteQuery:
 
 
 class TestMemoryUseDecision:
+    def test_memory_use_decider_has_explicit_openrouter_config(self):
+        assert get_setting("llm.memory_use_decider.provider") == "openrouter"
+        assert get_setting("llm.memory_use_decider.base_url") == "https://openrouter.ai/api/v1"
+        assert get_setting("llm.memory_use_decider.api_key_env") == "OPENROUTER_API_KEY"
+        assert get_llm_output_mode("memory_use_decider") == "native_json_schema_pydantic"
+
     def test_empty_memory_ignores_without_prompt(self):
         decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=0)
         assert decision is not None
@@ -108,8 +171,139 @@ class TestMemoryUseDecision:
         assert result["memory_use_policy"] == "ignore"
         assert result["selected_evidence_memory_summaries"] == []
 
+    def test_irrelevant_recent_memory_is_ineligible(self):
+        selected = select_relevant_memory_summaries(
+            {
+                "evidence_summary_memory": [
+                    {
+                        "memory_id": "recent-math",
+                        "subject": "math",
+                        "resource_type": "mindmap",
+                        "summary": "linear algebra vector spaces matrix decomposition",
+                    }
+                ],
+                "request_id": "req",
+                "thread_id": "thread",
+            },
+            current_query="Python functions quiz practice",
+            subject="python",
+            requested_resource_type="quiz",
+        )
+
+        assert selected == []
+
+    @patch("src.graph.academic.interrupt", return_value={"choice": "ignore"})
+    async def test_relevant_memory_plus_ambiguous_query_asks_user(self, mock_interrupt):
+        result = await memory_use_decider({
+            "messages": [HumanMessage(content="重新给我一份学习计划")],
+            "evidence_summary_memory": [
+                {
+                    "memory_id": "python-plan",
+                    "subject": "python",
+                    "resource_type": "study_plan",
+                    "summary": "Python functions parameters return values learning plan",
+                }
+            ],
+            "subject": "python",
+            "requested_resource_type": "study_plan",
+            "request_id": "req",
+            "thread_id": "thread",
+        })
+
+        mock_interrupt.assert_called_once()
+        assert result["memory_use_policy"] == "ignore"
+        assert result["eligible_evidence_memory_count"] == 1
+
+    @patch("src.graph.academic.interrupt")
+    async def test_explicit_history_use_bypasses_popup(self, mock_interrupt):
+        result = await memory_use_decider({
+            "messages": [HumanMessage(content="结合之前的内容，给我一份学习计划")],
+            "evidence_summary_memory": [
+                {
+                    "memory_id": "python-plan",
+                    "subject": "python",
+                    "resource_type": "study_plan",
+                    "summary": "Python functions parameters return values learning plan",
+                }
+            ],
+            "subject": "python",
+            "requested_resource_type": "study_plan",
+            "request_id": "req",
+            "thread_id": "thread",
+        })
+
+        mock_interrupt.assert_not_called()
+        assert result["memory_use_policy"] == "use"
+        assert result["selected_evidence_memory_summaries"]
+
 
 class TestSearchQueryRewriter:
+    def test_query_rewrite_schema_exposes_length_limits(self):
+        schema = SearchQueryRewriteOutput.model_json_schema()
+        props = schema["properties"]
+        plan_props = schema["$defs"]["RetrievalPlanItem"]["properties"]
+
+        assert schema["additionalProperties"] is False
+        assert schema["$defs"]["RetrievalPlanItem"]["additionalProperties"] is False
+        assert props["rag_query"]["maxLength"] == 240
+        assert props["web_search_query"]["maxLength"] == 180
+        assert props["expanded_keypoints"]["maxItems"] == 8
+        assert props["expanded_keypoints"]["items"]["maxLength"] == 120
+        assert props["retrieval_plan"]["maxItems"] == 4
+        assert props["memory_context_notes"]["maxItems"] == 5
+        assert props["memory_context_notes"]["items"]["maxLength"] == 240
+        assert plan_props["expected_coverage"]["maxItems"] == 8
+        assert plan_props["expected_coverage"]["items"]["maxLength"] == 120
+
+    def test_search_query_rewriter_structured_retry_is_disabled_for_local_retry(self):
+        assert get_setting("llm_outputs.search_query_rewriter.max_retries") == 0
+        assert get_setting("provider_transport_retry.max_retries") == 2
+
+    def test_overlong_query_fields_fail_schema_validation(self):
+        with pytest.raises(Exception):
+            SearchQueryRewriteOutput(
+                rag_query="x" * 241,
+                web_search_query="Python function tutorial",
+                expanded_keypoints=["Python"],
+                reason="too long query",
+            )
+
+    def test_combined_query_rewrite_keys_fail_schema_validation(self):
+        with pytest.raises(Exception):
+            SearchQueryRewriteOutput.model_validate(
+                {
+                    "expanded_keypoints": ["big data quiz"],
+                    "reason": "bad combined keys",
+                    "learning_goal_primary_subject": "big_data",
+                    "primary_subject_relation_summary": "single subject",
+                    "rag_query_web_search_query": "big data quiz",
+                    "retrieval_plan_subject_role_rag_query_web_search_query_purpose_relation_to_goal_coverage_hint_expected_coverage_priority": [],
+                }
+            )
+
+    def test_repeated_chinese_phrases_fail_business_validation(self):
+        parsed = _valid_query_rewrite_output()
+        parsed.rag_query = "检索意图 资源类型 练习题 答案 解析 实操任务 " * 3
+
+        error = validate_search_query_rewrite_output(parsed, memory_use_policy="ignore")
+
+        assert "repeated query phrase" in error
+        assert "检索意图" in error
+
+    def test_repeated_english_ngram_fails_business_validation(self):
+        parsed = _valid_query_rewrite_output()
+        parsed.web_search_query = "python function parameter return " * 3
+
+        error = validate_search_query_rewrite_output(parsed, memory_use_policy="ignore")
+
+        assert "repeated query ngram" in error
+
+    def test_valid_concise_query_passes_business_validation(self):
+        assert validate_search_query_rewrite_output(
+            _valid_query_rewrite_output(),
+            memory_use_policy="ignore",
+        ) == ""
+
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     async def test_produces_rag_web_queries_and_plan(self, mock_invoke, mock_available_subjects):
@@ -147,6 +341,122 @@ class TestSearchQueryRewriter:
         assert result["retrieval_plan"][0]["subject"] == "python"
         assert result["primary_subject"] == "python"
         mock_invoke.assert_awaited_once()
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
+    @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
+    async def test_local_compliance_retry_succeeds_once(
+        self,
+        mock_summary,
+        mock_invoke,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["python"]
+        mock_summary.return_value = ""
+        parsed = _valid_query_rewrite_output()
+        mock_invoke.side_effect = [
+            _structured_output_error(
+                phase="business_validation_error",
+                error_type="BusinessValidationError",
+                error_message="rag_query repeated query phrase: 检索意图",
+            ),
+            SimpleNamespace(parsed=parsed, raw_output='{"ok": true}'),
+        ]
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            result = await search_query_rewriter({
+                "messages": [HumanMessage(content="Explain Python functions")],
+                "keypoints": ["Python"],
+                "subject": "python",
+                "subject_candidates": ["python"],
+                "memory_use_policy": "ignore",
+                "request_id": "req",
+                "thread_id": "thread",
+            })
+        finally:
+            reset_trace_event_sink(token)
+
+        assert result["search_rag_query"] == parsed.rag_query
+        assert mock_invoke.await_count == 2
+        assert mock_invoke.await_args_list[1].kwargs["fallback_modes"] == []
+        retry_event = next(event for event in events if event["stage"] == "query_rewrite_compliance_retry")
+        assert retry_event["success"] is True
+        memory_event = next(event for event in events if event["stage"] == "query_rewrite_memory_use")
+        assert memory_event["memory_prompt_injected"] is False
+        assert memory_event["memory_used_for_retrieval"] == memory_event["llm_reported_memory_used_for_retrieval"]
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
+    @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
+    async def test_local_compliance_retry_fails_fast_after_retry_failure(
+        self,
+        mock_summary,
+        mock_invoke,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["python"]
+        mock_summary.return_value = ""
+        mock_invoke.side_effect = [
+            _structured_output_error(
+                phase="parsing_error",
+                error_type="JSONDecodeError",
+                error_message="invalid json",
+            ),
+            _structured_output_error(
+                phase="validation_error",
+                error_type="ValidationError",
+                error_message="rag_query maxLength",
+            ),
+        ]
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            with pytest.raises(StructuredOutputError):
+                await search_query_rewriter({
+                    "messages": [HumanMessage(content="Explain Python functions")],
+                    "keypoints": ["Python"],
+                    "subject": "python",
+                    "subject_candidates": ["python"],
+                    "memory_use_policy": "ignore",
+                    "request_id": "req",
+                    "thread_id": "thread",
+                })
+        finally:
+            reset_trace_event_sink(token)
+
+        assert mock_invoke.await_count == 2
+        retry_event = next(event for event in events if event["stage"] == "query_rewrite_compliance_retry")
+        assert retry_event["success"] is False
+        assert retry_event["final_failure_phase"] == "validation_error"
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
+    @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
+    async def test_unimplemented_output_mode_does_not_compliance_retry(
+        self,
+        mock_summary,
+        mock_invoke,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["python"]
+        mock_summary.return_value = ""
+        mock_invoke.side_effect = _structured_output_error(
+            phase="second_layer_native_json_schema_pydantic_unsupported",
+            error_type="NotImplementedError",
+            error_message="unsupported output mode",
+        )
+
+        with pytest.raises(StructuredOutputError):
+            await search_query_rewriter({
+                "messages": [HumanMessage(content="Explain Python functions")],
+                "keypoints": ["Python"],
+                "subject": "python",
+                "subject_candidates": ["python"],
+                "memory_use_policy": "ignore",
+            })
+
+        assert mock_invoke.await_count == 1
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -338,6 +648,87 @@ class TestWebSearchDualSource:
 
         assert result["web_evidence_candidates"] == []
         assert result["web_evidence_originals"] == {}
+
+
+class TestEvidenceMemorySummary:
+    def test_builder_uses_current_call_candidates_and_originals(self):
+        parsed = EvidenceJudgeOutput(
+            overall_evidence_state="sufficient",
+            need_more_web_search=False,
+            judged_evidence=[
+                EvidenceJudgeItem(
+                    evidence_id="current",
+                    keep=True,
+                    final_quality="high",
+                    use_case="core_evidence",
+                    coverage_contribution="covers Python function basics",
+                    reason="useful course note",
+                )
+            ],
+            decision_summary="Current evidence is enough.",
+        )
+        candidate = EvidenceCandidate(
+            evidence_id="current",
+            source_type="web",
+            provider="tavily",
+            subject="python",
+            source="Current source",
+            url="",
+            content_preview="This preview must not be persisted as raw content.",
+        )
+        state = {
+            "subject": "python",
+            "requested_resource_type": "quiz",
+            "evidence_candidates": [
+                {
+                    "evidence_id": "current",
+                    "source_type": "local_rag",
+                    "subject": "math",
+                    "source": "Stale source",
+                    "url": "https://stale.example",
+                    "content": "stale raw doc",
+                }
+            ],
+            "request_id": "req",
+            "thread_id": "thread",
+        }
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            evidence_entries, gap_entries = build_evidence_memory_summary(
+                state=state,
+                parsed=parsed,
+                candidates=[candidate],
+                originals={
+                    "current": {
+                        "source": "Original source fallback",
+                        "url": "https://current.example",
+                        "content": "raw original content",
+                    }
+                },
+                request_id="req",
+                thread_id="thread",
+            )
+        finally:
+            reset_trace_event_sink(token)
+
+        assert gap_entries == []
+        entry = evidence_entries[0]
+        kept = entry["kept_evidence_summary"][0]
+        assert kept["source"] == "Current source"
+        assert kept["url"] == "https://current.example"
+        assert kept["subject"] == "python"
+        assert kept["source_type"] == "web"
+        assert kept["final_quality"] == "high"
+        assert kept["use_case"] == "core_evidence"
+        assert kept["coverage_contribution"] == "covers Python function basics"
+        assert "content" not in entry
+        assert "raw_docs" not in entry
+        assert "content_preview" not in kept
+        trace = next(event for event in events if event["stage"] == "evidence_memory_summary_build")
+        assert trace["candidate_metadata_source"] == "current_call_arguments"
+        assert trace["candidate_count"] == 1
+        assert trace["original_count"] == 1
 
 
 class TestFormatHelpers:

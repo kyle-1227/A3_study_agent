@@ -145,6 +145,70 @@ def get_fallback_llm(**overrides) -> ChatOpenAI:
 # Resilient invoke
 # ---------------------------------------------------------------------------
 
+def get_llm_call_max_retries(node_name: str | None = None, default: int = 2) -> int:
+    """Return the semantic retry budget for one LLM call.
+
+    The value means "additional tries after the first attempt".
+    """
+    raw = None
+    if node_name:
+        raw = get_setting(f"llm_outputs.{node_name}.max_retries", None)
+    if raw is None:
+        raw = get_setting("llm_outputs.default.max_retries", default)
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(0, min(3, value))
+
+
+def _is_recoverable_llm_error(exc: BaseException) -> bool:
+    return isinstance(exc, _FALLBACK_ERRORS) or _is_provider_transport_retryable(exc)
+
+
+def _invoke_with_retries_sync(operation: Callable[[], T], *, max_retries: int, label: str) -> tuple[T, int]:
+    retry_count = 0
+    while True:
+        try:
+            return operation(), retry_count
+        except Exception as exc:
+            if not _is_recoverable_llm_error(exc) or retry_count >= max_retries:
+                raise
+            retry_count += 1
+            logger.warning(
+                "%s retry %s/%s after %s: %s",
+                label,
+                retry_count,
+                max_retries,
+                type(exc).__name__,
+                exc,
+            )
+
+
+async def _invoke_with_retries_async(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    max_retries: int,
+    label: str,
+) -> tuple[T, int]:
+    retry_count = 0
+    while True:
+        try:
+            return await operation(), retry_count
+        except Exception as exc:
+            if not _is_recoverable_llm_error(exc) or retry_count >= max_retries:
+                raise
+            retry_count += 1
+            logger.warning(
+                "%s retry %s/%s after %s: %s",
+                label,
+                retry_count,
+                max_retries,
+                type(exc).__name__,
+                exc,
+            )
+
+
 def invoke_with_fallback(primary, messages, *, fallback=None, span=None):
     """Invoke *primary*; on recoverable error, failover to *fallback*.
 
@@ -161,13 +225,19 @@ def invoke_with_fallback(primary, messages, *, fallback=None, span=None):
         The original error when no fallback is configured, or the fallback
         error when both models fail.
     """
+    max_retries = get_llm_call_max_retries()
     try:
-        response = primary.invoke(messages)
+        response, retry_count = _invoke_with_retries_sync(
+            lambda: primary.invoke(messages),
+            max_retries=max_retries,
+            label="Primary LLM",
+        )
         if span is not None:
+            span.set_attribute("llm.retry_count", retry_count)
             span.set_attribute("llm.fallback_used", False)
         return response
-    except _FALLBACK_ERRORS as exc:
-        if fallback is None:
+    except Exception as exc:
+        if not _is_recoverable_llm_error(exc) or fallback is None:
             raise
 
         logger.warning(
@@ -190,7 +260,14 @@ def invoke_with_fallback(primary, messages, *, fallback=None, span=None):
                 },
             )
 
-        return fallback.invoke(messages)
+        response, fallback_retry_count = _invoke_with_retries_sync(
+            lambda: fallback.invoke(messages),
+            max_retries=max_retries,
+            label="Fallback LLM",
+        )
+        if span is not None:
+            span.set_attribute("llm.fallback_retry_count", fallback_retry_count)
+        return response
 
 
 async def async_invoke_with_fallback(primary, messages, *, fallback=None, span=None):
@@ -209,13 +286,19 @@ async def async_invoke_with_fallback(primary, messages, *, fallback=None, span=N
         The original error when no fallback is configured, or the fallback
         error when both models fail.
     """
+    max_retries = get_llm_call_max_retries()
     try:
-        response = await primary.ainvoke(messages)
+        response, retry_count = await _invoke_with_retries_async(
+            lambda: primary.ainvoke(messages),
+            max_retries=max_retries,
+            label="Primary LLM",
+        )
         if span is not None:
+            span.set_attribute("llm.retry_count", retry_count)
             span.set_attribute("llm.fallback_used", False)
         return response
-    except _FALLBACK_ERRORS as exc:
-        if fallback is None:
+    except Exception as exc:
+        if not _is_recoverable_llm_error(exc) or fallback is None:
             raise
 
         logger.warning(
@@ -238,7 +321,14 @@ async def async_invoke_with_fallback(primary, messages, *, fallback=None, span=N
                 },
             )
 
-        return await fallback.ainvoke(messages)
+        response, fallback_retry_count = await _invoke_with_retries_async(
+            lambda: fallback.ainvoke(messages),
+            max_retries=max_retries,
+            label="Fallback LLM",
+        )
+        if span is not None:
+            span.set_attribute("llm.fallback_retry_count", fallback_retry_count)
+        return response
 
 
 def _message_content_chars(messages: list[Any]) -> int:
@@ -418,53 +508,87 @@ async def invoke_plain_llm_fail_fast(
         "prompt_chars": _message_content_chars(messages or []),
         "fallback_used": False,
     }
-    try:
-        result, transport_retry_count = await invoke_with_provider_transport_retry(
-            lambda: llm.ainvoke(messages),
-            node_name=node_name,
-            llm_node=llm_node,
-            provider=provider,
-            model=model,
-            state=state or {},
-        )
-        raw = str(getattr(result, "content", result) or "")
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-        if not raw.strip():
-            raise ValueError("plain LLM returned empty output")
-        emit_a3_trace(
-            logger,
-            "plain_llm_output",
-            {
-                **base_payload,
-                "success": True,
-                "total_elapsed_ms": elapsed_ms,
-                "raw_output_chars": len(raw),
-                "raw_output": raw[:max_chars],
-                "error_type": "",
-                "error_message": "",
-                "provider_error_body": "",
-                "provider_transport_retry_count": transport_retry_count,
-            },
-            state=state or {},
-            env_flag="LOG_A3_TRACE",
-        )
-        return raw.strip()
-    except Exception as exc:
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-        emit_a3_trace(
-            logger,
-            "plain_llm_output",
-            {
-                **base_payload,
-                "success": False,
-                "total_elapsed_ms": elapsed_ms,
-                "raw_output_chars": 0,
-                "raw_output": "",
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)[:max_chars],
-                "provider_error_body": _provider_error_body(exc, max_chars=max_chars),
-            },
-            state=state or {},
-            env_flag="LOG_A3_TRACE",
-        )
-        raise
+    max_retries = get_llm_call_max_retries(node_name)
+    retry_count = 0
+    total_transport_retry_count = 0
+
+    while True:
+        try:
+            result, transport_retry_count = await invoke_with_provider_transport_retry(
+                lambda: llm.ainvoke(messages),
+                node_name=node_name,
+                llm_node=llm_node,
+                provider=provider,
+                model=model,
+                state=state or {},
+            )
+            total_transport_retry_count += transport_retry_count
+            raw = str(getattr(result, "content", result) or "")
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            if not raw.strip():
+                raise ValueError("plain LLM returned empty output")
+            emit_a3_trace(
+                logger,
+                "plain_llm_output",
+                {
+                    **base_payload,
+                    "success": True,
+                    "total_elapsed_ms": elapsed_ms,
+                    "raw_output_chars": len(raw),
+                    "raw_output": raw[:max_chars],
+                    "error_type": "",
+                    "error_message": "",
+                    "provider_error_body": "",
+                    "provider_transport_retry_count": total_transport_retry_count,
+                    "retry_count": retry_count,
+                    "max_retries": max_retries,
+                },
+                state=state or {},
+                env_flag="LOG_A3_TRACE",
+            )
+            return raw.strip()
+        except Exception as exc:
+            should_retry_empty = (
+                isinstance(exc, ValueError)
+                and str(exc) == "plain LLM returned empty output"
+                and retry_count < max_retries
+            )
+            if should_retry_empty:
+                retry_count += 1
+                emit_a3_trace(
+                    logger,
+                    "plain_llm_retry_attempt",
+                    {
+                        **base_payload,
+                        "retry_count": retry_count,
+                        "max_retries": max_retries,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:max_chars],
+                        "provider_transport_retry_count": total_transport_retry_count,
+                    },
+                    state=state or {},
+                    env_flag="LOG_A3_TRACE",
+                )
+                continue
+
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            emit_a3_trace(
+                logger,
+                "plain_llm_output",
+                {
+                    **base_payload,
+                    "success": False,
+                    "total_elapsed_ms": elapsed_ms,
+                    "raw_output_chars": 0,
+                    "raw_output": "",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:max_chars],
+                    "provider_error_body": _provider_error_body(exc, max_chars=max_chars),
+                    "provider_transport_retry_count": total_transport_retry_count,
+                    "retry_count": retry_count,
+                    "max_retries": max_retries,
+                },
+                state=state or {},
+                env_flag="LOG_A3_TRACE",
+            )
+            raise
