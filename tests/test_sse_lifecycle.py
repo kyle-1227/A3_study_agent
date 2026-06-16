@@ -1,8 +1,8 @@
-﻿"""Unit tests for SSE node lifecycle events in generate_sse.
+"""Unit tests for SSE node lifecycle events in generate_sse.
 
 Tests cover: node start/end events, token streaming coexistence,
 sub-chain filtering, internal node filtering, and event ordering.
-All tests mock astream_events 鈥?no real graph execution required.
+All tests mock astream_events - no real graph execution required.
 
 NOTE: generate_sse now emits a thread_id event first (REQ-08 HIL),
 and calls graph.aget_state() after streaming to detect interrupts.
@@ -601,7 +601,7 @@ class TestSSEUsageEvents:
 
 
 # ---------------------------------------------------------------------------
-# TestSSETextEvent 鈥?"text" SSE event for non-streaming nodes (AC-02)
+# TestSSETextEvent - "text" SSE event for non-streaming nodes (AC-02)
 # ---------------------------------------------------------------------------
 
 class TestSSETextEvent:
@@ -792,7 +792,7 @@ class TestSSEProviderRetryEvents:
         assert retry_events[0]["max_retries"] == 2
 
 # ---------------------------------------------------------------------------
-# TestSSEDoneEvent 鈥?"done" SSE event at stream completion (BUG-09)
+# TestSSEDoneEvent - "done" SSE event at stream completion (BUG-09)
 # ---------------------------------------------------------------------------
 
 class TestSSEDoneEvent:

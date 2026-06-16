@@ -63,7 +63,7 @@ def build_graph() -> StateGraph:
     # Build graph
     graph = StateGraph(LearningState)
 
-    # 鈹€鈹€ Nodes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Nodes
     graph.add_node("supervisor", supervisor_node)
 
     # SubGraph A: Academic (parallel retrieval + answer generation)
@@ -115,7 +115,7 @@ def build_graph() -> StateGraph:
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
-    # 鈹€鈹€ Edges 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Edges
     graph.set_entry_point("supervisor")
 
     # Conditional fork edges

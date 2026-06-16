@@ -1,4 +1,4 @@
-﻿# A3 Study Agent 鈥?System Logic Parameters
+# A3 Study Agent - System Logic Parameters
 # Loaded by src/config/config_manager.py at runtime.
 
 academic:
@@ -198,7 +198,7 @@ llm_outputs:
     output_mode: native_json_schema_pydantic
     fallback_modes: []
     failure_policy: block
-    max_retries: 2
+    max_retries: 0
     max_raw_chars: 12000
   memory_use_decider:
     output_mode: native_json_schema_pydantic

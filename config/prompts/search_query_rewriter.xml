@@ -64,6 +64,16 @@ core_concept、implementation_tool、application_context、prerequisite、compar
 11. retrieval_plan 中每个 subject 的 rag_query 也必须中英双语扩展，且要贴合该 subject 在学习目标中的角色。
 12. 只输出 JSON，不要输出 Markdown、代码块或解释性前后缀。
 13. JSON 之外不能有任何文字。
+14. 必须使用输出 JSON 形状中的精确字段名；不要合并字段名，不要新增字段名。
+15. 禁止输出以下错误字段名：rag_query_web_search_query、learning_goal_primary_subject、primary_subject_relation_summary、retrieval_plan_subject_role_rag_query_web_search_query_purpose_relation_to_goal_coverage_hint_expected_coverage_priority。
+
+## 输出长度和重复控制
+- rag_query 最多 240 字符；web_search_query 最多 180 字符。
+- retrieval_plan[*].rag_query 最多 240 字符；retrieval_plan[*].web_search_query 最多 180 字符。
+- expanded_keypoints 最多 8 项，每项最多 120 字符。
+- expected_coverage 最多 8 项，每项最多 120 字符。
+- memory_context_notes 最多 5 项，每项最多 240 字符。
+- 不要重复模板短语或重复 n-gram；以下短语不要出现超过 2 次：检索意图、资源类型、练习题、答案、解析、实操任务。
 
 ## 双语扩展示例（仅作风格参考，不要硬编码）
 用户输入“Python 函数 参数 返回值 作用域”时，rag_query 可同时包含：
