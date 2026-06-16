@@ -210,7 +210,7 @@ export default function Home() {
   const [isMemoryConfirming, setIsMemoryConfirming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const router = useRouter()
-  const { userId, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
+  const { userId, nickname, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
 
   // Redirect to onboarding if user exists but has no profile
   useEffect(() => {
@@ -1119,12 +1119,15 @@ export default function Home() {
         onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
         userId={userId}
-        nickname={localStorage.getItem("a3_nickname")}
+        nickname={nickname}
         onStartOnboarding={startOnboarding}
         onClearUser={() => {
-          localStorage.removeItem("a3_user_id")
-          localStorage.removeItem("a3_nickname")
-          window.location.reload()
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("a3_user_id")
+            localStorage.removeItem("a3_nickname")
+            localStorage.removeItem("a3_onboarding_completed")
+            window.location.reload()
+          }
         }}
       />
       <div className="flex min-w-0 flex-1 flex-col h-full">
