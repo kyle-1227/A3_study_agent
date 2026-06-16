@@ -1,7 +1,9 @@
 "use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import { LeftSidebar } from "@/components/left-sidebar"
+import { useUser } from "@/hooks/use-user"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
@@ -207,6 +209,16 @@ export default function Home() {
   const [memoryConfirmation, setMemoryConfirmation] = useState<MemoryConfirmationState | null>(null)
   const [isMemoryConfirming, setIsMemoryConfirming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
+  const router = useRouter()
+  const { userId, nickname, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
+
+  // Redirect to onboarding if user exists but has no profile
+  useEffect(() => {
+    if (userLoading || !storageReady) return
+    if (userId && !hasProfile) {
+      router.push("/onboarding")
+    }
+  }, [userId, hasProfile, userLoading, storageReady, router])
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
@@ -917,7 +929,7 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query: content, thread_id: threadId }),
+        body: JSON.stringify({ query: content, thread_id: threadId, user_id: userId }),
       })
 
       if (!body) return
@@ -1106,6 +1118,17 @@ export default function Home() {
         onClearChat={handleClearChat}
         onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
+        userId={userId}
+        nickname={nickname}
+        onStartOnboarding={startOnboarding}
+        onClearUser={() => {
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("a3_user_id")
+            localStorage.removeItem("a3_nickname")
+            localStorage.removeItem("a3_onboarding_completed")
+            window.location.reload()
+          }
+        }}
       />
       <div className="flex min-w-0 flex-1 flex-col h-full">
         <ChatArea

@@ -7,10 +7,13 @@ import {
   ChevronLeft,
   ChevronRight,
   GraduationCap,
+  LogIn,
+  LogOut,
   MessageSquare,
   MessageSquarePlus,
   Settings,
   Trash2,
+  User2,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -39,6 +42,10 @@ interface LeftSidebarProps {
   onClearChat?: (id: string) => void
   onClearChatHistory?: () => void
   selectedChatId?: string
+  userId?: string | null
+  nickname?: string | null
+  onStartOnboarding?: () => void
+  onClearUser?: () => void
 }
 
 const VOLUNTEER_STORAGE_KEY = "volunteer_chat_history"
@@ -65,6 +72,10 @@ export function LeftSidebar({
   onClearChat,
   onClearChatHistory,
   selectedChatId,
+  userId,
+  nickname,
+  onStartOnboarding,
+  onClearUser,
 }: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
@@ -276,7 +287,43 @@ export function LeftSidebar({
             </div>
           </div>
 
-          <div className="border-t border-sidebar-border p-4">
+          <div className="border-t border-sidebar-border p-4 space-y-2">
+            {/* User identity section */}
+            {userId ? (
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--primary)] text-sm font-medium text-white">
+                  {(nickname || "U").charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {nickname || "用户"}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {userId.slice(0, 10)}...
+                  </p>
+                </div>
+                {onClearUser && (
+                  <button
+                    onClick={onClearUser}
+                    className="rounded-md p-1.5 text-muted-foreground hover:bg-[var(--muted)] hover:text-foreground"
+                    title="退出登录"
+                  >
+                    <LogOut className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+                onClick={onStartOnboarding}
+              >
+                <LogIn className="h-4 w-4" />
+                登录 / 注册
+              </Button>
+            )}
+
+            {/* Settings button (always shown) */}
             <Button variant="ghost" className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground">
               <Settings className="h-4 w-4" />
               设置与帮助
