@@ -4166,7 +4166,8 @@ async def _execute_web_research_tasks(
 def _dedupe_web_sources_by_canonical_url(sources: list[dict]) -> tuple[list[dict], dict]:
     deduped, debug = dedupe_sources_by_canonical_url(sources)
     for index, source in enumerate(deduped):
-        source["source_id"] = f"websrc:{index}"
+        task_id = str(source.get("task_id") or "task").replace(":", "_")[:48] or "task"
+        source["source_id"] = f"websrc:{task_id}:{index}"
         source.setdefault("canonical_url", canonicalize_url(str(source.get("original_url") or "")))
         source.setdefault("domain", domain_from_url(str(source.get("original_url") or "")))
     return deduped, debug
@@ -4522,6 +4523,7 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
                 "task_id": doc.get("task_id", ""),
                 "canonical_url": doc.get("canonical_url", ""),
                 "original_url": doc.get("original_url", ""),
+                "url": doc.get("url") or doc.get("original_url", ""),
                 "domain": doc.get("domain", ""),
                 "title": doc.get("title", ""),
                 "tavily_score": doc.get("tavily_score"),
@@ -5439,6 +5441,18 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
     for stage in summarizer_stages:
         _append_web_research_stage(debug, state, stage)
 
+    summarizer_result_count = len(summaries)
+    summarizer_kept_count = sum(1 for summary in summaries if summary.get("keep"))
+    summarizer_rejected_count = max(0, summarizer_result_count - summarizer_kept_count)
+    summarizer_fallback_used = any(bool(summary.get("source_summary_fallback_used")) for summary in summaries)
+    all_rejected_warning = None
+    if summaries and summarizer_kept_count == 0 and not summarizer_fallback_used:
+        all_rejected_warning = (
+            "All web sources were rejected by Web Source Summarizer; continuing with local evidence only."
+        )
+        _append_developer_warning(debug, all_rejected_warning)
+        debug["status"] = "degraded"
+
     docs = _build_web_docs_from_summaries(sources=deduped_sources, summaries=summaries)
     candidates = _build_web_evidence_candidates_from_research_docs(docs)
     capped_candidates = _cap_evidence_candidates(candidates)
@@ -5462,9 +5476,13 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
         result_count=len(deduped_sources),
         kept_count=len(capped_candidates),
         rejected_count=max(0, len(deduped_sources) - len(docs)),
+        summarizer_result_count=summarizer_result_count,
+        summarizer_kept_count=summarizer_kept_count,
+        summarizer_rejected_count=summarizer_rejected_count,
         duplicate_url_count=debug["duplicate_url_count"],
         search_result_judge_skipped=True,
         skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        developer_warning=all_rejected_warning,
         candidate_preview=[
             {
                 "evidence_id": candidate.evidence_id,
@@ -5488,9 +5506,13 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
         result_count=len(deduped_sources),
         kept_count=len(capped_candidates),
         rejected_count=max(0, len(deduped_sources) - len(docs)),
+        summarizer_result_count=summarizer_result_count,
+        summarizer_kept_count=summarizer_kept_count,
+        summarizer_rejected_count=summarizer_rejected_count,
         duplicate_url_count=debug["duplicate_url_count"],
         search_result_judge_skipped=True,
         skip_reason=WEB_RESEARCH_V2_SKIP_REASON,
+        developer_warning=all_rejected_warning,
         source_distribution=_source_distribution([doc for doc in capped_originals.values()]),
     )
     _append_web_research_stage(debug, state, final_stage)

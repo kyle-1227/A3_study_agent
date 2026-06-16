@@ -216,7 +216,7 @@ def test_canonical_url_dedup_keeps_higher_score_then_priority():
             "tavily_score": 0.2,
         },
         {
-            "task_id": "task-high",
+            "task_id": "task:ml:0",
             "task_priority": 0.1,
             "original_url": "https://example.com/course",
             "tavily_score": 0.8,
@@ -238,8 +238,9 @@ def test_canonical_url_dedup_keeps_higher_score_then_priority():
     deduped, debug = _dedupe_web_sources_by_canonical_url(sources)
 
     assert debug["duplicate_url_count"] == 2
-    assert {source["task_id"] for source in deduped} == {"task-high", "task-priority-high"}
-    assert all(source["source_id"].startswith("websrc:") for source in deduped)
+    assert {source["task_id"] for source in deduped} == {"task:ml:0", "task-priority-high"}
+    assert deduped[0]["source_id"] == "websrc:task_ml_0:0"
+    assert all(str(source["source_id"]).startswith("websrc:") for source in deduped)
 
 
 @pytest.mark.asyncio
@@ -305,6 +306,10 @@ async def test_summarizer_failure_uses_basic_doc_fallback(monkeypatch):
     debug = result["web_research_v2_debug"]
 
     assert debug["used_fallback"] is True
+    assert candidate["metadata"]["source_id"].startswith("websrc:task-1:")
+    assert candidate["metadata"]["task_id"] == "task-1"
+    assert candidate["metadata"]["canonical_url"] == "https://example.edu/big-data/exercises"
+    assert candidate["metadata"]["url"] == "https://example.edu/big-data/exercises"
     assert candidate["metadata"]["summary_source"] == "basic_tavily_fallback"
     assert candidate["metadata"]["source_summary_fallback_used"] is True
     assert candidate["metadata"]["web_research_v2_stage"] == "summarizer_fallback"
@@ -346,6 +351,68 @@ async def test_web_research_v2_records_search_result_judge_skipped(monkeypatch):
     assert debug["search_result_judge_skipped"] is True
     assert debug["skip_reason"] == WEB_RESEARCH_V2_SKIP_REASON
     assert all(stage["skip_reason"] == WEB_RESEARCH_V2_SKIP_REASON for stage in debug["stages"] if "skip_reason" in stage)
+
+
+@pytest.mark.asyncio
+async def test_summarizer_rejects_all_sources_returns_empty_degraded(monkeypatch):
+    plan = WebResearchPlan(tasks=[_task(task_id="task:ml:0")])
+    warning = "All web sources were rejected by Web Source Summarizer; continuing with local evidence only."
+
+    async def fake_invoke_structured_llm(**kwargs):
+        if kwargs["node_name"] == "web_research_planner":
+            return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
+        source_ids = _source_ids_from_messages(kwargs["messages"])
+        batch = WebSourceSummaryBatch(summaries=[
+            _summary(
+                source_id=source_id,
+                keep=False,
+                summary="",
+                coverage_points=[],
+                reason="Not useful enough for this request.",
+                use_case="discard",
+                relevance="low",
+                usefulness="low",
+                risk="medium",
+            )
+            for source_id in source_ids
+        ])
+        return _structured_result(
+            parsed=batch,
+            node_name="web_source_summarizer",
+            schema_name="WebSourceSummaryBatch",
+        )
+
+    def fake_web_search_fn(*args, **kwargs):
+        return [
+            {
+                "title": "Rejected Big Data Page",
+                "url": "https://example.edu/rejected-1",
+                "content": "A generic page.",
+                "score": 0.71,
+            },
+            {
+                "title": "Rejected Big Data Blog",
+                "url": "https://example.edu/rejected-2",
+                "content": "Another generic page.",
+                "score": 0.69,
+            },
+        ]
+
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
+    monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
+
+    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
+    debug = result["web_research_v2_debug"]
+    final_stage = next(stage for stage in debug["stages"] if stage["stage"] == "web_research_v2.final")
+
+    assert result["web_evidence_candidates"] == []
+    assert result["web_evidence_originals"] == {}
+    assert debug["status"] == "degraded"
+    assert warning in debug["developer_warnings"]
+    assert final_stage["summarizer_result_count"] == 2
+    assert final_stage["kept_count"] == 0
+    assert final_stage["rejected_count"] == 2
+    assert final_stage["developer_warning"] == warning
 
 
 @pytest.mark.asyncio
