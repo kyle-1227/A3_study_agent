@@ -42,6 +42,8 @@ ALLOWED_OUTPUT_MODES = {
     "tool_call_pydantic",
     "native_json_schema_pydantic",
     "constrained_decoding",
+    "deepseek_tool_call_strict",
+    "deepseek_json_object",
 }
 
 _SECRET_PATTERNS = (
@@ -62,6 +64,14 @@ class _BusinessValidationError(Exception):
         super().__init__(message)
 
 
+class _DeepSeekStructuredOutputError(RuntimeError):
+    """Raised for DeepSeek official structured-output protocol failures."""
+
+    def __init__(self, failure_phase: str, message: str):
+        self.failure_phase = failure_phase
+        super().__init__(message)
+
+
 @dataclass
 class _InvokeMetrics:
     """Diagnostics for one structured output attempt."""
@@ -75,6 +85,7 @@ class _InvokeMetrics:
     using_direct_openrouter_http: bool = False
     provider_request_mode: str = ""
     http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
+    extra_debug: dict[str, Any] = field(default_factory=dict)
 
 
 class _InvokeOneModeError(Exception):
@@ -109,6 +120,7 @@ class StructuredLLMAttempt:
     using_direct_openrouter_http: bool = False
     provider_request_mode: str = ""
     http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
+    extra_debug: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -149,6 +161,7 @@ class StructuredLLMResult:
     using_direct_openrouter_http: bool = False
     provider_request_mode: str = ""
     http_messages_preview: list[dict[str, Any]] = field(default_factory=list)
+    extra_debug: dict[str, Any] = field(default_factory=dict)
 
     def to_debug_payload(self, *, max_raw_chars: int = 4000) -> dict[str, Any]:
         using_direct_openrouter_http = (
@@ -163,7 +176,11 @@ class StructuredLLMResult:
             (attempt.http_messages_preview for attempt in reversed(self.attempts) if attempt.http_messages_preview),
             [],
         )
-        return {
+        extra_debug = self.extra_debug or next(
+            (attempt.extra_debug for attempt in reversed(self.attempts) if attempt.extra_debug),
+            {},
+        )
+        payload = {
             "node_name": self.node_name,
             "llm_node": self.llm_node,
             "schema_name": self.schema_name,
@@ -219,10 +236,13 @@ class StructuredLLMResult:
                     "using_direct_openrouter_http": attempt.using_direct_openrouter_http,
                     "provider_request_mode": attempt.provider_request_mode,
                     "http_messages_preview": attempt.http_messages_preview,
+                    **attempt.extra_debug,
                 }
                 for attempt in self.attempts
             ],
         }
+        payload.update(extra_debug)
+        return payload
 
 
 class StructuredOutputError(RuntimeError):
@@ -348,6 +368,145 @@ def _safe_schema_size_chars(schema: type[BaseModel]) -> int:
         return 0
 
 
+_DEEPSEEK_SAFE_SCHEMA_KEYS = {
+    "$defs",
+    "$ref",
+    "anyOf",
+    "description",
+    "enum",
+    "items",
+    "properties",
+    "required",
+    "type",
+}
+
+_DEEPSEEK_DROP_SCHEMA_KEYS = {
+    "const",
+    "default",
+    "examples",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minimum",
+    "multipleOf",
+    "pattern",
+    "title",
+    "uniqueItems",
+}
+
+_DEEPSEEK_UNSUPPORTED_SCHEMA_KEYS = {
+    "allOf",
+    "contains",
+    "dependentRequired",
+    "dependentSchemas",
+    "if",
+    "maxContains",
+    "minContains",
+    "not",
+    "oneOf",
+    "patternProperties",
+    "prefixItems",
+    "propertyNames",
+    "then",
+    "else",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+}
+
+
+def compile_pydantic_schema_for_deepseek_tool(schema_model: type[BaseModel]) -> dict[str, Any]:
+    """Compile a Pydantic JSON schema for DeepSeek strict tool calling.
+
+    DeepSeek strict mode validates a narrower subset of JSON Schema than
+    Pydantic emits.  We relax API-side validation keywords here while leaving
+    Pydantic validation intact after the model returns tool arguments.
+    """
+    try:
+        raw_schema = schema_model.model_json_schema()
+        compiled = _compile_deepseek_schema_node(raw_schema, path=schema_model.__name__)
+    except _DeepSeekStructuredOutputError:
+        raise
+    except Exception as exc:
+        raise _DeepSeekStructuredOutputError(
+            "deepseek_schema_compile_error",
+            f"Failed to compile {schema_model.__name__} for DeepSeek strict tool calling: {exc}",
+        ) from exc
+    if not isinstance(compiled, dict):
+        raise _DeepSeekStructuredOutputError(
+            "deepseek_schema_compile_error",
+            f"Compiled {schema_model.__name__} schema is not an object",
+        )
+    return compiled
+
+
+def _compile_deepseek_schema_node(node: Any, *, path: str) -> Any:
+    if isinstance(node, list):
+        return [
+            _compile_deepseek_schema_node(item, path=f"{path}[{index}]")
+            for index, item in enumerate(node)
+        ]
+    if not isinstance(node, dict):
+        return node
+
+    unsupported = sorted(set(node) & _DEEPSEEK_UNSUPPORTED_SCHEMA_KEYS)
+    if unsupported:
+        raise _DeepSeekStructuredOutputError(
+            "deepseek_schema_compile_error",
+            f"DeepSeek strict schema does not support {unsupported} at {path}",
+        )
+
+    node_type = node.get("type")
+    if node_type == "null" or (isinstance(node_type, list) and "null" in node_type):
+        raise _DeepSeekStructuredOutputError(
+            "deepseek_schema_compile_error",
+            f"DeepSeek strict schema does not support nullable type at {path}",
+        )
+
+    compiled: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _DEEPSEEK_DROP_SCHEMA_KEYS:
+            continue
+        if key == "additionalProperties":
+            if isinstance(value, dict) and value:
+                raise _DeepSeekStructuredOutputError(
+                    "deepseek_schema_compile_error",
+                    f"DeepSeek strict schema does not support map-like additionalProperties at {path}",
+                )
+            continue
+        if key in {"properties", "$defs"}:
+            if not isinstance(value, dict):
+                raise _DeepSeekStructuredOutputError(
+                    "deepseek_schema_compile_error",
+                    f"DeepSeek strict schema expected object for {key} at {path}",
+                )
+            compiled[key] = {
+                str(child_key): _compile_deepseek_schema_node(
+                    child_value,
+                    path=f"{path}.{key}.{child_key}",
+                )
+                for child_key, child_value in value.items()
+            }
+            continue
+        if key not in _DEEPSEEK_SAFE_SCHEMA_KEYS:
+            continue
+        compiled[key] = _compile_deepseek_schema_node(value, path=f"{path}.{key}")
+
+    properties = compiled.get("properties")
+    if node_type == "object" or isinstance(properties, dict):
+        if not isinstance(properties, dict):
+            properties = {}
+            compiled["properties"] = properties
+        compiled["additionalProperties"] = False
+        compiled["required"] = list(properties.keys())
+
+    return compiled
+
+
 def _round_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 2)
 
@@ -397,6 +556,9 @@ def _extract_provider_error_body(exc: Exception) -> str:
 
 def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None) -> str:
     """Classify failure phase for a structured output attempt."""
+    explicit_phase = getattr(exc, "failure_phase", "")
+    if explicit_phase:
+        return str(explicit_phase)
     if isinstance(exc, _InvalidHttpMessageFormatError):
         return "invalid_http_message_format"
     if isinstance(exc, _BusinessValidationError):
@@ -405,6 +567,12 @@ def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics 
         return "parsing_error"
     if isinstance(exc, ValidationError):
         return "validation_error"
+    status_code = _extract_status_code(exc)
+    if mode in {"deepseek_tool_call_strict", "deepseek_json_object"}:
+        if _is_provider_transport_error(exc, status_code=status_code):
+            return "provider_transport_error"
+        if status_code is not None:
+            return "provider_http_error"
     if isinstance(exc, NotImplementedError):
         return f"second_layer_{mode}_unsupported"
     if _is_second_layer_unsupported(exc, mode):
@@ -416,6 +584,23 @@ def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics 
 
 def _is_semantic_retryable_failure(phase: str) -> bool:
     return phase in {"parsing_error", "validation_error"}
+
+
+def _is_provider_transport_error(exc: Exception, *, status_code: Any = None) -> bool:
+    try:
+        numeric_status = int(status_code) if status_code is not None else None
+    except Exception:
+        numeric_status = None
+    if numeric_status == 429 or (numeric_status is not None and 500 <= numeric_status <= 599):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.ConnectError, httpx.TimeoutException)):
+        return True
+    return type(exc).__name__ in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+    }
 
 
 def _semantic_retry_count(attempts: list[StructuredLLMAttempt]) -> int:
@@ -451,7 +636,7 @@ def _validate_mode(mode: str) -> None:
 
 
 def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
-    return (
+    contract = (
         "Structured output contract for this call:\n"
         f"- Node: {node_name}\n"
         f"- Schema: {schema.__name__}\n"
@@ -461,6 +646,16 @@ def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) ->
         "- Do not omit required fields. Use only schema-compatible enum values.\n"
         "- If unsure, still return the best schema-valid JSON object; never answer in prose."
     )
+    if mode == "deepseek_tool_call_strict":
+        contract += (
+            "\n- Do not omit any field. If empty, use \"\", [], false, or 0 according to the schema."
+        )
+    elif mode == "deepseek_json_object":
+        contract += (
+            "\n- The response_format is json_object, so the response must be valid json."
+            f"\n- Example json object shape: {json.dumps(_minimal_json_example(schema), ensure_ascii=False)}"
+        )
+    return contract
 
 
 def _inject_json_contract(messages: list, *, schema: type[BaseModel], node_name: str, mode: str) -> list:
@@ -479,6 +674,122 @@ def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
             "parameters": schema.model_json_schema(),
         },
     }
+
+
+def _minimal_json_example(schema: type[BaseModel]) -> dict[str, Any]:
+    example: dict[str, Any] = {}
+    fields = getattr(schema, "model_fields", {}) or {}
+    for name, field in fields.items():
+        annotation = getattr(field, "annotation", None)
+        annotation_text = str(annotation)
+        if "bool" in annotation_text:
+            value: Any = False
+        elif "int" in annotation_text:
+            value = 0
+        elif "float" in annotation_text:
+            value = 0.0
+        elif "list" in annotation_text or "List" in annotation_text:
+            value = []
+        else:
+            value = ""
+        example[str(name)] = value
+        if len(example) >= 6:
+            break
+    return example or {"result": {}}
+
+
+def _deepseek_tool_name(node_name: str, schema: type[BaseModel]) -> str:
+    raw = f"{node_name}_{schema.__name__}"
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_")
+    return (cleaned or schema.__name__)[:64]
+
+
+def _deepseek_api_key(llm_node: str) -> tuple[str, str]:
+    api_key_env = str(_setting(llm_node, "api_key_env", "DEEPSEEK_API_KEY") or "DEEPSEEK_API_KEY")
+    return api_key_env, os.getenv(api_key_env, "").strip()
+
+
+def _deepseek_base_url(llm_node: str, *, beta: bool) -> str:
+    key = "beta_base_url" if beta else "base_url"
+    default = "https://api.deepseek.com/beta" if beta else "https://api.deepseek.com"
+    return str(_setting(llm_node, key, default) or default).rstrip("/")
+
+
+def _deepseek_request_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _deepseek_temperature(llm_node: str) -> float:
+    try:
+        return float(_setting(llm_node, "temperature", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _deepseek_max_tokens(llm_node: str) -> int:
+    try:
+        return int(_setting(llm_node, "max_tokens", 1024) or 1024)
+    except Exception:
+        return 1024
+
+
+def _deepseek_thinking(llm_node: str) -> dict[str, str] | None:
+    value = str(_setting(llm_node, "thinking", "") or "").strip().lower()
+    if value in {"enabled", "disabled"}:
+        return {"type": value}
+    return None
+
+
+def _deepseek_choice(data: dict[str, Any]) -> dict[str, Any]:
+    choices = data.get("choices", [])
+    if not choices or not isinstance(choices[0], dict):
+        return {}
+    return choices[0]
+
+
+def _deepseek_message_from_choice(choice: dict[str, Any]) -> dict[str, Any]:
+    message = choice.get("message", {})
+    return message if isinstance(message, dict) else {}
+
+
+def _deepseek_raise_for_status(response: httpx.Response) -> None:
+    if response.status_code < 400:
+        return
+    err = RuntimeError(f"Error code: {response.status_code} - {response.text}")
+    err.response = response  # for _extract_status_code / _extract_provider_error_body
+    raise err
+
+
+async def _deepseek_chat_completion(
+    *,
+    payload: dict[str, Any],
+    base_url: str,
+    api_key: str,
+    node_name: str,
+    llm_node: str,
+    state: dict | None,
+) -> tuple[httpx.Response, int]:
+    async def _post_request():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers=_deepseek_request_headers(api_key),
+                json=payload,
+            )
+        _deepseek_raise_for_status(response)
+        return response
+
+    return await invoke_with_provider_transport_retry(
+        _post_request,
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=_provider(llm_node),
+        model=_model(llm_node),
+        state=state or {},
+    )
 
 
 async def _invoke_openrouter_native(
@@ -601,6 +912,274 @@ async def _invoke_openrouter_native(
     return parsed, raw_output, metrics
 
 
+async def _invoke_deepseek_tool_call_strict(
+    schema: type[BaseModel],
+    messages: list,
+    metrics: _InvokeMetrics,
+    llm_node: str,
+    node_name: str,
+    state: dict | None = None,
+) -> tuple[BaseModel, str, _InvokeMetrics]:
+    """Direct DeepSeek official strict tool-call invocation."""
+    metrics.using_direct_openrouter_http = False
+    metrics.provider_request_mode = "deepseek_tool_call_strict"
+    tool_name = _deepseek_tool_name(node_name, schema)
+    metrics.extra_debug.update({
+        "using_deepseek_official_http": True,
+        "deepseek_schema_size_chars": 0,
+        "tool_name": tool_name,
+        "tool_call_present": False,
+        "tool_arguments_chars": 0,
+        "finish_reason": "",
+    })
+
+    api_key_env, api_key = _deepseek_api_key(llm_node)
+    if not api_key:
+        raise _InvokeOneModeError(
+            RuntimeError(f"{api_key_env} is not configured"),
+            metrics,
+            raw_output="",
+        )
+
+    try:
+        deepseek_schema = compile_pydantic_schema_for_deepseek_tool(schema)
+    except Exception as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+    metrics.extra_debug["deepseek_schema_size_chars"] = len(
+        json.dumps(deepseek_schema, ensure_ascii=False, default=str)
+    )
+
+    openai_messages = normalize_openai_messages(messages)
+    metrics.http_messages_preview = preview_openai_messages(openai_messages)
+    try:
+        validate_openai_messages(openai_messages)
+    except Exception as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
+    payload: dict[str, Any] = {
+        "model": _model(llm_node),
+        "messages": openai_messages,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": f"Return a {schema.__name__} object for {node_name}.",
+                    "strict": True,
+                    "parameters": deepseek_schema,
+                },
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": tool_name},
+        },
+        "temperature": _deepseek_temperature(llm_node),
+        "max_tokens": _deepseek_max_tokens(llm_node),
+        "stream": False,
+    }
+    thinking = _deepseek_thinking(llm_node)
+    if thinking is not None:
+        payload["thinking"] = thinking
+
+    llm_started = time.perf_counter()
+    try:
+        response, _transport_retry_count = await _deepseek_chat_completion(
+            payload=payload,
+            base_url=_deepseek_base_url(llm_node, beta=True),
+            api_key=api_key,
+            node_name=node_name,
+            llm_node=llm_node,
+            state=state,
+        )
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+    except Exception as exc:
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        metrics.raw_output_chars = len(response.text or "")
+        raise _InvokeOneModeError(exc, metrics, raw_output=response.text) from exc
+
+    choice = _deepseek_choice(data)
+    finish_reason = str(choice.get("finish_reason", "") or "")
+    metrics.extra_debug["finish_reason"] = finish_reason
+    message = _deepseek_message_from_choice(choice)
+    tool_calls = message.get("tool_calls") or []
+    metrics.extra_debug["tool_call_present"] = bool(tool_calls)
+    if not tool_calls:
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_tool_call_missing",
+                "DeepSeek response did not include a tool call",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+
+    tool_call = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    returned_name = str(function.get("name") or "")
+    if returned_name != tool_name:
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_wrong_tool_name",
+                f"Expected DeepSeek tool {tool_name!r}, got {returned_name!r}",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        raw_arguments = json.dumps(arguments, ensure_ascii=False)
+    else:
+        raw_arguments = str(arguments or "")
+    metrics.raw_output_chars = len(raw_arguments)
+    metrics.extra_debug["tool_arguments_chars"] = len(raw_arguments)
+    if not raw_arguments.strip():
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_empty_tool_arguments",
+                "DeepSeek tool call returned empty arguments",
+            ),
+            metrics,
+            raw_output="",
+        )
+
+    parse_started = time.perf_counter()
+    try:
+        parsed_args = json.loads(raw_arguments)
+        if not isinstance(parsed_args, dict):
+            raise ValueError("DeepSeek tool arguments must be a JSON object")
+        parsed = schema.model_validate(parsed_args)
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+    except Exception as exc:
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        _refresh_parse_validate_total(metrics)
+        raise _InvokeOneModeError(exc, metrics, raw_output=raw_arguments) from exc
+
+    _refresh_parse_validate_total(metrics)
+    return parsed, raw_arguments, metrics
+
+
+async def _invoke_deepseek_json_object(
+    schema: type[BaseModel],
+    messages: list,
+    metrics: _InvokeMetrics,
+    llm_node: str,
+    node_name: str,
+    state: dict | None = None,
+) -> tuple[BaseModel, str, _InvokeMetrics]:
+    """Direct DeepSeek official JSON object invocation."""
+    metrics.using_direct_openrouter_http = False
+    metrics.provider_request_mode = "deepseek_json_object"
+    metrics.extra_debug.update({
+        "using_deepseek_official_http": True,
+        "deepseek_schema_size_chars": 0,
+        "tool_name": "",
+        "tool_call_present": False,
+        "tool_arguments_chars": 0,
+        "finish_reason": "",
+    })
+    try:
+        deepseek_schema = compile_pydantic_schema_for_deepseek_tool(schema)
+        metrics.extra_debug["deepseek_schema_size_chars"] = len(
+            json.dumps(deepseek_schema, ensure_ascii=False, default=str)
+        )
+    except Exception:
+        # JSON object mode does not send schema, so schema compile diagnostics are best effort.
+        metrics.extra_debug["deepseek_schema_size_chars"] = 0
+
+    api_key_env, api_key = _deepseek_api_key(llm_node)
+    if not api_key:
+        raise _InvokeOneModeError(
+            RuntimeError(f"{api_key_env} is not configured"),
+            metrics,
+            raw_output="",
+        )
+
+    openai_messages = normalize_openai_messages(messages)
+    metrics.http_messages_preview = preview_openai_messages(openai_messages)
+    try:
+        validate_openai_messages(openai_messages)
+    except Exception as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
+    payload: dict[str, Any] = {
+        "model": _model(llm_node),
+        "messages": openai_messages,
+        "response_format": {"type": "json_object"},
+        "temperature": _deepseek_temperature(llm_node),
+        "max_tokens": _deepseek_max_tokens(llm_node),
+        "stream": False,
+    }
+    thinking = _deepseek_thinking(llm_node)
+    if thinking is not None:
+        payload["thinking"] = thinking
+
+    llm_started = time.perf_counter()
+    try:
+        response, _transport_retry_count = await _deepseek_chat_completion(
+            payload=payload,
+            base_url=_deepseek_base_url(llm_node, beta=False),
+            api_key=api_key,
+            node_name=node_name,
+            llm_node=llm_node,
+            state=state,
+        )
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+    except Exception as exc:
+        metrics.llm_elapsed_ms = _round_ms(llm_started)
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        metrics.raw_output_chars = len(response.text or "")
+        raise _InvokeOneModeError(exc, metrics, raw_output=response.text) from exc
+
+    choice = _deepseek_choice(data)
+    finish_reason = str(choice.get("finish_reason", "") or "")
+    metrics.extra_debug["finish_reason"] = finish_reason
+    if finish_reason == "length":
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_json_truncated",
+                "DeepSeek JSON output was truncated by max_tokens",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+
+    message = _deepseek_message_from_choice(choice)
+    content = _message_text(message.get("content", ""))
+    metrics.raw_output_chars = len(content or "")
+    if not content.strip():
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_json_empty_content",
+                "DeepSeek JSON output returned empty content",
+            ),
+            metrics,
+            raw_output="",
+        )
+
+    parse_started = time.perf_counter()
+    try:
+        parsed = schema.model_validate(_extract_json_object(content))
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+    except Exception as exc:
+        metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
+        _refresh_parse_validate_total(metrics)
+        raise _InvokeOneModeError(exc, metrics, raw_output=content) from exc
+
+    _refresh_parse_validate_total(metrics)
+    return parsed, content, metrics
+
+
 async def _invoke_one_mode(
     *,
     node_name: str,
@@ -610,7 +1189,6 @@ async def _invoke_one_mode(
     mode: str,
     state: dict | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
-    llm = get_node_llm(llm_node)
     messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
     prompt_chars = _compute_prompt_chars(messages)
     metrics = _InvokeMetrics(prompt_chars=prompt_chars)
@@ -624,6 +1202,28 @@ async def _invoke_one_mode(
         )
 
     # ── native_json_schema_pydantic ──
+    if mode == "deepseek_tool_call_strict":
+        return await _invoke_deepseek_tool_call_strict(
+            schema,
+            messages,
+            metrics,
+            llm_node,
+            node_name=node_name,
+            state=state,
+        )
+
+    if mode == "deepseek_json_object":
+        return await _invoke_deepseek_json_object(
+            schema,
+            messages,
+            metrics,
+            llm_node,
+            node_name=node_name,
+            state=state,
+        )
+
+    llm = get_node_llm(llm_node)
+
     if mode == "native_json_schema_pydantic":
         if _provider(llm_node) == "openrouter":
             # Direct httpx: bypass ChatOpenAI default params (frequency_penalty,
@@ -848,6 +1448,7 @@ async def invoke_structured_llm(
             using_direct_openrouter_http=attempt.using_direct_openrouter_http,
             provider_request_mode=attempt.provider_request_mode,
             http_messages_preview=attempt.http_messages_preview,
+            extra_debug=dict(attempt.extra_debug),
         )
 
     def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
@@ -917,6 +1518,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -943,6 +1545,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -990,6 +1593,7 @@ async def invoke_structured_llm(
                     using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                     provider_request_mode=metrics.provider_request_mode,
                     http_messages_preview=metrics.http_messages_preview,
+                    extra_debug=dict(metrics.extra_debug),
                 )
                 attempts.append(attempt)
                 result = StructuredLLMResult(
@@ -1024,6 +1628,7 @@ async def invoke_structured_llm(
                     using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                     provider_request_mode=metrics.provider_request_mode,
                     http_messages_preview=metrics.http_messages_preview,
+                    extra_debug=dict(metrics.extra_debug),
                 )
                 _emit_and_maybe_raise(result, exc=_BusinessValidationError(business_error))
                 continue
@@ -1043,6 +1648,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -1073,6 +1679,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             _emit_and_maybe_raise(result)
             return result
@@ -1107,6 +1714,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -1145,6 +1753,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -1173,6 +1782,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             attempts.append(attempt)
             result = StructuredLLMResult(
@@ -1211,6 +1821,7 @@ async def invoke_structured_llm(
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
+                extra_debug=dict(metrics.extra_debug),
             )
             _emit_and_maybe_raise(result, exc=exc)
             continue
@@ -1248,6 +1859,7 @@ async def invoke_structured_llm(
         using_direct_openrouter_http=last.using_direct_openrouter_http,
         provider_request_mode=last.provider_request_mode,
         http_messages_preview=last.http_messages_preview,
+        extra_debug=dict(last.extra_debug),
     )
     _emit_and_maybe_raise(result)
     return result

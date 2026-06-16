@@ -113,6 +113,7 @@ def initial_request_reset_transient_state() -> dict:
         "web_evidence_originals": {},
         "evidence_candidates": [],
         "evidence_judge_output": {},
+        "evidence_judge_debug": {},
         "evidence_judge_rounds": 0,
         "evidence_judge_state": "",
         "evidence_coverage_gaps": [],
@@ -272,6 +273,7 @@ class LearningState(TypedDict):
     web_evidence_originals: dict                                         # Original Tavily results keyed by evidence_id
     evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
     evidence_judge_output: dict                                          # Raw structured Evidence Judge output
+    evidence_judge_debug: dict                                           # Evidence Judge execution status/debug summary
     evidence_judge_rounds: int                                           # Evidence Judge rounds executed
     evidence_judge_state: str                                            # sufficient / partially_sufficient / insufficient
     evidence_coverage_gaps: list[dict]                                   # Coverage gaps reserved for future search optimization

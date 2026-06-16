@@ -16,8 +16,11 @@ from src.graph.academic import (
     _format_retrieved,
     _format_search,
     _normalize_retrieval_plan,
+    _judge_tavily_search_results_with_llm,
     _select_docs_with_subject_quota,
     RetrievalPlanItem,
+    SearchResultJudgeItem,
+    SearchResultJudgeOutput,
     SearchQueryRewriteOutput,
     academic_router,
     build_evidence_memory_summary,
@@ -27,6 +30,7 @@ from src.graph.academic import (
     rewrite_query,
     search_query_rewriter,
     select_relevant_memory_summaries,
+    validate_search_result_judge_output,
     validate_search_query_rewrite_output,
     web_search,
 )
@@ -132,11 +136,12 @@ class TestRewriteQuery:
 
 
 class TestMemoryUseDecision:
-    def test_memory_use_decider_has_explicit_openrouter_config(self):
-        assert get_setting("llm.memory_use_decider.provider") == "openrouter"
-        assert get_setting("llm.memory_use_decider.base_url") == "https://openrouter.ai/api/v1"
-        assert get_setting("llm.memory_use_decider.api_key_env") == "OPENROUTER_API_KEY"
-        assert get_llm_output_mode("memory_use_decider") == "native_json_schema_pydantic"
+    def test_memory_use_decider_has_explicit_deepseek_official_config(self):
+        assert get_setting("llm.memory_use_decider.provider") == "deepseek_official"
+        assert get_setting("llm.memory_use_decider.base_url") == "https://api.deepseek.com"
+        assert get_setting("llm.memory_use_decider.beta_base_url") == "https://api.deepseek.com/beta"
+        assert get_setting("llm.memory_use_decider.api_key_env") == "DEEPSEEK_API_KEY"
+        assert get_llm_output_mode("memory_use_decider") == "deepseek_tool_call_strict"
 
     def test_empty_memory_ignores_without_prompt(self):
         decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=0)
@@ -235,6 +240,94 @@ class TestMemoryUseDecision:
         mock_interrupt.assert_not_called()
         assert result["memory_use_policy"] == "use"
         assert result["selected_evidence_memory_summaries"]
+
+
+class TestSearchResultJudge:
+    async def test_uses_structured_runtime_with_deepseek_mode(self):
+        captured: dict = {}
+        parsed = SearchResultJudgeOutput(
+            judged_results=[
+                SearchResultJudgeItem(
+                    index=0,
+                    title="Python exercises",
+                    url="https://example.com/python",
+                    keep=True,
+                    final_quality="high",
+                    relevance="high",
+                    authority="medium",
+                    usefulness="high",
+                    risk="low",
+                    evidence_type="open_exercise_set",
+                    use_case="exercise_material",
+                    reason="Relevant practice set.",
+                )
+            ]
+        )
+
+        async def fake_invoke_structured_llm(**kwargs):
+            captured.update(kwargs)
+            business_error = kwargs["business_validator"](parsed)
+            assert business_error == ""
+            return StructuredLLMResult(
+                success=True,
+                parsed=parsed,
+                node_name=kwargs["node_name"],
+                llm_node=kwargs["llm_node"],
+                schema_name=kwargs["schema"].__name__,
+                provider="deepseek_official",
+                model="deepseek-v4-flash",
+                output_mode=kwargs["output_mode"],
+                raw_output=parsed.model_dump_json(),
+            )
+
+        with patch("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm):
+            accepted, debug = await _judge_tavily_search_results_with_llm(
+                state={
+                    "messages": [HumanMessage(content="给我一份 Python 的练习题")],
+                    "learning_goal": "Python practice",
+                    "requested_resource_type": "quiz",
+                    "request_id": "req",
+                    "thread_id": "thread",
+                },
+                subject="python",
+                role="core_concept",
+                purpose="exercise_material",
+                search_query="Python exercises",
+                raw_query="Python exercises",
+                original_user_query="给我一份 Python 的练习题",
+                tavily_results=[
+                    {
+                        "title": "Python exercises",
+                        "url": "https://example.com/python",
+                        "content": "Practice Python functions.",
+                    }
+                ],
+                coverage_risk="low",
+                local_evidence_strength="medium",
+            )
+
+        assert captured["node_name"] == "search_result_judge"
+        assert captured["llm_node"] == "search_result_judge"
+        assert captured["output_mode"] == "deepseek_tool_call_strict"
+        assert captured["fallback_modes"] == []
+        assert accepted[0]["judge_quality"] == "high"
+        assert debug["provider"] == "deepseek_official"
+
+    def test_index_coverage_business_validator_rejects_missing_and_duplicate_indexes(self):
+        missing = SearchResultJudgeOutput(
+            judged_results=[
+                SearchResultJudgeItem(index=0, keep=True, reason="ok"),
+            ]
+        )
+        duplicate = SearchResultJudgeOutput(
+            judged_results=[
+                SearchResultJudgeItem(index=0, keep=True, reason="ok"),
+                SearchResultJudgeItem(index=0, keep=False, reason="duplicate"),
+            ]
+        )
+
+        assert "must be [0, 1]" in validate_search_result_judge_output(missing, expected_count=2)
+        assert "duplicate" in validate_search_result_judge_output(duplicate, expected_count=2)
 
 
 class TestSearchQueryRewriter:

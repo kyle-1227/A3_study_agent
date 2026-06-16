@@ -24,7 +24,13 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import get_setting, load_prompt
-from src.graph.evidence import EvidenceCandidate, EvidenceJudgeOutput
+from src.graph.evidence import (
+    EvidenceCandidate,
+    EvidenceGradeBatch,
+    EvidenceJudgeItem,
+    EvidenceJudgeOutput,
+    EvidenceSufficiencyOutput,
+)
 from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
 from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
 from src.llm.structured_output import (
@@ -590,6 +596,7 @@ def _clear_retrieval_plan_state() -> dict:
         "web_supplement_count": 0,
         "evidence_candidates": [],
         "evidence_judge_output": {},
+        "evidence_judge_debug": {},
         "evidence_judge_rounds": 0,
         "evidence_judge_state": "",
         "evidence_coverage_gaps": [],
@@ -1764,45 +1771,6 @@ def _judge_model() -> str:
     )
 
 
-def _judge_base_url() -> str:
-    return str(_judge_setting("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
-
-
-def _judge_api_key_env() -> str:
-    return str(_judge_setting("api_key_env", "OPENROUTER_API_KEY") or "OPENROUTER_API_KEY")
-
-
-def _judge_api_key() -> str:
-    return os.getenv(_judge_api_key_env(), "").strip()
-
-
-def _judge_max_tokens() -> int:
-    try:
-        return int(_judge_setting("max_tokens", 1200))
-    except (TypeError, ValueError):
-        return 1200
-
-
-def _judge_temperature() -> float:
-    try:
-        return float(_judge_setting("temperature", 0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _judge_result_preview(results: list[dict], *, limit: int = 8) -> list[dict]:
-    previews: list[dict] = []
-    for index, result in enumerate(results[:limit]):
-        previews.append({
-            "index": index,
-            "title": result.get("title", ""),
-            "url": result.get("url", ""),
-            "content_preview": str(result.get("content", ""))[:600],
-            "tavily_score": result.get("score"),
-        })
-    return previews
-
-
 def _judge_result_payload(results: list[dict]) -> list[dict]:
     return [
         {
@@ -1814,6 +1782,21 @@ def _judge_result_payload(results: list[dict]) -> list[dict]:
         }
         for index, result in enumerate(results)
     ]
+
+
+def validate_search_result_judge_output(parsed: BaseModel, *, expected_count: int) -> str:
+    if not isinstance(parsed, SearchResultJudgeOutput):
+        return "search_result_judge returned unexpected schema type"
+    judged = parsed.judged_results or []
+    expected_indexes = set(range(expected_count))
+    indexes = [item.index for item in judged]
+    if expected_count > 0 and not judged:
+        return f"judged_results must cover input indexes {sorted(expected_indexes)}"
+    if len(indexes) != len(set(indexes)):
+        return f"judged_results contains duplicate indexes: {indexes}"
+    if set(indexes) != expected_indexes:
+        return f"judged_results indexes must be {sorted(expected_indexes)}, got {indexes}"
+    return ""
 
 
 def _judge_http_headers(api_key: str) -> dict[str, str]:
@@ -1828,10 +1811,6 @@ def _judge_http_headers(api_key: str) -> dict[str, str]:
     if app_title:
         headers["X-Title"] = app_title
     return headers
-
-
-def _judge_response_schema() -> dict[str, Any]:
-    return SearchResultJudgeOutput.model_json_schema()
 
 
 def _build_judge_messages(
@@ -1875,104 +1854,6 @@ def _build_judge_messages(
     ]
 
 
-def _judge_request_payload(messages: list[dict]) -> dict[str, Any]:
-    openai_messages = normalize_openai_messages(messages)
-    validate_openai_messages(openai_messages)
-    return {
-        "model": _judge_model(),
-        "messages": openai_messages,
-        "temperature": _judge_temperature(),
-        "max_tokens": _judge_max_tokens(),
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "search_result_judge_output",
-                "strict": True,
-                "schema": _judge_response_schema(),
-            },
-        },
-    }
-
-
-def _openrouter_chat_completion(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    api_key = _judge_api_key()
-    if not api_key:
-        raise RuntimeError(f"{_judge_api_key_env()} is not configured")
-    timeout = max(5.0, _web_timeout_seconds() + 8.0)
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(
-            f"{_judge_base_url()}/chat/completions",
-            headers=_judge_http_headers(api_key),
-            json=payload,
-        )
-        status_code = response.status_code
-        response.raise_for_status()
-        return response.json(), status_code
-
-
-def _extract_openrouter_response_meta(raw_response: dict[str, Any]) -> tuple[str, str, int, int]:
-    """Return (content, finish_reason, prompt_tokens, completion_tokens) from OpenRouter response."""
-    choices = raw_response.get("choices") if isinstance(raw_response, dict) else None
-    if not choices:
-        return "", "", 0, 0
-    first = choices[0] if isinstance(choices[0], dict) else {}
-    message = first.get("message") if isinstance(first.get("message"), dict) else {}
-    content = _message_content_to_text(message.get("content", ""))
-    finish_reason = str(first.get("finish_reason", ""))
-    usage = raw_response.get("usage") if isinstance(raw_response, dict) else {}
-    prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
-    completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-    return content, finish_reason, prompt_tokens, completion_tokens
-
-
-def _extract_openrouter_content(raw_response: dict[str, Any]) -> str:
-    content, _, _, _ = _extract_openrouter_response_meta(raw_response)
-    return content
-
-
-def _judge_failure_debug(
-    *,
-    failure_phase: str,
-    original_user_query: str,
-    raw_query: str,
-    search_query: str,
-    subject: str,
-    role: str,
-    purpose: str,
-    tavily_results: list[dict],
-    error_type: str = "",
-    error_message: str = "",
-    status_code: Any = None,
-    parsing_error: str = "",
-    validation_error: str = "",
-    raw_output: str = "",
-) -> dict:
-    return {
-        "provider": _judge_provider(),
-        "model": _judge_model(),
-        "success": False,
-        "search_result_judge_failed": True,
-        "failure_phase": failure_phase,
-        "original_user_query": original_user_query,
-        "raw_query": raw_query,
-        "search_query": search_query,
-        "subject": subject,
-        "role": role,
-        "purpose": purpose,
-        "input_result_count": len(tavily_results),
-        "input_results_preview": _judge_result_preview(tavily_results),
-        "accepted_count": 0,
-        "rejected_count": 0,
-        "error_type": error_type,
-        "error_message": sanitize_error_message(error_message, max_chars=2000),
-        "status_code": status_code,
-        "parsing_error": sanitize_error_message(parsing_error, max_chars=2000),
-        "validation_error": sanitize_error_message(validation_error, max_chars=4000),
-        "raw_output": raw_output[:12000],
-    }
-
-
 async def _judge_tavily_search_results_with_llm(
     *,
     state: LearningState,
@@ -1986,7 +1867,7 @@ async def _judge_tavily_search_results_with_llm(
     coverage_risk: str = "",
     local_evidence_strength: str = "",
 ) -> tuple[list[dict], dict]:
-    """Judge Tavily results with OpenRouter strict schema. No rule fallback."""
+    """Judge Tavily results with the configured structured LLM runtime."""
     if not tavily_results:
         debug = {
             "provider": _judge_provider(),
@@ -2022,170 +1903,76 @@ async def _judge_tavily_search_results_with_llm(
         coverage_risk=coverage_risk,
         local_evidence_strength=local_evidence_strength,
     )
-    request_payload = _judge_request_payload(messages)
-    raw_output = ""
-    status_code = None
-    try:
-        raw_response, status_code = await asyncio.to_thread(_openrouter_chat_completion, request_payload)
-        raw_output = _extract_openrouter_content(raw_response)
-        if not raw_output:
-            debug = _judge_failure_debug(
-                failure_phase="missing_judged_results",
-                original_user_query=original_user_query,
-                raw_query=raw_query,
-                search_query=search_query,
-                subject=subject,
-                role=role,
-                purpose=purpose,
-                tavily_results=tavily_results,
-                error_type="EmptyRawOutput",
-                error_message="Search Result Judge returned empty content",
-                status_code=status_code,
-                raw_output=json.dumps(raw_response, ensure_ascii=False, default=str)[:12000],
-            )
-            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return [], debug
-        try:
-            parsed_json = json.loads(raw_output)
-        except json.JSONDecodeError as exc:
-            debug = _judge_failure_debug(
-                failure_phase="parsing_error",
-                original_user_query=original_user_query,
-                raw_query=raw_query,
-                search_query=search_query,
-                subject=subject,
-                role=role,
-                purpose=purpose,
-                tavily_results=tavily_results,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                parsing_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return [], debug
-        try:
-            parsed = SearchResultJudgeOutput.model_validate(parsed_json)
-        except ValidationError as exc:
-            debug = _judge_failure_debug(
-                failure_phase="validation_error",
-                original_user_query=original_user_query,
-                raw_query=raw_query,
-                search_query=search_query,
-                subject=subject,
-                role=role,
-                purpose=purpose,
-                tavily_results=tavily_results,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                status_code=status_code,
-                validation_error=str(exc),
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return [], debug
+    structured_result = await invoke_structured_llm(
+        node_name="search_result_judge",
+        llm_node="search_result_judge",
+        schema=SearchResultJudgeOutput,
+        messages=messages,
+        output_mode=get_llm_output_mode("search_result_judge"),
+        fallback_modes=get_fallback_modes("search_result_judge"),
+        business_validator=lambda parsed: validate_search_result_judge_output(
+            parsed,
+            expected_count=len(tavily_results),
+        ),
+        state=state,
+        max_raw_chars=get_max_raw_chars("search_result_judge"),
+    )
+    parsed = structured_result.parsed
+    if not isinstance(parsed, SearchResultJudgeOutput):
+        raise TypeError("search_result_judge parsed result is not SearchResultJudgeOutput")
 
-        judged = parsed.judged_results or []
-        indexes = [item.index for item in judged]
-        expected_indexes = set(range(len(tavily_results)))
-        if not judged:
-            failure_phase = "missing_judged_results"
-        elif len(indexes) != len(set(indexes)) or set(indexes) != expected_indexes:
-            failure_phase = "index_mismatch"
-        else:
-            failure_phase = ""
-        if failure_phase:
-            debug = _judge_failure_debug(
-                failure_phase=failure_phase,
-                original_user_query=original_user_query,
-                raw_query=raw_query,
-                search_query=search_query,
-                subject=subject,
-                role=role,
-                purpose=purpose,
-                tavily_results=tavily_results,
-                error_type="InvalidJudgedResults",
-                error_message=f"Expected indexes {sorted(expected_indexes)}, got {indexes}",
-                status_code=status_code,
-                validation_error=f"Expected indexes {sorted(expected_indexes)}, got {indexes}",
-                raw_output=raw_output,
-            )
-            emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-            return [], debug
+    judged = parsed.judged_results or []
+    judged_by_index = {item.index: item for item in judged}
+    accepted_results: list[dict] = []
+    judged_payload: list[dict] = []
+    for index, tavily_result in enumerate(tavily_results):
+        item = judged_by_index[index]
+        item_payload = item.model_dump()
+        judged_payload.append(item_payload)
+        if not item.keep:
+            continue
+        accepted_results.append({
+            **tavily_result,
+            "judge_keep": True,
+            "judge_quality": item.final_quality,
+            "judge_relevance": item.relevance,
+            "judge_authority": item.authority,
+            "judge_usefulness": item.usefulness,
+            "judge_risk": item.risk,
+            "evidence_type": item.evidence_type,
+            "use_case": item.use_case,
+            "judge_reason": item.reason,
+            "judge_index": index,
+            "judge_title": item.title,
+            "judge_url": item.url,
+        })
 
-        judged_by_index = {item.index: item for item in judged}
-        accepted_results: list[dict] = []
-        judged_payload: list[dict] = []
-        for index, tavily_result in enumerate(tavily_results):
-            item = judged_by_index[index]
-            item_payload = item.model_dump()
-            judged_payload.append(item_payload)
-            if not item.keep:
-                continue
-            accepted_results.append({
-                **tavily_result,
-                "judge_keep": True,
-                "judge_quality": item.final_quality,
-                "judge_relevance": item.relevance,
-                "judge_authority": item.authority,
-                "judge_usefulness": item.usefulness,
-                "judge_risk": item.risk,
-                "evidence_type": item.evidence_type,
-                "use_case": item.use_case,
-                "judge_reason": item.reason,
-                "judge_index": index,
-                "judge_title": item.title,
-                "judge_url": item.url,
-            })
-
-        debug = {
-            "provider": _judge_provider(),
-            "model": _judge_model(),
-            "success": True,
-            "search_result_judge_failed": False,
-            "judge_rejected_all": not bool(accepted_results),
-            "original_user_query": original_user_query,
-            "raw_query": raw_query,
-            "search_query": search_query,
-            "subject": subject,
-            "role": role,
-            "purpose": purpose,
-            "input_result_count": len(tavily_results),
-            "accepted_count": len(accepted_results),
-            "rejected_count": len(tavily_results) - len(accepted_results),
-            "judged_results": judged_payload,
-            "raw_preview": raw_output[:4000],
-            "parsing_error": None,
-            "validation_error": None,
-            "status_code": status_code,
-        }
-        emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
-        return accepted_results, debug
-    except Exception as exc:
-        if isinstance(exc, httpx.HTTPStatusError):
-            status_code = exc.response.status_code
-            error_message = exc.response.text or str(exc)
-        else:
-            error_message = str(exc)
-        error_type = "MissingApiKey" if _judge_api_key_env() in str(exc) else type(exc).__name__
-        failure_phase = "missing_api_key" if error_type == "MissingApiKey" else "structured_output_request_failed"
-        debug = _judge_failure_debug(
-            failure_phase=failure_phase,
-            original_user_query=original_user_query,
-            raw_query=raw_query,
-            search_query=search_query,
-            subject=subject,
-            role=role,
-            purpose=purpose,
-            tavily_results=tavily_results,
-            error_type=error_type,
-            error_message=error_message,
-            status_code=status_code,
-            raw_output=raw_output,
-        )
-        emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=12000)
-        return [], debug
+    debug = {
+        "provider": _judge_provider(),
+        "model": _judge_model(),
+        "success": True,
+        "search_result_judge_failed": False,
+        "judge_rejected_all": not bool(accepted_results),
+        "original_user_query": original_user_query,
+        "raw_query": raw_query,
+        "search_query": search_query,
+        "subject": subject,
+        "role": role,
+        "purpose": purpose,
+        "input_result_count": len(tavily_results),
+        "accepted_count": len(accepted_results),
+        "rejected_count": len(tavily_results) - len(accepted_results),
+        "judged_results": judged_payload,
+        "raw_preview": structured_result.raw_output[:4000],
+        "parsing_error": None,
+        "validation_error": None,
+        "status_code": structured_result.status_code,
+        "structured_output": structured_result.to_debug_payload(
+            max_raw_chars=get_max_raw_chars("search_result_judge"),
+        ),
+    }
+    emit_a3_trace(logger, "search_result_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+    return accepted_results, debug
 
 
 def _retrieval_setting(key: str, default: Any) -> Any:
@@ -2429,6 +2216,236 @@ def _openrouter_evidence_chat_completion(payload: dict[str, Any]) -> tuple[dict[
         return response.json(), status_code
 
 
+def _evidence_judge_v2_setting(key: str, default: Any) -> Any:
+    return get_setting(f"retrieval.evidence_judge_v2.{key}", default)
+
+
+def _evidence_judge_v2_enabled() -> bool:
+    return bool(_evidence_judge_v2_setting("enabled", True))
+
+
+def _evidence_judge_v2_batch_size() -> int:
+    try:
+        raw = int(_evidence_judge_v2_setting("item_batch_size", 5))
+    except (TypeError, ValueError):
+        raw = 5
+    return max(1, min(8, raw))
+
+
+def _evidence_judge_v2_strict_observability() -> bool:
+    return bool(_evidence_judge_v2_setting("strict_observability", True))
+
+
+def _evidence_judge_v2_expose_fallback_trace() -> bool:
+    return bool(_evidence_judge_v2_setting("expose_fallback_trace", True))
+
+
+def _evidence_judge_v2_fallback_to_legacy() -> bool:
+    return bool(_evidence_judge_v2_setting("fallback_to_legacy_on_v2_failure", True))
+
+
+def _evidence_judge_v2_allow_sufficiency_fallback() -> bool:
+    return bool(_evidence_judge_v2_setting("allow_sufficiency_deterministic_fallback", True))
+
+
+def _schema_size_chars(schema: type[BaseModel]) -> int:
+    try:
+        return len(json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str))
+    except Exception:
+        return 0
+
+
+def _raw_preview(raw: str, *, max_chars: int = 1200) -> str:
+    return sanitize_error_message(str(raw or ""), max_chars=max_chars)
+
+
+def _validation_errors_from_text(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = [part.strip() for part in text.split(";")]
+    return [part for part in parts if part]
+
+
+def _attempted_modes(result: StructuredLLMResult | None) -> list[str]:
+    if result is None:
+        return []
+    modes: list[str] = []
+    for attempt in result.attempts:
+        mode = str(attempt.output_mode or "")
+        if mode and mode not in modes:
+            modes.append(mode)
+    if not modes and result.output_mode:
+        modes.append(str(result.output_mode))
+    return modes
+
+
+def _make_execution_status(
+    *,
+    node_name: str,
+    stage: str,
+    status: Literal["success", "fallback", "degraded", "failed", "skipped"] = "success",
+    is_fallback: bool = False,
+    fallback_from: str | None = None,
+    fallback_to: str | None = None,
+    fallback_reason: str | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    structured_output_mode: str | None = None,
+    fallback_modes_attempted: list[str] | None = None,
+    retry_count: int = 0,
+    validation_errors: list[str] | None = None,
+    action_taken: str = "",
+    developer_warning: str | None = None,
+    **extra: Any,
+) -> dict:
+    payload = {
+        "node_name": node_name,
+        "stage": stage,
+        "status": status,
+        "is_fallback": bool(is_fallback),
+        "fallback_from": fallback_from,
+        "fallback_to": fallback_to,
+        "fallback_reason": fallback_reason,
+        "error_type": error_type,
+        "error_message_sanitized": sanitize_error_message(error_message or "", max_chars=1200) if error_message else None,
+        "structured_output_mode": structured_output_mode,
+        "fallback_modes_attempted": fallback_modes_attempted or [],
+        "retry_count": int(retry_count or 0),
+        "validation_errors": validation_errors or [],
+        "action_taken": action_taken,
+        "developer_warning": developer_warning,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _emit_evidence_stage_trace(state: LearningState, stage_debug: dict) -> None:
+    if not _evidence_judge_v2_expose_fallback_trace() and not stage_debug.get("is_fallback"):
+        return
+    emit_a3_trace(
+        logger,
+        str(stage_debug.get("stage") or "evidence_judge_v2"),
+        stage_debug,
+        state=state,
+        env_flag="LOG_WEB_SEARCH_RESULT",
+        level="warning" if stage_debug.get("status") in {"fallback", "degraded", "failed"} else "info",
+        max_chars=1200,
+    )
+
+
+def _new_evidence_judge_debug(
+    *,
+    version: Literal["v2", "legacy", "legacy_after_v2_failure"],
+    status: Literal["success", "fallback", "degraded", "failed"] = "success",
+) -> dict:
+    return {
+        "evidence_judge_version": version,
+        "status": status,
+        "used_fallback": False,
+        "fallback_chain": [],
+        "developer_warnings": [],
+        "stages": [],
+    }
+
+
+def _append_stage(debug: dict, stage_debug: dict) -> None:
+    debug.setdefault("stages", []).append(stage_debug)
+    if stage_debug.get("is_fallback") and stage_debug.get("fallback_from") and stage_debug.get("fallback_to"):
+        _append_fallback_chain(
+            debug,
+            fallback_from=str(stage_debug.get("fallback_from")),
+            fallback_to=str(stage_debug.get("fallback_to")),
+            reason=str(stage_debug.get("fallback_reason") or stage_debug.get("error_type") or "fallback_used"),
+        )
+    warning = stage_debug.get("developer_warning")
+    if warning:
+        _append_developer_warning(debug, str(warning))
+
+
+def _append_fallback_chain(debug: dict, *, fallback_from: str, fallback_to: str, reason: str) -> None:
+    debug["used_fallback"] = True
+    entry = {
+        "from": fallback_from,
+        "to": fallback_to,
+        "reason": sanitize_error_message(reason, max_chars=1200),
+    }
+    chain = debug.setdefault("fallback_chain", [])
+    if entry not in chain:
+        chain.append(entry)
+
+
+def _append_developer_warning(debug: dict, warning: str) -> None:
+    warning = sanitize_error_message(warning, max_chars=1200)
+    if warning and warning not in debug.setdefault("developer_warnings", []):
+        debug["developer_warnings"].append(warning)
+
+
+def _finalize_evidence_judge_debug(debug: dict) -> dict:
+    stages = debug.get("stages") or []
+    has_fallback_stage = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
+    has_degraded_stage = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
+    has_failed_stage = any(stage.get("status") == "failed" for stage in stages if isinstance(stage, dict))
+    has_fallback_chain = bool(debug.get("fallback_chain"))
+    explicit_status = debug.get("status")
+    if has_fallback_stage or has_fallback_chain:
+        debug["used_fallback"] = True
+    if explicit_status == "failed":
+        debug["status"] = "failed"
+    elif debug.get("used_fallback") or has_fallback_chain:
+        debug["status"] = "fallback"
+    elif has_failed_stage:
+        debug["status"] = "failed"
+    elif has_degraded_stage:
+        debug["status"] = "degraded"
+    else:
+        debug["status"] = debug.get("status") or "success"
+    _assert_no_silent_fallback(debug)
+    return debug
+
+
+def _assert_no_silent_fallback(debug: dict) -> None:
+    stages = debug.get("stages") or []
+    stage_fallback = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
+    fallback_chain = debug.get("fallback_chain") or []
+    problems: list[str] = []
+    if debug.get("status") == "success" and fallback_chain:
+        debug["status"] = "fallback"
+    if stage_fallback and not debug.get("used_fallback"):
+        problems.append("stage fallback detected but final used_fallback is false")
+    if fallback_chain and not debug.get("used_fallback"):
+        problems.append("fallback_chain is non-empty but final used_fallback is false")
+    if debug.get("evidence_judge_version") == "legacy_after_v2_failure" and not debug.get("used_fallback"):
+        problems.append("legacy_after_v2_failure requires used_fallback=true")
+    if not problems:
+        return
+    message = "Evidence Judge observability violation: " + "; ".join(problems)
+    logger.error(message)
+    if _evidence_judge_v2_strict_observability():
+        raise RuntimeError(message)
+    debug["used_fallback"] = True
+    if debug.get("status") == "success":
+        debug["status"] = "fallback"
+
+
+def _candidate_trace_payload(candidates: list[EvidenceCandidate]) -> list[dict]:
+    payload: list[dict] = []
+    for candidate in candidates:
+        payload.append({
+            "evidence_id": candidate.evidence_id,
+            "source_type": candidate.source_type,
+            "subject": candidate.subject,
+            "role": candidate.role,
+            "title": _clip_text(candidate.title, 160),
+            "source": _clip_text(candidate.source, 160),
+        })
+    return payload
+
+
 def _evidence_judge_failure_debug(
     *,
     failure_phase: str,
@@ -2567,7 +2584,7 @@ def _structured_result_to_evidence_failure_debug(
     )
 
 
-async def _judge_evidence_candidates_with_llm(
+async def _judge_evidence_candidates_legacy_with_llm(
     *,
     state: LearningState,
     candidates: list[EvidenceCandidate],
@@ -2576,7 +2593,7 @@ async def _judge_evidence_candidates_with_llm(
     requested_resource_type: str,
     round_index: int,
 ) -> tuple[EvidenceJudgeOutput | None, dict]:
-    """Judge local RAG and Web evidence through the unified structured runtime."""
+    """Legacy one-shot Evidence Judge through the unified structured runtime."""
     if not candidates:
         parsed = EvidenceJudgeOutput(
             overall_evidence_state="insufficient",
@@ -2701,6 +2718,881 @@ async def _judge_evidence_candidates_with_llm(
         "message_count": len(messages),
     }
     emit_a3_trace(logger, "evidence_judge", debug, state=state, env_flag="LOG_WEB_SEARCH_RESULT", max_chars=8000)
+    return parsed, debug
+
+
+def _build_evidence_item_grader_messages(
+    *,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    batch_index: int,
+) -> list[dict]:
+    payload = [candidate.model_dump(mode="json") for candidate in candidates]
+    prompt = _render_prompt(
+        "evidence_item_grader",
+        {
+            "original_user_query": original_user_query,
+            "learning_goal": learning_goal,
+            "requested_resource_type": requested_resource_type,
+            "batch_index": str(batch_index),
+            "evidence_candidates": json.dumps(payload, ensure_ascii=False),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict item-level Evidence Grader. Return only valid JSON "
+                "matching the schema. Do not answer the user or generate source metadata."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _graded_evidence_summary(
+    *,
+    candidates: list[EvidenceCandidate],
+    judged_items: list[EvidenceJudgeItem],
+) -> list[dict]:
+    candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    summary: list[dict] = []
+    for item in judged_items:
+        candidate = candidate_by_id.get(item.evidence_id)
+        summary.append({
+            "evidence_id": item.evidence_id,
+            "source_type": candidate.source_type if candidate else "",
+            "subject": candidate.subject if candidate else "",
+            "role": candidate.role if candidate else "",
+            "purpose": candidate.purpose if candidate else "",
+            "title": _clip_text(candidate.title if candidate else "", 160),
+            "keep": item.keep,
+            "final_quality": item.final_quality,
+            "relevance": item.relevance,
+            "authority": item.authority,
+            "usefulness": item.usefulness,
+            "risk": item.risk,
+            "evidence_type": item.evidence_type,
+            "use_case": item.use_case,
+            "coverage_contribution": _clip_text(item.coverage_contribution, 240),
+            "reason": _clip_text(item.reason, 240),
+        })
+    return summary
+
+
+def _build_evidence_sufficiency_messages(
+    *,
+    candidates: list[EvidenceCandidate],
+    judged_items: list[EvidenceJudgeItem],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    expanded_keypoints: list[str],
+) -> list[dict]:
+    prompt = _render_prompt(
+        "evidence_sufficiency_judge",
+        {
+            "original_user_query": original_user_query,
+            "learning_goal": learning_goal,
+            "requested_resource_type": requested_resource_type,
+            "expanded_keypoints": json.dumps(expanded_keypoints or [], ensure_ascii=False),
+            "graded_evidence_summary": json.dumps(
+                _graded_evidence_summary(candidates=candidates, judged_items=judged_items),
+                ensure_ascii=False,
+            ),
+        },
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict Evidence Sufficiency Judge. Return only valid JSON "
+                "matching the schema. Do not answer the user."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _evidence_id_validation_summary(expected_ids: list[str], judged_ids: list[str]) -> dict:
+    duplicate_ids = sorted([eid for eid, count in Counter(judged_ids).items() if count > 1])
+    missing_ids = [eid for eid in expected_ids if eid not in judged_ids]
+    unknown_ids = [eid for eid in judged_ids if eid not in expected_ids]
+    return {
+        "missing_ids": missing_ids,
+        "duplicate_ids": duplicate_ids,
+        "unknown_ids": unknown_ids,
+    }
+
+
+def validate_evidence_grade_batch_output(parsed: BaseModel, *, expected_ids: list[str]) -> str:
+    if not isinstance(parsed, EvidenceGradeBatch):
+        return "parsed result is not EvidenceGradeBatch"
+    judged_ids = [item.evidence_id for item in parsed.judged_evidence]
+    summary = _evidence_id_validation_summary(expected_ids, judged_ids)
+    problems: list[str] = []
+    if summary["missing_ids"]:
+        problems.append(f"missing evidence_id values: {summary['missing_ids']}")
+    if summary["duplicate_ids"]:
+        problems.append(f"duplicate evidence_id values: {summary['duplicate_ids']}")
+    if summary["unknown_ids"]:
+        problems.append(f"unknown evidence_id values: {summary['unknown_ids']}")
+    if len(judged_ids) != len(expected_ids):
+        problems.append(f"expected {len(expected_ids)} judged evidence items, got {len(judged_ids)}")
+    for item in parsed.judged_evidence:
+        if not item.reason.strip():
+            problems.append(f"reason must not be empty for evidence_id={item.evidence_id}")
+        if item.keep and not item.coverage_contribution.strip():
+            problems.append(f"coverage_contribution must not be empty when keep=true for evidence_id={item.evidence_id}")
+    return "; ".join(problems)
+
+
+def validate_evidence_sufficiency_output(parsed: BaseModel, *, kept_count: int) -> str:
+    if not isinstance(parsed, EvidenceSufficiencyOutput):
+        return "parsed result is not EvidenceSufficiencyOutput"
+    problems: list[str] = []
+    if parsed.overall_evidence_state == "sufficient" and parsed.answerability != "can_answer":
+        problems.append("sufficient evidence must have answerability=can_answer")
+    if parsed.overall_evidence_state == "partially_sufficient" and parsed.answerability == "cannot_answer":
+        problems.append("partially_sufficient evidence cannot have answerability=cannot_answer")
+    if parsed.overall_evidence_state == "insufficient" and parsed.answerability == "can_answer":
+        problems.append("insufficient evidence cannot have answerability=can_answer")
+    if kept_count == 0 and parsed.overall_evidence_state == "sufficient":
+        problems.append("sufficient evidence is not allowed when kept_count=0")
+    if (
+        parsed.overall_evidence_state == "insufficient"
+        and not parsed.need_more_local_rag
+        and not parsed.need_more_web_search
+    ):
+        problems.append("insufficient evidence must request local RAG or web search")
+    for index, gap in enumerate(parsed.coverage_gaps):
+        if not gap.suggested_search_query.strip():
+            problems.append(f"coverage_gaps[{index}].suggested_search_query must not be empty")
+    if not parsed.decision_summary.strip():
+        problems.append("decision_summary must not be empty")
+    return "; ".join(problems)
+
+
+async def _grade_evidence_items_with_llm(
+    *,
+    state: LearningState,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    round_index: int,
+) -> tuple[list[EvidenceJudgeItem] | None, dict]:
+    del round_index
+    batch_size = _evidence_judge_v2_batch_size()
+    all_items: list[EvidenceJudgeItem] = []
+    debug = {"stages": []}
+    batches = [candidates[index : index + batch_size] for index in range(0, len(candidates), batch_size)]
+    output_mode = get_llm_output_mode("evidence_item_grader")
+    fallback_modes = get_fallback_modes("evidence_item_grader")
+
+    for batch_index, batch in enumerate(batches):
+        expected_ids = [candidate.evidence_id for candidate in batch]
+        messages = _build_evidence_item_grader_messages(
+            candidates=batch,
+            original_user_query=original_user_query,
+            learning_goal=learning_goal,
+            requested_resource_type=requested_resource_type,
+            batch_index=batch_index,
+        )
+        try:
+            structured_result = await invoke_structured_llm(
+                node_name="evidence_item_grader",
+                llm_node="evidence_judge",
+                schema=EvidenceGradeBatch,
+                messages=messages,
+                output_mode=output_mode,
+                fallback_modes=fallback_modes,
+                business_validator=lambda parsed, ids=expected_ids: validate_evidence_grade_batch_output(
+                    parsed,
+                    expected_ids=ids,
+                ),
+                state=state,
+                max_raw_chars=get_max_raw_chars("evidence_item_grader"),
+            )
+        except StructuredOutputError as exc:
+            result = exc.result
+            validation_errors = _validation_errors_from_text(result.business_validation_error or result.validation_error)
+            stage = _make_execution_status(
+                node_name="evidence_item_grader",
+                stage="evidence_item_grader.batch",
+                status="failed",
+                error_type=result.error_type or type(exc).__name__,
+                error_message=result.error_message or str(exc),
+                structured_output_mode=result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(result),
+                retry_count=result.retry_count,
+                validation_errors=validation_errors,
+                action_taken="return_failed_stage_for_v2_dispatcher",
+                batch_index=batch_index,
+                candidate_count=len(batch),
+                expected_ids=expected_ids,
+                judged_ids=[],
+                kept_count=0,
+                rejected_count=0,
+                raw_preview=_raw_preview(result.raw_output),
+                schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+            )
+            debug["stages"].append(stage)
+            _emit_evidence_stage_trace(state, stage)
+            return None, debug
+        except Exception as exc:
+            stage = _make_execution_status(
+                node_name="evidence_item_grader",
+                stage="evidence_item_grader.batch",
+                status="failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                structured_output_mode=output_mode,
+                fallback_modes_attempted=fallback_modes,
+                retry_count=0,
+                action_taken="return_failed_stage_for_v2_dispatcher",
+                batch_index=batch_index,
+                candidate_count=len(batch),
+                expected_ids=expected_ids,
+                judged_ids=[],
+                kept_count=0,
+                rejected_count=0,
+                schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+            )
+            debug["stages"].append(stage)
+            _emit_evidence_stage_trace(state, stage)
+            return None, debug
+
+        parsed = structured_result.parsed
+        if not structured_result.success or not isinstance(parsed, EvidenceGradeBatch):
+            validation_errors = _validation_errors_from_text(
+                structured_result.business_validation_error
+                or structured_result.validation_error
+                or "parsed result is not EvidenceGradeBatch"
+            )
+            stage = _make_execution_status(
+                node_name="evidence_item_grader",
+                stage="evidence_item_grader.batch",
+                status="failed",
+                error_type=structured_result.error_type or "InvalidStructuredResult",
+                error_message=structured_result.error_message or "Evidence item grader returned no parsed batch.",
+                structured_output_mode=structured_result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(structured_result),
+                retry_count=structured_result.retry_count,
+                validation_errors=validation_errors,
+                action_taken="return_failed_stage_for_v2_dispatcher",
+                batch_index=batch_index,
+                candidate_count=len(batch),
+                expected_ids=expected_ids,
+                judged_ids=[],
+                kept_count=0,
+                rejected_count=0,
+                raw_preview=_raw_preview(structured_result.raw_output),
+                schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+            )
+            debug["stages"].append(stage)
+            _emit_evidence_stage_trace(state, stage)
+            return None, debug
+
+        judged_ids = [item.evidence_id for item in parsed.judged_evidence]
+        validation_error_text = validate_evidence_grade_batch_output(parsed, expected_ids=expected_ids)
+        validation_errors = _validation_errors_from_text(validation_error_text)
+        if validation_error_text:
+            stage = _make_execution_status(
+                node_name="evidence_item_grader",
+                stage="evidence_item_grader.batch",
+                status="failed",
+                error_type="BusinessValidationError",
+                error_message="Evidence item grader business validation failed.",
+                structured_output_mode=structured_result.output_mode,
+                fallback_modes_attempted=_attempted_modes(structured_result),
+                retry_count=structured_result.retry_count,
+                validation_errors=validation_errors,
+                action_taken="return_failed_stage_for_v2_dispatcher",
+                batch_index=batch_index,
+                candidate_count=len(batch),
+                expected_ids=expected_ids,
+                judged_ids=judged_ids,
+                kept_count=sum(1 for item in parsed.judged_evidence if item.keep),
+                rejected_count=sum(1 for item in parsed.judged_evidence if not item.keep),
+                raw_preview=_raw_preview(structured_result.raw_output),
+                schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+            )
+            debug["stages"].append(stage)
+            _emit_evidence_stage_trace(state, stage)
+            return None, debug
+
+        stage_status = "fallback" if structured_result.fallback_used else "success"
+        stage = _make_execution_status(
+            node_name="evidence_item_grader",
+            stage="evidence_item_grader.batch",
+            status=stage_status,
+            is_fallback=structured_result.fallback_used,
+            fallback_from=output_mode if structured_result.fallback_used else None,
+            fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
+            fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+            structured_output_mode=structured_result.output_mode,
+            fallback_modes_attempted=_attempted_modes(structured_result),
+            retry_count=structured_result.retry_count,
+            validation_errors=[],
+            action_taken="accepted_batch_judgement",
+            batch_index=batch_index,
+            candidate_count=len(batch),
+            expected_ids=expected_ids,
+            judged_ids=judged_ids,
+            kept_count=sum(1 for item in parsed.judged_evidence if item.keep),
+            rejected_count=sum(1 for item in parsed.judged_evidence if not item.keep),
+            candidate_preview=_candidate_trace_payload(batch),
+            raw_preview=_raw_preview(structured_result.raw_output),
+            schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+        )
+        debug["stages"].append(stage)
+        _emit_evidence_stage_trace(state, stage)
+        all_items.extend(parsed.judged_evidence)
+
+    expected_all_ids = [candidate.evidence_id for candidate in candidates]
+    judged_all_ids = [item.evidence_id for item in all_items]
+    id_summary = _evidence_id_validation_summary(expected_all_ids, judged_all_ids)
+    aggregate_errors: list[str] = []
+    if id_summary["missing_ids"]:
+        aggregate_errors.append(f"missing evidence_id values: {id_summary['missing_ids']}")
+    if id_summary["duplicate_ids"]:
+        aggregate_errors.append(f"duplicate evidence_id values: {id_summary['duplicate_ids']}")
+    if id_summary["unknown_ids"]:
+        aggregate_errors.append(f"unknown evidence_id values: {id_summary['unknown_ids']}")
+    if len(judged_all_ids) != len(expected_all_ids):
+        aggregate_errors.append(f"expected {len(expected_all_ids)} judged evidence items, got {len(judged_all_ids)}")
+    aggregate_stage = _make_execution_status(
+        node_name="evidence_item_grader",
+        stage="evidence_item_grader.aggregate",
+        status="failed" if aggregate_errors else "success",
+        error_type="EvidenceIdAggregateMismatch" if aggregate_errors else None,
+        error_message="Evidence item aggregate validation failed." if aggregate_errors else None,
+        structured_output_mode=output_mode,
+        fallback_modes_attempted=fallback_modes,
+        retry_count=0,
+        validation_errors=aggregate_errors,
+        action_taken="aggregate_batch_judgements" if not aggregate_errors else "return_failed_stage_for_v2_dispatcher",
+        candidate_count=len(candidates),
+        judged_count=len(all_items),
+        missing_ids=id_summary["missing_ids"],
+        duplicate_ids=id_summary["duplicate_ids"],
+        unknown_ids=id_summary["unknown_ids"],
+    )
+    debug["stages"].append(aggregate_stage)
+    _emit_evidence_stage_trace(state, aggregate_stage)
+    if aggregate_errors:
+        return None, debug
+    return all_items, debug
+
+
+def _deterministic_sufficiency_fallback(
+    judged_items: list[EvidenceJudgeItem],
+) -> tuple[EvidenceSufficiencyOutput, str]:
+    kept = [item for item in judged_items if item.keep]
+    strong_use_cases = {"core_evidence", "exercise_material", "implementation_reference"}
+    if any(item.final_quality == "high" and item.use_case in strong_use_cases for item in kept):
+        return (
+            EvidenceSufficiencyOutput(
+                overall_evidence_state="sufficient",
+                answerability="can_answer",
+                need_more_local_rag=False,
+                need_more_web_search=False,
+                coverage_gaps=[],
+                decision_summary="Deterministic fallback found high-quality core or task-specific evidence.",
+            ),
+            "high_quality_core_or_task_specific_evidence",
+        )
+    medium_or_high = [item for item in kept if item.final_quality in {"medium", "high"}]
+    if len(medium_or_high) >= 2:
+        return (
+            EvidenceSufficiencyOutput(
+                overall_evidence_state="sufficient",
+                answerability="can_answer",
+                need_more_local_rag=False,
+                need_more_web_search=False,
+                coverage_gaps=[],
+                decision_summary="Deterministic fallback found at least two medium-or-high kept evidence items.",
+            ),
+            "at_least_two_medium_or_high_kept_evidence",
+        )
+    if kept:
+        return (
+            EvidenceSufficiencyOutput(
+                overall_evidence_state="partially_sufficient",
+                answerability="can_answer_with_caveats",
+                need_more_local_rag=False,
+                need_more_web_search=True,
+                coverage_gaps=[],
+                decision_summary="Deterministic fallback found kept evidence, but quality or coverage is limited.",
+            ),
+            "kept_evidence_quality_or_coverage_limited",
+        )
+    return (
+        EvidenceSufficiencyOutput(
+            overall_evidence_state="insufficient",
+            answerability="cannot_answer",
+            need_more_local_rag=True,
+            need_more_web_search=True,
+            coverage_gaps=[],
+            decision_summary="Deterministic fallback found no kept evidence.",
+        ),
+        "no_kept_evidence",
+    )
+
+
+async def _judge_evidence_sufficiency_with_llm(
+    *,
+    state: LearningState,
+    candidates: list[EvidenceCandidate],
+    judged_items: list[EvidenceJudgeItem],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    expanded_keypoints: list[str],
+) -> tuple[EvidenceSufficiencyOutput | None, dict]:
+    output_mode = get_llm_output_mode("evidence_sufficiency_judge")
+    fallback_modes = get_fallback_modes("evidence_sufficiency_judge")
+    messages = _build_evidence_sufficiency_messages(
+        candidates=candidates,
+        judged_items=judged_items,
+        original_user_query=original_user_query,
+        learning_goal=learning_goal,
+        requested_resource_type=requested_resource_type,
+        expanded_keypoints=expanded_keypoints,
+    )
+    kept_count = sum(1 for item in judged_items if item.keep)
+
+    try:
+        structured_result = await invoke_structured_llm(
+            node_name="evidence_sufficiency_judge",
+            llm_node="evidence_judge",
+            schema=EvidenceSufficiencyOutput,
+            messages=messages,
+            output_mode=output_mode,
+            fallback_modes=fallback_modes,
+            business_validator=lambda parsed: validate_evidence_sufficiency_output(
+                parsed,
+                kept_count=kept_count,
+            ),
+            state=state,
+            max_raw_chars=get_max_raw_chars("evidence_sufficiency_judge"),
+        )
+    except StructuredOutputError as exc:
+        result = exc.result
+        validation_errors = _validation_errors_from_text(result.business_validation_error or result.validation_error)
+        if not _evidence_judge_v2_allow_sufficiency_fallback():
+            stage = _make_execution_status(
+                node_name="evidence_sufficiency_judge",
+                stage="evidence_sufficiency_judge",
+                status="failed",
+                error_type=result.error_type or type(exc).__name__,
+                error_message=result.error_message or str(exc),
+                structured_output_mode=result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(result),
+                retry_count=result.retry_count,
+                validation_errors=validation_errors,
+                action_taken="return_failed_stage_to_v2_dispatcher",
+                kept_count=kept_count,
+                schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+                raw_preview=_raw_preview(result.raw_output),
+            )
+            _emit_evidence_stage_trace(state, stage)
+            return None, stage
+        fallback, rule_reason = _deterministic_sufficiency_fallback(judged_items)
+        stage = _make_execution_status(
+            node_name="evidence_sufficiency_judge",
+            stage="evidence_sufficiency_judge",
+            status="fallback",
+            is_fallback=True,
+            fallback_from="evidence_sufficiency_judge",
+            fallback_to="deterministic_sufficiency_fallback",
+            fallback_reason=f"{type(exc).__name__}: {rule_reason}",
+            error_type=result.error_type or type(exc).__name__,
+            error_message=result.error_message or str(exc),
+            structured_output_mode=result.output_mode or output_mode,
+            fallback_modes_attempted=_attempted_modes(result),
+            retry_count=result.retry_count,
+            validation_errors=validation_errors,
+            action_taken="used_deterministic_sufficiency_fallback",
+            developer_warning="Sufficiency judge failed; deterministic fallback used.",
+            kept_count=kept_count,
+            overall_evidence_state=fallback.overall_evidence_state,
+            answerability=fallback.answerability,
+            need_more_local_rag=fallback.need_more_local_rag,
+            need_more_web_search=fallback.need_more_web_search,
+            deterministic_rule=rule_reason,
+            schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+            raw_preview=_raw_preview(result.raw_output),
+        )
+        _emit_evidence_stage_trace(state, stage)
+        return fallback, stage
+    except Exception as exc:
+        if not _evidence_judge_v2_allow_sufficiency_fallback():
+            stage = _make_execution_status(
+                node_name="evidence_sufficiency_judge",
+                stage="evidence_sufficiency_judge",
+                status="failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                structured_output_mode=output_mode,
+                fallback_modes_attempted=fallback_modes,
+                retry_count=0,
+                action_taken="return_failed_stage_to_v2_dispatcher",
+                kept_count=kept_count,
+                schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+            )
+            _emit_evidence_stage_trace(state, stage)
+            return None, stage
+        fallback, rule_reason = _deterministic_sufficiency_fallback(judged_items)
+        stage = _make_execution_status(
+            node_name="evidence_sufficiency_judge",
+            stage="evidence_sufficiency_judge",
+            status="fallback",
+            is_fallback=True,
+            fallback_from="evidence_sufficiency_judge",
+            fallback_to="deterministic_sufficiency_fallback",
+            fallback_reason=f"{type(exc).__name__}: {rule_reason}",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            structured_output_mode=output_mode,
+            fallback_modes_attempted=fallback_modes,
+            retry_count=0,
+            action_taken="used_deterministic_sufficiency_fallback",
+            developer_warning="Sufficiency judge failed; deterministic fallback used.",
+            kept_count=kept_count,
+            overall_evidence_state=fallback.overall_evidence_state,
+            answerability=fallback.answerability,
+            need_more_local_rag=fallback.need_more_local_rag,
+            need_more_web_search=fallback.need_more_web_search,
+            deterministic_rule=rule_reason,
+            schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+        )
+        _emit_evidence_stage_trace(state, stage)
+        return fallback, stage
+
+    parsed = structured_result.parsed
+    if not structured_result.success or not isinstance(parsed, EvidenceSufficiencyOutput):
+        validation_errors = _validation_errors_from_text(
+            structured_result.business_validation_error
+            or structured_result.validation_error
+            or "parsed result is not EvidenceSufficiencyOutput"
+        )
+        if _evidence_judge_v2_allow_sufficiency_fallback():
+            fallback, rule_reason = _deterministic_sufficiency_fallback(judged_items)
+            stage = _make_execution_status(
+                node_name="evidence_sufficiency_judge",
+                stage="evidence_sufficiency_judge",
+                status="fallback",
+                is_fallback=True,
+                fallback_from="evidence_sufficiency_judge",
+                fallback_to="deterministic_sufficiency_fallback",
+                fallback_reason=f"invalid_structured_result: {rule_reason}",
+                error_type=structured_result.error_type or "InvalidStructuredResult",
+                error_message=structured_result.error_message or "Sufficiency judge returned no parsed output.",
+                structured_output_mode=structured_result.output_mode or output_mode,
+                fallback_modes_attempted=_attempted_modes(structured_result),
+                retry_count=structured_result.retry_count,
+                validation_errors=validation_errors,
+                action_taken="used_deterministic_sufficiency_fallback",
+                developer_warning="Sufficiency judge failed; deterministic fallback used.",
+                kept_count=kept_count,
+                overall_evidence_state=fallback.overall_evidence_state,
+                answerability=fallback.answerability,
+                need_more_local_rag=fallback.need_more_local_rag,
+                need_more_web_search=fallback.need_more_web_search,
+                deterministic_rule=rule_reason,
+                schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+                raw_preview=_raw_preview(structured_result.raw_output),
+            )
+            _emit_evidence_stage_trace(state, stage)
+            return fallback, stage
+        stage = _make_execution_status(
+            node_name="evidence_sufficiency_judge",
+            stage="evidence_sufficiency_judge",
+            status="failed",
+            error_type=structured_result.error_type or "InvalidStructuredResult",
+            error_message=structured_result.error_message or "Sufficiency judge returned no parsed output.",
+            structured_output_mode=structured_result.output_mode or output_mode,
+            fallback_modes_attempted=_attempted_modes(structured_result),
+            retry_count=structured_result.retry_count,
+            validation_errors=validation_errors,
+            action_taken="return_failed_stage_to_v2_dispatcher",
+            kept_count=kept_count,
+            schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+            raw_preview=_raw_preview(structured_result.raw_output),
+        )
+        _emit_evidence_stage_trace(state, stage)
+        return None, stage
+
+    stage = _make_execution_status(
+        node_name="evidence_sufficiency_judge",
+        stage="evidence_sufficiency_judge",
+        status="fallback" if structured_result.fallback_used else "success",
+        is_fallback=structured_result.fallback_used,
+        fallback_from=output_mode if structured_result.fallback_used else None,
+        fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
+        fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+        structured_output_mode=structured_result.output_mode,
+        fallback_modes_attempted=_attempted_modes(structured_result),
+        retry_count=structured_result.retry_count,
+        validation_errors=[],
+        action_taken="accepted_sufficiency_judgement",
+        kept_count=kept_count,
+        overall_evidence_state=parsed.overall_evidence_state,
+        answerability=parsed.answerability,
+        need_more_local_rag=parsed.need_more_local_rag,
+        need_more_web_search=parsed.need_more_web_search,
+        coverage_gap_count=len(parsed.coverage_gaps),
+        schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
+        raw_preview=_raw_preview(structured_result.raw_output),
+    )
+    _emit_evidence_stage_trace(state, stage)
+    return parsed, stage
+
+
+def _final_assembly_stage(
+    *,
+    parsed: EvidenceJudgeOutput,
+    sufficiency: EvidenceSufficiencyOutput,
+    candidates: list[EvidenceCandidate],
+) -> dict:
+    candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    kept = [item for item in parsed.judged_evidence if item.keep]
+    kept_distribution = Counter(
+        candidate_by_id[item.evidence_id].source_type
+        for item in kept
+        if item.evidence_id in candidate_by_id
+    )
+    return _make_execution_status(
+        node_name="evidence_judge",
+        stage="evidence_judge_v2.final_assembly",
+        status="success",
+        structured_output_mode=None,
+        fallback_modes_attempted=[],
+        retry_count=0,
+        validation_errors=[],
+        action_taken="assembled_legacy_compatible_evidence_judge_output",
+        overall_evidence_state=parsed.overall_evidence_state,
+        answerability=sufficiency.answerability,
+        need_more_local_rag=sufficiency.need_more_local_rag,
+        need_more_web_search=sufficiency.need_more_web_search,
+        kept_source_distribution=dict(kept_distribution),
+        coverage_gap_count=len(parsed.coverage_gaps),
+        decision_summary_preview=_clip_text(parsed.decision_summary, 240),
+    )
+
+
+async def _run_legacy_evidence_judge_with_observable_debug(
+    *,
+    state: LearningState,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    round_index: int,
+    version: Literal["legacy", "legacy_after_v2_failure"],
+    fallback_reason: str,
+    inherited_stages: list[dict] | None = None,
+) -> tuple[EvidenceJudgeOutput | None, dict]:
+    debug = _new_evidence_judge_debug(version=version, status="fallback")
+    for stage in inherited_stages or []:
+        _append_stage(debug, stage)
+
+    legacy_stage = _make_execution_status(
+        node_name="evidence_judge",
+        stage="evidence_judge_v2.legacy_fallback",
+        status="fallback",
+        is_fallback=True,
+        fallback_from="evidence_judge_v2",
+        fallback_to="legacy_evidence_judge",
+        fallback_reason=fallback_reason,
+        action_taken="invoke_legacy_evidence_judge",
+        developer_warning=(
+            "Item grader failed; legacy judge used."
+            if version == "legacy_after_v2_failure"
+            else "Evidence Judge V2 disabled; legacy judge used."
+        ),
+        structured_output_mode=get_llm_output_mode("evidence_judge"),
+        fallback_modes_attempted=get_fallback_modes("evidence_judge"),
+        retry_count=0,
+    )
+    _emit_evidence_stage_trace(state, legacy_stage)
+    _append_stage(debug, legacy_stage)
+
+    parsed, legacy_debug = await _judge_evidence_candidates_legacy_with_llm(
+        state=state,
+        candidates=candidates,
+        original_user_query=original_user_query,
+        learning_goal=learning_goal,
+        requested_resource_type=requested_resource_type,
+        round_index=round_index,
+    )
+    legacy_success = parsed is not None
+    result_stage = _make_execution_status(
+        node_name="evidence_judge",
+        stage="evidence_judge_v2.legacy_fallback",
+        status="success" if legacy_success else "failed",
+        error_type=None if legacy_success else str(legacy_debug.get("error_type") or "LegacyEvidenceJudgeFailed"),
+        error_message=None if legacy_success else str(legacy_debug.get("error_message") or legacy_debug.get("failure_phase") or ""),
+        structured_output_mode=str(legacy_debug.get("structured_output_method") or legacy_debug.get("output_mode") or ""),
+        fallback_modes_attempted=list(legacy_debug.get("fallback_modes") or []),
+        retry_count=int(legacy_debug.get("retry_count") or 0),
+        validation_errors=_validation_errors_from_text(legacy_debug.get("validation_error")),
+        action_taken="legacy_evidence_judge_succeeded" if legacy_success else "legacy_evidence_judge_failed",
+        legacy_success=legacy_success,
+        legacy_failure_phase=legacy_debug.get("failure_phase", ""),
+        legacy_status=legacy_debug.get("status", ""),
+    )
+    _emit_evidence_stage_trace(state, result_stage)
+    _append_stage(debug, result_stage)
+
+    if not legacy_success:
+        debug["status"] = "failed"
+        _finalize_evidence_judge_debug(debug)
+        return None, debug
+
+    debug["status"] = "fallback"
+    _finalize_evidence_judge_debug(debug)
+    return parsed, debug
+
+
+async def _judge_evidence_candidates_with_llm(
+    *,
+    state: LearningState,
+    candidates: list[EvidenceCandidate],
+    original_user_query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    round_index: int,
+) -> tuple[EvidenceJudgeOutput | None, dict]:
+    """Evidence Judge V2 dispatcher with observable fallback paths."""
+    if not _evidence_judge_v2_enabled():
+        dispatch_stage = _make_execution_status(
+            node_name="evidence_judge",
+            stage="evidence_judge_v2.dispatch",
+            status="fallback",
+            is_fallback=True,
+            fallback_from="evidence_judge_v2",
+            fallback_to="legacy_evidence_judge",
+            fallback_reason="evidence_judge_v2_disabled",
+            action_taken="dispatch_to_legacy_evidence_judge",
+            evidence_judge_v2_enabled=False,
+            candidate_count=len(candidates),
+        )
+        _emit_evidence_stage_trace(state, dispatch_stage)
+        return await _run_legacy_evidence_judge_with_observable_debug(
+            state=state,
+            candidates=candidates,
+            original_user_query=original_user_query,
+            learning_goal=learning_goal,
+            requested_resource_type=requested_resource_type,
+            round_index=round_index,
+            version="legacy",
+            fallback_reason="evidence_judge_v2_disabled",
+            inherited_stages=[dispatch_stage],
+        )
+
+    debug = _new_evidence_judge_debug(version="v2", status="success")
+    dispatch_stage = _make_execution_status(
+        node_name="evidence_judge",
+        stage="evidence_judge_v2.dispatch",
+        status="success",
+        action_taken="dispatch_to_evidence_judge_v2",
+        evidence_judge_v2_enabled=True,
+        candidate_count=len(candidates),
+        item_batch_size=_evidence_judge_v2_batch_size(),
+        fallback_to_legacy_on_v2_failure=_evidence_judge_v2_fallback_to_legacy(),
+        strict_observability=_evidence_judge_v2_strict_observability(),
+    )
+    _emit_evidence_stage_trace(state, dispatch_stage)
+    _append_stage(debug, dispatch_stage)
+
+    if not candidates:
+        fallback, rule_reason = _deterministic_sufficiency_fallback([])
+        parsed = EvidenceJudgeOutput(
+            overall_evidence_state=fallback.overall_evidence_state,
+            need_more_web_search=fallback.need_more_web_search,
+            judged_evidence=[],
+            coverage_gaps=fallback.coverage_gaps,
+            decision_summary=fallback.decision_summary,
+        )
+        final_stage = _final_assembly_stage(parsed=parsed, sufficiency=fallback, candidates=candidates)
+        final_stage["deterministic_rule"] = rule_reason
+        _emit_evidence_stage_trace(state, final_stage)
+        _append_stage(debug, final_stage)
+        _finalize_evidence_judge_debug(debug)
+        return parsed, debug
+
+    judged_items, grader_debug = await _grade_evidence_items_with_llm(
+        state=state,
+        candidates=candidates,
+        original_user_query=original_user_query,
+        learning_goal=learning_goal,
+        requested_resource_type=requested_resource_type,
+        round_index=round_index,
+    )
+    for stage in grader_debug.get("stages", []):
+        _append_stage(debug, stage)
+
+    if judged_items is None:
+        failed_stage = next(
+            (stage for stage in reversed(grader_debug.get("stages", [])) if stage.get("status") == "failed"),
+            {},
+        )
+        if _evidence_judge_v2_fallback_to_legacy():
+            return await _run_legacy_evidence_judge_with_observable_debug(
+                state=state,
+                candidates=candidates,
+                original_user_query=original_user_query,
+                learning_goal=learning_goal,
+                requested_resource_type=requested_resource_type,
+                round_index=round_index,
+                version="legacy_after_v2_failure",
+                fallback_reason=str(
+                    failed_stage.get("error_type")
+                    or failed_stage.get("fallback_reason")
+                    or "evidence_item_grader_failed"
+                ),
+                inherited_stages=debug.get("stages", []),
+            )
+        debug["status"] = "failed"
+        _append_developer_warning(debug, "Evidence item grader failed and legacy fallback is disabled.")
+        _finalize_evidence_judge_debug(debug)
+        return None, debug
+
+    sufficiency, sufficiency_stage = await _judge_evidence_sufficiency_with_llm(
+        state=state,
+        candidates=candidates,
+        judged_items=judged_items,
+        original_user_query=original_user_query,
+        learning_goal=learning_goal,
+        requested_resource_type=requested_resource_type,
+        expanded_keypoints=list(state.get("expanded_keypoints") or state.get("keypoints") or []),
+    )
+    _append_stage(debug, sufficiency_stage)
+    if sufficiency is None:
+        debug["status"] = "failed"
+        _append_developer_warning(debug, "Evidence sufficiency judge failed and deterministic fallback is disabled.")
+        _finalize_evidence_judge_debug(debug)
+        return None, debug
+
+    parsed = EvidenceJudgeOutput(
+        overall_evidence_state=sufficiency.overall_evidence_state,
+        need_more_web_search=sufficiency.need_more_web_search,
+        judged_evidence=judged_items,
+        coverage_gaps=sufficiency.coverage_gaps,
+        decision_summary=sufficiency.decision_summary,
+    )
+    final_stage = _final_assembly_stage(parsed=parsed, sufficiency=sufficiency, candidates=candidates)
+    if debug.get("used_fallback"):
+        final_stage["status"] = "fallback"
+        final_stage["action_taken"] = "assembled_legacy_compatible_output_after_internal_fallback"
+    _emit_evidence_stage_trace(state, final_stage)
+    _append_stage(debug, final_stage)
+    _finalize_evidence_judge_debug(debug)
     return parsed, debug
 
 
@@ -3694,6 +4586,7 @@ async def evidence_judge(state: LearningState) -> dict:
         "context": context_docs,
         "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
         "evidence_judge_output": parsed.model_dump(mode="json"),
+        "evidence_judge_debug": judge_debug,
         "evidence_judge_rounds": 1,
         "evidence_judge_state": evidence_state,
         "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],

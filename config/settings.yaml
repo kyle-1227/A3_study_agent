@@ -55,6 +55,13 @@ retrieval:
   mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
   dual_source_evidence:
     block_generation_when_evidence_judge_failed: true
+  evidence_judge_v2:
+    enabled: true
+    item_batch_size: 5
+    allow_sufficiency_deterministic_fallback: true
+    expose_fallback_trace: true
+    strict_observability: true
+    fallback_to_legacy_on_v2_failure: true
   local_rag:
     enabled: true
     per_subject_top_k: 3
@@ -79,12 +86,14 @@ retrieval:
 
 llm:
   supervisor:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
-    max_tokens: 1200
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
   query_rewrite:
     provider: openrouter
@@ -95,12 +104,14 @@ llm:
     max_tokens: 1600
     streaming: false
   memory_use_decider:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
-    max_tokens: 800
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
   hallucination_eval:
     provider: openrouter
@@ -127,20 +138,24 @@ llm:
     max_tokens: 4096
     streaming: false
   web_coverage_decision:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
-    max_tokens: 1600
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
   search_result_judge:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
-    max_tokens: 1200
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
     structured_output: true
     strict_schema: true
@@ -189,7 +204,7 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   supervisor:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
@@ -201,7 +216,7 @@ llm_outputs:
     max_retries: 0
     max_raw_chars: 12000
   memory_use_decider:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
@@ -237,7 +252,7 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   web_coverage_decision:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
@@ -248,8 +263,24 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
-  search_result_judge:
+  evidence_item_grader:
     output_mode: native_json_schema_pydantic
+    fallback_modes:
+      - json_mode_pydantic
+      - prompt_json_pydantic
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  evidence_sufficiency_judge:
+    output_mode: native_json_schema_pydantic
+    fallback_modes:
+      - json_mode_pydantic
+      - prompt_json_pydantic
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  search_result_judge:
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2

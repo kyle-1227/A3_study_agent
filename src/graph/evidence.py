@@ -106,6 +106,31 @@ class EvidenceCoverageGap(BaseModel):
     priority: float = 0.5
 
 
+class EvidenceGradeBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    judged_evidence: list[EvidenceJudgeItem] = Field(default_factory=list, max_length=8)
+
+
+class EvidenceSufficiencyOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overall_evidence_state: Literal[
+        "sufficient",
+        "partially_sufficient",
+        "insufficient",
+    ] = "insufficient"
+    answerability: Literal[
+        "can_answer",
+        "can_answer_with_caveats",
+        "cannot_answer",
+    ] = "cannot_answer"
+    need_more_local_rag: bool = False
+    need_more_web_search: bool = False
+    coverage_gaps: list[EvidenceCoverageGap] = Field(default_factory=list, max_length=5)
+    decision_summary: str = Field("", max_length=600)
+
+
 class EvidenceJudgeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
