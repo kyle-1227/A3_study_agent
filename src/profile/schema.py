@@ -11,7 +11,7 @@ Design principles:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -150,6 +150,52 @@ class UserProfile(BaseModel):
 
 
 # ── Extraction / update DTOs ───────────────────────────────────────────────
+
+
+class ProfileSkillSignal(BaseModel):
+    """Strict-output friendly skill signal."""
+
+    name: str = Field(default="", max_length=50)
+    level: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ProfileStyleSignal(BaseModel):
+    """Strict-output friendly learning-style signal."""
+
+    dimension: str = Field(default="", max_length=40)
+    strength: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ProfileGoalSignal(BaseModel):
+    """Strict-output friendly learning-goal signal."""
+
+    goal: str = Field(default="", max_length=200)
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class ProfileBehaviorUpdateSignal(BaseModel):
+    """Strict-output friendly behavior metrics."""
+
+    avg_session_minutes: float = Field(default=0.0, ge=0.0)
+    quiz_accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
+    questions_asked: float = Field(default=0.0, ge=0.0)
+
+
+ProfileObservationText = Annotated[str, Field(max_length=200)]
+ProfileDislikeText = Annotated[str, Field(max_length=100)]
+
+
+class ExtractedProfileInfoStrict(BaseModel):
+    """DeepSeek strict-tool schema for profile extraction."""
+
+    skills_observed: list[ProfileSkillSignal] = Field(default_factory=list, max_length=8)
+    skill_evidence: str = Field(default="", max_length=500)
+    style_signals: list[ProfileStyleSignal] = Field(default_factory=list, max_length=8)
+    style_evidence: str = Field(default="", max_length=500)
+    goals_observed: list[ProfileGoalSignal] = Field(default_factory=list, max_length=5)
+    behavior_update: ProfileBehaviorUpdateSignal = Field(default_factory=ProfileBehaviorUpdateSignal)
+    observations: list[ProfileObservationText] = Field(default_factory=list, max_length=8)
+    dislikes_observed: list[ProfileDislikeText] = Field(default_factory=list, max_length=8)
 
 
 class ExtractedProfileInfo(BaseModel):

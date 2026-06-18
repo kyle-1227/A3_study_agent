@@ -124,15 +124,11 @@ class TestShouldRetryOrEnd:
 
 
 class TestGenerateAnswerRetryCompat:
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_uses_last_human_message_not_last_message(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+        self, mock_invoke_plain, mock_llm_response,
     ):
-        mock_llm = type("LLM", (), {})()
-        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("new answer"))
-        mock_get_llm.return_value = mock_llm
-        mock_get_fallback.return_value = None
+        mock_invoke_plain.return_value = "new answer"
 
         await generate_answer({
             "messages": [
@@ -142,7 +138,7 @@ class TestGenerateAnswerRetryCompat:
             "context": [],
         })
 
-        call_args = mock_llm.ainvoke.call_args[0][0]
+        call_args = mock_invoke_plain.await_args.kwargs["messages"]
         human_msgs = [m for m in call_args if isinstance(m, HumanMessage)]
         prompt_text = " ".join(m.content for m in human_msgs)
         assert "What is the discriminant?" in prompt_text

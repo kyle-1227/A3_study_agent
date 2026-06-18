@@ -114,14 +114,11 @@ class TestProfileManagerInit:
         """Passing an LLM (instead of extractor) should create extractor internally."""
         store = DictProfileStore()
         mock_llm = MagicMock()
-        mock_structured = MagicMock()
-        mock_llm.with_structured_output.return_value = mock_structured
 
         manager = ProfileManager(store=store, llm=mock_llm)
         assert manager._extractor is not None
-        mock_llm.with_structured_output.assert_called_once()
-        call_kwargs = mock_llm.with_structured_output.call_args
-        assert call_kwargs[1]["method"] == "json_mode"
+        assert manager._extractor._base_llm is mock_llm
+        assert not mock_llm.with_structured_output.called
 
 
 # ===========================================================================

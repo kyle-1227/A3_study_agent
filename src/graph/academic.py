@@ -12,7 +12,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 from collections import Counter, defaultdict
@@ -30,7 +29,7 @@ from src.graph.evidence import (
     EvidenceJudgeOutput,
     EvidenceSufficiencyOutput,
 )
-from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
+from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
 from src.graph.web_research import (
     WebCuratedSource,
@@ -1533,7 +1532,7 @@ def _evidence_judge_v2_expose_fallback_trace() -> bool:
 
 
 def _evidence_judge_v2_allow_sufficiency_fallback() -> bool:
-    return bool(_evidence_judge_v2_setting("allow_sufficiency_deterministic_fallback", True))
+    return bool(_evidence_judge_v2_setting("allow_sufficiency_deterministic_fallback", False))
 
 
 def _schema_size_chars(schema: type[BaseModel]) -> int:
@@ -1557,6 +1556,119 @@ def _validation_errors_from_text(value: Any) -> list[str]:
         return []
     parts = [part.strip() for part in text.split(";")]
     return [part for part in parts if part]
+
+
+def _normalize_requested_resource_types_for_evidence(
+    requested_resource_types: Any,
+    requested_resource_type: Any = "",
+) -> list[str]:
+    values: list[Any] = []
+    if isinstance(requested_resource_types, list):
+        values.extend(requested_resource_types)
+    elif requested_resource_types:
+        values.append(requested_resource_types)
+    if not values and requested_resource_type:
+        values.append(requested_resource_type)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip()
+        if item and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _trace_parse_evidence_grade_raw(raw_output: str) -> dict:
+    try:
+        data = json.loads(raw_output or "{}")
+        items = data.get("judged_evidence") or []
+        if not isinstance(items, list):
+            return {"judged_ids": [], "kept_count": 0, "rejected_count": 0}
+        return {
+            "judged_ids": [
+                str(item.get("evidence_id", ""))
+                for item in items
+                if isinstance(item, dict)
+            ],
+            "kept_count": sum(
+                1 for item in items
+                if isinstance(item, dict) and item.get("keep") is True
+            ),
+            "rejected_count": sum(
+                1 for item in items
+                if isinstance(item, dict) and item.get("keep") is False
+            ),
+        }
+    except Exception:
+        return {"judged_ids": [], "kept_count": 0, "rejected_count": 0}
+
+
+WEB_SOURCE_SUMMARY_ALLOWED_FIELDS = {
+    "source_id",
+    "keep",
+    "summary",
+    "coverage_points",
+    "evidence_type",
+    "use_case",
+    "relevance",
+    "usefulness",
+    "risk",
+    "reason",
+}
+
+
+def _trace_parse_web_source_summary_raw(raw_output: str) -> dict:
+    try:
+        data = json.loads(raw_output or "{}")
+        items = data.get("summaries") or []
+        if not isinstance(items, list):
+            return {
+                "returned_source_ids": [],
+                "kept_count": 0,
+                "rejected_count": 0,
+                "missing_required_reason_count": 0,
+                "extra_field_names": [],
+                "extra_field_count": 0,
+            }
+        extra_names: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in item:
+                if key not in WEB_SOURCE_SUMMARY_ALLOWED_FIELDS:
+                    extra_names.append(str(key))
+        return {
+            "returned_source_ids": [
+                str(item.get("source_id", ""))
+                for item in items
+                if isinstance(item, dict)
+            ],
+            "kept_count": sum(
+                1 for item in items
+                if isinstance(item, dict) and item.get("keep") is True
+            ),
+            "rejected_count": sum(
+                1 for item in items
+                if isinstance(item, dict) and item.get("keep") is False
+            ),
+            "missing_required_reason_count": sum(
+                1 for item in items
+                if isinstance(item, dict) and "reason" not in item
+            ),
+            "extra_field_names": sorted(set(extra_names)),
+            "extra_field_count": len(extra_names),
+        }
+    except Exception:
+        return {
+            "returned_source_ids": [],
+            "kept_count": 0,
+            "rejected_count": 0,
+            "missing_required_reason_count": 0,
+            "extra_field_names": [],
+            "extra_field_count": 0,
+        }
 
 
 def _attempted_modes(result: StructuredLLMResult | None) -> list[str]:
@@ -1674,6 +1786,14 @@ def _append_developer_warning(debug: dict, warning: str) -> None:
         debug["developer_warnings"].append(warning)
 
 
+def _last_failed_execution_stage(debug: dict) -> dict:
+    stages = debug.get("stages") or []
+    for stage in reversed(stages):
+        if isinstance(stage, dict) and stage.get("status") == "failed":
+            return stage
+    return {}
+
+
 def _finalize_evidence_judge_debug(debug: dict) -> dict:
     stages = debug.get("stages") or []
     has_fallback_stage = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
@@ -1740,14 +1860,20 @@ def _build_evidence_item_grader_messages(
     learning_goal: str,
     requested_resource_type: str,
     batch_index: int,
+    requested_resource_types: list[str] | None = None,
 ) -> list[dict]:
     payload = [candidate.model_dump(mode="json") for candidate in candidates]
+    resource_types = _normalize_requested_resource_types_for_evidence(
+        requested_resource_types,
+        requested_resource_type,
+    )
     prompt = _render_prompt(
         "evidence_item_grader",
         {
             "original_user_query": original_user_query,
             "learning_goal": learning_goal,
             "requested_resource_type": requested_resource_type,
+            "requested_resource_types": json.dumps(resource_types, ensure_ascii=False),
             "batch_index": str(batch_index),
             "evidence_candidates": json.dumps(payload, ensure_ascii=False),
         },
@@ -1802,13 +1928,19 @@ def _build_evidence_sufficiency_messages(
     learning_goal: str,
     requested_resource_type: str,
     expanded_keypoints: list[str],
+    requested_resource_types: list[str] | None = None,
 ) -> list[dict]:
+    resource_types = _normalize_requested_resource_types_for_evidence(
+        requested_resource_types,
+        requested_resource_type,
+    )
     prompt = _render_prompt(
         "evidence_sufficiency_judge",
         {
             "original_user_query": original_user_query,
             "learning_goal": learning_goal,
             "requested_resource_type": requested_resource_type,
+            "requested_resource_types": json.dumps(resource_types, ensure_ascii=False),
             "expanded_keypoints": json.dumps(expanded_keypoints or [], ensure_ascii=False),
             "graded_evidence_summary": json.dumps(
                 _graded_evidence_summary(candidates=candidates, judged_items=judged_items),
@@ -1895,6 +2027,7 @@ async def _grade_evidence_items_with_llm(
     learning_goal: str,
     requested_resource_type: str,
     round_index: int,
+    requested_resource_types: list[str] | None = None,
 ) -> tuple[list[EvidenceJudgeItem] | None, dict]:
     del round_index
     batch_size = _evidence_judge_v2_batch_size()
@@ -1912,6 +2045,7 @@ async def _grade_evidence_items_with_llm(
             learning_goal=learning_goal,
             requested_resource_type=requested_resource_type,
             batch_index=batch_index,
+            requested_resource_types=requested_resource_types,
         )
         try:
             structured_result = await invoke_structured_llm(
@@ -1931,6 +2065,8 @@ async def _grade_evidence_items_with_llm(
         except StructuredOutputError as exc:
             result = exc.result
             validation_errors = _validation_errors_from_text(result.business_validation_error or result.validation_error)
+            raw_trace = _trace_parse_evidence_grade_raw(result.raw_output)
+            id_summary = _evidence_id_validation_summary(expected_ids, raw_trace["judged_ids"])
             stage = _make_execution_status(
                 node_name="evidence_item_grader",
                 stage="evidence_item_grader.batch",
@@ -1945,9 +2081,13 @@ async def _grade_evidence_items_with_llm(
                 batch_index=batch_index,
                 candidate_count=len(batch),
                 expected_ids=expected_ids,
-                judged_ids=[],
-                kept_count=0,
-                rejected_count=0,
+                judged_ids=raw_trace["judged_ids"],
+                missing_ids=id_summary["missing_ids"],
+                duplicate_ids=id_summary["duplicate_ids"],
+                unknown_ids=id_summary["unknown_ids"],
+                extra_ids=id_summary["unknown_ids"],
+                kept_count=raw_trace["kept_count"],
+                rejected_count=raw_trace["rejected_count"],
                 raw_preview=_raw_preview(result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
             )
@@ -1984,6 +2124,8 @@ async def _grade_evidence_items_with_llm(
                 or structured_result.validation_error
                 or "parsed result is not EvidenceGradeBatch"
             )
+            raw_trace = _trace_parse_evidence_grade_raw(structured_result.raw_output)
+            id_summary = _evidence_id_validation_summary(expected_ids, raw_trace["judged_ids"])
             stage = _make_execution_status(
                 node_name="evidence_item_grader",
                 stage="evidence_item_grader.batch",
@@ -1998,9 +2140,13 @@ async def _grade_evidence_items_with_llm(
                 batch_index=batch_index,
                 candidate_count=len(batch),
                 expected_ids=expected_ids,
-                judged_ids=[],
-                kept_count=0,
-                rejected_count=0,
+                judged_ids=raw_trace["judged_ids"],
+                missing_ids=id_summary["missing_ids"],
+                duplicate_ids=id_summary["duplicate_ids"],
+                unknown_ids=id_summary["unknown_ids"],
+                extra_ids=id_summary["unknown_ids"],
+                kept_count=raw_trace["kept_count"],
+                rejected_count=raw_trace["rejected_count"],
                 raw_preview=_raw_preview(structured_result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
             )
@@ -2164,6 +2310,7 @@ async def _judge_evidence_sufficiency_with_llm(
     learning_goal: str,
     requested_resource_type: str,
     expanded_keypoints: list[str],
+    requested_resource_types: list[str] | None = None,
 ) -> tuple[EvidenceSufficiencyOutput | None, dict]:
     output_mode = get_llm_output_mode("evidence_sufficiency_judge")
     fallback_modes = get_fallback_modes("evidence_sufficiency_judge")
@@ -2173,6 +2320,7 @@ async def _judge_evidence_sufficiency_with_llm(
         original_user_query=original_user_query,
         learning_goal=learning_goal,
         requested_resource_type=requested_resource_type,
+        requested_resource_types=requested_resource_types,
         expanded_keypoints=expanded_keypoints,
     )
     kept_count = sum(1 for item in judged_items if item.keep)
@@ -2405,8 +2553,13 @@ async def _judge_evidence_candidates_with_llm(
     learning_goal: str,
     requested_resource_type: str,
     round_index: int,
+    requested_resource_types: list[str] | None = None,
 ) -> tuple[EvidenceJudgeOutput | None, dict]:
     """Evidence Judge V2 dispatcher."""
+    resource_types = _normalize_requested_resource_types_for_evidence(
+        requested_resource_types,
+        requested_resource_type,
+    )
     if not _evidence_judge_v2_enabled():
         debug = _new_evidence_judge_debug(version="v2", status="failed")
         dispatch_stage = _make_execution_status(
@@ -2419,6 +2572,8 @@ async def _judge_evidence_candidates_with_llm(
             developer_warning="Evidence Judge V2 is disabled; no previous one-shot fallback is available.",
             evidence_judge_v2_enabled=False,
             candidate_count=len(candidates),
+            requested_resource_type=requested_resource_type,
+            requested_resource_types=resource_types,
         )
         _emit_evidence_stage_trace(state, dispatch_stage)
         _append_stage(debug, dispatch_stage)
@@ -2435,6 +2590,8 @@ async def _judge_evidence_candidates_with_llm(
         candidate_count=len(candidates),
         item_batch_size=_evidence_judge_v2_batch_size(),
         strict_observability=_evidence_judge_v2_strict_observability(),
+        requested_resource_type=requested_resource_type,
+        requested_resource_types=resource_types,
     )
     _emit_evidence_stage_trace(state, dispatch_stage)
     _append_stage(debug, dispatch_stage)
@@ -2462,6 +2619,7 @@ async def _judge_evidence_candidates_with_llm(
         learning_goal=learning_goal,
         requested_resource_type=requested_resource_type,
         round_index=round_index,
+        requested_resource_types=resource_types,
     )
     for stage in grader_debug.get("stages", []):
         _append_stage(debug, stage)
@@ -2480,6 +2638,7 @@ async def _judge_evidence_candidates_with_llm(
         learning_goal=learning_goal,
         requested_resource_type=requested_resource_type,
         expanded_keypoints=list(state.get("expanded_keypoints") or state.get("keypoints") or []),
+        requested_resource_types=resource_types,
     )
     _append_stage(debug, sufficiency_stage)
     if sufficiency is None:
@@ -3280,6 +3439,7 @@ async def _summarize_web_sources(
             )
         except StructuredOutputError as exc:
             result = exc.result
+            raw_trace = _trace_parse_web_source_summary_raw(result.raw_output)
             stage = _make_execution_status(
                 node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
                 stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_FAILED,
@@ -3294,10 +3454,13 @@ async def _summarize_web_sources(
                 developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
                 batch_index=batch_index,
                 expected_source_ids=expected_ids,
-                returned_source_ids=[],
+                returned_source_ids=raw_trace["returned_source_ids"],
                 source_count=len(batch),
-                kept_count=0,
-                rejected_count=0,
+                kept_count=raw_trace["kept_count"],
+                rejected_count=raw_trace["rejected_count"],
+                missing_required_reason_count=raw_trace["missing_required_reason_count"],
+                extra_field_names=raw_trace["extra_field_names"],
+                extra_field_count=raw_trace["extra_field_count"],
                 raw_preview=_raw_preview(result.raw_output),
                 schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
                 source_summarizer_used=True,
@@ -3337,6 +3500,7 @@ async def _summarize_web_sources(
             else "parsed result is not WebSourceSummaryBatch"
         )
         if not structured_result.success or not isinstance(parsed, WebSourceSummaryBatch) or validation_error_text:
+            raw_trace = _trace_parse_web_source_summary_raw(structured_result.raw_output)
             stage = _make_execution_status(
                 node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
                 stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_FAILED,
@@ -3355,14 +3519,17 @@ async def _summarize_web_sources(
                 developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
                 batch_index=batch_index,
                 expected_source_ids=expected_ids,
-                returned_source_ids=[
+                returned_source_ids=raw_trace["returned_source_ids"] or [
                     str(summary.source_id)
                     for summary in getattr(parsed, "summaries", []) or []
                     if hasattr(summary, "source_id")
                 ],
                 source_count=len(batch),
-                kept_count=0,
-                rejected_count=0,
+                kept_count=raw_trace["kept_count"],
+                rejected_count=raw_trace["rejected_count"],
+                missing_required_reason_count=raw_trace["missing_required_reason_count"],
+                extra_field_names=raw_trace["extra_field_names"],
+                extra_field_count=raw_trace["extra_field_count"],
                 raw_preview=_raw_preview(structured_result.raw_output),
                 schema_size_chars=_schema_size_chars(WebSourceSummaryBatch),
                 source_summarizer_used=True,
@@ -4328,6 +4495,11 @@ async def evidence_judge(state: LearningState) -> dict:
     web_originals = dict(state.get("web_evidence_originals") or {})
     all_originals = {**local_originals, **web_originals}
     originals = {candidate.evidence_id: all_originals.get(candidate.evidence_id, {}) for candidate in candidates}
+    requested_resource_type = str(state.get("requested_resource_type", ""))
+    requested_resource_types = _normalize_requested_resource_types_for_evidence(
+        state.get("requested_resource_types") or [],
+        requested_resource_type,
+    )
 
     emit_a3_trace(
         logger,
@@ -4339,6 +4511,8 @@ async def evidence_judge(state: LearningState) -> dict:
             "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
             "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
             "source_type_distribution": dict(Counter(candidate.source_type for candidate in candidates)),
+            "requested_resource_type": requested_resource_type,
+            "requested_resource_types": requested_resource_types,
             "candidate_preview": [
                 {
                     "evidence_id": candidate.evidence_id,
@@ -4362,7 +4536,8 @@ async def evidence_judge(state: LearningState) -> dict:
             candidates=candidates,
             original_user_query=original_user_query,
             learning_goal=str(state.get("learning_goal", "")),
-            requested_resource_type=str(state.get("requested_resource_type", "")),
+            requested_resource_type=requested_resource_type,
+            requested_resource_types=requested_resource_types,
             round_index=1,
         )
     except StructuredOutputError as exc:
@@ -4372,9 +4547,16 @@ async def evidence_judge(state: LearningState) -> dict:
         ) from exc
 
     if parsed is None:
+        failed_stage = _last_failed_execution_stage(judge_debug)
         raise RuntimeError(
-            f"Evidence Judge returned no parsed result: "
-            f"{judge_debug.get('failure_phase', 'unknown')}"
+            "Evidence Judge returned no parsed result. "
+            f"stage={failed_stage.get('stage', 'unknown')}; "
+            f"node={failed_stage.get('node_name', 'unknown')}; "
+            f"error_type={failed_stage.get('error_type', 'unknown')}; "
+            f"error_message={failed_stage.get('error_message_sanitized') or failed_stage.get('error_message') or 'unknown'}; "
+            f"validation_errors={failed_stage.get('validation_errors', [])}; "
+            f"retry_count={failed_stage.get('retry_count', 0)}; "
+            f"raw_preview={failed_stage.get('raw_preview', '')}"
         )
 
     context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
@@ -4770,7 +4952,7 @@ async def memory_use_decider(state: LearningState) -> dict:
             HumanMessage(content=json.dumps(prompt_payload, ensure_ascii=False)),
         ]
         with traced_llm_call(
-            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+            model_name=get_setting("llm.memory_use_decider.model", ""),
             node_name="memory_use_decider",
             temperature=0.0,
         ):
@@ -4780,7 +4962,7 @@ async def memory_use_decider(state: LearningState) -> dict:
                 schema=MemoryUseDecisionOutput,
                 messages=messages,
                 output_mode=get_llm_output_mode("memory_use_decider"),
-                fallback_modes=get_fallback_modes("memory_use_decider"),
+                fallback_modes=[],
                 business_validator=lambda p: validate_memory_use_decision_output(
                     p,
                     selected_memory_count=selected_memory_count,
@@ -5042,87 +5224,12 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
         return existing_summary or ""
 
 
-_QUERY_REWRITE_COMPLIANCE_RETRY_INSTRUCTION = """
-Previous response failed structured-output compliance. Retry once with the same schema.
-Return only one complete valid JSON object using exactly the field names below.
-Do not create combined field names such as local_retrieval_query_web_research_seed_query or learning_goal_primary_subject.
-Keep this retry intentionally small:
-- local_retrieval_query <= 240 chars; web_research_seed_query <= 180 chars.
-- retrieval_plan[*].local_retrieval_query <= 240 chars; retrieval_plan[*].web_research_seed_query <= 180 chars.
-- expanded_keypoints <= 4 items, each <= 120 chars.
-- retrieval_plan <= 1 item for this retry; retrieval_coverage_goals <= 3 items, each <= 120 chars.
-- memory_context_notes <= 2 items, each <= 240 chars.
-- Avoid repeated template phrases and repeated n-grams. Do not repeat these phrases more than twice:
-  检索意图, 资源类型, 练习题, 答案, 解析, 实操任务.
-Previous failure: {failure_phase} {error_type}: {error_message}
-Required JSON shape:
-{{
-  "local_retrieval_query": "concise local RAG query",
-  "web_research_seed_query": "concise Web Research seed query",
-  "expanded_keypoints": ["point 1", "point 2"],
-  "reason": "brief reason",
-  "learning_goal": "brief learning goal",
-  "primary_subject": "one available subject or empty string",
-  "subject_relation_summary": "brief subject relation",
-  "retrieval_plan": [
-    {{
-      "subject": "one available subject",
-      "role": "core_concept",
-      "local_retrieval_query": "concise subject RAG query",
-      "web_research_seed_query": "concise subject web query",
-      "purpose": "brief purpose",
-      "relation_to_goal": "brief relation",
-      "priority": 0.9,
-      "retrieval_coverage_hint": "brief coverage hint",
-      "retrieval_coverage_goals": ["coverage 1", "coverage 2"]
-    }}
-  ],
-  "memory_context_notes": [],
-  "memory_used_for_retrieval": false,
-  "memory_use_reason": ""
-}}
-""".strip()
-
-
-def _query_rewrite_compliance_retry_reason(exc: StructuredOutputError) -> str:
-    result = exc.result
-    phase = result.failure_phase or ""
-    if phase in {"parsing_error", "validation_error", "business_validation_error"}:
-        return phase
-    error_blob = " ".join(
-        str(part or "")
-        for part in (
-            result.error_type,
-            result.error_message,
-            result.parsing_error,
-            result.validation_error,
-            result.business_validation_error,
-        )
-    )
-    retry_markers = (
-        "JSONDecodeError",
-        "Unterminated string",
-        "Structured output JSON",
-        "validation",
-        "business validation",
-        "repeated query phrase",
-        "repeated query ngram",
-        "query too long",
-        "maxLength",
-        "max_length",
-    )
-    if any(marker.lower() in error_blob.lower() for marker in retry_markers):
-        return phase or "structured_compliance_error"
-    return ""
-
-
 async def _invoke_search_query_rewriter_structured(
     *,
     state: LearningState,
     messages: list,
     original_query: str,
     memory_use_policy: str,
-    fallback_modes: list[str],
 ) -> StructuredLLMResult:
     return await invoke_structured_llm(
         node_name="search_query_rewriter",
@@ -5130,7 +5237,7 @@ async def _invoke_search_query_rewriter_structured(
         schema=SearchQueryRewriteOutput,
         messages=messages,
         output_mode=get_llm_output_mode("search_query_rewriter"),
-        fallback_modes=fallback_modes,
+        fallback_modes=[],
         business_validator=lambda p: validate_search_query_rewrite_output(
             p,
             current_query=original_query,
@@ -5211,82 +5318,16 @@ async def search_query_rewriter(state: LearningState) -> dict:
     parsing_error = None
     try:
         with traced_llm_call(
-            model_name=get_setting("query_rewrite.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+            model_name=get_setting("llm.query_rewrite.model", get_setting("query_rewrite.model", "")),
             node_name="search_query_rewriter",
             temperature=0.0,
         ):
-            try:
-                structured_result = await _invoke_search_query_rewriter_structured(
-                    state=state,
-                    messages=messages,
-                    original_query=original_query,
-                    memory_use_policy=memory_use_policy,
-                    fallback_modes=get_fallback_modes("search_query_rewriter"),
-                )
-            except StructuredOutputError as first_exc:
-                retry_reason = _query_rewrite_compliance_retry_reason(first_exc)
-                if not retry_reason:
-                    raise
-                first_result = first_exc.result
-                retry_messages = [
-                    *messages,
-                    HumanMessage(
-                        content=_QUERY_REWRITE_COMPLIANCE_RETRY_INSTRUCTION.format(
-                            failure_phase=first_result.failure_phase or "unknown",
-                            error_type=first_result.error_type or "unknown",
-                            error_message=(
-                                first_result.business_validation_error
-                                or first_result.validation_error
-                                or first_result.parsing_error
-                                or first_result.error_message
-                                or ""
-                            )[:1000],
-                        )
-                    ),
-                ]
-                try:
-                    structured_result = await _invoke_search_query_rewriter_structured(
-                        state=state,
-                        messages=retry_messages,
-                        original_query=original_query,
-                        memory_use_policy=memory_use_policy,
-                        fallback_modes=[],
-                    )
-                except StructuredOutputError as retry_exc:
-                    emit_a3_trace(
-                        logger,
-                        "query_rewrite_compliance_retry",
-                        {
-                            "success": False,
-                            "retry_count": 1,
-                            "retry_reason": retry_reason,
-                            "previous_error_type": first_result.error_type,
-                            "previous_failure_phase": first_result.failure_phase,
-                            "previous_raw_output_chars": len(first_result.raw_output or ""),
-                            "final_error_type": retry_exc.result.error_type,
-                            "final_failure_phase": retry_exc.result.failure_phase,
-                            "final_raw_output_chars": len(retry_exc.result.raw_output or ""),
-                            "fallback_used": False,
-                        },
-                        state=state,
-                        env_flag="LOG_A3_TRACE",
-                    )
-                    raise
-                emit_a3_trace(
-                    logger,
-                    "query_rewrite_compliance_retry",
-                    {
-                        "success": True,
-                        "retry_count": 1,
-                        "retry_reason": retry_reason,
-                        "previous_error_type": first_result.error_type,
-                        "previous_failure_phase": first_result.failure_phase,
-                        "previous_raw_output_chars": len(first_result.raw_output or ""),
-                        "fallback_used": False,
-                    },
-                    state=state,
-                    env_flag="LOG_A3_TRACE",
-                )
+            structured_result = await _invoke_search_query_rewriter_structured(
+                state=state,
+                messages=messages,
+                original_query=original_query,
+                memory_use_policy=memory_use_policy,
+            )
         parsed = structured_result.parsed
         if not isinstance(parsed, SearchQueryRewriteOutput):
             raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
@@ -5742,8 +5783,6 @@ async def generate_answer(state: LearningState) -> dict:
         )
         return {"messages": [AIMessage(content=diagnostic)]}
 
-    llm = get_node_llm("academic")
-
     # Split merged context by source type
     context = state.get("context", [])
     rag_docs = [c for c in context if c.get("type") == "rag"]
@@ -5793,26 +5832,25 @@ async def generate_answer(state: LearningState) -> dict:
         resource_offer_instruction=_resource_offer_instruction(state),
     )
 
-    max_tokens = get_setting("academic.max_tokens", None)
-    fallback_kwargs = {"temperature": temperature}
-    if max_tokens is not None:
-        fallback_kwargs["max_tokens"] = max_tokens
-    fallback = get_fallback_llm(**fallback_kwargs)
     messages = [
         SystemMessage(content=load_prompt("academic_system")),
         HumanMessage(content=user_prompt),
     ]
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        model_name=get_setting("llm.academic.model", get_setting("academic.model", "")),
         node_name="generate_answer",
         temperature=temperature,
-    ) as span:
-        response = await async_invoke_with_fallback(
-            llm, messages, fallback=fallback, span=span,
+    ):
+        response = await invoke_plain_llm_fail_fast(
+            node_name="generate_answer",
+            llm_node="academic",
+            messages=messages,
+            state=state,
+            temperature=temperature,
         )
 
-    return {"messages": [AIMessage(content=response.content)]}
+    return {"messages": [AIMessage(content=response)]}
 
 
 # Node 4: hallucination evaluation (reflection loop)
@@ -5869,7 +5907,7 @@ async def evaluate_hallucination(state: LearningState) -> dict:
         }
 
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
-    eval_model = get_setting("hallucination_eval.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    eval_model = get_setting("llm.hallucination_eval.model", get_setting("hallucination_eval.model", ""))
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content

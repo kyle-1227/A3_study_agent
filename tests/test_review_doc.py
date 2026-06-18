@@ -18,6 +18,23 @@ from src.graph.review_doc import (
 )
 
 
+VALID_REVIEW_DOC_MARKDOWN = """# Python函数复习
+
+## 复习目标
+理解函数定义、参数和返回值。
+
+## 核心知识点
+- def 定义函数
+- return 返回结果
+
+## 易错点
+- 不要混淆打印和返回值
+
+## 自测清单
+- 能写出一个带参数的函数
+"""
+
+
 @pytest.mark.anyio
 async def test_review_doc_planner_empty_outline_raises():
     with patch("src.graph.review_doc.invoke_plain_llm_fail_fast", return_value="  "):
@@ -36,25 +53,23 @@ async def test_review_doc_agent_empty_markdown_raises():
 async def test_review_doc_reviewer_local_rejects_without_llm():
     result = await review_doc_reviewer({"review_doc_markdown": "# Title\n\n## Only one section"})
     assert result["review_doc_review_verdict"] == "reject"
-    assert "three H2" in result["review_doc_review_reason"]
+    assert "Markdown missing required sections" in result["review_doc_review_reason"]
 
 
 @pytest.mark.anyio
 async def test_review_doc_reviewer_structured_rejects():
-    markdown = "# Title\n\n## A\ntext\n\n## B\ntext\n\n## C\ntext"
     verdict = ReviewDocReviewVerdict(verdict="reject", reason="Needs citations")
     with patch("src.graph.review_doc.invoke_structured_llm", return_value=SimpleNamespace(parsed=verdict)):
-        result = await review_doc_reviewer({"review_doc_markdown": markdown})
+        result = await review_doc_reviewer({"review_doc_markdown": VALID_REVIEW_DOC_MARKDOWN})
     assert result["review_doc_review_verdict"] == "reject"
     assert "Needs citations" in result["review_doc_revision_notes"]
 
 
 @pytest.mark.anyio
 async def test_review_doc_reviewer_exception_propagates():
-    markdown = "# Title\n\n## A\ntext\n\n## B\ntext\n\n## C\ntext"
     with patch("src.graph.review_doc.invoke_structured_llm", side_effect=RuntimeError("review failed")):
         with pytest.raises(RuntimeError, match="review failed"):
-            await review_doc_reviewer({"review_doc_markdown": markdown})
+            await review_doc_reviewer({"review_doc_markdown": VALID_REVIEW_DOC_MARKDOWN})
 
 
 @pytest.mark.anyio

@@ -42,7 +42,15 @@ class WebResearchTask(BaseModel):
     role: str = Field(...)
     purpose: str = Field(...)
     search_query: str = Field(...)
-    reason: str = Field(...)
+    reason: str = Field(
+        ...,
+        description=(
+            "Required for every summary item. Explain why this source is kept or "
+            "rejected. If keep=true, this must be non-empty and explain why the "
+            "source is useful for the user's learning goal. If keep=false, this "
+            "field must still exist and explain why the source is rejected."
+        ),
+    )
     priority: float = Field(...)
 
 

@@ -482,10 +482,9 @@ class TestNodeConfigIntegration:
 
         assert _web_timeout_seconds() == get_setting("web_search.timeout_seconds")
 
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_generate_answer_uses_config_prompt(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+        self, mock_invoke_plain, mock_llm_response,
     ):
         """generate_answer should use prompt loaded from XML config."""
         from unittest.mock import AsyncMock
@@ -494,9 +493,7 @@ class TestNodeConfigIntegration:
 
         from src.graph.academic import generate_answer
 
-        mock_llm = mock_get_llm.return_value
-        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("answer"))
-        mock_get_fallback.return_value = mock_llm
+        mock_invoke_plain.side_effect = AsyncMock(return_value="answer")
 
         state = {
             "messages": [HumanMessage(content="test question")],
@@ -506,6 +503,7 @@ class TestNodeConfigIntegration:
         result = await generate_answer(state)
 
         assert "answer" in result["messages"][0].content
+        assert mock_invoke_plain.await_args.kwargs["llm_node"] == "academic"
 
     @patch("src.graph.supervisor.invoke_structured_llm")
     async def test_supervisor_uses_config_prompt(self, mock_invoke):

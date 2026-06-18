@@ -72,6 +72,28 @@ class _DeepSeekStructuredOutputError(RuntimeError):
         super().__init__(message)
 
 
+class DeepSeekInsufficientSystemResourceError(RuntimeError):
+    """Retryable DeepSeek provider capacity/infra failure."""
+
+    retryable_provider_error = True
+
+    def __init__(self, message: str, response: httpx.Response | None = None):
+        super().__init__(message)
+        self.response = response
+        self.failure_phase = "provider_transport_error"
+
+
+class DeepSeekProviderResponseJSONError(RuntimeError):
+    """Retryable invalid provider envelope without model output."""
+
+    retryable_provider_error = True
+
+    def __init__(self, message: str, response: httpx.Response | None = None):
+        super().__init__(message)
+        self.response = response
+        self.failure_phase = "provider_transport_error"
+
+
 @dataclass
 class _InvokeMetrics:
     """Diagnostics for one structured output attempt."""
@@ -613,12 +635,20 @@ def _is_semantic_retryable_failure(
     *,
     include_business_validation: bool = False,
 ) -> bool:
-    if phase in {"parsing_error", "validation_error"}:
+    if phase in {
+        "parsing_error",
+        "validation_error",
+        "deepseek_tool_call_missing",
+        "deepseek_empty_tool_arguments",
+        "deepseek_tool_call_truncated",
+    }:
         return True
     return bool(include_business_validation and phase == "business_validation_error")
 
 
 def _is_provider_transport_error(exc: Exception, *, status_code: Any = None) -> bool:
+    if bool(getattr(exc, "retryable_provider_error", False)):
+        return True
     try:
         numeric_status = int(status_code) if status_code is not None else None
     except Exception:
@@ -677,6 +707,16 @@ def _build_reask_instruction(
             "The previous response passed schema validation but failed this node's business validation. "
             "Fix only the concrete business rule named below."
         )
+    elif phase in {"deepseek_tool_call_missing", "deepseek_empty_tool_arguments"}:
+        issue = (
+            "The previous response did not provide the required tool call arguments. "
+            "Call the required function exactly once with a complete schema-valid arguments object."
+        )
+    elif phase == "deepseek_tool_call_truncated":
+        issue = (
+            "The previous response was truncated before a complete tool arguments object was available. "
+            "Return a shorter but complete schema-valid arguments object."
+        )
     else:
         issue = "The previous response failed structured output compliance."
 
@@ -695,7 +735,15 @@ def _build_reask_instruction(
         "- Do not explain the error.\n"
         "- Do not output markdown, code fences, comments, or extra prose.\n"
         "- Do not change the schema, omit fields, invent fields, or use non-schema enum values.\n"
-        "- If a field is empty, use the schema-compatible empty value such as \"\", [], false, or 0."
+        "- If the previous error says \"Extra inputs are not permitted\", remove all fields not defined in the schema.\n"
+        "- Do not include input-only metadata fields unless they are explicitly present in the schema.\n"
+        "- If the previous error says \"Field required\", add that exact required field to every affected object.\n"
+        "- Do not fix one validation error by introducing extra fields.\n"
+        "- If a field is missing and the schema permits an empty value, you may use a "
+        "schema-compatible empty value such as \"\", [], false, or 0. However, if the "
+        "validation error says non-empty or the business validation error says a field "
+        "must be non-empty, you must provide a valid non-empty value. Do not use an "
+        "empty value to satisfy a field that failed a non-empty business rule."
     )
 
 
@@ -709,7 +757,14 @@ def _build_reask_context(
     phase = result.failure_phase or ""
     if not _reask_enabled(node_name):
         return None
-    if phase not in {"parsing_error", "validation_error", "business_validation_error"}:
+    if phase not in {
+        "parsing_error",
+        "validation_error",
+        "business_validation_error",
+        "deepseek_tool_call_missing",
+        "deepseek_empty_tool_arguments",
+        "deepseek_tool_call_truncated",
+    }:
         return None
     if phase == "business_validation_error" and not _reask_business_validation_enabled(node_name):
         return None
@@ -905,6 +960,20 @@ async def _deepseek_chat_completion(
                 json=payload,
             )
         _deepseek_raise_for_status(response)
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise DeepSeekProviderResponseJSONError(
+                f"DeepSeek provider returned a non-JSON response envelope: {exc}",
+                response=response,
+            ) from exc
+        choice = _deepseek_choice(data)
+        finish_reason = str(choice.get("finish_reason", "") or "")
+        if finish_reason == "insufficient_system_resource":
+            raise DeepSeekInsufficientSystemResourceError(
+                "DeepSeek provider returned finish_reason=insufficient_system_resource",
+                response=response,
+            )
         return response
 
     return await invoke_with_provider_transport_retry(
@@ -913,6 +982,8 @@ async def _deepseek_chat_completion(
         llm_node=llm_node,
         provider=_provider(llm_node),
         model=_model(llm_node),
+        output_mode="deepseek_tool_call_strict" if base_url.endswith("/beta") else "deepseek_json_object",
+        trace_stage_prefix="structured_llm_transport",
         state=state or {},
     )
 
@@ -1049,8 +1120,11 @@ async def _invoke_deepseek_tool_call_strict(
     metrics.using_direct_openrouter_http = False
     metrics.provider_request_mode = "deepseek_tool_call_strict"
     tool_name = _deepseek_tool_name(node_name, schema)
+    base_url = _deepseek_base_url(llm_node, beta=True)
     metrics.extra_debug.update({
         "using_deepseek_official_http": True,
+        "base_url_type": "beta",
+        "resolved_base_url": base_url,
         "deepseek_schema_size_chars": 0,
         "tool_name": tool_name,
         "tool_call_present": False,
@@ -1061,7 +1135,10 @@ async def _invoke_deepseek_tool_call_strict(
     api_key_env, api_key = _deepseek_api_key(llm_node)
     if not api_key:
         raise _InvokeOneModeError(
-            RuntimeError(f"{api_key_env} is not configured"),
+            _DeepSeekStructuredOutputError(
+                "provider_auth_error",
+                f"{api_key_env} is not configured",
+            ),
             metrics,
             raw_output="",
         )
@@ -1102,16 +1179,14 @@ async def _invoke_deepseek_tool_call_strict(
         "temperature": _deepseek_temperature(llm_node),
         "max_tokens": _deepseek_max_tokens(llm_node),
         "stream": False,
+        "thinking": {"type": "disabled"},
     }
-    thinking = _deepseek_thinking(llm_node)
-    if thinking is not None:
-        payload["thinking"] = thinking
 
     llm_started = time.perf_counter()
     try:
         response, _transport_retry_count = await _deepseek_chat_completion(
             payload=payload,
-            base_url=_deepseek_base_url(llm_node, beta=True),
+            base_url=base_url,
             api_key=api_key,
             node_name=node_name,
             llm_node=llm_node,
@@ -1131,6 +1206,33 @@ async def _invoke_deepseek_tool_call_strict(
     choice = _deepseek_choice(data)
     finish_reason = str(choice.get("finish_reason", "") or "")
     metrics.extra_debug["finish_reason"] = finish_reason
+    if finish_reason == "insufficient_system_resource":
+        raise _InvokeOneModeError(
+            DeepSeekInsufficientSystemResourceError(
+                "DeepSeek provider returned finish_reason=insufficient_system_resource",
+                response=response,
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+    if finish_reason == "content_filter":
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "provider_content_filter",
+                "DeepSeek response was blocked by provider content_filter",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+    if finish_reason == "length":
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "deepseek_tool_call_truncated",
+                "DeepSeek response was truncated before complete tool arguments were returned",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
     message = _deepseek_message_from_choice(choice)
     tool_calls = message.get("tool_calls") or []
     metrics.extra_debug["tool_call_present"] = bool(tool_calls)
@@ -1201,8 +1303,11 @@ async def _invoke_deepseek_json_object(
     """Direct DeepSeek official JSON object invocation."""
     metrics.using_direct_openrouter_http = False
     metrics.provider_request_mode = "deepseek_json_object"
+    base_url = _deepseek_base_url(llm_node, beta=False)
     metrics.extra_debug.update({
         "using_deepseek_official_http": True,
+        "base_url_type": "stable",
+        "resolved_base_url": base_url,
         "deepseek_schema_size_chars": 0,
         "tool_name": "",
         "tool_call_present": False,
@@ -1221,7 +1326,10 @@ async def _invoke_deepseek_json_object(
     api_key_env, api_key = _deepseek_api_key(llm_node)
     if not api_key:
         raise _InvokeOneModeError(
-            RuntimeError(f"{api_key_env} is not configured"),
+            _DeepSeekStructuredOutputError(
+                "provider_auth_error",
+                f"{api_key_env} is not configured",
+            ),
             metrics,
             raw_output="",
         )
@@ -1249,7 +1357,7 @@ async def _invoke_deepseek_json_object(
     try:
         response, _transport_retry_count = await _deepseek_chat_completion(
             payload=payload,
-            base_url=_deepseek_base_url(llm_node, beta=False),
+            base_url=base_url,
             api_key=api_key,
             node_name=node_name,
             llm_node=llm_node,
@@ -1269,6 +1377,24 @@ async def _invoke_deepseek_json_object(
     choice = _deepseek_choice(data)
     finish_reason = str(choice.get("finish_reason", "") or "")
     metrics.extra_debug["finish_reason"] = finish_reason
+    if finish_reason == "insufficient_system_resource":
+        raise _InvokeOneModeError(
+            DeepSeekInsufficientSystemResourceError(
+                "DeepSeek provider returned finish_reason=insufficient_system_resource",
+                response=response,
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
+    if finish_reason == "content_filter":
+        raise _InvokeOneModeError(
+            _DeepSeekStructuredOutputError(
+                "provider_content_filter",
+                "DeepSeek response was blocked by provider content_filter",
+            ),
+            metrics,
+            raw_output=json.dumps(data, ensure_ascii=False, default=str),
+        )
     if finish_reason == "length":
         raise _InvokeOneModeError(
             _DeepSeekStructuredOutputError(

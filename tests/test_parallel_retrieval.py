@@ -289,15 +289,11 @@ class TestWebSearchParallelOutput:
 class TestGenerateAnswerFromMergedContext:
     """generate_answer splits merged context by type for formatting."""
 
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_uses_both_rag_and_web_context(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+        self, mock_invoke_plain, mock_llm_response,
     ):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("combined answer"))
-        mock_get_llm.return_value = mock_llm
-        mock_get_fallback.return_value = MagicMock()
+        mock_invoke_plain.return_value = "combined answer"
 
         state = {
             "messages": [HumanMessage(content="判别式")],
@@ -320,20 +316,16 @@ class TestGenerateAnswerFromMergedContext:
         assert len(result["messages"]) == 1
         assert isinstance(result["messages"][0], AIMessage)
         # Verify the prompt includes both RAG and web content
-        call_args = mock_llm.ainvoke.call_args[0][0]
+        call_args = mock_invoke_plain.await_args.kwargs["messages"]
         prompt_text = call_args[-1].content
         assert "delta=b^2-4ac" in prompt_text
         assert "判别式用法" in prompt_text
 
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_handles_empty_context(
-        self, mock_get_llm, mock_get_fallback, mock_llm_response,
+        self, mock_invoke_plain, mock_llm_response,
     ):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=mock_llm_response("answer without context"))
-        mock_get_llm.return_value = mock_llm
-        mock_get_fallback.return_value = MagicMock()
+        mock_invoke_plain.return_value = "answer without context"
 
         state = {
             "messages": [HumanMessage(content="test")],

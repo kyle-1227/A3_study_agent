@@ -8,8 +8,13 @@ from pydantic import ValidationError
 
 from src.graph.academic import (
     _assert_no_silent_fallback,
+    _build_evidence_item_grader_messages,
+    _build_evidence_sufficiency_messages,
     _deterministic_sufficiency_fallback,
     _grade_evidence_items_with_llm,
+    _last_failed_execution_stage,
+    _trace_parse_evidence_grade_raw,
+    evidence_judge,
     _judge_evidence_candidates_with_llm,
     validate_evidence_grade_batch_output,
     validate_evidence_sufficiency_output,
@@ -85,7 +90,14 @@ def _structured_result(*, parsed, node_name: str, schema_name: str, output_mode:
     )
 
 
-def _structured_error(*, node_name: str, schema_name: str, message: str, business_error: str = ""):
+def _structured_error(
+    *,
+    node_name: str,
+    schema_name: str,
+    message: str,
+    business_error: str = "",
+    raw_output: str = "{}",
+):
     return StructuredOutputError(
         StructuredLLMResult(
             success=False,
@@ -101,7 +113,7 @@ def _structured_error(*, node_name: str, schema_name: str, message: str, busines
             error_message=message,
             business_validation_error=business_error,
             validation_error="" if business_error else message,
-            raw_output="{}",
+            raw_output=raw_output,
         )
     )
 
@@ -118,6 +130,35 @@ def test_evidence_grade_batch_schema_validates_and_caps_items():
                 for index in range(9)
             ]
         )
+
+
+def test_evidence_judge_item_requires_explicit_coverage_contribution():
+    with pytest.raises(ValidationError, match="coverage_contribution"):
+        EvidenceJudgeItem(
+            evidence_id="local:python:0",
+            keep=True,
+            reason="Useful evidence.",
+        )
+
+    with pytest.raises(ValidationError, match="coverage_contribution"):
+        EvidenceJudgeItem(
+            evidence_id="local:python:0",
+            keep=False,
+            reason="Discarded evidence.",
+        )
+
+    with pytest.raises(ValidationError, match="coverage_contribution must not be empty"):
+        _judge_item(coverage_contribution="")
+
+    discarded = _judge_item(
+        keep=False,
+        coverage_contribution="",
+        reason="Not relevant to the request.",
+    )
+    assert discarded.coverage_contribution == ""
+
+    kept = _judge_item(coverage_contribution="Covers Python quiz practice.")
+    assert kept.coverage_contribution == "Covers Python quiz practice."
 
 
 def _coverage_gap(index: int = 0, *, query: str = "python function exercises") -> EvidenceCoverageGap:
@@ -143,13 +184,24 @@ def test_evidence_sufficiency_output_schema_validates_limits():
 
     assert output.answerability == "can_answer"
 
+    output_with_max_gaps = EvidenceSufficiencyOutput(
+        overall_evidence_state="partially_sufficient",
+        answerability="can_answer_with_caveats",
+        need_more_local_rag=False,
+        need_more_web_research=True,
+        coverage_gaps=[_coverage_gap(index) for index in range(10)],
+        decision_summary="Needs broader coverage.",
+    )
+
+    assert len(output_with_max_gaps.coverage_gaps) == 10
+
     with pytest.raises(ValidationError):
         EvidenceSufficiencyOutput(
             overall_evidence_state="partially_sufficient",
             answerability="can_answer_with_caveats",
             need_more_local_rag=False,
             need_more_web_research=True,
-            coverage_gaps=[_coverage_gap(index) for index in range(6)],
+            coverage_gaps=[_coverage_gap(index) for index in range(11)],
             decision_summary="Needs a bit more coverage.",
         )
 
@@ -198,22 +250,73 @@ def test_grade_batch_validator_finds_missing_duplicate_and_unknown_ids():
     )
 
 
-def test_grade_batch_validator_rejects_empty_reason_and_missing_coverage_contribution():
+def test_grade_batch_validator_rejects_empty_reason_and_accepts_discarded_empty_coverage():
     empty_reason = EvidenceGradeBatch(judged_evidence=[
         _judge_item(reason=""),
     ])
-    empty_coverage = EvidenceGradeBatch(judged_evidence=[
-        _judge_item(coverage_contribution=""),
+    discarded_empty_coverage = EvidenceGradeBatch(judged_evidence=[
+        _judge_item(
+            keep=False,
+            coverage_contribution="",
+            reason="Not relevant to the request.",
+        ),
     ])
 
     assert "reason must not be empty" in validate_evidence_grade_batch_output(
         empty_reason,
         expected_ids=["local:python:0"],
     )
-    assert "coverage_contribution must not be empty" in validate_evidence_grade_batch_output(
-        empty_coverage,
+    assert validate_evidence_grade_batch_output(
+        discarded_empty_coverage,
         expected_ids=["local:python:0"],
+    ) == ""
+
+
+def test_trace_helpers_extract_failed_stage_and_raw_grade_counts():
+    debug = {
+        "stages": [
+            {"stage": "first", "status": "failed", "error_type": "FirstError"},
+            {"stage": "second", "status": "success"},
+            {"stage": "last", "status": "failed", "error_type": "LastError"},
+        ]
+    }
+    assert _last_failed_execution_stage(debug)["stage"] == "last"
+
+    parsed = _trace_parse_evidence_grade_raw(
+        '{"judged_evidence": ['
+        '{"evidence_id": "local:python:0", "keep": true},'
+        '{"evidence_id": "web:python:1", "keep": false}'
+        ']}'
     )
+    assert parsed["judged_ids"] == ["local:python:0", "web:python:1"]
+    assert parsed["kept_count"] == 1
+    assert parsed["rejected_count"] == 1
+
+
+def test_evidence_prompts_include_json_requested_resource_types():
+    candidate = _candidate()
+    item_messages = _build_evidence_item_grader_messages(
+        candidates=[candidate],
+        original_user_query="给我一份python思维导图和练习题",
+        learning_goal="Learn Python with a mindmap and quiz",
+        requested_resource_type="mindmap",
+        requested_resource_types=["mindmap", "quiz"],
+        batch_index=0,
+    )
+    item_prompt = item_messages[-1]["content"]
+    assert "- requested_resource_type: mindmap" in item_prompt
+    assert '["mindmap", "quiz"]' in item_prompt
+
+    sufficiency_messages = _build_evidence_sufficiency_messages(
+        candidates=[candidate],
+        judged_items=[_judge_item()],
+        original_user_query="给我一份python思维导图和练习题",
+        learning_goal="Learn Python with a mindmap and quiz",
+        requested_resource_type="mindmap",
+        requested_resource_types=["mindmap", "quiz"],
+        expanded_keypoints=["Python basics"],
+    )
+    assert '["mindmap", "quiz"]' in sufficiency_messages[-1]["content"]
 
 
 def test_sufficiency_validator_rules():
@@ -341,7 +444,7 @@ def test_deterministic_sufficiency_fallback_rules():
 
 
 @pytest.mark.asyncio
-async def test_sufficiency_failure_uses_deterministic_fallback(monkeypatch):
+async def test_sufficiency_failure_returns_failed_when_fallback_disabled(monkeypatch):
     candidate = _candidate()
     grade_batch = EvidenceGradeBatch(judged_evidence=[_judge_item()])
 
@@ -369,10 +472,14 @@ async def test_sufficiency_failure_uses_deterministic_fallback(monkeypatch):
         round_index=1,
     )
 
-    assert isinstance(parsed, EvidenceJudgeOutput)
-    assert debug["used_fallback"] is True
+    assert parsed is None
+    assert debug["used_fallback"] is False
     assert debug["status"] != "success"
-    assert any(item["to"] == "deterministic_sufficiency_fallback" for item in debug["fallback_chain"])
+    assert debug["fallback_chain"] == []
+    assert any(
+        stage.get("action_taken") == "return_failed_stage_to_v2_dispatcher"
+        for stage in debug["stages"]
+    )
 
 
 @pytest.mark.asyncio
@@ -425,12 +532,20 @@ async def test_v2_disabled_returns_failed_without_previous_fallback(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_business_validator_failure_is_exposed_in_stage_debug(monkeypatch):
+    raw_output = (
+        '{"judged_evidence": ['
+        '{"evidence_id": "local:python:0", "keep": true, "reason": "Useful but invalid."},'
+        '{"evidence_id": "web:python:1", "keep": false, "reason": "Discarded."}'
+        ']}'
+    )
+
     async def fake_invoke_structured_llm(**kwargs):
         raise _structured_error(
             node_name=kwargs["node_name"],
             schema_name=kwargs["schema"].__name__,
             message="business validation failed",
             business_error="missing evidence_id values: ['local:python:0']; duplicate evidence_id values: ['x']",
+            raw_output=raw_output,
         )
 
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
@@ -448,6 +563,53 @@ async def test_business_validator_failure_is_exposed_in_stage_debug(monkeypatch)
     failed_stage = debug["stages"][0]
     assert failed_stage["status"] == "failed"
     assert failed_stage["validation_errors"]
+    assert failed_stage["judged_ids"] == ["local:python:0", "web:python:1"]
+    assert failed_stage["kept_count"] == 1
+    assert failed_stage["rejected_count"] == 1
+    assert failed_stage["unknown_ids"] == ["web:python:1"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_judge_runtime_error_includes_failed_stage_details(monkeypatch):
+    async def fake_judge(**_kwargs):
+        return None, {
+            "status": "failed",
+            "stages": [
+                {
+                    "stage": "evidence_item_grader.batch",
+                    "node_name": "evidence_item_grader",
+                    "status": "failed",
+                    "error_type": "BusinessValidationError",
+                    "error_message_sanitized": "business validation failed",
+                    "validation_errors": ["coverage_contribution must not be empty"],
+                    "retry_count": 2,
+                    "raw_preview": '{"judged_evidence": []}',
+                }
+            ],
+        }
+
+    monkeypatch.setattr("src.graph.academic._judge_evidence_candidates_with_llm", fake_judge)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await evidence_judge(
+            {
+                **_state(),
+                "local_evidence_candidates": [_candidate().model_dump(mode="json")],
+                "web_evidence_candidates": [],
+                "local_evidence_originals": {},
+                "web_evidence_originals": {},
+                "requested_resource_type": "mindmap",
+                "requested_resource_types": ["mindmap", "quiz"],
+            }
+        )
+
+    message = str(exc_info.value)
+    assert "stage=evidence_item_grader.batch" in message
+    assert "node=evidence_item_grader" in message
+    assert "error_type=BusinessValidationError" in message
+    assert "coverage_contribution must not be empty" in message
+    assert "retry_count=2" in message
+    assert "raw_preview=" in message
 
 
 def test_silent_fallback_guard_raises_in_strict_mode(monkeypatch):

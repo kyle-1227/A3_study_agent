@@ -11,6 +11,7 @@ import logging
 import os
 import asyncio
 import time
+import ssl
 from typing import Any, Awaitable, Callable, TypeVar
 
 from langchain_core.messages import BaseMessage
@@ -58,7 +59,7 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     nested_prefix = f"llm.{node_name}"
     provider = get_setting(f"{nested_prefix}.provider", get_setting(f"{node_name}.provider", "deepseek"))
     provider_name = str(provider or "").strip().lower()
-    default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
     default_api_key_env = "DEEPSEEK_API_KEY"
     default_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
@@ -114,7 +115,7 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
 def get_primary_llm(**overrides) -> ChatOpenAI:
     """Build the primary chat model from DEEPSEEK_* env vars."""
     defaults = dict(
-        model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         temperature=0.7,
@@ -132,7 +133,7 @@ def get_fallback_llm(**overrides) -> ChatOpenAI:
     instance or a different cloud provider.
     """
     defaults = dict(
-        model=os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+        model=os.getenv("FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")),
         api_key=os.getenv("FALLBACK_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or "not-configured",
         base_url=os.getenv("FALLBACK_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")),
         temperature=0.7,
@@ -370,22 +371,32 @@ def _extract_status_code(exc: BaseException) -> int | None:
 
 
 def _is_provider_transport_retryable(exc: BaseException) -> bool:
+    if bool(getattr(exc, "retryable_provider_error", False)):
+        return True
     status_code = _extract_status_code(exc)
     if status_code == 429 or (status_code is not None and 500 <= status_code <= 599):
         return True
-    if isinstance(exc, (TimeoutError, ConnectionError, httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError, httpx.TransportError, httpx.TimeoutException)):
         return True
     retryable_type_names = {
         "APIConnectionError",
         "APITimeoutError",
         "RateLimitError",
         "InternalServerError",
+        "DeepSeekInsufficientSystemResourceError",
+        "DeepSeekProviderResponseJSONError",
     }
     return type(exc).__name__ in retryable_type_names
 
 
-def _provider_transport_max_retries() -> int:
-    raw = get_setting("provider_transport_retry.max_retries", 2)
+def _provider_transport_max_retries(node_name: str | None = None) -> int:
+    raw = None
+    if node_name:
+        raw = get_setting(f"llm_outputs.{node_name}.transport_max_retries", None)
+    if raw is None:
+        raw = get_setting("llm_outputs.default.transport_max_retries", None)
+    if raw is None:
+        raw = get_setting("provider_transport_retry.max_retries", 2)
     try:
         value = int(raw)
     except Exception:
@@ -409,6 +420,8 @@ async def invoke_with_provider_transport_retry(
     llm_node: str,
     provider: str,
     model: str,
+    output_mode: str = "",
+    trace_stage_prefix: str = "provider_transport",
     state: dict | None = None,
 ) -> tuple[T, int]:
     """Retry transient provider transport failures without fallback.
@@ -417,7 +430,7 @@ async def invoke_with_provider_transport_retry(
     The caller supplies the exact same operation each time, so model, prompt,
     schema, and request payload remain unchanged.
     """
-    max_retries = _provider_transport_max_retries()
+    max_retries = _provider_transport_max_retries(node_name)
     retry_count = 0
     while True:
         try:
@@ -425,25 +438,35 @@ async def invoke_with_provider_transport_retry(
         except Exception as exc:
             if not _is_provider_transport_retryable(exc) or retry_count >= max_retries:
                 if retry_count > 0 and _is_provider_transport_retryable(exc):
+                    final_payload = {
+                        "node_name": node_name,
+                        "llm_node": llm_node,
+                        "provider": provider,
+                        "model": model,
+                        "output_mode": output_mode,
+                        "retry_count": retry_count,
+                        "max_retries": max_retries,
+                        "fallback_used": False,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "status_code": _extract_status_code(exc),
+                        "provider_error_body": _provider_error_body(exc),
+                    }
                     emit_a3_trace(
                         logger,
                         "final_failure_after_retries",
-                        {
-                            "node_name": node_name,
-                            "llm_node": llm_node,
-                            "provider": provider,
-                            "model": model,
-                            "retry_count": retry_count,
-                            "max_retries": max_retries,
-                            "fallback_used": False,
-                            "error_type": type(exc).__name__,
-                            "error_message": str(exc),
-                            "status_code": _extract_status_code(exc),
-                            "provider_error_body": _provider_error_body(exc),
-                        },
+                        final_payload,
                         state=state or {},
                         env_flag="LOG_A3_TRACE",
                     )
+                    if trace_stage_prefix != "provider_transport":
+                        emit_a3_trace(
+                            logger,
+                            f"{trace_stage_prefix}_final_failure",
+                            final_payload,
+                            state=state or {},
+                            env_flag="LOG_A3_TRACE",
+                        )
                 raise
 
             retry_count += 1
@@ -453,6 +476,7 @@ async def invoke_with_provider_transport_retry(
                 "llm_node": llm_node,
                 "provider": provider,
                 "model": model,
+                "output_mode": output_mode,
                 "retry_count": retry_count,
                 "max_retries": max_retries,
                 "fallback_used": False,
@@ -478,6 +502,24 @@ async def invoke_with_provider_transport_retry(
                 state=state or {},
                 env_flag="LOG_A3_TRACE",
             )
+            if trace_stage_prefix != "provider_transport":
+                emit_a3_trace(
+                    logger,
+                    f"{trace_stage_prefix}_error",
+                    common_payload,
+                    state=state or {},
+                    env_flag="LOG_A3_TRACE",
+                )
+                emit_a3_trace(
+                    logger,
+                    f"{trace_stage_prefix}_retry_attempt",
+                    {
+                        **common_payload,
+                        "next_attempt": retry_count + 1,
+                    },
+                    state=state or {},
+                    env_flag="LOG_A3_TRACE",
+                )
             await asyncio.sleep(_provider_transport_delay_seconds(retry_count))
 
 

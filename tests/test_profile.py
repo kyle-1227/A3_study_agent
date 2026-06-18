@@ -12,13 +12,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.llm.structured_output import StructuredLLMResult
 from src.profile.schema import (
     AgentObservation,
     BehaviorProfile,
     ExtractedProfileInfo,
+    ExtractedProfileInfoStrict,
     Goal,
     LearningStyle,
+    ProfileBehaviorUpdateSignal,
+    ProfileGoalSignal,
     ProfileUpdateResult,
+    ProfileSkillSignal,
+    ProfileStyleSignal,
     SkillEntry,
     UserProfile,
     _certainty_label,
@@ -865,23 +871,60 @@ class TestTruncateConversation:
 class TestProfileExtractor:
 
     @staticmethod
-    def _make_extractor(ainvoke_return=None):
-        """Build a ProfileExtractor with a fully mocked LLM chain."""
-        mock_llm = MagicMock()
-        mock_structured = MagicMock()
-        mock_llm.with_structured_output.return_value = mock_structured
+    def _strict_from_extracted(info: ExtractedProfileInfo) -> ExtractedProfileInfoStrict:
+        return ExtractedProfileInfoStrict(
+            skills_observed=[
+                ProfileSkillSignal(name=name, level=level)
+                for name, level in info.skills_observed.items()
+            ],
+            skill_evidence=info.skill_evidence,
+            style_signals=[
+                ProfileStyleSignal(dimension=dimension, strength=strength)
+                for dimension, strength in info.style_signals.items()
+            ],
+            style_evidence=info.style_evidence,
+            goals_observed=[
+                ProfileGoalSignal(
+                    goal=str(goal.get("goal", "")),
+                    importance=float(goal.get("importance", 0.5)),
+                )
+                for goal in info.goals_observed
+            ],
+            behavior_update=ProfileBehaviorUpdateSignal(
+                avg_session_minutes=float(info.behavior_update.get("avg_session_minutes", 0.0)),
+                quiz_accuracy=float(info.behavior_update.get("quiz_accuracy", 0.0)),
+                questions_asked=float(info.behavior_update.get("questions_asked", 0.0)),
+            ),
+            observations=list(info.observations),
+            dislikes_observed=list(info.dislikes_observed),
+        )
 
-        if ainvoke_return is not None:
-            mock_structured.ainvoke = AsyncMock(return_value=ainvoke_return)
-        else:
-            mock_structured.ainvoke = AsyncMock(return_value=ExtractedProfileInfo())
+    @staticmethod
+    def _structured_result(parsed: ExtractedProfileInfoStrict) -> StructuredLLMResult:
+        return StructuredLLMResult(
+            success=True,
+            parsed=parsed,
+            node_name="profile_extractor",
+            llm_node="profile_extractor",
+            schema_name="ExtractedProfileInfoStrict",
+            provider="deepseek_official",
+            model="deepseek-v4-pro",
+            output_mode="deepseek_tool_call_strict",
+            fallback_modes=[],
+        )
 
-        extractor = ProfileExtractor(mock_llm)
-        return extractor, mock_llm, mock_structured
+    def _make_extractor(self, monkeypatch, ainvoke_return=None):
+        """Build a ProfileExtractor with a mocked structured runtime."""
+        parsed = self._strict_from_extracted(ainvoke_return or ExtractedProfileInfo())
+        mock_invoke = AsyncMock(return_value=self._structured_result(parsed))
+        monkeypatch.setattr("src.profile.extractor.invoke_structured_llm", mock_invoke)
+        extractor = ProfileExtractor()
+        return extractor, mock_invoke
 
     @pytest.mark.asyncio
-    async def test_extract_skills(self):
-        extractor, _, mock_structured = self._make_extractor(
+    async def test_extract_skills(self, monkeypatch):
+        extractor, mock_invoke = self._make_extractor(
+            monkeypatch,
             ExtractedProfileInfo(
                 skills_observed={"python": 0.35},
                 skill_evidence="用户问了list和tuple的区别",
@@ -893,11 +936,12 @@ class TestProfileExtractor:
         )
         assert "python" in result.skills_observed
         assert result.skills_observed["python"] == 0.35
-        mock_structured.ainvoke.assert_awaited_once()
+        mock_invoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_empty_when_nothing_observed(self):
-        extractor, _, mock_structured = self._make_extractor(
+    async def test_extract_empty_when_nothing_observed(self, monkeypatch):
+        extractor, _mock_invoke = self._make_extractor(
+            monkeypatch,
             ExtractedProfileInfo()  # empty
         )
         result = await extractor.extract(
@@ -910,8 +954,9 @@ class TestProfileExtractor:
         assert result.observations == []
 
     @pytest.mark.asyncio
-    async def test_extract_with_existing_profile(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_with_existing_profile(self, monkeypatch):
+        extractor, _mock_invoke = self._make_extractor(
+            monkeypatch,
             ExtractedProfileInfo(
                 style_signals={"prefer_examples": 0.8},
                 style_evidence="用户多次要求举例",
@@ -928,8 +973,9 @@ class TestProfileExtractor:
         assert result.style_signals["prefer_examples"] == 0.8
 
     @pytest.mark.asyncio
-    async def test_extract_with_history(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_with_history(self, monkeypatch):
+        extractor, _mock_invoke = self._make_extractor(
+            monkeypatch,
             ExtractedProfileInfo(
                 observations=["用户在连续学习Python基础内容"],
             )
@@ -946,20 +992,19 @@ class TestProfileExtractor:
         assert len(result.observations) == 1
 
     @pytest.mark.asyncio
-    async def test_extract_sanitizes_invalid_skill_keys(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_sanitizes_invalid_skill_keys(self, monkeypatch):
+        result = ProfileExtractor._sanitize(
             ExtractedProfileInfo(
                 skills_observed={" A VERY LONG INVALID SKILL NAME " * 10: 1.5},
             )
         )
-        result = await extractor.extract("hello", "world")
         # Long keys (>50 chars) are dropped, out-of-range values clamped
         for name in result.skills_observed:
             assert len(name) <= 50
 
     @pytest.mark.asyncio
-    async def test_extract_sanitizes_style_signals(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_sanitizes_style_signals(self, monkeypatch):
+        result = ProfileExtractor._sanitize(
             ExtractedProfileInfo(
                 style_signals={
                     "prefer_examples": 1.2,  # clamped to 1.0
@@ -968,15 +1013,14 @@ class TestProfileExtractor:
                 },
             )
         )
-        result = await extractor.extract("hello", "world")
         assert "prefer_examples" in result.style_signals
         assert result.style_signals["prefer_examples"] == 1.0
         assert result.style_signals["prefer_step_by_step"] == 0.0
         assert "invalid_dimension" not in result.style_signals
 
     @pytest.mark.asyncio
-    async def test_extract_sanitizes_goals(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_sanitizes_goals(self, monkeypatch):
+        result = ProfileExtractor._sanitize(
             ExtractedProfileInfo(
                 goals_observed=[
                     {"goal": "正常目标", "importance": 0.7},
@@ -986,13 +1030,12 @@ class TestProfileExtractor:
                 ],
             )
         )
-        result = await extractor.extract("hello", "world")
         # Only "正常目标" and "无效重要度" should survive
         assert len(result.goals_observed) == 2
 
     @pytest.mark.asyncio
-    async def test_extract_sanitizes_observations(self):
-        extractor, _, _ = self._make_extractor(
+    async def test_extract_sanitizes_observations(self, monkeypatch):
+        result = ProfileExtractor._sanitize(
             ExtractedProfileInfo(
                 observations=[
                     "正常观察",
@@ -1002,14 +1045,13 @@ class TestProfileExtractor:
                 ],
             )
         )
-        result = await extractor.extract("hello", "world")
         assert len(result.observations) == 2
         assert len(result.observations[1]) <= 200
 
     @pytest.mark.asyncio
-    async def test_extract_llm_failure_returns_empty(self):
-        extractor, _, mock_structured = self._make_extractor()
-        mock_structured.ainvoke = AsyncMock(side_effect=RuntimeError("API error"))
+    async def test_extract_llm_failure_returns_empty(self, monkeypatch):
+        extractor, mock_invoke = self._make_extractor(monkeypatch)
+        mock_invoke.side_effect = RuntimeError("API error")
 
         result = await extractor.extract(
             user_message="hello",
@@ -1019,16 +1061,13 @@ class TestProfileExtractor:
         assert result.skills_observed == {}
         assert result.style_signals == {}
         assert result.observations == []
+        mock_invoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_retries_failure_then_success(self, monkeypatch):
-        monkeypatch.setattr("src.profile.extractor.get_llm_call_max_retries", lambda _node: 2)
-        extractor, _, mock_structured = self._make_extractor()
-        mock_structured.ainvoke = AsyncMock(
-            side_effect=[
-                RuntimeError("temporary API error"),
-                ExtractedProfileInfo(skills_observed={"python": 0.4}),
-            ]
+    async def test_extract_uses_runtime_result_after_internal_retries(self, monkeypatch):
+        extractor, mock_invoke = self._make_extractor(
+            monkeypatch,
+            ExtractedProfileInfo(skills_observed={"python": 0.4}),
         )
 
         result = await extractor.extract(
@@ -1037,13 +1076,12 @@ class TestProfileExtractor:
         )
 
         assert result.skills_observed == {"python": 0.4}
-        assert mock_structured.ainvoke.await_count == 2
+        mock_invoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_returns_empty_after_retry_budget(self, monkeypatch):
-        monkeypatch.setattr("src.profile.extractor.get_llm_call_max_retries", lambda _node: 2)
-        extractor, _, mock_structured = self._make_extractor()
-        mock_structured.ainvoke = AsyncMock(side_effect=RuntimeError("API error"))
+    async def test_extract_returns_empty_after_runtime_failure(self, monkeypatch):
+        extractor, mock_invoke = self._make_extractor(monkeypatch)
+        mock_invoke.side_effect = RuntimeError("API error")
 
         result = await extractor.extract(
             user_message="hello",
@@ -1053,17 +1091,17 @@ class TestProfileExtractor:
         assert result.skills_observed == {}
         assert result.style_signals == {}
         assert result.observations == []
-        assert mock_structured.ainvoke.await_count == 3
+        mock_invoke.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_extract_batch(self):
-        extractor, _, mock_structured = self._make_extractor()
+    async def test_extract_batch(self, monkeypatch):
+        extractor, mock_invoke = self._make_extractor(monkeypatch)
         # Return different results for each call
-        mock_structured.ainvoke = AsyncMock(side_effect=[
-            ExtractedProfileInfo(skills_observed={"python": 0.2}),
-            ExtractedProfileInfo(style_signals={"prefer_examples": 0.7}),
-            ExtractedProfileInfo(observations=["第三轮有新发现"]),
-        ])
+        mock_invoke.side_effect = [
+            self._structured_result(self._strict_from_extracted(ExtractedProfileInfo(skills_observed={"python": 0.2}))),
+            self._structured_result(self._strict_from_extracted(ExtractedProfileInfo(style_signals={"prefer_examples": 0.7}))),
+            self._structured_result(self._strict_from_extracted(ExtractedProfileInfo(observations=["third turn signal"]))),
+        ]
 
         turns = [
             {"user": "Q1", "assistant": "A1"},
@@ -1074,20 +1112,27 @@ class TestProfileExtractor:
         assert len(results) == 3
         assert "python" in results[0].skills_observed
         assert results[1].style_signals["prefer_examples"] == 0.7
-        assert results[2].observations[0] == "第三轮有新发现"
+        assert results[2].observations[0] == "third turn signal"
 
     @pytest.mark.asyncio
-    async def test_extract_with_structured_output_config(self):
-        """Verify with_structured_output is called with json_mode."""
+    async def test_extract_uses_unified_structured_runtime(self, monkeypatch):
+        """Verify profile extraction uses invoke_structured_llm, not json_mode."""
         mock_llm = MagicMock()
-        mock_structured = MagicMock()
-        mock_structured.ainvoke = AsyncMock(return_value=ExtractedProfileInfo())
-        mock_llm.with_structured_output.return_value = mock_structured
+        extractor, mock_invoke = self._make_extractor(
+            monkeypatch,
+            ExtractedProfileInfo(skills_observed={"python": 0.3}),
+        )
+        extractor._base_llm = mock_llm
 
-        ProfileExtractor(mock_llm)
-        mock_llm.with_structured_output.assert_called_once()
-        call_kwargs = mock_llm.with_structured_output.call_args
-        assert call_kwargs[1]["method"] == "json_mode"
+        result = await extractor.extract("hello", "world")
+
+        assert result.skills_observed == {"python": 0.3}
+        assert not mock_llm.with_structured_output.called
+        kwargs = mock_invoke.await_args.kwargs
+        assert kwargs["node_name"] == "profile_extractor"
+        assert kwargs["llm_node"] == "profile_extractor"
+        assert kwargs["output_mode"] == "deepseek_tool_call_strict"
+        assert kwargs["fallback_modes"] == []
 
 
 # ===========================================================================

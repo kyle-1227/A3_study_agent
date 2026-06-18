@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -189,7 +188,7 @@ async def study_plan_emotional_intel(state: LearningState) -> dict:
         "Do not provide therapy or medical diagnosis. Focus on study burden, motivation, pacing, and support needs.\n\n"
         f"User query:\n{query}\n\nConversation excerpt:\n{history}"
     )
-    model_name = get_setting("llm.study_plan.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.study_plan.model", get_setting("study_plan.model", ""))
     with traced_llm_call(model_name=model_name, node_name="study_plan_emotional_intel", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="study_plan_emotional_intel",
@@ -277,7 +276,7 @@ async def study_plan_agent(state: LearningState) -> dict:
         f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}\n\n"
         f"Judged evidence:\n{_format_context(state.get('context', []))}"
     )
-    model_name = get_setting("llm.study_plan.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.study_plan.model", get_setting("study_plan.model", ""))
     with traced_llm_call(model_name=model_name, node_name="study_plan_agent", temperature=0.2):
         structured_result = await invoke_structured_llm(
             node_name="study_plan_agent",

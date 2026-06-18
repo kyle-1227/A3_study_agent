@@ -100,11 +100,9 @@ class TestAcademicRouterRetry:
 
 
 class TestRewriteQuery:
-    @patch("src.graph.llm.get_node_llm")
-    async def test_produces_rewritten_query(self, mock_get_llm):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="improved retrieval query"))
-        mock_get_llm.return_value = mock_llm
+    @patch("src.graph.llm.invoke_plain_llm_fail_fast")
+    async def test_produces_rewritten_query(self, mock_invoke_plain):
+        mock_invoke_plain.return_value = "improved retrieval query"
 
         result = await rewrite_query({
             "messages": [HumanMessage(content="original question")],
@@ -117,12 +115,10 @@ class TestRewriteQuery:
         assert result["rewritten_query"] == "improved retrieval query"
         assert result["retrieval_plan"] == []
 
-    @patch("src.graph.llm.get_node_llm")
-    async def test_fail_fast_on_retry_rewrite_failure(self, mock_get_llm):
+    @patch("src.graph.llm.invoke_plain_llm_fail_fast")
+    async def test_fail_fast_on_retry_rewrite_failure(self, mock_invoke_plain):
         """Rewrite query now fails fast - no fallback to original query."""
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM error"))
-        mock_get_llm.return_value = mock_llm
+        mock_invoke_plain.side_effect = RuntimeError("LLM error")
 
         with pytest.raises(RuntimeError, match="LLM error"):
             await rewrite_query({
@@ -306,8 +302,9 @@ class TestSearchQueryRewriter:
         assert plan_props["retrieval_coverage_goals"]["maxItems"] == 8
         assert plan_props["retrieval_coverage_goals"]["items"]["maxLength"] == 120
 
-    def test_search_query_rewriter_structured_retry_is_disabled_for_local_retry(self):
-        assert get_setting("llm_outputs.search_query_rewriter.max_retries") == 0
+    def test_search_query_rewriter_uses_unified_structured_retry(self):
+        assert get_setting("llm_outputs.search_query_rewriter.max_retries") == 2
+        assert get_setting("llm_outputs.search_query_rewriter.output_mode") == "deepseek_tool_call_strict"
         assert get_setting("provider_transport_retry.max_retries") == 2
 
     def test_overlong_query_fields_fail_schema_validation(self):
@@ -396,7 +393,7 @@ class TestSearchQueryRewriter:
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
-    async def test_local_compliance_retry_succeeds_once(
+    async def test_query_rewrite_delegates_compliance_retry_to_structured_runtime(
         self,
         mock_summary,
         mock_invoke,
@@ -405,14 +402,7 @@ class TestSearchQueryRewriter:
         mock_available_subjects.return_value = ["python"]
         mock_summary.return_value = ""
         parsed = _valid_query_rewrite_output()
-        mock_invoke.side_effect = [
-            _structured_output_error(
-                phase="business_validation_error",
-                error_type="BusinessValidationError",
-                error_message="local_retrieval_query repeated query phrase: 检索意图",
-            ),
-            SimpleNamespace(parsed=parsed, raw_output='{"ok": true}'),
-        ]
+        mock_invoke.return_value = SimpleNamespace(parsed=parsed, raw_output='{"ok": true}')
         events: list[dict] = []
         token = set_trace_event_sink(events)
         try:
@@ -429,10 +419,9 @@ class TestSearchQueryRewriter:
             reset_trace_event_sink(token)
 
         assert result["local_retrieval_query"] == parsed.local_retrieval_query
-        assert mock_invoke.await_count == 2
-        assert mock_invoke.await_args_list[1].kwargs["fallback_modes"] == []
-        retry_event = next(event for event in events if event["stage"] == "query_rewrite_compliance_retry")
-        assert retry_event["success"] is True
+        assert mock_invoke.await_count == 1
+        assert mock_invoke.await_args.kwargs["fallback_modes"] == []
+        assert not any(event["stage"] == "query_rewrite_compliance_retry" for event in events)
         memory_event = next(event for event in events if event["stage"] == "query_rewrite_memory_use")
         assert memory_event["memory_prompt_injected"] is False
         assert memory_event["memory_used_for_retrieval"] == memory_event["llm_reported_memory_used_for_retrieval"]
@@ -440,7 +429,7 @@ class TestSearchQueryRewriter:
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
-    async def test_local_compliance_retry_fails_fast_after_retry_failure(
+    async def test_query_rewrite_structured_failure_is_not_retried_locally(
         self,
         mock_summary,
         mock_invoke,
@@ -448,18 +437,11 @@ class TestSearchQueryRewriter:
     ):
         mock_available_subjects.return_value = ["python"]
         mock_summary.return_value = ""
-        mock_invoke.side_effect = [
-            _structured_output_error(
-                phase="parsing_error",
-                error_type="JSONDecodeError",
-                error_message="invalid json",
-            ),
-            _structured_output_error(
-                phase="validation_error",
-                error_type="ValidationError",
-                error_message="local_retrieval_query maxLength",
-            ),
-        ]
+        mock_invoke.side_effect = _structured_output_error(
+            phase="validation_error",
+            error_type="ValidationError",
+            error_message="local_retrieval_query maxLength",
+        )
         events: list[dict] = []
         token = set_trace_event_sink(events)
         try:
@@ -476,10 +458,8 @@ class TestSearchQueryRewriter:
         finally:
             reset_trace_event_sink(token)
 
-        assert mock_invoke.await_count == 2
-        retry_event = next(event for event in events if event["stage"] == "query_rewrite_compliance_retry")
-        assert retry_event["success"] is False
-        assert retry_event["final_failure_phase"] == "validation_error"
+        assert mock_invoke.await_count == 1
+        assert not any(event["stage"] == "query_rewrite_compliance_retry" for event in events)
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -876,13 +856,9 @@ class TestFormatHelpers:
 
 
 class TestGenerateAnswer:
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
-    async def test_generates_ai_message(self, mock_get_llm, mock_get_fallback):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content="answer"))
-        mock_get_llm.return_value = mock_llm
-        mock_get_fallback.return_value = None
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
+    async def test_generates_ai_message(self, mock_invoke_plain):
+        mock_invoke_plain.return_value = "answer"
 
         result = await generate_answer({
             "messages": [HumanMessage(content="question")],
@@ -890,14 +866,11 @@ class TestGenerateAnswer:
         })
 
         assert result["messages"][0].content == "answer"
+        assert mock_invoke_plain.await_args.kwargs["llm_node"] == "academic"
 
-    @patch("src.graph.academic.get_fallback_llm")
-    @patch("src.graph.academic.get_node_llm")
-    async def test_handles_empty_context(self, mock_get_llm, mock_get_fallback):
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content="answer without context"))
-        mock_get_llm.return_value = mock_llm
-        mock_get_fallback.return_value = None
+    @patch("src.graph.academic.invoke_plain_llm_fail_fast")
+    async def test_handles_empty_context(self, mock_invoke_plain):
+        mock_invoke_plain.return_value = "answer without context"
 
         result = await generate_answer({
             "messages": [HumanMessage(content="question")],

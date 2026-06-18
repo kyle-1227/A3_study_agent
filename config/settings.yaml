@@ -23,7 +23,7 @@ checkpointer:
 
 web_search:
   provider: tavily                       # Web Research executor provider
-  timeout_seconds: 30                    # Timeout per web research task
+  timeout_seconds: 120                   # Timeout per web research task
   max_query_chars: 160                   # Keep search queries short without breaking key phrases
   tavily:
     enabled: true
@@ -45,7 +45,7 @@ retrieval:
   evidence_judge_v2:
     enabled: true
     item_batch_size: 5
-    allow_sufficiency_deterministic_fallback: true
+    allow_sufficiency_deterministic_fallback: false
     expose_fallback_trace: true
     strict_observability: true
   web_research_v2:
@@ -67,7 +67,7 @@ retrieval:
     enabled: true
     provider: tavily
     max_results_per_query: 3
-    timeout_seconds: 30
+    timeout_seconds: 120
   fusion:
     max_context_docs: 8
     max_evidence_candidates: 16
@@ -83,9 +83,18 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  academic:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.7
+    max_tokens: 4096
+    streaming: false
   supervisor:
     provider: deepseek_official
-    model: "deepseek-v4-flash"
+    model: "deepseek-v4-pro"
     base_url: "https://api.deepseek.com"
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
@@ -94,16 +103,18 @@ llm:
     thinking: disabled
     streaming: false
   query_rewrite:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 1600
+    thinking: disabled
     streaming: false
   memory_use_decider:
     provider: deepseek_official
-    model: "deepseek-v4-flash"
+    model: "deepseek-v4-pro"
     base_url: "https://api.deepseek.com"
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
@@ -112,32 +123,38 @@ llm:
     thinking: disabled
     streaming: false
   hallucination_eval:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 800
+    thinking: disabled
     streaming: false
   mindmap:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
   exercise:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
   web_research_planner:
     provider: deepseek_official
-    model: "deepseek-v4-flash"
+    model: "deepseek-v4-pro"
     base_url: "https://api.deepseek.com"
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
@@ -150,7 +167,7 @@ llm:
     include_raw: true
   web_source_summarizer:
     provider: deepseek_official
-    model: "deepseek-v4-flash"
+    model: "deepseek-v4-pro"
     base_url: "https://api.deepseek.com"
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
@@ -162,50 +179,68 @@ llm:
     strict_schema: true
     include_raw: true
   evidence_judge:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 4096
+    thinking: disabled
     streaming: false
     structured_output: true
     strict_schema: true
     include_raw: true
   emotional:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 800
     streaming: false
   review_doc:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
   study_plan:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
+    streaming: false
+  profile_extractor:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    thinking: disabled
     streaming: false
 
 llm_outputs:
   default:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
+    transport_max_retries: 2
     max_raw_chars: 12000
     reask_enabled: true
-    reask_business_validation: false
+    reask_business_validation: true
   supervisor:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
@@ -213,12 +248,12 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   search_query_rewriter:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
-    reask_enabled: false
+    reask_enabled: true
   memory_use_decider:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
@@ -226,31 +261,31 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   exercise_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   exercise_reviewer:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   mindmap_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   mindmap_reviewer:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   hallucination_eval:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
@@ -270,43 +305,51 @@ llm_outputs:
     max_raw_chars: 12000
     reask_business_validation: true
   evidence_item_grader:
-    output_mode: native_json_schema_pydantic
-    fallback_modes:
-      - json_mode_pydantic
-      - prompt_json_pydantic
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   evidence_sufficiency_judge:
-    output_mode: native_json_schema_pydantic
-    fallback_modes:
-      - json_mode_pydantic
-      - prompt_json_pydantic
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   study_plan_emotional_intel:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   study_plan_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   study_plan_reviewer_academic:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   study_plan_reviewer_emotional:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  review_doc_reviewer:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  profile_extractor:
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
@@ -346,7 +389,7 @@ rag:
   branch_strong_threshold: 0.7            # Minimum score for strong local evidence
 
 supervisor:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic intent routing
@@ -356,7 +399,7 @@ supervisor:
     - unknown
 
 query_rewrite:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic retrieval-query rewriting
@@ -364,7 +407,7 @@ query_rewrite:
   streaming: false
 
 hallucination_eval:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic answer faithfulness evaluation

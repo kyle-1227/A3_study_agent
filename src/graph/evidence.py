@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class EvidenceCandidate(BaseModel):
@@ -78,8 +78,24 @@ class EvidenceJudgeItem(BaseModel):
         "discard",
     ] = "discard"
 
-    coverage_contribution: str = ""
+    coverage_contribution: str = Field(
+        ...,
+        description=(
+            "Required for every judged item. If keep=true, this must be a non-empty "
+            "sentence explaining what exact coverage this evidence contributes to the "
+            "user's request. If keep=false, use an empty string."
+        ),
+    )
     reason: str = Field(...)
+
+    @model_validator(mode="after")
+    def validate_keep_requires_coverage_contribution(self):
+        if self.keep and not self.coverage_contribution.strip():
+            raise ValueError(
+                "coverage_contribution must not be empty when keep=true "
+                f"for evidence_id={self.evidence_id}"
+            )
+        return self
 
 
 class EvidenceCoverageGap(BaseModel):
@@ -127,7 +143,7 @@ class EvidenceSufficiencyOutput(BaseModel):
     ] = "cannot_answer"
     need_more_local_rag: bool = False
     need_more_web_research: bool = False
-    coverage_gaps: list[EvidenceCoverageGap] = Field(default_factory=list, max_length=5)
+    coverage_gaps: list[EvidenceCoverageGap] = Field(default_factory=list, max_length=10)
     decision_summary: str = Field("", max_length=600)
 
 

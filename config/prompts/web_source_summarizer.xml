@@ -8,7 +8,15 @@
   <constraints>
     Return only schema-valid JSON for WebSourceSummaryBatch.
     Include every input source_id exactly once.
+    Each summary item MUST include reason.
+    reason is required for both keep=true and keep=false.
+    If keep=true, reason must explain why the source is useful for the user's learning goal.
+    If keep=false, reason must explain why the source is rejected.
     Do not output URL, title, domain, canonical_url, or original_url.
+    Do not include fields that are not in the WebSourceSummary schema.
+    Do not copy task metadata fields into summary items.
+    Forbidden fields: task_id, subject, role, purpose.
+    Output only these summary item fields: source_id, keep, summary, coverage_points, evidence_type, use_case, relevance, usefulness, risk, reason.
     Use the provided enum values for evidence_type, use_case, relevance, usefulness, and risk.
     If keep is true, summary must be non-empty and coverage_points must contain at least one concrete point.
     If keep is false, use_case should be discard.

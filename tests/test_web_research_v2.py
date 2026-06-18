@@ -35,6 +35,7 @@ from src.graph.academic import (
     _build_web_research_planner_messages,
     _dedupe_web_sources_by_canonical_url,
     _drop_deprecated_web_state_keys,
+    _trace_parse_web_source_summary_raw,
     _web_research_branch_payload,
     _web_search_dual_source,
 )
@@ -192,6 +193,32 @@ def test_web_research_schema_limits_and_literal_rejection():
         WebSourceSummary(**{**_summary().model_dump(), "url": "https://example.edu"})
 
 
+def test_web_source_summary_requires_reason_and_rejects_task_metadata():
+    keep_true_missing_reason = _summary().model_dump()
+    keep_true_missing_reason.pop("reason")
+    with pytest.raises(ValidationError):
+        WebSourceSummary(**keep_true_missing_reason)
+
+    keep_false_missing_reason = _summary(
+        keep=False,
+        summary="",
+        coverage_points=[],
+        use_case="discard",
+        relevance="low",
+        usefulness="low",
+        risk="medium",
+    ).model_dump()
+    keep_false_missing_reason.pop("reason")
+    with pytest.raises(ValidationError):
+        WebSourceSummary(**keep_false_missing_reason)
+
+    assert _summary(reason="Useful for the requested learning goal.").reason
+
+    for forbidden in ["task_id", "subject", "role", "purpose"]:
+        with pytest.raises(ValidationError):
+            WebSourceSummary(**{**_summary().model_dump(), forbidden: "input-only metadata"})
+
+
 def test_planner_validator_rejects_invalid_task_shape():
     plan = WebResearchPlan(tasks=[
         _task(task_id="", search_query="", role="", purpose="", reason="", priority=1.4),
@@ -326,6 +353,33 @@ def test_web_research_prompts_define_v2_boundaries_and_enum_mapping():
     assert "use_case=exercise_material" in summarizer_prompt
     assert "use_case=roadmap_reference" in summarizer_prompt
     assert "practice_material" in summarizer_prompt
+    assert "reason is required" in summarizer_prompt
+    assert "Forbidden fields: task_id, subject, role, purpose" in summarizer_prompt
+    assert "Do not copy task metadata fields into summary items" in summarizer_prompt
+
+
+def test_web_source_summary_raw_trace_parser_counts_missing_reason_and_extra_fields():
+    missing_reason = _trace_parse_web_source_summary_raw(
+        '{"summaries": ['
+        '{"source_id": "websrc:0", "keep": true},'
+        '{"source_id": "websrc:1", "keep": false}'
+        ']}'
+    )
+    assert missing_reason["returned_source_ids"] == ["websrc:0", "websrc:1"]
+    assert missing_reason["kept_count"] == 1
+    assert missing_reason["rejected_count"] == 1
+    assert missing_reason["missing_required_reason_count"] == 2
+    assert missing_reason["extra_field_count"] == 0
+
+    extra_fields = _trace_parse_web_source_summary_raw(
+        '{"summaries": ['
+        '{"source_id": "websrc:0", "keep": true, "reason": "useful", '
+        '"task_id": "task-1", "subject": "python", "role": "core", "purpose": "quiz"}'
+        ']}'
+    )
+    assert extra_fields["missing_required_reason_count"] == 0
+    assert extra_fields["extra_field_names"] == ["purpose", "role", "subject", "task_id"]
+    assert extra_fields["extra_field_count"] == 4
 
 
 def test_web_research_planner_input_uses_v2_friendly_branch_payload():

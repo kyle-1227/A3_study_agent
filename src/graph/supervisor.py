@@ -8,7 +8,6 @@ Uses structured output (Pydantic) instead of manual JSON parsing.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -146,7 +145,7 @@ async def supervisor_node(state: LearningState) -> dict:
     )
 
     temperature = get_setting("supervisor.temperature", 0.0)
-    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.supervisor.model", get_setting("supervisor.model", ""))
     with traced_llm_call(
         model_name=model_name,
         node_name="supervisor",

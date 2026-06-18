@@ -1,5 +1,6 @@
 import json
 from typing import Annotated
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel, Field
@@ -8,7 +9,10 @@ from src.config import get_setting
 from src.graph.supervisor import SupervisorOutput, validate_supervisor_output
 from src.llm.structured_output import (
     StructuredOutputError,
+    StructuredLLMResult,
+    _build_reask_instruction,
     compile_pydantic_schema_for_deepseek_tool,
+    get_fallback_modes,
     get_llm_output_mode,
     invoke_structured_llm,
 )
@@ -77,6 +81,19 @@ def _tool_response(arguments, *, tool_name: str = "supervisor_SupervisorOutput")
                         }
                     ]
                 },
+            }
+        ]
+    })
+
+
+def _json_response(content) -> _FakeResponse:
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    return _FakeResponse({
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": content},
             }
         ]
     })
@@ -154,6 +171,7 @@ class TestDeepSeekStrictRuntime:
         assert result.success is True
         assert isinstance(result.parsed, SupervisorOutput)
         assert _FakeAsyncClient.requests[0]["url"] == "https://api.deepseek.com/beta/chat/completions"
+        assert _FakeAsyncClient.requests[0]["json"]["thinking"] == {"type": "disabled"}
         payload = next(event for event in events if event["stage"] == "structured_llm_output")
         assert payload["provider"] == "deepseek_official"
         assert payload["provider_request_mode"] == "deepseek_tool_call_strict"
@@ -338,6 +356,10 @@ class TestDeepSeekStrictRuntime:
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
         )
+        monkeypatch.setattr(
+            "src.llm.structured_output._reask_business_validation_enabled",
+            lambda _node_name: False,
+        )
         _FakeAsyncClient.responses = [
             _tool_response(_supervisor_args(intent="emotional", requested_resource_type="quiz"))
         ]
@@ -357,6 +379,119 @@ class TestDeepSeekStrictRuntime:
 
         assert exc_info.value.result.failure_phase == "business_validation_error"
         assert len(exc_info.value.result.attempts) == 1
+
+    async def test_length_finish_reason_is_semantic_failure(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        _FakeAsyncClient.responses = [
+            _FakeResponse({"choices": [{"finish_reason": "length", "message": {}}]})
+        ]
+        _FakeAsyncClient.requests = []
+
+        with pytest.raises(StructuredOutputError) as exc_info:
+            await invoke_structured_llm(
+                node_name="supervisor",
+                llm_node="supervisor",
+                schema=SupervisorOutput,
+                messages=[{"role": "user", "content": "route"}],
+                output_mode="deepseek_tool_call_strict",
+                fallback_modes=[],
+                state={},
+            )
+
+        assert exc_info.value.result.failure_phase == "deepseek_tool_call_truncated"
+        assert len(exc_info.value.result.attempts) == 3
+
+    async def test_content_filter_finish_reason_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        _FakeAsyncClient.responses = [
+            _FakeResponse({"choices": [{"finish_reason": "content_filter", "message": {}}]})
+        ]
+        _FakeAsyncClient.requests = []
+
+        with pytest.raises(StructuredOutputError) as exc_info:
+            await invoke_structured_llm(
+                node_name="supervisor",
+                llm_node="supervisor",
+                schema=SupervisorOutput,
+                messages=[{"role": "user", "content": "route"}],
+                output_mode="deepseek_tool_call_strict",
+                fallback_modes=[],
+                state={},
+            )
+
+        assert exc_info.value.result.failure_phase == "provider_content_filter"
+        assert len(exc_info.value.result.attempts) == 1
+
+    async def test_insufficient_system_resource_uses_transport_retry(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        from src.graph import llm as llm_module
+
+        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 2)
+        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
+        _FakeAsyncClient.responses = [
+            _FakeResponse({"choices": [{"finish_reason": "insufficient_system_resource", "message": {}}]}),
+            _tool_response(_supervisor_args()),
+        ]
+        _FakeAsyncClient.requests = []
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            result = await invoke_structured_llm(
+                node_name="supervisor",
+                llm_node="supervisor",
+                schema=SupervisorOutput,
+                messages=[{"role": "user", "content": "route"}],
+                output_mode="deepseek_tool_call_strict",
+                fallback_modes=[],
+                state={},
+            )
+        finally:
+            reset_trace_event_sink(token)
+
+        assert result.success is True
+        assert len(_FakeAsyncClient.requests) == 2
+        stages = [event["stage"] for event in events]
+        assert "structured_llm_transport_retry_attempt" in stages
+
+    async def test_deepseek_json_object_does_not_force_strict_thinking_override(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        _FakeAsyncClient.responses = [_json_response(_supervisor_args())]
+        _FakeAsyncClient.requests = []
+
+        result = await invoke_structured_llm(
+            node_name="supervisor",
+            llm_node="academic",
+            schema=SupervisorOutput,
+            messages=[{"role": "user", "content": "return json route"}],
+            output_mode="deepseek_json_object",
+            fallback_modes=[],
+            state={},
+        )
+
+        assert result.success is True
+        request = _FakeAsyncClient.requests[0]
+        assert request["url"] == "https://api.deepseek.com/chat/completions"
+        assert request["json"]["response_format"] == {"type": "json_object"}
+        assert "tool_choice" not in request["json"]
+        assert "tools" not in request["json"]
+        assert "thinking" not in request["json"]
 
     async def test_business_validation_reask_only_when_enabled(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
@@ -403,24 +538,106 @@ async def _fake_transport_retry(operation, **_kwargs):
 
 
 class TestDeepSeekConfigScope:
-    def test_first_batch_nodes_use_deepseek_official_strict_mode(self):
-        for node_name in (
-            "supervisor",
-            "memory_use_decider",
-            "web_research_planner",
-            "web_source_summarizer",
-        ):
-            assert get_setting(f"llm.{node_name}.provider") == "deepseek_official"
-            assert get_setting(f"llm.{node_name}.api_key_env") == "DEEPSEEK_API_KEY"
-            assert get_llm_output_mode(node_name) == "deepseek_tool_call_strict"
+    LLM_NODES = (
+        "academic",
+        "supervisor",
+        "query_rewrite",
+        "memory_use_decider",
+        "hallucination_eval",
+        "mindmap",
+        "exercise",
+        "web_research_planner",
+        "web_source_summarizer",
+        "evidence_judge",
+        "emotional",
+        "review_doc",
+        "study_plan",
+        "profile_extractor",
+    )
+    STRUCTURED_NODE_TO_LLM_NODE = {
+        "supervisor": "supervisor",
+        "memory_use_decider": "memory_use_decider",
+        "search_query_rewriter": "query_rewrite",
+        "hallucination_eval": "hallucination_eval",
+        "web_research_planner": "web_research_planner",
+        "web_source_summarizer": "web_source_summarizer",
+        "evidence_item_grader": "evidence_judge",
+        "evidence_sufficiency_judge": "evidence_judge",
+        "exercise_agent": "exercise",
+        "exercise_reviewer": "exercise",
+        "mindmap_agent": "mindmap",
+        "mindmap_reviewer": "mindmap",
+        "study_plan_emotional_intel": "study_plan",
+        "study_plan_agent": "study_plan",
+        "study_plan_reviewer_academic": "study_plan",
+        "study_plan_reviewer_emotional": "study_plan",
+        "review_doc_reviewer": "review_doc",
+        "profile_extractor": "profile_extractor",
+    }
+    STRICT_LLM_NODES = tuple(sorted(set(STRUCTURED_NODE_TO_LLM_NODE.values())))
 
-    def test_complex_nodes_keep_existing_modes(self):
-        assert get_setting("llm.query_rewrite.provider") == "openrouter"
-        assert get_llm_output_mode("search_query_rewriter") == "native_json_schema_pydantic"
-        assert get_setting("llm_outputs.search_query_rewriter.reask_enabled") is False
-        assert get_setting("llm.evidence_judge.provider") == "openrouter"
+    def test_all_deepseek_llm_nodes_resolve_to_official_api(self):
+        for llm_node in self.LLM_NODES:
+            assert get_setting(f"llm.{llm_node}.provider") == "deepseek_official"
+            assert get_setting(f"llm.{llm_node}.model") == "deepseek-v4-pro"
+            assert get_setting(f"llm.{llm_node}.base_url") == "https://api.deepseek.com"
+            assert get_setting(f"llm.{llm_node}.beta_base_url") == "https://api.deepseek.com/beta"
+            assert get_setting(f"llm.{llm_node}.api_key_env") == "DEEPSEEK_API_KEY"
+
+    def test_structured_nodes_resolve_strict_mode_and_no_fallback(self):
+        for node_name, llm_node in self.STRUCTURED_NODE_TO_LLM_NODE.items():
+            assert get_setting(f"llm.{llm_node}.provider") == "deepseek_official"
+            assert get_llm_output_mode(node_name) == "deepseek_tool_call_strict"
+            assert get_fallback_modes(node_name) == []
+            assert get_setting(f"llm_outputs.{node_name}.fallback_modes", []) == []
+            assert get_setting(f"llm_outputs.{node_name}.max_retries", 2) == 2
+
+    def test_strict_structured_llm_nodes_disable_thinking_in_config(self):
+        for llm_node in self.STRICT_LLM_NODES:
+            assert get_setting(f"llm.{llm_node}.thinking") == "disabled"
+
+    def test_no_deepseek_chat_generation_node_uses_openrouter(self):
+        for llm_node in self.LLM_NODES:
+            provider = str(get_setting(f"llm.{llm_node}.provider", "")).lower()
+            model = str(get_setting(f"llm.{llm_node}.model", "")).lower()
+            base_url = str(get_setting(f"llm.{llm_node}.base_url", "")).lower()
+            api_key_env = str(get_setting(f"llm.{llm_node}.api_key_env", "")).upper()
+            if "deepseek" in model:
+                assert provider != "openrouter"
+                assert "openrouter.ai" not in base_url
+                assert api_key_env != "OPENROUTER_API_KEY"
+
+        assert get_setting("rag.reranker_base_url") == "https://openrouter.ai/api/v1"
         assert get_setting("llm.web_search.provider", None) is None
 
     def test_default_reask_config_is_conservative(self):
         assert get_setting("llm_outputs.default.reask_enabled") is True
-        assert get_setting("llm_outputs.default.reask_business_validation") is False
+        assert get_setting("llm_outputs.default.reask_business_validation") is True
+        assert get_setting("llm_outputs.default.transport_max_retries") == 2
+
+    def test_reask_instruction_does_not_use_empty_value_for_non_empty_business_rule(self):
+        instruction = _build_reask_instruction(
+            result=StructuredLLMResult(
+                success=False,
+                parsed=None,
+                node_name="evidence_item_grader",
+                llm_node="evidence_judge",
+                schema_name="EvidenceGradeBatch",
+                provider="unit",
+                model="unit",
+                output_mode="native_json_schema_pydantic",
+                failure_phase="business_validation_error",
+                error_type="BusinessValidationError",
+                error_message="coverage_contribution must not be empty",
+                business_validation_error="coverage_contribution must not be empty",
+            ),
+            schema_name="EvidenceGradeBatch",
+            previous_error_summary="coverage_contribution must not be empty",
+        )
+
+        assert "validation error says non-empty" in instruction
+        assert "business validation error says a field must be non-empty" in instruction
+        assert "Do not use an empty value to satisfy a field that failed a non-empty business rule" in instruction
+        assert 'If the previous error says "Extra inputs are not permitted"' in instruction
+        assert 'If the previous error says "Field required"' in instruction
+        assert "Do not fix one validation error by introducing extra fields" in instruction
