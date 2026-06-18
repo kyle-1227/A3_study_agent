@@ -189,7 +189,6 @@ def _doc_subject_values(item: dict) -> set[str]:
     metadata = item.get("metadata") or {}
     values = {
         item.get("retrieval_subject"),
-        item.get("supplement_for_subject"),
         item.get("subject"),
         metadata.get("subject") if isinstance(metadata, dict) else "",
     }

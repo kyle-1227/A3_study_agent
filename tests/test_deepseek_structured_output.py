@@ -254,6 +254,83 @@ class TestDeepSeekStrictRuntime:
 
         assert exc_info.value.result.failure_phase == "parsing_error"
 
+    async def test_malformed_arguments_reask_then_success(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        _FakeAsyncClient.responses = [
+            _tool_response("{not-json"),
+            _tool_response(_supervisor_args()),
+        ]
+        _FakeAsyncClient.requests = []
+        events: list[dict] = []
+        token = set_trace_event_sink(events)
+        try:
+            result = await invoke_structured_llm(
+                node_name="supervisor",
+                llm_node="supervisor",
+                schema=SupervisorOutput,
+                messages=[{"role": "user", "content": "route"}],
+                output_mode="deepseek_tool_call_strict",
+                fallback_modes=[],
+                business_validator=validate_supervisor_output,
+                state={},
+            )
+        finally:
+            reset_trace_event_sink(token)
+
+        assert result.success is True
+        assert result.retry_count == 1
+        assert len(result.attempts) == 2
+        assert _FakeAsyncClient.requests[1]["json"]["messages"][-1]["role"] == "user"
+        correction = _FakeAsyncClient.requests[1]["json"]["messages"][-1]["content"]
+        assert "Structured output correction required" in correction
+        assert "Previous failure_phase: parsing_error" in correction
+
+        retry_event = next(event for event in events if event["stage"] == "structured_llm_retry_attempt")
+        reask_event = next(event for event in events if event["stage"] == "structured_llm_reask_attempt")
+        assert retry_event["reask_used"] is True
+        assert reask_event["reask_reason"] == "parsing_error"
+        final_payload = [event for event in events if event["stage"] == "structured_llm_output"][-1]
+        assert final_payload["reask_used"] is True
+        assert final_payload["provider"] == "deepseek_official"
+        assert final_payload["provider_request_mode"] == "deepseek_tool_call_strict"
+
+    async def test_validation_error_reask_includes_field_path_then_success(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        invalid_args = _supervisor_args()
+        invalid_args.pop("keywords")
+        _FakeAsyncClient.responses = [
+            _tool_response(invalid_args),
+            _tool_response(_supervisor_args()),
+        ]
+        _FakeAsyncClient.requests = []
+
+        result = await invoke_structured_llm(
+            node_name="supervisor",
+            llm_node="supervisor",
+            schema=SupervisorOutput,
+            messages=[{"role": "user", "content": "route"}],
+            output_mode="deepseek_tool_call_strict",
+            fallback_modes=[],
+            business_validator=validate_supervisor_output,
+            state={},
+        )
+
+        assert result.success is True
+        assert result.retry_count == 1
+        correction = _FakeAsyncClient.requests[1]["json"]["messages"][-1]["content"]
+        assert "Previous failure_phase: validation_error" in correction
+        assert "keywords" in correction
+
     async def test_business_validation_failure_keeps_business_phase(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
@@ -279,6 +356,46 @@ class TestDeepSeekStrictRuntime:
             )
 
         assert exc_info.value.result.failure_phase == "business_validation_error"
+        assert len(exc_info.value.result.attempts) == 1
+
+    async def test_business_validation_reask_only_when_enabled(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        monkeypatch.setattr(
+            "src.llm.structured_output._reask_business_validation_enabled",
+            lambda _node_name: True,
+        )
+        _FakeAsyncClient.responses = [
+            _tool_response(_supervisor_args(confidence=0.50)),
+            _tool_response(_supervisor_args(confidence=0.99)),
+        ]
+        _FakeAsyncClient.requests = []
+
+        def require_high_confidence(parsed):
+            if parsed.confidence < 0.95:
+                return "confidence must be at least 0.95 for this test"
+            return ""
+
+        result = await invoke_structured_llm(
+            node_name="supervisor",
+            llm_node="supervisor",
+            schema=SupervisorOutput,
+            messages=[{"role": "user", "content": "route"}],
+            output_mode="deepseek_tool_call_strict",
+            fallback_modes=[],
+            business_validator=require_high_confidence,
+            state={},
+        )
+
+        assert result.success is True
+        assert result.retry_count == 1
+        correction = _FakeAsyncClient.requests[1]["json"]["messages"][-1]["content"]
+        assert "Previous failure_phase: business_validation_error" in correction
+        assert "confidence must be at least 0.95" in correction
 
 
 async def _fake_transport_retry(operation, **_kwargs):
@@ -290,8 +407,8 @@ class TestDeepSeekConfigScope:
         for node_name in (
             "supervisor",
             "memory_use_decider",
-            "search_result_judge",
-            "web_coverage_decision",
+            "web_research_planner",
+            "web_source_summarizer",
         ):
             assert get_setting(f"llm.{node_name}.provider") == "deepseek_official"
             assert get_setting(f"llm.{node_name}.api_key_env") == "DEEPSEEK_API_KEY"
@@ -300,6 +417,10 @@ class TestDeepSeekConfigScope:
     def test_complex_nodes_keep_existing_modes(self):
         assert get_setting("llm.query_rewrite.provider") == "openrouter"
         assert get_llm_output_mode("search_query_rewriter") == "native_json_schema_pydantic"
+        assert get_setting("llm_outputs.search_query_rewriter.reask_enabled") is False
         assert get_setting("llm.evidence_judge.provider") == "openrouter"
-        assert get_llm_output_mode("evidence_judge") == "native_json_schema_pydantic"
         assert get_setting("llm.web_search.provider", None) is None
+
+    def test_default_reask_config_is_conservative(self):
+        assert get_setting("llm_outputs.default.reask_enabled") is True
+        assert get_setting("llm_outputs.default.reask_business_validation") is False

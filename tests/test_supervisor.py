@@ -13,6 +13,7 @@ from src.graph.supervisor import (
     SupervisorOutput,
     _VALID_INTENTS,
     _detect_requested_resource_type,
+    _detect_requested_resource_types,
     handle_unknown,
     route_by_intent,
     supervisor_node,
@@ -25,6 +26,7 @@ def _result(
     confidence: float = 0.9,
     subject_candidates: list[str] | None = None,
     requested_resource_type: str = "",
+    requested_resource_types: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         parsed=SupervisorOutput(
@@ -33,6 +35,7 @@ def _result(
             confidence=confidence,
             subject_candidates=subject_candidates or [],
             requested_resource_type=requested_resource_type,
+            requested_resource_types=requested_resource_types or [],
         ),
         raw_output="{}",
     )
@@ -97,6 +100,7 @@ class TestSupervisorNode:
 
         assert result["intent"] == "academic"
         assert result["requested_resource_type"] == "study_plan"
+        assert result["requested_resource_types"] == ["study_plan"]
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_emotional_intent(self, mock_invoke):
@@ -191,6 +195,7 @@ class TestSupervisorNode:
 
         assert result["intent"] == "academic"
         assert result["requested_resource_type"] == "study_plan"
+        assert result["requested_resource_types"] == ["study_plan"]
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_mindmap_request_sets_route_flag(self, mock_invoke):
@@ -201,6 +206,17 @@ class TestSupervisorNode:
 
         assert result["needs_mindmap"] is True
         assert result["requested_resource_type"] == "mindmap"
+        assert result["requested_resource_types"] == ["mindmap"]
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_multi_resource_request_sets_ordered_resource_types(self, mock_invoke):
+        mock_invoke.return_value = _result(intent="academic", keywords=["big data"])
+
+        state = {"messages": [HumanMessage(content="请帮我生成一份大数据复习文档和练习题")]}
+        result = await supervisor_node(state)
+
+        assert result["requested_resource_type"] == "review_doc"
+        assert result["requested_resource_types"] == ["review_doc", "quiz"]
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_plain_mindmap_question_does_not_route_to_mindmap(self, mock_invoke):
@@ -223,6 +239,12 @@ class TestResourceTypeDetection:
     def test_detects_study_plan_requests(self):
         assert _detect_requested_resource_type("Please create a Python study plan") == "study_plan"
         assert _detect_requested_resource_type("Give me a machine learning roadmap") == "study_plan"
+
+    def test_detects_multiple_resource_types_in_order(self):
+        assert _detect_requested_resource_types("请帮我生成机器学习思维导图和练习题") == ["mindmap", "quiz"]
+
+    def test_does_not_detect_resource_list_for_explanation_question(self):
+        assert _detect_requested_resource_types("什么是思维导图？") == []
 
 
 class TestRouteByIntent:
@@ -271,11 +293,13 @@ class TestSupervisorOutput:
             keywords=["mathematics"],
             confidence=0.9,
             subject_candidates=["math"],
+            requested_resource_types=["quiz"],
         )
         assert output.intent == "academic"
         assert output.keywords == ["mathematics"]
         assert output.confidence == 0.9
         assert output.subject_candidates == ["math"]
+        assert output.requested_resource_types == ["quiz"]
 
     def test_unknown_intent_valid(self):
         output = SupervisorOutput(intent="unknown", keywords=[], confidence=0.1)

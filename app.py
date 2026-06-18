@@ -1,4 +1,4 @@
-"""A3 Study Agent - AI-powered university learning resource generation system."""
+﻿"""A3 Study Agent - AI-powered university learning resource generation system."""
 
 from __future__ import annotations
 
@@ -145,7 +145,15 @@ app.add_middleware(
 ALLOWED_NODES = {"generate_answer", "emotional_response"}
 
 # Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
-TEXT_EMIT_NODES = {"handle_unknown", "evidence_summary_output", "mindmap_output", "exercise_output", "review_doc_output", "study_plan_output"}
+TEXT_EMIT_NODES = {
+    "handle_unknown",
+    "evidence_summary_output",
+    "mindmap_output",
+    "exercise_output",
+    "review_doc_output",
+    "study_plan_output",
+    "resource_bundle_output",
+}
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
@@ -160,6 +168,9 @@ GRAPH_NODES = {
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",
+    "resource_orchestrator",
+    "resource_worker",
+    "resource_bundle_output",
     "mindmap_planner",
     "mindmap_agent",
     "mindmap_reviewer",
@@ -210,6 +221,29 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             "controlled_stop": True,
             "controlled_stop_reason": final_state.get("evidence_controlled_stop_reason", ""),
             "answer": answer,
+        }
+
+    bundle_artifact = final_state.get("resource_bundle_artifact") or {}
+    requested_resource_types = list(final_state.get("requested_resource_types") or [])
+    bundle_resources = list(bundle_artifact.get("resources") or [])
+    bundle_errors = list(bundle_artifact.get("errors") or [])
+    is_multi_resource_bundle = (
+        bool(bundle_artifact)
+        and (
+            len(requested_resource_types) > 1
+            or len(bundle_resources) > 1
+            or bundle_artifact.get("status") in {"partial_success", "failed"}
+        )
+    )
+    if is_multi_resource_bundle:
+        return {
+            "type": "resource_final",
+            "resource_type": "bundle",
+            "answer": _last_ai_message_content(final_state),
+            "resource_generation_status": final_state.get("resource_generation_status", ""),
+            "resource_bundle": bundle_artifact,
+            "resources": bundle_resources,
+            "errors": bundle_errors,
         }
 
     resource_type = str(final_state.get("requested_resource_type") or "")
@@ -275,7 +309,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         payload["review_doc_artifacts"] = [
             {
                 "subject": artifact.get("subject", ""),
-                "title": artifact.get("title", "Markdown Review Document"),
+                                    "title": artifact.get("title", "Markdown复习文档"),
                 "filename": artifact.get("filename", ""),
                 "docx_filename": artifact.get("docx_filename", ""),
                 "markdown_url": artifact.get("markdown_url", ""),
@@ -450,7 +484,7 @@ async def _stream_graph_events(
                             mindmap_payload = json.dumps(
                                 {
                                     "type": "mindmap_result",
-                                    "title": artifact.get("title", "鐭ヨ瘑鐐规€濈淮瀵煎浘"),
+                                    "title": artifact.get("title", "Markdown复习文档"),
                                     "tree": artifact.get("tree", {}),
                                     "xmind_url": artifact.get("xmind_url", ""),
                                 },
@@ -465,7 +499,7 @@ async def _stream_graph_events(
                             review_doc_payload = json.dumps(
                                 {
                                     "type": "review_doc_result",
-                                    "title": artifact.get("title", "Markdown澶嶄範鏂囨。"),
+                                    "title": artifact.get("title", "Markdown复习文档"),
                                     "filename": artifact.get("filename", ""),
                                     "docx_filename": artifact.get("docx_filename", ""),
                                     "markdown_url": artifact.get("markdown_url", ""),
@@ -651,9 +685,9 @@ async def generate_sse(
             profile_ctx = await manager.build_profile_context(user_id)
             if profile_ctx:
                 messages.insert(0, SystemMessage(content=profile_ctx))
-                logger.info("注入画像上下文 user=%s (%d chars)", user_id, len(profile_ctx))
+                logger.info("Injected profile context user=%s (%d chars)", user_id, len(profile_ctx))
         except Exception:
-            logger.exception("获取画像上下文失败 user=%s", user_id)
+            logger.exception("Failed to load profile context user=%s", user_id)
 
     state_input = {
         "messages": messages,
@@ -678,9 +712,9 @@ async def generate_sse(
                 user_message=query,
                 assistant_response="",
             )
-            logger.debug("画像轮次已记录 user=%s", user_id)
+            logger.debug("鐢诲儚杞宸茶褰?user=%s", user_id)
         except Exception:
-            logger.exception("画像记录失败（非致命） user=%s", user_id)
+            logger.exception("鐢诲儚璁板綍澶辫触锛堥潪鑷村懡锛?user=%s", user_id)
 
 
 async def generate_resume_sse(
@@ -814,14 +848,14 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
     )
 
 
-# ── User profile & onboarding ────────────────────────────────────────────────
+# User profile and onboarding
 
 
 @app.post("/onboard")
 async def onboard_endpoint(req: OnboardRequest):
     """Create an initial user profile from the onboarding wizard.
 
-    All values are explicit self-reports → stored with confidence=0.9.
+    All values are explicit self-reports -> stored with confidence=0.9.
     """
     from src.profile.schema import (
         AgentObservation,
@@ -862,7 +896,7 @@ async def onboard_endpoint(req: OnboardRequest):
     obs_list: list[AgentObservation] = []
     if req.grade:
         obs_list.append(AgentObservation(
-            content=f"用户自述年级: {req.grade}",
+            content=f"鐢ㄦ埛鑷堪骞寸骇: {req.grade}",
             category="general",
             importance=0.8,
             created_at=now,
@@ -893,7 +927,7 @@ async def onboard_endpoint(req: OnboardRequest):
 
     await manager.store.save(profile)
     logger.info(
-        "Onboarding 画像已创建 user=%s nickname=%s subjects=%d goals=%d",
+        "Onboarding 鐢诲儚宸插垱寤?user=%s nickname=%s subjects=%d goals=%d",
         req.user_id, req.nickname, len(skills), len(goals),
     )
 

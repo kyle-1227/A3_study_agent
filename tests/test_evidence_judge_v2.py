@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -137,7 +136,7 @@ def test_evidence_sufficiency_output_schema_validates_limits():
         overall_evidence_state="sufficient",
         answerability="can_answer",
         need_more_local_rag=False,
-        need_more_web_search=False,
+        need_more_web_research=False,
         coverage_gaps=[],
         decision_summary="Enough evidence.",
     )
@@ -149,7 +148,7 @@ def test_evidence_sufficiency_output_schema_validates_limits():
             overall_evidence_state="partially_sufficient",
             answerability="can_answer_with_caveats",
             need_more_local_rag=False,
-            need_more_web_search=True,
+            need_more_web_research=True,
             coverage_gaps=[_coverage_gap(index) for index in range(6)],
             decision_summary="Needs a bit more coverage.",
         )
@@ -159,7 +158,7 @@ def test_evidence_sufficiency_output_schema_validates_limits():
             overall_evidence_state="partially_sufficient",
             answerability="can_answer_with_caveats",
             need_more_local_rag=False,
-            need_more_web_search=True,
+            need_more_web_research=True,
             coverage_gaps=[],
             decision_summary="x" * 601,
         )
@@ -222,7 +221,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="sufficient",
         answerability="can_answer",
         need_more_local_rag=False,
-        need_more_web_search=False,
+        need_more_web_research=False,
         coverage_gaps=[],
         decision_summary="Enough evidence.",
     )
@@ -230,7 +229,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="sufficient",
         answerability="can_answer_with_caveats",
         need_more_local_rag=False,
-        need_more_web_search=False,
+        need_more_web_research=False,
         coverage_gaps=[],
         decision_summary="Enough evidence.",
     )
@@ -238,7 +237,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="partially_sufficient",
         answerability="cannot_answer",
         need_more_local_rag=False,
-        need_more_web_search=True,
+        need_more_web_research=True,
         coverage_gaps=[],
         decision_summary="Partial evidence.",
     )
@@ -246,7 +245,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="partially_sufficient",
         answerability="can_answer_with_caveats",
         need_more_local_rag=False,
-        need_more_web_search=True,
+        need_more_web_research=True,
         coverage_gaps=[],
         decision_summary="Partial evidence.",
     )
@@ -254,7 +253,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="insufficient",
         answerability="can_answer",
         need_more_local_rag=True,
-        need_more_web_search=False,
+        need_more_web_research=False,
         coverage_gaps=[],
         decision_summary="Not enough evidence.",
     )
@@ -262,7 +261,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="insufficient",
         answerability="cannot_answer",
         need_more_local_rag=False,
-        need_more_web_search=False,
+        need_more_web_research=False,
         coverage_gaps=[],
         decision_summary="Not enough evidence.",
     )
@@ -270,7 +269,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="partially_sufficient",
         answerability="can_answer_with_caveats",
         need_more_local_rag=False,
-        need_more_web_search=True,
+        need_more_web_research=True,
         coverage_gaps=[_coverage_gap(query="")],
         decision_summary="Partial evidence.",
     )
@@ -278,7 +277,7 @@ def test_sufficiency_validator_rules():
         overall_evidence_state="partially_sufficient",
         answerability="can_answer_with_caveats",
         need_more_local_rag=False,
-        need_more_web_search=True,
+        need_more_web_research=True,
         coverage_gaps=[],
         decision_summary="",
     )
@@ -300,7 +299,7 @@ def test_sufficiency_validator_rules():
         insufficient_can_answer,
         kept_count=0,
     )
-    assert "must request local RAG or web search" in validate_evidence_sufficiency_output(
+    assert "must request local RAG or web research" in validate_evidence_sufficiency_output(
         insufficient_no_followup,
         kept_count=0,
     )
@@ -377,20 +376,7 @@ async def test_sufficiency_failure_uses_deterministic_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_item_grader_failure_uses_legacy_fallback(monkeypatch):
-    legacy_output = EvidenceJudgeOutput(
-        overall_evidence_state="sufficient",
-        need_more_web_search=False,
-        judged_evidence=[_judge_item()],
-        decision_summary="Legacy succeeded.",
-    )
-    legacy_mock = AsyncMock(return_value=(legacy_output, {
-        "structured_output_method": "native_json_schema_pydantic",
-        "fallback_modes": [],
-        "retry_count": 0,
-        "failure_phase": "",
-    }))
-
+async def test_item_grader_failure_returns_failed_without_previous_fallback(monkeypatch):
     async def fake_invoke_structured_llm(**kwargs):
         raise _structured_error(
             node_name=kwargs["node_name"],
@@ -400,7 +386,6 @@ async def test_item_grader_failure_uses_legacy_fallback(monkeypatch):
         )
 
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic._judge_evidence_candidates_legacy_with_llm", legacy_mock)
 
     parsed, debug = await _judge_evidence_candidates_with_llm(
         state=_state(),
@@ -411,31 +396,16 @@ async def test_item_grader_failure_uses_legacy_fallback(monkeypatch):
         round_index=1,
     )
 
-    assert parsed == legacy_output
-    assert legacy_mock.await_count == 1
-    assert debug["evidence_judge_version"] == "legacy_after_v2_failure"
-    assert debug["status"] == "fallback"
-    assert debug["used_fallback"] is True
+    assert parsed is None
+    assert debug["evidence_judge_version"] == "v2"
+    assert debug["status"] == "failed"
+    assert debug["used_fallback"] is False
     assert debug["developer_warnings"]
 
 
 @pytest.mark.asyncio
-async def test_v2_disabled_uses_legacy_with_explicit_reason(monkeypatch):
-    legacy_output = EvidenceJudgeOutput(
-        overall_evidence_state="sufficient",
-        need_more_web_search=False,
-        judged_evidence=[_judge_item()],
-        decision_summary="Legacy succeeded.",
-    )
-    legacy_mock = AsyncMock(return_value=(legacy_output, {
-        "structured_output_method": "native_json_schema_pydantic",
-        "fallback_modes": [],
-        "retry_count": 0,
-        "failure_phase": "",
-    }))
-
+async def test_v2_disabled_returns_failed_without_previous_fallback(monkeypatch):
     monkeypatch.setattr("src.graph.academic._evidence_judge_v2_enabled", lambda: False)
-    monkeypatch.setattr("src.graph.academic._judge_evidence_candidates_legacy_with_llm", legacy_mock)
 
     parsed, debug = await _judge_evidence_candidates_with_llm(
         state=_state(),
@@ -446,10 +416,11 @@ async def test_v2_disabled_uses_legacy_with_explicit_reason(monkeypatch):
         round_index=1,
     )
 
-    assert parsed == legacy_output
-    assert debug["evidence_judge_version"] == "legacy"
-    assert debug["status"] == "fallback"
-    assert any(item["reason"] == "evidence_judge_v2_disabled" for item in debug["fallback_chain"])
+    assert parsed is None
+    assert debug["evidence_judge_version"] == "v2"
+    assert debug["status"] == "failed"
+    assert debug["used_fallback"] is False
+    assert debug["stages"][0]["error_type"] == "EvidenceJudgeV2Disabled"
 
 
 @pytest.mark.asyncio

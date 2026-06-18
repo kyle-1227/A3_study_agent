@@ -10,7 +10,28 @@
     Keep search_query concise and search-engine friendly.
     Do not create duplicate search_query values.
     Do not exceed max_total_tasks or max_tasks_per_subject.
+    The only allowed task fields are task_id, subject, role, purpose, search_query, reason, and priority.
+    seed_search_query appears only in the input branch payload; never output seed_search_query.
+    Forbidden output fields: rag_query, web_search_query, expected_coverage, coverage_hint, seed_search_query, url, title, domain.
+    Do not output source identity fields, source metadata fields, or retrieval branch fields.
+    Every task must include task_id, subject, role, purpose, search_query, reason, and priority.
+    Return only fields defined by WebResearchTask.
   </constraints>
+  <example_json>
+    {
+      "tasks": [
+        {
+          "task_id": "task_machine_learning_0",
+          "subject": "machine_learning",
+          "role": "core_concept",
+          "purpose": "Find authoritative web resources for a machine learning mindmap.",
+          "search_query": "machine learning mindmap core concepts algorithms model evaluation",
+          "reason": "Local evidence is weak and the user needs a structured mindmap.",
+          "priority": 1.0
+        }
+      ]
+    }
+  </example_json>
   <inputs>
     <original_user_query>{original_user_query}</original_user_query>
     <learning_goal>{learning_goal}</learning_goal>

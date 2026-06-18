@@ -17,7 +17,7 @@ import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from src.config import get_setting
@@ -256,6 +256,24 @@ class StructuredOutputError(RuntimeError):
         )
 
 
+@dataclass
+class _ReaskContext:
+    instruction: str
+    reason: str
+    attempt_number: int
+    previous_failure_phase: str
+    previous_error_summary: str
+
+    def to_debug(self) -> dict[str, Any]:
+        return {
+            "reask_used": True,
+            "reask_reason": self.reason,
+            "reask_attempt_number": self.attempt_number,
+            "previous_failure_phase": self.previous_failure_phase,
+            "previous_error_summary": self.previous_error_summary,
+        }
+
+
 def _setting(node_name: str, key: str, default: Any = None) -> Any:
     return get_setting(f"llm.{node_name}.{key}", default)
 
@@ -299,6 +317,14 @@ def get_max_raw_chars(node_name: str) -> int:
 
 def _failure_policy(node_name: str) -> str:
     return str(_output_setting(node_name, "failure_policy", "block") or "block")
+
+
+def _reask_enabled(node_name: str) -> bool:
+    return bool(_output_setting(node_name, "reask_enabled", True))
+
+
+def _reask_business_validation_enabled(node_name: str) -> bool:
+    return bool(_output_setting(node_name, "reask_business_validation", False))
 
 
 def _provider(node_name: str) -> str:
@@ -582,8 +608,14 @@ def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics 
     return "llm_exception"
 
 
-def _is_semantic_retryable_failure(phase: str) -> bool:
-    return phase in {"parsing_error", "validation_error"}
+def _is_semantic_retryable_failure(
+    phase: str,
+    *,
+    include_business_validation: bool = False,
+) -> bool:
+    if phase in {"parsing_error", "validation_error"}:
+        return True
+    return bool(include_business_validation and phase == "business_validation_error")
 
 
 def _is_provider_transport_error(exc: Exception, *, status_code: Any = None) -> bool:
@@ -608,6 +640,99 @@ def _semantic_retry_count(attempts: list[StructuredLLMAttempt]) -> int:
     for attempt in attempts:
         attempts_by_mode[attempt.output_mode] = attempts_by_mode.get(attempt.output_mode, 0) + 1
     return sum(max(0, count - 1) for count in attempts_by_mode.values())
+
+
+def _structured_error_summary(result: StructuredLLMResult) -> str:
+    return _sanitize(
+        result.business_validation_error
+        or result.validation_error
+        or result.parsing_error
+        or result.error_message
+        or result.provider_error_body
+        or result.error_type
+        or result.failure_phase,
+        max_chars=1000,
+    )
+
+
+def _build_reask_instruction(
+    *,
+    result: StructuredLLMResult,
+    schema_name: str,
+    previous_error_summary: str,
+) -> str:
+    phase = result.failure_phase or "structured_output_error"
+    if phase == "parsing_error":
+        issue = (
+            "The previous response could not be parsed as valid JSON/tool arguments. "
+            "Return one syntactically valid JSON object for the required schema."
+        )
+    elif phase == "validation_error":
+        issue = (
+            "The previous response parsed as JSON but failed Pydantic/schema validation. "
+            "Fix the field paths, enum values, types, required fields, and length/item constraints named below."
+        )
+    elif phase == "business_validation_error":
+        issue = (
+            "The previous response passed schema validation but failed this node's business validation. "
+            "Fix only the concrete business rule named below."
+        )
+    else:
+        issue = "The previous response failed structured output compliance."
+
+    if result.output_mode == "deepseek_tool_call_strict":
+        channel_rule = "Call the required function exactly once and put the corrected object in function arguments."
+    else:
+        channel_rule = "Return exactly one corrected JSON object."
+
+    return (
+        "Structured output correction required.\n"
+        f"- Schema: {schema_name}\n"
+        f"- Previous failure_phase: {phase}\n"
+        f"- Issue: {issue}\n"
+        f"- Previous error summary: {previous_error_summary}\n"
+        f"- {channel_rule}\n"
+        "- Do not explain the error.\n"
+        "- Do not output markdown, code fences, comments, or extra prose.\n"
+        "- Do not change the schema, omit fields, invent fields, or use non-schema enum values.\n"
+        "- If a field is empty, use the schema-compatible empty value such as \"\", [], false, or 0."
+    )
+
+
+def _build_reask_context(
+    *,
+    node_name: str,
+    schema_name: str,
+    result: StructuredLLMResult,
+    attempt_number: int,
+) -> _ReaskContext | None:
+    phase = result.failure_phase or ""
+    if not _reask_enabled(node_name):
+        return None
+    if phase not in {"parsing_error", "validation_error", "business_validation_error"}:
+        return None
+    if phase == "business_validation_error" and not _reask_business_validation_enabled(node_name):
+        return None
+
+    previous_error_summary = _structured_error_summary(result)
+    return _ReaskContext(
+        instruction=_build_reask_instruction(
+            result=result,
+            schema_name=schema_name,
+            previous_error_summary=previous_error_summary,
+        ),
+        reason=phase,
+        attempt_number=attempt_number,
+        previous_failure_phase=phase,
+        previous_error_summary=previous_error_summary,
+    )
+
+
+def _append_reask_message(messages: list, instruction: str) -> list:
+    base_messages = list(messages or [])
+    if base_messages and isinstance(base_messages[0], dict):
+        return [*base_messages, {"role": "user", "content": instruction}]
+    return [*base_messages, HumanMessage(content=instruction)]
 
 
 def _is_second_layer_unsupported(exc: Exception, mode: str) -> bool:
@@ -1188,10 +1313,13 @@ async def _invoke_one_mode(
     messages: list,
     mode: str,
     state: dict | None = None,
+    reask_context: _ReaskContext | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
     prompt_chars = _compute_prompt_chars(messages)
     metrics = _InvokeMetrics(prompt_chars=prompt_chars)
+    if reask_context is not None:
+        metrics.extra_debug.update(reask_context.to_debug())
 
     # ── constrained_decoding (reserved) ──
     if mode == "constrained_decoding":
@@ -1435,6 +1563,7 @@ async def invoke_structured_llm(
     schema_size_chars = _safe_schema_size_chars(schema)
     attempts: list[StructuredLLMAttempt] = []
     terminal_modes: set[str] = set()
+    pending_reasks: dict[str, _ReaskContext] = {}
 
     def _make_metrics_from_attempt(attempt: StructuredLLMAttempt) -> _InvokeMetrics:
         return _InvokeMetrics(
@@ -1462,12 +1591,59 @@ async def invoke_structured_llm(
             max_chars=raw_limit,
         )
         attempts_for_mode = sum(1 for attempt in attempts if attempt.output_mode == result.output_mode)
+        include_business_validation_retry = (
+            _reask_enabled(node_name) and _reask_business_validation_enabled(node_name)
+        )
         should_retry = (
             not result.success
-            and _is_semantic_retryable_failure(result.failure_phase)
+            and _is_semantic_retryable_failure(
+                result.failure_phase,
+                include_business_validation=include_business_validation_retry,
+            )
             and attempts_for_mode <= max_retries
         )
+        reask_context = (
+            _build_reask_context(
+                node_name=node_name,
+                schema_name=schema_name,
+                result=result,
+                attempt_number=attempts_for_mode,
+            )
+            if should_retry
+            else None
+        )
         if should_retry:
+            reask_debug = reask_context.to_debug() if reask_context is not None else {
+                "reask_used": False,
+                "reask_reason": "",
+                "reask_attempt_number": 0,
+                "previous_failure_phase": "",
+                "previous_error_summary": "",
+            }
+            if reask_context is not None:
+                pending_reasks[result.output_mode] = reask_context
+                emit_a3_trace(
+                    logger,
+                    "structured_llm_reask_attempt",
+                    {
+                        "node_name": node_name,
+                        "llm_node": llm_node,
+                        "schema_name": schema_name,
+                        "provider": provider,
+                        "model": model,
+                        "output_mode": result.output_mode,
+                        "failure_phase": result.failure_phase,
+                        "error_type": result.error_type,
+                        "error_message": _sanitize(result.error_message, max_chars=1200),
+                        "max_retries": max_retries,
+                        "next_attempt": attempts_for_mode + 1,
+                        "fallback_used": result.fallback_used,
+                        **reask_debug,
+                    },
+                    state=state,
+                    env_flag="LOG_STRUCTURED_LLM_OUTPUT",
+                    max_chars=raw_limit,
+                )
             emit_a3_trace(
                 logger,
                 "structured_llm_retry_attempt",
@@ -1485,6 +1661,7 @@ async def invoke_structured_llm(
                     "max_retries": max_retries,
                     "next_attempt": attempts_for_mode + 1,
                     "fallback_used": result.fallback_used,
+                    **reask_debug,
                 },
                 state=state,
                 env_flag="LOG_STRUCTURED_LLM_OUTPUT",
@@ -1501,6 +1678,12 @@ async def invoke_structured_llm(
     for mode in modes:
         if mode in terminal_modes:
             continue
+        reask_context = pending_reasks.pop(mode, None)
+        attempt_messages = (
+            _append_reask_message(messages, reask_context.instruction)
+            if reask_context is not None
+            else messages
+        )
         attempt_started = time.perf_counter()
         metrics = _InvokeMetrics()
         try:
@@ -1556,9 +1739,10 @@ async def invoke_structured_llm(
                 node_name=node_name,
                 llm_node=llm_node,
                 schema=schema,
-                messages=messages,
+                messages=attempt_messages,
                 mode=mode,
                 state=state,
+                reask_context=reask_context,
             )
             # business validation with timing
             business_started = time.perf_counter()

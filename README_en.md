@@ -1,9 +1,9 @@
-﻿# A3 Study Agent
+# A3 Study Agent
 
-A3 Study Agent 鈥?AI-powered personalized learning resource generation assistant for university students.
+A3 Study Agent - AI-powered personalized learning resource generation assistant for university students.
 
 <p align="center">
-  <a href="README.md">涓枃 README</a> |
+  <a href="README.md">中文 README</a> |
   <a href="docs/architecture/v0.3.0/diagram_design.md">Architecture Diagrams</a> |
   <a href="CHANGELOG.md">Changelog</a>
 </p>
@@ -21,18 +21,19 @@ A3 Study Agent 鈥?AI-powered personalized learning resource generation assistan
 
 ## About
 
-A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized learning resources such as course Q&A, layered exercises, mind maps, project examples, and study plans.
+A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized learning resources such as course Q&A, layered exercises, mind maps, review documents, project examples, and study plans.
 
-The system combines local course-material RAG, BM25, reranking, Tavily Web Search, structured LLM output, evidence judging, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows rather than exam-prep-specific learning support.
+The system combines local course-material RAG, BM25, reranking, Tavily Web Research, Evidence Judge V2, DeepSeek strict structured output, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows.
 
-The current React frontend is a lightweight reference implementation for demonstrating complex agent interaction, streaming output, generated resources, and runtime traces. Additional planning modules may evolve later.
+The external LangGraph/SSE node name `web_search` is kept for lifecycle compatibility, while the internal semantics are Web Research V2.
 
 ## Core Capabilities
 
 - **Course Q&A**: Answer university course questions using local course materials and judged web evidence.
-- **Personalized Resource Generation**: Generate exercises, mind maps, project cases, and learning-material summaries.
+- **Personalized Resource Generation**: Generate exercises, mind maps, review documents, project cases, and learning-material summaries.
 - **Study Planning**: Draft and review staged study plans with multi-agent review and human feedback.
 - **Academic Support**: Respond with the tone of a university learning mentor or academic support advisor.
+- **Stable Structured Output**: Use DeepSeek official strict tool calling for small structured nodes and re-ask retry for recoverable compliance failures.
 - **Observability**: Use A3_TRACE, OpenTelemetry, SSE node events, and structured diagnostics to inspect real interactions.
 - **Configuration Driven**: Control behavior through YAML runtime settings and XML prompt templates.
 
@@ -41,44 +42,24 @@ The current React frontend is a lightweight reference implementation for demonst
 ```mermaid
 graph TD
   START([Learner Input]) --> supervisor[Intent Classification]
-
   supervisor --> search_query_rewriter[Query Rewriter]
-  search_query_rewriter --> academic_router[Academic Router]
   supervisor -->|emotional| emotional_response[Academic Support]
   supervisor -->|unknown| handle_unknown[Unknown Intent]
 
+  search_query_rewriter --> academic_router[Academic Router]
   academic_router --> rag_retrieve[Local RAG]
-  academic_router --> web_search[Tavily Web Search]
-  rag_retrieve --> evidence_judge[Evidence Judge]
+  academic_router --> web_search[Web Research V2]
+  rag_retrieve --> evidence_judge[Evidence Judge V2]
   web_search --> evidence_judge
 
   evidence_judge --> generate_answer[Generate Answer]
-  evidence_judge --> study_plan_emotional_intel[Emotional / Workload Intel]
   evidence_judge --> mindmap_planner[Mindmap Planner]
   evidence_judge --> exercise_planner[Exercise Planner]
   evidence_judge --> review_doc_planner[Review Doc Planner]
-
-  generate_answer --> evaluate_hallucination[Faithfulness Eval]
-  evaluate_hallucination -->|Pass| END_A([End])
-  evaluate_hallucination -->|Retry| rewrite_query[Query Rewrite]
-  rewrite_query --> academic_router
-
-  study_plan_emotional_intel --> study_plan_planner[Study Plan Planner]
-  study_plan_planner --> study_plan_agent[Study Plan Generator]
-  study_plan_agent --> study_plan_reviewer_academic[Academic Reviewer]
-  study_plan_agent --> study_plan_reviewer_emotional[Emotional Reviewer]
-  study_plan_reviewer_academic --> study_plan_consensus[Consensus Check]
-  study_plan_reviewer_emotional --> study_plan_consensus
-  study_plan_consensus -->|Pass| study_plan_output[Study Plan Output]
-  study_plan_consensus -->|Reject| study_plan_rewrite[Plan Revision]
-  study_plan_rewrite --> study_plan_agent
-  study_plan_output --> END_P([End])
-
-  emotional_response --> END_E([End])
-  handle_unknown --> END_U([End])
+  evidence_judge --> study_plan_emotional_intel[Study Plan Emotional Intel]
 ```
 
-See [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md) for more diagrams.
+See [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md) for the complete diagrams.
 
 ## Tech Stack
 
@@ -88,7 +69,9 @@ See [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diag
 | Backend API | FastAPI, Uvicorn, SSE |
 | Orchestration | LangGraph |
 | Local Knowledge | ChromaDB, BM25, reranker |
-| Web Search | Tavily |
+| Web Research | Tavily |
+| Structured Output | DeepSeek official strict tool calling, Pydantic validation, re-ask retry |
+| Evidence Judging | Evidence Judge V2 item grader + sufficiency judge |
 | State Snapshots | LangGraph Checkpointer, MemorySaver by default, optional PostgreSQL |
 | Observability | A3_TRACE, OpenTelemetry, Jaeger, SQLite fallback |
 | Configuration | YAML settings, XML prompts |
@@ -160,22 +143,22 @@ npm run dev
 
 ```text
 A3_study_agent/
-鈹溾攢鈹€ app.py                         # FastAPI SSE endpoints + lifespan
-鈹溾攢鈹€ docker-compose.yml             # Backend + PostgreSQL + Jaeger
-鈹溾攢鈹€ config/
-鈹?  鈹溾攢鈹€ settings.yaml              # Runtime parameters
-鈹?  鈹斺攢鈹€ prompts/                   # XML prompt templates
-鈹溾攢鈹€ src/
-鈹?  鈹溾攢鈹€ graph/                     # LangGraph nodes and state flow
-鈹?  鈹溾攢鈹€ rag/                       # Local retrieval and indexing
-鈹?  鈹溾攢鈹€ llm/                       # LLM factory and structured output runtime
-鈹?  鈹溾攢鈹€ database/                  # Checkpointer management
-鈹?  鈹溾攢鈹€ tracing/                   # OpenTelemetry setup
-鈹?  鈹斺攢鈹€ tools/                     # Web search and resource tools
-鈹溾攢鈹€ frontend/                      # Next.js UI
-鈹溾攢鈹€ data/                          # University course materials
-鈹溾攢鈹€ scripts/                       # Indexing and debug scripts
-鈹斺攢鈹€ tests/                         # Test suite
+|-- app.py                         # FastAPI SSE endpoints + lifespan
+|-- docker-compose.yml             # Backend + PostgreSQL + Jaeger
+|-- config/
+|   |-- settings.yaml              # Runtime parameters
+|   `-- prompts/                   # XML prompt templates
+|-- src/
+|   |-- graph/                     # LangGraph nodes and state flow
+|   |-- rag/                       # Local retrieval and indexing
+|   |-- llm/                       # LLM factory and structured output runtime
+|   |-- database/                  # Checkpointer management
+|   |-- tracing/                   # OpenTelemetry setup
+|   `-- tools/                     # Web research and resource tools
+|-- frontend/                      # Next.js UI
+|-- data/                          # University course materials
+|-- scripts/                       # Indexing and debug scripts
+`-- tests/                         # Test suite
 ```
 
 ## Testing
@@ -191,4 +174,3 @@ cd frontend && npm run build
 ## License
 
 [MIT](./LICENSE)
-

@@ -37,6 +37,9 @@ class TestBuildGraph:
             "generate_answer",
             "evaluate_hallucination",
             "rewrite_query",
+            "resource_orchestrator",
+            "resource_worker",
+            "resource_bundle_output",
             "study_plan_emotional_intel",
             "study_plan_planner",
             "study_plan_agent",
@@ -75,13 +78,14 @@ class TestBuildGraph:
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
 
-    def test_route_after_evidence_judge_routes_resource_chains(self):
-        assert route_after_evidence_judge({"requested_resource_type": "mindmap"}) == "mindmap"
-        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "exercise"
+    def test_route_after_evidence_judge_routes_resource_requests_to_orchestrator(self):
+        assert route_after_evidence_judge({"requested_resource_type": "mindmap"}) == "resources"
+        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "resources"
         assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
-        assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
-        assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "review_doc"
-        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "study_plan"
+        assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_types": ["mindmap", "quiz"]}) == "resources"
         assert route_after_evidence_judge({}) == "answer"
         assert route_after_academic_retrieval({}) == "answer"
 
@@ -111,6 +115,9 @@ class TestBuildGraph:
         }
         assert old_direct_edges.isdisjoint(graph.edges)
         assert "route_after_evidence_judge" in graph.branches["evidence_judge"]
+        assert "dispatch_resource_workers" in graph.branches["resource_orchestrator"]
+        assert ("resource_worker", "resource_bundle_output") in graph.edges
+        assert ("resource_bundle_output", "__end__") in graph.edges
 
     def test_search_query_rewriter_is_shared_after_supervisor(self):
         graph = build_graph()

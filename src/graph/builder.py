@@ -42,6 +42,13 @@ from src.graph.review_doc import (
     review_doc_rewrite,
     should_rewrite_review_doc,
 )
+from src.graph.resource_generation import (
+    dispatch_resource_workers,
+    normalize_requested_resource_types,
+    resource_bundle_output,
+    resource_orchestrator,
+    resource_worker,
+)
 from src.graph.state import LearningState
 from src.graph.study_plan import (
     route_after_study_plan_consensus,
@@ -103,6 +110,9 @@ def build_graph() -> StateGraph:
     graph.add_node("review_doc_output", review_doc_output)
 
     # Study plan resource generation
+    graph.add_node("resource_orchestrator", resource_orchestrator)
+    graph.add_node("resource_worker", resource_worker)
+    graph.add_node("resource_bundle_output", resource_bundle_output)
     graph.add_node("study_plan_emotional_intel", study_plan_emotional_intel)
     graph.add_node("study_plan_planner", study_plan_planner)
     graph.add_node("study_plan_agent", study_plan_agent)
@@ -154,14 +164,15 @@ def build_graph() -> StateGraph:
         route_after_evidence_judge,
         {
             "answer": "generate_answer",
-            "mindmap": "mindmap_planner",
-            "exercise": "exercise_planner",
-            "review_doc": "review_doc_planner",
-            "study_plan": "study_plan_emotional_intel",
+            "resources": "resource_orchestrator",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
     graph.add_edge("evidence_summary_output", END)
+
+    graph.add_conditional_edges("resource_orchestrator", dispatch_resource_workers)
+    graph.add_edge("resource_worker", "resource_bundle_output")
+    graph.add_edge("resource_bundle_output", END)
 
     # Hallucination evaluation with retry loop
     graph.add_edge("generate_answer", "evaluate_hallucination")
@@ -247,15 +258,12 @@ def route_after_evidence_judge(state: LearningState) -> str:
     if state.get("evidence_controlled_stop"):
         return "evidence_summary_output"
 
-    resource_type = state.get("requested_resource_type")
-    if resource_type == "mindmap":
-        return "mindmap"
-    if resource_type == "quiz":
-        return "exercise"
-    if resource_type == "review_doc":
-        return "review_doc"
-    if resource_type == "study_plan":
-        return "study_plan"
+    resource_types = normalize_requested_resource_types(
+        state.get("requested_resource_types") or [],
+        state.get("requested_resource_type") or "",
+    )
+    if resource_types:
+        return "resources"
     return "answer"
 
 

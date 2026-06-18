@@ -18,7 +18,7 @@ Rules:
 2. Do not invent new evidence, URLs, sources, titles, metadata, or facts.
 3. Use coverage_gaps only for important missing or weak coverage that would materially affect answer quality.
 4. need_more_local_rag means local course/textbook evidence is missing or weak.
-5. need_more_web_search means external/current/practical/web evidence is missing or weak.
+5. need_more_web_research means external/current/practical/web evidence is missing or weak.
 6. Do not answer the user.
 
 Output only strict JSON. Do not output Markdown or prose outside JSON.
@@ -28,7 +28,7 @@ Output JSON shape:
   "overall_evidence_state": "sufficient",
   "answerability": "can_answer",
   "need_more_local_rag": false,
-  "need_more_web_search": false,
+  "need_more_web_research": false,
   "coverage_gaps": [],
   "decision_summary": "Brief explanation of why the graded evidence is sufficient or insufficient."
 }

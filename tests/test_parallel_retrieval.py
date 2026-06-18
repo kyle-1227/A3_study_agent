@@ -1,4 +1,4 @@
-"""Unit tests for parallel retrieval (fan-out / fan-in) pattern.
+﻿"""Unit tests for parallel retrieval (fan-out / fan-in) pattern.
 
 Tests cover: operator.add context reducer, academic_router pass-through,
 rag_retrieve + web_search writing evidence candidates,
@@ -8,17 +8,83 @@ All tests mock external dependencies -- no real API calls required.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.academic import (
+    WEB_RESEARCH_V2_PLANNER_NODE,
     academic_router,
     rag_retrieve,
     web_search,
 )
 from src.graph.builder import build_graph, get_compiled_graph
+from src.graph.web_research import WebResearchPlan, WebResearchTask, WebSourceSummary, WebSourceSummaryBatch
+from src.llm.structured_output import StructuredLLMResult
+
+
+def _web_research_structured_result(parsed, *, node_name: str, schema_name: str) -> StructuredLLMResult:
+    return StructuredLLMResult(
+        success=True,
+        parsed=parsed,
+        node_name=node_name,
+        llm_node=node_name,
+        schema_name=schema_name,
+        provider="test",
+        model="test",
+        output_mode="deepseek_tool_call_strict",
+        fallback_modes=[],
+        raw_output=parsed.model_dump_json() if parsed is not None else "{}",
+    )
+
+
+async def _fake_web_research_v2_llm(**kwargs):
+    if kwargs["node_name"] == WEB_RESEARCH_V2_PLANNER_NODE:
+        planner_prompt = str(kwargs["messages"][-1]["content"])
+        subject_matches = re.findall(r'"subject":\s*"([^"]*)"', planner_prompt)
+        seed_matches = re.findall(r'"seed_search_query":\s*"([^"]*)"', planner_prompt)
+        subject = (subject_matches[-1] if subject_matches else "other") or "other"
+        seed_query = (seed_matches[-1] if seed_matches else "web tutorial") or "web tutorial"
+        plan = WebResearchPlan(tasks=[
+            WebResearchTask(
+                task_id=f"task-{subject}-0",
+                subject=subject,
+                role="supporting_context",
+                purpose=f"Find web material for {subject}.",
+                search_query=seed_query,
+                reason="Need web evidence for the current retrieval request.",
+                priority=0.8,
+            )
+        ])
+        return _web_research_structured_result(
+            plan,
+            node_name=WEB_RESEARCH_V2_PLANNER_NODE,
+            schema_name="WebResearchPlan",
+        )
+
+    source_ids = re.findall(r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"]))
+    batch = WebSourceSummaryBatch(summaries=[
+        WebSourceSummary(
+            source_id=source_id,
+            keep=True,
+            summary="result",
+            coverage_points=["result"],
+            reason="Relevant web result.",
+            evidence_type="unknown",
+            use_case="background_context",
+            relevance="medium",
+            usefulness="medium",
+            risk="low",
+        )
+        for source_id in source_ids
+    ])
+    return _web_research_structured_result(
+        batch,
+        node_name=kwargs["node_name"],
+        schema_name="WebSourceSummaryBatch",
+    )
 
 
 # ===========================================================================
@@ -170,10 +236,11 @@ class TestWebSearchParallelOutput:
     """web_search returns web evidence only; context is written by evidence_judge."""
 
     @patch("src.graph.academic.web_search_fn")
-    async def test_returns_context_with_web_type(self, mock_search):
+    async def test_returns_context_with_web_type(self, mock_search, monkeypatch):
         mock_search.return_value = [
             {"content": "result", "title": "Title", "url": "http://x"},
         ]
+        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
 
         state = {"messages": [HumanMessage(content="量子力学")]}
         result = await web_search(state)
@@ -186,18 +253,22 @@ class TestWebSearchParallelOutput:
         assert result["web_evidence_originals"][candidate["evidence_id"]]["title"] == "Title"
 
     @patch("src.graph.academic.web_search_fn", side_effect=Exception("network"))
-    async def test_returns_empty_context_on_exception(self, mock_search):
-        state = {"messages": [HumanMessage(content="test")]}
-        result = await web_search(state)
+    async def test_returns_empty_context_on_exception(self, mock_search, monkeypatch):
+        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
 
-        assert result["web_evidence_candidates"] == []
-        assert result["web_evidence_originals"] == {}
-        assert "context" not in result
+        state = {"messages": [HumanMessage(content="test")]}
+        with pytest.raises(RuntimeError, match="fallback is disabled") as exc_info:
+            await web_search(state)
+
+        debug = getattr(exc_info.value, "web_research_debug")
+        assert debug["status"] == "failed"
+        assert debug["used_fallback"] is False
 
     @patch("src.graph.academic.web_search_fn")
-    async def test_uses_last_human_message_for_query(self, mock_search):
+    async def test_uses_last_human_message_for_query(self, mock_search, monkeypatch):
         """During retry, web_search must find the original question."""
-        mock_search.return_value = []
+        mock_search.return_value = [{"content": "result", "title": "Title", "url": "http://x"}]
+        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
 
         state = {
             "messages": [
@@ -231,8 +302,14 @@ class TestGenerateAnswerFromMergedContext:
         state = {
             "messages": [HumanMessage(content="判别式")],
             "context": [
-                {"type": "rag", "content": "Δ=b²-4ac", "source": "math.pdf", "rerank_score": 0.9},
-                {"type": "web", "content": "判别式用法", "title": "高等数学课程资料", "url": "http://x"},
+                {"type": "rag", "content": "delta=b^2-4ac", "source": "math.pdf", "rerank_score": 0.9},
+                {
+                    "type": "web_evidence",
+                    "source_type": "web",
+                    "content": "判别式用法",
+                    "title": "高等数学课程资料",
+                    "url": "http://x",
+                },
             ],
         }
 
@@ -245,7 +322,7 @@ class TestGenerateAnswerFromMergedContext:
         # Verify the prompt includes both RAG and web content
         call_args = mock_llm.ainvoke.call_args[0][0]
         prompt_text = call_args[-1].content
-        assert "Δ=b²-4ac" in prompt_text
+        assert "delta=b^2-4ac" in prompt_text
         assert "判别式用法" in prompt_text
 
     @patch("src.graph.academic.get_fallback_llm")

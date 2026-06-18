@@ -1,7 +1,8 @@
-"""Unit tests for the current academic evidence path."""
+﻿"""Unit tests for the current academic evidence path."""
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,14 +15,11 @@ from src.graph.academic import (
     _deterministic_memory_use_decision,
     _evaluate_retrieval_branch,
     _format_retrieved,
-    _format_search,
+    _format_web_research_context,
     _normalize_retrieval_plan,
-    _judge_tavily_search_results_with_llm,
     _select_docs_with_subject_quota,
     MemoryUseDecisionOutput,
     RetrievalPlanItem,
-    SearchResultJudgeItem,
-    SearchResultJudgeOutput,
     SearchQueryRewriteOutput,
     academic_router,
     build_evidence_memory_summary,
@@ -31,20 +29,20 @@ from src.graph.academic import (
     rewrite_query,
     search_query_rewriter,
     select_relevant_memory_summaries,
-    validate_search_result_judge_output,
     validate_search_query_rewrite_output,
     web_search,
 )
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeItem, EvidenceJudgeOutput
 from src.graph.state import CONTEXT_CLEAR
+from src.graph.web_research import WebResearchPlan, WebResearchTask, WebSourceSummary, WebSourceSummaryBatch
 from src.llm.structured_output import StructuredLLMResult, StructuredOutputError, get_llm_output_mode
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 
 
 def _valid_query_rewrite_output() -> SearchQueryRewriteOutput:
     return SearchQueryRewriteOutput(
-        rag_query="Python functions 参数 return value scope",
-        web_search_query="Python function parameters return value course notes tutorial",
+        local_retrieval_query="Python functions 参数 return value scope",
+        web_research_seed_query="Python function parameters return value course notes tutorial",
         expanded_keypoints=["Python functions", "参数 parameter", "return value"],
         reason="Expanded concise bilingual retrieval terms.",
         learning_goal="Understand Python functions",
@@ -54,10 +52,10 @@ def _valid_query_rewrite_output() -> SearchQueryRewriteOutput:
             RetrievalPlanItem(
                 subject="python",
                 role="core_concept",
-                rag_query="Python functions 参数 return value scope",
-                web_search_query="Python function parameters tutorial course notes",
+                local_retrieval_query="Python functions 参数 return value scope",
+                web_research_seed_query="Python function parameters tutorial course notes",
                 priority=0.9,
-                expected_coverage=["function definition", "parameter passing"],
+                retrieval_coverage_goals=["function definition", "parameter passing"],
             )
         ],
     )
@@ -121,7 +119,7 @@ class TestRewriteQuery:
 
     @patch("src.graph.llm.get_node_llm")
     async def test_fail_fast_on_retry_rewrite_failure(self, mock_get_llm):
-        """Rewrite query now fails fast — no fallback to original query."""
+        """Rewrite query now fails fast - no fallback to original query."""
         mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("LLM error"))
         mock_get_llm.return_value = mock_llm
@@ -290,94 +288,6 @@ class TestMemoryUseDecision:
         assert result["memory_use_policy"] == "ignore"
 
 
-class TestSearchResultJudge:
-    async def test_uses_structured_runtime_with_deepseek_mode(self):
-        captured: dict = {}
-        parsed = SearchResultJudgeOutput(
-            judged_results=[
-                SearchResultJudgeItem(
-                    index=0,
-                    title="Python exercises",
-                    url="https://example.com/python",
-                    keep=True,
-                    final_quality="high",
-                    relevance="high",
-                    authority="medium",
-                    usefulness="high",
-                    risk="low",
-                    evidence_type="open_exercise_set",
-                    use_case="exercise_material",
-                    reason="Relevant practice set.",
-                )
-            ]
-        )
-
-        async def fake_invoke_structured_llm(**kwargs):
-            captured.update(kwargs)
-            business_error = kwargs["business_validator"](parsed)
-            assert business_error == ""
-            return StructuredLLMResult(
-                success=True,
-                parsed=parsed,
-                node_name=kwargs["node_name"],
-                llm_node=kwargs["llm_node"],
-                schema_name=kwargs["schema"].__name__,
-                provider="deepseek_official",
-                model="deepseek-v4-flash",
-                output_mode=kwargs["output_mode"],
-                raw_output=parsed.model_dump_json(),
-            )
-
-        with patch("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm):
-            accepted, debug = await _judge_tavily_search_results_with_llm(
-                state={
-                    "messages": [HumanMessage(content="给我一份 Python 的练习题")],
-                    "learning_goal": "Python practice",
-                    "requested_resource_type": "quiz",
-                    "request_id": "req",
-                    "thread_id": "thread",
-                },
-                subject="python",
-                role="core_concept",
-                purpose="exercise_material",
-                search_query="Python exercises",
-                raw_query="Python exercises",
-                original_user_query="给我一份 Python 的练习题",
-                tavily_results=[
-                    {
-                        "title": "Python exercises",
-                        "url": "https://example.com/python",
-                        "content": "Practice Python functions.",
-                    }
-                ],
-                coverage_risk="low",
-                local_evidence_strength="medium",
-            )
-
-        assert captured["node_name"] == "search_result_judge"
-        assert captured["llm_node"] == "search_result_judge"
-        assert captured["output_mode"] == "deepseek_tool_call_strict"
-        assert captured["fallback_modes"] == []
-        assert accepted[0]["judge_quality"] == "high"
-        assert debug["provider"] == "deepseek_official"
-
-    def test_index_coverage_business_validator_rejects_missing_and_duplicate_indexes(self):
-        missing = SearchResultJudgeOutput(
-            judged_results=[
-                SearchResultJudgeItem(index=0, keep=True, reason="ok"),
-            ]
-        )
-        duplicate = SearchResultJudgeOutput(
-            judged_results=[
-                SearchResultJudgeItem(index=0, keep=True, reason="ok"),
-                SearchResultJudgeItem(index=0, keep=False, reason="duplicate"),
-            ]
-        )
-
-        assert "must be [0, 1]" in validate_search_result_judge_output(missing, expected_count=2)
-        assert "duplicate" in validate_search_result_judge_output(duplicate, expected_count=2)
-
-
 class TestSearchQueryRewriter:
     def test_query_rewrite_schema_exposes_length_limits(self):
         schema = SearchQueryRewriteOutput.model_json_schema()
@@ -386,15 +296,15 @@ class TestSearchQueryRewriter:
 
         assert schema["additionalProperties"] is False
         assert schema["$defs"]["RetrievalPlanItem"]["additionalProperties"] is False
-        assert props["rag_query"]["maxLength"] == 240
-        assert props["web_search_query"]["maxLength"] == 180
+        assert props["local_retrieval_query"]["maxLength"] == 240
+        assert props["web_research_seed_query"]["maxLength"] == 180
         assert props["expanded_keypoints"]["maxItems"] == 8
         assert props["expanded_keypoints"]["items"]["maxLength"] == 120
         assert props["retrieval_plan"]["maxItems"] == 4
         assert props["memory_context_notes"]["maxItems"] == 5
         assert props["memory_context_notes"]["items"]["maxLength"] == 240
-        assert plan_props["expected_coverage"]["maxItems"] == 8
-        assert plan_props["expected_coverage"]["items"]["maxLength"] == 120
+        assert plan_props["retrieval_coverage_goals"]["maxItems"] == 8
+        assert plan_props["retrieval_coverage_goals"]["items"]["maxLength"] == 120
 
     def test_search_query_rewriter_structured_retry_is_disabled_for_local_retry(self):
         assert get_setting("llm_outputs.search_query_rewriter.max_retries") == 0
@@ -403,8 +313,8 @@ class TestSearchQueryRewriter:
     def test_overlong_query_fields_fail_schema_validation(self):
         with pytest.raises(Exception):
             SearchQueryRewriteOutput(
-                rag_query="x" * 241,
-                web_search_query="Python function tutorial",
+                local_retrieval_query="x" * 241,
+                web_research_seed_query="Python function tutorial",
                 expanded_keypoints=["Python"],
                 reason="too long query",
             )
@@ -417,14 +327,14 @@ class TestSearchQueryRewriter:
                     "reason": "bad combined keys",
                     "learning_goal_primary_subject": "big_data",
                     "primary_subject_relation_summary": "single subject",
-                    "rag_query_web_search_query": "big data quiz",
-                    "retrieval_plan_subject_role_rag_query_web_search_query_purpose_relation_to_goal_coverage_hint_expected_coverage_priority": [],
+                    "local_retrieval_query_web_research_seed_query": "big data quiz",
+                    "retrieval_plan_subject_role_local_retrieval_query_web_research_seed_query_purpose_relation_to_goal_retrieval_coverage_hint_retrieval_coverage_goals_priority": [],
                 }
             )
 
     def test_repeated_chinese_phrases_fail_business_validation(self):
         parsed = _valid_query_rewrite_output()
-        parsed.rag_query = "检索意图 资源类型 练习题 答案 解析 实操任务 " * 3
+        parsed.local_retrieval_query = "检索意图 资源类型 练习题 答案 解析 实操任务 " * 3
 
         error = validate_search_query_rewrite_output(parsed, memory_use_policy="ignore")
 
@@ -433,7 +343,7 @@ class TestSearchQueryRewriter:
 
     def test_repeated_english_ngram_fails_business_validation(self):
         parsed = _valid_query_rewrite_output()
-        parsed.web_search_query = "python function parameter return " * 3
+        parsed.web_research_seed_query = "python function parameter return " * 3
 
         error = validate_search_query_rewrite_output(parsed, memory_use_policy="ignore")
 
@@ -450,8 +360,8 @@ class TestSearchQueryRewriter:
     async def test_produces_rag_web_queries_and_plan(self, mock_invoke, mock_available_subjects):
         mock_available_subjects.return_value = ["python", "machine_learning"]
         parsed = SearchQueryRewriteOutput(
-            rag_query="Python functions parameters return values",
-            web_search_query="Python functions course notes tutorial",
+            local_retrieval_query="Python functions parameters return values",
+            web_research_seed_query="Python functions course notes tutorial",
             expanded_keypoints=["Python", "functions"],
             reason="expanded for bilingual retrieval",
             learning_goal="Understand Python functions",
@@ -461,8 +371,8 @@ class TestSearchQueryRewriter:
                 RetrievalPlanItem(
                     subject="python",
                     role="core_concept",
-                    rag_query="Python functions",
-                    web_search_query="Python functions tutorial",
+                    local_retrieval_query="Python functions",
+                    web_research_seed_query="Python functions tutorial",
                     priority=0.8,
                 ),
             ],
@@ -477,8 +387,8 @@ class TestSearchQueryRewriter:
             "memory_use_policy": "ignore",
         })
 
-        assert result["search_rag_query"] == "Python functions parameters return values"
-        assert result["search_web_query"] == "Python functions course notes tutorial"
+        assert result["local_retrieval_query"] == "Python functions parameters return values"
+        assert result["web_research_seed_query"] == "Python functions course notes tutorial"
         assert result["retrieval_plan"][0]["subject"] == "python"
         assert result["primary_subject"] == "python"
         mock_invoke.assert_awaited_once()
@@ -499,7 +409,7 @@ class TestSearchQueryRewriter:
             _structured_output_error(
                 phase="business_validation_error",
                 error_type="BusinessValidationError",
-                error_message="rag_query repeated query phrase: 检索意图",
+                error_message="local_retrieval_query repeated query phrase: 检索意图",
             ),
             SimpleNamespace(parsed=parsed, raw_output='{"ok": true}'),
         ]
@@ -518,7 +428,7 @@ class TestSearchQueryRewriter:
         finally:
             reset_trace_event_sink(token)
 
-        assert result["search_rag_query"] == parsed.rag_query
+        assert result["local_retrieval_query"] == parsed.local_retrieval_query
         assert mock_invoke.await_count == 2
         assert mock_invoke.await_args_list[1].kwargs["fallback_modes"] == []
         retry_event = next(event for event in events if event["stage"] == "query_rewrite_compliance_retry")
@@ -547,7 +457,7 @@ class TestSearchQueryRewriter:
             _structured_output_error(
                 phase="validation_error",
                 error_type="ValidationError",
-                error_message="rag_query maxLength",
+                error_message="local_retrieval_query maxLength",
             ),
         ]
         events: list[dict] = []
@@ -605,13 +515,13 @@ class TestSearchQueryRewriter:
     async def test_always_rewrites_even_with_stale_rewritten_query(
         self, mock_summary, mock_invoke, mock_available_subjects
     ):
-        """Query rewrite always runs for every new request — stale
+        """Query rewrite always runs for every new request - stale
         rewritten_query from a previous turn does NOT skip it."""
         mock_available_subjects.return_value = ["python"]
         mock_summary.return_value = ""
         parsed = SearchQueryRewriteOutput(
-            rag_query="fresh rag query",
-            web_search_query="fresh web query",
+            local_retrieval_query="fresh rag query",
+            web_research_seed_query="fresh web query",
             expanded_keypoints=["fresh"],
             reason="rewritten for new request",
             learning_goal="",
@@ -621,8 +531,8 @@ class TestSearchQueryRewriter:
                 RetrievalPlanItem(
                     subject="python",
                     role="core_concept",
-                    rag_query="fresh rag query",
-                    web_search_query="fresh web query",
+                    local_retrieval_query="fresh rag query",
+                    web_research_seed_query="fresh web query",
                     priority=1.0,
                 ),
             ],
@@ -637,8 +547,8 @@ class TestSearchQueryRewriter:
             "memory_use_policy": "ignore",
         })
 
-        assert result["search_rag_query"] == "fresh rag query"
-        assert result["search_web_query"] == "fresh web query"
+        assert result["local_retrieval_query"] == "fresh rag query"
+        assert result["web_research_seed_query"] == "fresh web query"
         assert result["retrieval_plan"][0]["subject"] == "python"
         # Stale rewritten_query does NOT suppress the fresh retrieval plan
         assert result["primary_subject"] == "python"
@@ -650,11 +560,11 @@ class TestSearchQueryRewriter:
 
         plan, debug = _normalize_retrieval_plan(
             [
-                RetrievalPlanItem(subject="", role="core_concept", rag_query="x"),
-                RetrievalPlanItem(subject="python", role="bad_role", rag_query="old", priority=0.1),
-                RetrievalPlanItem(subject="python", role="implementation_tool", rag_query="new", priority=0.9),
-                RetrievalPlanItem(subject="law", role="core_concept", rag_query="law", priority=0.8),
-                RetrievalPlanItem(subject="machine_learning", role="core_concept", rag_query="", priority=0.8),
+                RetrievalPlanItem(subject="", role="core_concept", local_retrieval_query="x"),
+                RetrievalPlanItem(subject="python", role="bad_role", local_retrieval_query="old", priority=0.1),
+                RetrievalPlanItem(subject="python", role="implementation_tool", local_retrieval_query="new", priority=0.9),
+                RetrievalPlanItem(subject="law", role="core_concept", local_retrieval_query="law", priority=0.8),
+                RetrievalPlanItem(subject="machine_learning", role="core_concept", local_retrieval_query="", priority=0.8),
             ],
             {"subject": "python"},
         )
@@ -663,13 +573,13 @@ class TestSearchQueryRewriter:
         assert plan[0] == {
             "subject": "python",
             "role": "implementation_tool",
-            "rag_query": "new",
-            "web_search_query": "",
+            "local_retrieval_query": "new",
+            "web_research_seed_query": "",
             "purpose": "",
             "relation_to_goal": "",
             "priority": 0.9,
-            "coverage_hint": "",
-            "expected_coverage": [],
+            "retrieval_coverage_hint": "",
+            "retrieval_coverage_goals": [],
         }
         assert debug["raw_plan_count"] == 5
         assert debug["normalized_plan_count"] == 1
@@ -761,9 +671,69 @@ class TestRagRetrieveDualSource:
         mock_retrieve.assert_called_once_with(query="Python functions", subject="python", top_k=3)
 
 
+def _web_research_structured_result(parsed, *, node_name: str, schema_name: str) -> StructuredLLMResult:
+    return StructuredLLMResult(
+        success=True,
+        parsed=parsed,
+        node_name=node_name,
+        llm_node=node_name,
+        schema_name=schema_name,
+        provider="test",
+        model="test",
+        output_mode="deepseek_tool_call_strict",
+        fallback_modes=[],
+        raw_output=parsed.model_dump_json() if parsed is not None else "{}",
+    )
+
+
+async def _fake_web_research_v2_llm(**kwargs):
+    if kwargs["node_name"] == "web_research_planner":
+        planner_prompt = str(kwargs["messages"][-1]["content"])
+        subject_matches = re.findall(r'"subject":\s*"([^"]+)"', planner_prompt)
+        subject = subject_matches[-1] if subject_matches else "python"
+        plan = WebResearchPlan(tasks=[
+            WebResearchTask(
+                task_id=f"task-{subject}-0",
+                subject=subject,
+                role="supporting_context",
+                purpose=f"Find {subject} tutorial material.",
+                search_query=f"{subject} tutorial",
+                reason=f"Need web evidence for the requested {subject} topic.",
+                priority=0.8,
+            )
+        ])
+        return _web_research_structured_result(
+            plan,
+            node_name="web_research_planner",
+            schema_name="WebResearchPlan",
+        )
+
+    source_ids = re.findall(r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"]))
+    batch = WebSourceSummaryBatch(summaries=[
+        WebSourceSummary(
+            source_id=source_id,
+            keep=True,
+            summary="Python tutorial source.",
+            coverage_points=["Python function basics"],
+            reason="Relevant tutorial result.",
+            evidence_type="tutorial",
+            use_case="background_context",
+            relevance="medium",
+            usefulness="medium",
+            risk="low",
+        )
+        for source_id in source_ids
+    ])
+    return _web_research_structured_result(
+        batch,
+        node_name="web_source_summarizer",
+        schema_name="WebSourceSummaryBatch",
+    )
+
+
 class TestWebSearchDualSource:
     @patch("src.graph.academic.web_search_fn")
-    async def test_returns_web_candidates_not_context(self, mock_search):
+    async def test_returns_web_candidates_not_context(self, mock_search, monkeypatch):
         mock_search.return_value = {
             "provider": "tavily",
             "ok": True,
@@ -771,10 +741,11 @@ class TestWebSearchDualSource:
             "elapsed_ms": 10,
             "results": [{"content": "Python tutorial", "title": "Python", "url": "https://example.com"}],
         }
+        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
 
         result = await web_search({
             "messages": [HumanMessage(content="Explain Python functions")],
-            "search_web_query": "Python functions tutorial",
+            "web_research_seed_query": "Python functions tutorial",
             "subject": "python",
         })
 
@@ -784,18 +755,22 @@ class TestWebSearchDualSource:
         assert result["web_evidence_originals"]
 
     @patch("src.graph.academic.web_search_fn", side_effect=RuntimeError("network error"))
-    async def test_returns_empty_candidates_on_search_exception(self, mock_search):
-        result = await web_search({"messages": [HumanMessage(content="test")]})
+    async def test_returns_empty_candidates_on_search_exception(self, mock_search, monkeypatch):
+        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
 
-        assert result["web_evidence_candidates"] == []
-        assert result["web_evidence_originals"] == {}
+        with pytest.raises(RuntimeError, match="fallback is disabled") as exc_info:
+            await web_search({"messages": [HumanMessage(content="test")]})
+
+        debug = getattr(exc_info.value, "web_research_debug")
+        assert debug["status"] == "failed"
+        assert debug["used_fallback"] is False
 
 
 class TestEvidenceMemorySummary:
     def test_builder_uses_current_call_candidates_and_originals(self):
         parsed = EvidenceJudgeOutput(
             overall_evidence_state="sufficient",
-            need_more_web_search=False,
+            need_more_web_research=False,
             judged_evidence=[
                 EvidenceJudgeItem(
                     evidence_id="current",
@@ -884,12 +859,17 @@ class TestFormatHelpers:
         assert "[1]" in output
         assert "one.pdf" in output
 
-    def test_format_search_empty(self):
-        assert _format_search([]).strip()
+    def test_format_web_research_context_empty(self):
+        assert _format_web_research_context([]).strip()
 
-    def test_format_search_with_results(self):
-        output = _format_search([
-            {"title": "Course project plan", "url": "https://example.com/1", "content": "project plan"},
+    def test_format_web_research_context_with_results(self):
+        output = _format_web_research_context([
+            {
+                "type": "web_evidence",
+                "title": "Course project plan",
+                "url": "https://example.com/1",
+                "content": "project plan",
+            },
         ])
         assert "[1]" in output
         assert "Course project plan" in output

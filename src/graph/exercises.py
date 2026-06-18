@@ -113,9 +113,7 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
 def _is_web_evidence(item: dict) -> bool:
     return (
         item.get("source_type") == "web"
-        or item.get("type") in {"web_evidence", "web_supplement"}
-        or item.get("legacy_type") == "web_supplement"
-        or item.get("type_legacy") == "web_supplement"
+        or item.get("type") == "web_evidence"
     )
 
 

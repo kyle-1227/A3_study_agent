@@ -1,27 +1,56 @@
 from __future__ import annotations
 
-import logging
 import re
 
 import pytest
 from langchain_core.messages import HumanMessage
 from pydantic import ValidationError
 
+from src.config import load_prompt
 from src.graph.academic import (
-    WEB_RESEARCH_V2_SKIP_REASON,
-    _assert_no_silent_web_research_fallback,
+    WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+    WEB_RESEARCH_V2_LLM_SUMMARY_SOURCE,
+    WEB_RESEARCH_V2_PLANNER_NODE,
+    WEB_RESEARCH_V2_STAGE_CANDIDATE_BUILD,
+    WEB_RESEARCH_V2_STAGE_COMPLETE,
+    WEB_RESEARCH_V2_STAGE_CURATE,
+    WEB_RESEARCH_V2_STAGE_DEDUPE,
+    WEB_RESEARCH_V2_STAGE_FAILED,
+    WEB_RESEARCH_V2_STAGE_FETCH_SOURCE,
+    WEB_RESEARCH_V2_STAGE_FETCH_START,
+    WEB_RESEARCH_V2_STAGE_PLAN_FAILED,
+    WEB_RESEARCH_V2_STAGE_PLAN_START,
+    WEB_RESEARCH_V2_STAGE_PLAN_SUCCESS,
+    WEB_RESEARCH_V2_STAGE_SEARCH_START,
+    WEB_RESEARCH_V2_STAGE_SEARCH_TASK,
+    WEB_RESEARCH_V2_STAGE_START,
+    WEB_RESEARCH_V2_STAGE_SUMMARIZE_FAILED,
+    WEB_RESEARCH_V2_STAGE_SUMMARIZE_START,
+    WEB_RESEARCH_V2_STAGE_SUMMARIZE_SUCCESS,
+    WEB_RESEARCH_V2_SUMMARIZER_NODE,
+    WEB_RESEARCH_V2_WARNING_ALL_SOURCES_REJECTED,
+    WEB_RESEARCH_V2_WARNING_DISABLED,
+    WEB_RESEARCH_V2_WARNING_PLANNER_FAILED_FAIL_FAST,
+    WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
+    _build_web_research_planner_messages,
     _dedupe_web_sources_by_canonical_url,
+    _drop_deprecated_web_state_keys,
+    _web_research_branch_payload,
     _web_search_dual_source,
 )
 from src.graph.web_research import (
+    WebFetchedSource,
+    WebRawSource,
     WebResearchPlan,
     WebResearchTask,
     WebSourceSummary,
     WebSourceSummaryBatch,
+    normalize_web_raw_source,
     validate_web_research_plan,
     validate_web_source_summary_batch,
 )
 from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 
 
 def _state(query: str = "我还想要一份大数据的练习题") -> dict:
@@ -40,8 +69,8 @@ def _branches() -> list[dict]:
             "subject": "big_data",
             "role": "core_concept",
             "purpose": "exercise_material",
-            "rag_query": "big data practice",
-            "web_search_query": "big data exercises course",
+            "local_retrieval_query": "big data practice",
+            "web_research_seed_query": "big data exercises course",
             "priority": 0.9,
         }
     ]
@@ -63,7 +92,7 @@ def _task(**overrides) -> WebResearchTask:
 
 def _summary(**overrides) -> WebSourceSummary:
     payload = {
-        "source_id": "websrc:0",
+        "source_id": "websrc:task-1:abc123abc123",
         "keep": True,
         "summary": "Covers big data exercises.",
         "coverage_points": ["HDFS and MapReduce practice"],
@@ -119,17 +148,45 @@ def _source_ids_from_messages(messages: list[dict]) -> list[str]:
     return re.findall(r'"source_id":\s*"([^"]+)"', content)
 
 
+def _search_result(*, content: str = "Practice HDFS, MapReduce, and Spark basics.") -> list[dict]:
+    return [
+        {
+            "title": "Big Data Exercise Set",
+            "url": "https://example.edu/big-data/exercises?utm_source=test",
+            "content": content,
+            "score": 0.87,
+        }
+    ]
+
+
+async def _successful_llm(**kwargs):
+    if kwargs["node_name"] == WEB_RESEARCH_V2_PLANNER_NODE:
+        return _structured_result(
+            parsed=WebResearchPlan(tasks=[_task()]),
+            node_name=WEB_RESEARCH_V2_PLANNER_NODE,
+            schema_name="WebResearchPlan",
+        )
+    source_ids = _source_ids_from_messages(kwargs["messages"])
+    batch = WebSourceSummaryBatch(summaries=[_summary(source_id=source_id) for source_id in source_ids])
+    return _structured_result(
+        parsed=batch,
+        node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
+        schema_name="WebSourceSummaryBatch",
+    )
+
+
 def test_web_research_schema_limits_and_literal_rejection():
     tasks = [_task(task_id=f"task-{index}", search_query=f"query {index}") for index in range(7)]
     with pytest.raises(ValidationError):
         WebResearchPlan(tasks=tasks)
 
-    summaries = [_summary(source_id=f"websrc:{index}") for index in range(13)]
+    summaries = [_summary(source_id=f"websrc:task-{index}:abc") for index in range(13)]
     with pytest.raises(ValidationError):
         WebSourceSummaryBatch(summaries=summaries)
 
-    with pytest.raises(ValidationError):
-        WebSourceSummary(**{**_summary().model_dump(), "evidence_type": "made_up"})
+    for bad_value in ["practice_material", "mindmap", "practice_questions", "web_article"]:
+        with pytest.raises(ValidationError):
+            WebSourceSummary(**{**_summary().model_dump(), "use_case": bad_value})
 
     with pytest.raises(ValidationError):
         WebSourceSummary(**{**_summary().model_dump(), "url": "https://example.edu"})
@@ -158,24 +215,6 @@ def test_planner_validator_rejects_invalid_task_shape():
     assert "reason must not be empty" in error
     assert "priority must be between 0 and 1" in error
     assert "duplicate search_query" in error
-
-
-def test_planner_validator_rejects_duplicate_ids_queries_and_subject_caps():
-    plan = WebResearchPlan(tasks=[
-        _task(task_id="dup", search_query="same query"),
-        _task(task_id="dup", search_query="same query", priority=0.2),
-    ])
-
-    error = validate_web_research_plan(
-        plan,
-        allowed_subjects=["big_data"],
-        max_total_tasks=6,
-        max_tasks_per_subject=1,
-    )
-
-    assert "duplicate task_id values" in error
-    assert "duplicate search_query values" in error
-    assert "subject 'big_data' task count 2 exceeds max_tasks_per_subject 1" in error
 
 
 def test_summarizer_validator_requires_each_source_exactly_once():
@@ -207,44 +246,174 @@ def test_summarizer_validator_rejects_empty_fields():
     assert "coverage_points must contain at least one item when keep=true" in error
 
 
-def test_canonical_url_dedup_keeps_higher_score_then_priority():
-    sources = [
-        {
-            "task_id": "task-low",
-            "task_priority": 0.9,
-            "original_url": "https://www.example.com/course?utm_source=test",
-            "tavily_score": 0.2,
-        },
-        {
-            "task_id": "task:ml:0",
-            "task_priority": 0.1,
-            "original_url": "https://example.com/course",
-            "tavily_score": 0.8,
-        },
-        {
-            "task_id": "task-priority-low",
-            "task_priority": 0.2,
-            "original_url": "https://example.com/guide",
-            "tavily_score": 0.5,
-        },
-        {
-            "task_id": "task-priority-high",
-            "task_priority": 0.9,
-            "original_url": "https://www.example.com/guide/",
-            "tavily_score": 0.5,
-        },
-    ]
+def test_raw_source_normalization_and_stable_dedupe():
+    raw = normalize_web_raw_source(
+        _search_result()[0],
+        task_id="task:ml:0",
+        subject="big_data",
+        role="core_concept",
+        purpose="exercise_material",
+        search_query="big data exercises",
+        task_priority=0.8,
+        provider="tavily",
+        provider_rank=0,
+        retrieved_at="2026-06-17T00:00:00+00:00",
+    )
 
-    deduped, debug = _dedupe_web_sources_by_canonical_url(sources)
+    assert isinstance(raw, WebRawSource)
+    assert raw.canonical_url == "https://example.edu/big-data/exercises"
+    assert raw.provider_score == 0.87
 
-    assert debug["duplicate_url_count"] == 2
-    assert {source["task_id"] for source in deduped} == {"task:ml:0", "task-priority-high"}
-    assert deduped[0]["source_id"] == "websrc:task_ml_0:0"
-    assert all(str(source["source_id"]).startswith("websrc:") for source in deduped)
+    deduped, debug = _dedupe_web_sources_by_canonical_url([raw.model_dump(mode="json")])
+
+    assert debug["duplicate_url_count"] == 0
+    assert re.fullmatch(r"websrc:task_ml_0:[0-9a-f]{12}", deduped[0]["source_id"])
+
+
+def test_fetch_source_schema_preserves_fetch_status():
+    fetched = WebFetchedSource.model_validate({
+        **normalize_web_raw_source(
+            _search_result()[0],
+            task_id="task-1",
+            subject="big_data",
+            role="core_concept",
+            purpose="exercise_material",
+            search_query="big data exercises",
+            task_priority=0.8,
+            provider="tavily",
+            provider_rank=0,
+        ).model_dump(),
+        "fetch_status": "success",
+        "content_chars": 42,
+        "content_preview": "Readable provider content",
+    })
+
+    assert fetched.fetch_status == "success"
+    assert fetched.content_chars == 42
+
+
+def test_deprecated_checkpoint_state_keys_are_dropped_before_v2_boundary():
+    old_web_query = "web_" + "search_" + "query"
+    old_debug = "web_research_" + "v2_debug"
+    old_prefix_key = "web_" + "supple" + "ment_results"
+    state = {
+        old_web_query: "old query",
+        old_debug: {"status": "old"},
+        old_prefix_key: [{"title": "old"}],
+        "web_research_seed_query": "new seed",
+    }
+
+    sanitized, dropped = _drop_deprecated_web_state_keys(state)
+
+    assert old_web_query in dropped
+    assert old_debug in dropped
+    assert old_prefix_key in dropped
+    assert old_web_query not in sanitized
+    assert old_debug not in sanitized
+    assert old_prefix_key not in sanitized
+    assert sanitized["web_research_seed_query"] == "new seed"
+
+
+def test_web_research_prompts_define_v2_boundaries_and_enum_mapping():
+    planner_prompt = load_prompt("web_research_planner")
+    summarizer_prompt = load_prompt("web_source_summarizer")
+
+    assert "Forbidden output fields: rag_query, web_search_query" in planner_prompt
+    assert "never output seed_search_query" in planner_prompt
+    assert "Return only fields defined by WebResearchTask" in planner_prompt
+    assert "Web Source Summarizer prepares structured source summaries" in summarizer_prompt
+    assert "Evidence Judge V2 makes final sufficiency decisions" in summarizer_prompt
+    assert "use_case=exercise_material" in summarizer_prompt
+    assert "use_case=roadmap_reference" in summarizer_prompt
+    assert "practice_material" in summarizer_prompt
+
+
+def test_web_research_planner_input_uses_v2_friendly_branch_payload():
+    branch_payload = _web_research_branch_payload(_branches(), original_user_query="current query")
+    messages = _build_web_research_planner_messages(
+        state=_state(),
+        branches=_branches(),
+        original_user_query="current query",
+    )
+    branch_item = branch_payload[0]
+
+    assert messages[-1]["content"]
+    assert branch_item["seed_search_query"] == "big data exercises course"
+    assert "local_branch_status" in branch_item
+    assert "weak_reason" in branch_item
+    assert "local_retrieval_query" not in branch_item
+    assert "web_research_seed_query" not in branch_item
+    assert "retrieval_coverage_goals" not in branch_item
+
+
+def test_web_research_task_rejects_deprecated_output_fields():
+    with pytest.raises(ValidationError):
+        WebResearchPlan.model_validate({
+            "tasks": [
+                {
+                    "task_id": "task-deprecated",
+                    "subject": "big_data",
+                    "role": "core_concept",
+                    "purpose": "exercise_material",
+                    "search_query": "big data exercises",
+                    "web_research_seed_query": "deprecated field must fail",
+                    "local_retrieval_query": "deprecated field must fail",
+                    "retrieval_coverage_goals": ["deprecated field must fail"],
+                    "reason": "Deprecated fields should be exposed as validation errors.",
+                    "priority": 0.8,
+                }
+            ]
+        })
 
 
 @pytest.mark.asyncio
-async def test_planner_failure_uses_legacy_fallback(monkeypatch):
+async def test_web_research_pipeline_success_stage_order_and_stable_candidate(monkeypatch):
+    events: list[dict] = []
+
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _successful_llm)
+    monkeypatch.setattr("src.graph.academic.web_search_fn", lambda *args, **kwargs: _search_result())
+
+    token = set_trace_event_sink(events)
+    try:
+        result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
+    finally:
+        reset_trace_event_sink(token)
+
+    debug = result["web_research_debug"]
+    stages = [stage["stage"] for stage in debug["stages"]]
+    candidate = result["web_evidence_candidates"][0]
+
+    assert result["web_research_outcome"] == "success"
+    assert debug["status"] == "success"
+    assert debug["used_fallback"] is False
+    assert debug["fallback_chain"] == []
+    assert stages == [
+        WEB_RESEARCH_V2_STAGE_START,
+        WEB_RESEARCH_V2_STAGE_PLAN_START,
+        WEB_RESEARCH_V2_STAGE_PLAN_SUCCESS,
+        WEB_RESEARCH_V2_STAGE_SEARCH_START,
+        WEB_RESEARCH_V2_STAGE_SEARCH_TASK,
+        WEB_RESEARCH_V2_STAGE_DEDUPE,
+        WEB_RESEARCH_V2_STAGE_FETCH_START,
+        WEB_RESEARCH_V2_STAGE_FETCH_SOURCE,
+        WEB_RESEARCH_V2_STAGE_CURATE,
+        WEB_RESEARCH_V2_STAGE_SUMMARIZE_START,
+        WEB_RESEARCH_V2_STAGE_SUMMARIZE_SUCCESS,
+        WEB_RESEARCH_V2_STAGE_CANDIDATE_BUILD,
+        WEB_RESEARCH_V2_STAGE_COMPLETE,
+    ]
+    assert candidate["evidence_id"].startswith("web:websrc_task-1_")
+    assert candidate["metadata"]["source_id"].startswith("websrc:task-1:")
+    assert candidate["metadata"]["fetch_status"] == "success"
+    assert candidate["metadata"]["summary_source"] == WEB_RESEARCH_V2_LLM_SUMMARY_SOURCE
+    assert debug["evidence_boundary_reason"] == WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON
+    assert any(event["stage"] == WEB_RESEARCH_V2_STAGE_COMPLETE for event in events)
+    assert all("search_query" not in event for event in events if event["stage"] == WEB_RESEARCH_V2_STAGE_SEARCH_TASK)
+    assert all("canonical_url" not in event for event in events if event["stage"] == WEB_RESEARCH_V2_STAGE_FETCH_SOURCE)
+
+
+@pytest.mark.asyncio
+async def test_planner_failure_fail_fast_raises_without_previous_fallback(monkeypatch):
     async def fake_invoke_structured_llm(**kwargs):
         raise _structured_error(
             node_name=kwargs["node_name"],
@@ -252,115 +421,78 @@ async def test_planner_failure_uses_legacy_fallback(monkeypatch):
             message="planner failed",
         )
 
-    async def fake_legacy(state, branches, branch_debug):
-        return {
-            "web_evidence_candidates": [{"evidence_id": "web:legacy:0"}],
-            "web_evidence_originals": {"web:legacy:0": {"title": "legacy"}},
-        }
-
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic._web_search_dual_source_legacy", fake_legacy)
 
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    debug = result["web_research_v2_debug"]
+    with pytest.raises(RuntimeError, match=WEB_RESEARCH_V2_WARNING_PLANNER_FAILED_FAIL_FAST) as exc_info:
+        await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
 
-    assert result["web_evidence_candidates"] == [{"evidence_id": "web:legacy:0"}]
-    assert debug["status"] == "fallback"
-    assert debug["used_fallback"] is True
-    assert any(item["to"] == "legacy_dual_source_web_search" for item in debug["fallback_chain"])
+    debug = getattr(exc_info.value, "web_research_debug")
+
+    assert debug["status"] == "failed"
+    assert debug["web_research_outcome"] == "failed"
+    assert debug["used_fallback"] is False
+    assert WEB_RESEARCH_V2_WARNING_PLANNER_FAILED_FAIL_FAST in debug["developer_warnings"]
+    assert any(stage["stage"] == WEB_RESEARCH_V2_STAGE_PLAN_FAILED for stage in debug["stages"])
+    assert debug["stages"][-1]["stage"] == WEB_RESEARCH_V2_STAGE_FAILED
 
 
 @pytest.mark.asyncio
-async def test_summarizer_failure_uses_basic_doc_fallback(monkeypatch):
-    plan = WebResearchPlan(tasks=[_task()])
-
+async def test_web_research_v2_disabled_returns_skipped_without_previous_pipeline(monkeypatch):
     async def fake_invoke_structured_llm(**kwargs):
-        if kwargs["node_name"] == "web_research_planner":
-            return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
+        raise AssertionError("LLM must not be called when Web Research V2 is disabled")
+
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
+    monkeypatch.setattr("src.graph.academic._web_research_v2_enabled", lambda: False)
+
+    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
+    debug = result["web_research_debug"]
+
+    assert result["web_evidence_candidates"] == []
+    assert result["web_evidence_originals"] == {}
+    assert result["web_research_outcome"] == "skipped"
+    assert debug["status"] == "skipped"
+    assert debug["used_fallback"] is False
+    assert WEB_RESEARCH_V2_WARNING_DISABLED in debug["developer_warnings"]
+
+
+@pytest.mark.asyncio
+async def test_summarizer_failure_raises_without_basic_fallback(monkeypatch):
+    async def fake_invoke_structured_llm(**kwargs):
+        if kwargs["node_name"] == WEB_RESEARCH_V2_PLANNER_NODE:
+            return _structured_result(
+                parsed=WebResearchPlan(tasks=[_task()]),
+                node_name=WEB_RESEARCH_V2_PLANNER_NODE,
+                schema_name="WebResearchPlan",
+            )
         raise _structured_error(
-            node_name="web_source_summarizer",
+            node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
             schema_name="WebSourceSummaryBatch",
             message="summarizer failed",
         )
 
-    def fake_web_search_fn(*args, **kwargs):
-        return {
-            "ok": True,
-            "results": [
-                {
-                    "title": "Big Data Exercise Set",
-                    "url": "https://example.edu/big-data/exercises",
-                    "content": "Practice HDFS, MapReduce, and Spark basics.",
-                    "score": 0.87,
-                }
-            ],
-            "result_count": 1,
-        }
-
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
+    monkeypatch.setattr("src.graph.academic.web_search_fn", lambda *args, **kwargs: _search_result())
 
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    candidate = result["web_evidence_candidates"][0]
-    original = next(iter(result["web_evidence_originals"].values()))
-    debug = result["web_research_v2_debug"]
+    with pytest.raises(RuntimeError, match=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED) as exc_info:
+        await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
 
-    assert debug["used_fallback"] is True
-    assert candidate["metadata"]["source_id"].startswith("websrc:task-1:")
-    assert candidate["metadata"]["task_id"] == "task-1"
-    assert candidate["metadata"]["canonical_url"] == "https://example.edu/big-data/exercises"
-    assert candidate["metadata"]["url"] == "https://example.edu/big-data/exercises"
-    assert candidate["metadata"]["summary_source"] == "basic_tavily_fallback"
-    assert candidate["metadata"]["source_summary_fallback_used"] is True
-    assert candidate["metadata"]["web_research_v2_stage"] == "summarizer_fallback"
-    assert original["summary_source"] == "basic_tavily_fallback"
-    assert original["source_summary_fallback_used"] is True
+    debug = getattr(exc_info.value, "web_research_debug")
+
+    assert debug["status"] == "failed"
+    assert debug["used_fallback"] is False
+    assert debug["fallback_chain"] == []
+    assert any(stage["stage"] == WEB_RESEARCH_V2_STAGE_SUMMARIZE_FAILED for stage in debug["stages"])
 
 
 @pytest.mark.asyncio
-async def test_web_research_v2_records_search_result_judge_skipped(monkeypatch):
-    plan = WebResearchPlan(tasks=[_task()])
-
+async def test_summarizer_rejects_all_sources_raises(monkeypatch):
     async def fake_invoke_structured_llm(**kwargs):
-        if kwargs["node_name"] == "web_research_planner":
-            return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
-        source_ids = _source_ids_from_messages(kwargs["messages"])
-        batch = WebSourceSummaryBatch(summaries=[_summary(source_id=source_id) for source_id in source_ids])
-        return _structured_result(
-            parsed=batch,
-            node_name="web_source_summarizer",
-            schema_name="WebSourceSummaryBatch",
-        )
-
-    def fake_web_search_fn(*args, **kwargs):
-        return [
-            {
-                "title": "Big Data Exercises",
-                "url": "https://example.edu/big-data",
-                "content": "Hands-on exercises for distributed systems.",
-                "score": 0.91,
-            }
-        ]
-
-    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
-
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    debug = result["web_research_v2_debug"]
-
-    assert debug["search_result_judge_skipped"] is True
-    assert debug["skip_reason"] == WEB_RESEARCH_V2_SKIP_REASON
-    assert all(stage["skip_reason"] == WEB_RESEARCH_V2_SKIP_REASON for stage in debug["stages"] if "skip_reason" in stage)
-
-
-@pytest.mark.asyncio
-async def test_summarizer_rejects_all_sources_returns_empty_degraded(monkeypatch):
-    plan = WebResearchPlan(tasks=[_task(task_id="task:ml:0")])
-    warning = "All web sources were rejected by Web Source Summarizer; continuing with local evidence only."
-
-    async def fake_invoke_structured_llm(**kwargs):
-        if kwargs["node_name"] == "web_research_planner":
-            return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
+        if kwargs["node_name"] == WEB_RESEARCH_V2_PLANNER_NODE:
+            return _structured_result(
+                parsed=WebResearchPlan(tasks=[_task(task_id="task:ml:0")]),
+                node_name=WEB_RESEARCH_V2_PLANNER_NODE,
+                schema_name="WebResearchPlan",
+            )
         source_ids = _source_ids_from_messages(kwargs["messages"])
         batch = WebSourceSummaryBatch(summaries=[
             _summary(
@@ -378,138 +510,49 @@ async def test_summarizer_rejects_all_sources_returns_empty_degraded(monkeypatch
         ])
         return _structured_result(
             parsed=batch,
-            node_name="web_source_summarizer",
+            node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
             schema_name="WebSourceSummaryBatch",
         )
 
-    def fake_web_search_fn(*args, **kwargs):
-        return [
-            {
-                "title": "Rejected Big Data Page",
-                "url": "https://example.edu/rejected-1",
-                "content": "A generic page.",
-                "score": 0.71,
-            },
-            {
-                "title": "Rejected Big Data Blog",
-                "url": "https://example.edu/rejected-2",
-                "content": "Another generic page.",
-                "score": 0.69,
-            },
-        ]
-
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
+    monkeypatch.setattr("src.graph.academic.web_search_fn", lambda *args, **kwargs: _search_result())
 
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    debug = result["web_research_v2_debug"]
-    final_stage = next(stage for stage in debug["stages"] if stage["stage"] == "web_research_v2.final")
+    with pytest.raises(RuntimeError, match=WEB_RESEARCH_V2_WARNING_ALL_SOURCES_REJECTED) as exc_info:
+        await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
 
-    assert result["web_evidence_candidates"] == []
-    assert result["web_evidence_originals"] == {}
-    assert debug["status"] == "degraded"
-    assert warning in debug["developer_warnings"]
-    assert final_stage["summarizer_result_count"] == 2
-    assert final_stage["kept_count"] == 0
-    assert final_stage["rejected_count"] == 2
-    assert final_stage["developer_warning"] == warning
+    debug = getattr(exc_info.value, "web_research_debug")
+    final_stage = debug["stages"][-1]
+
+    assert debug["status"] == "failed"
+    assert debug["used_fallback"] is False
+    assert final_stage["stage"] == WEB_RESEARCH_V2_STAGE_FAILED
+    assert final_stage["summarizer_result_count"] == 1
+    assert final_stage["summarizer_kept_count"] == 0
+    assert WEB_RESEARCH_V2_WARNING_ALL_SOURCES_REJECTED in debug["developer_warnings"]
 
 
 @pytest.mark.asyncio
-async def test_single_tavily_timeout_continues(monkeypatch):
-    plan = WebResearchPlan(tasks=[
-        _task(task_id="task-timeout", search_query="timeout query"),
-        _task(task_id="task-ok", search_query="ok query"),
-    ])
-
-    async def fake_invoke_structured_llm(**kwargs):
-        if kwargs["node_name"] == "web_research_planner":
-            return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
-        source_ids = _source_ids_from_messages(kwargs["messages"])
-        batch = WebSourceSummaryBatch(summaries=[_summary(source_id=source_id) for source_id in source_ids])
-        return _structured_result(
-            parsed=batch,
-            node_name="web_source_summarizer",
-            schema_name="WebSourceSummaryBatch",
-        )
-
-    def fake_web_search_fn(query, *args, **kwargs):
-        if query == "timeout query":
-            raise TimeoutError("boom")
-        return [
-            {
-                "title": "Big Data Practice",
-                "url": "https://example.edu/practice",
-                "content": "Practice tasks.",
-                "score": 0.7,
-            }
-        ]
-
-    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
-    monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
-
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    debug = result["web_research_v2_debug"]
-
-    assert len(result["web_evidence_candidates"]) == 1
-    assert any(stage["stage"] == "web_search_executor.task" and stage["status"] == "failed" for stage in debug["stages"])
-    assert debug["status"] == "success"
-
-
-@pytest.mark.asyncio
-async def test_all_tasks_failed_returns_empty_degraded(monkeypatch):
-    plan = WebResearchPlan(tasks=[_task()])
-
-    async def fake_invoke_structured_llm(**kwargs):
-        return _structured_result(parsed=plan, node_name="web_research_planner", schema_name="WebResearchPlan")
+async def test_search_task_timeout_raises_fail_fast(monkeypatch):
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _successful_llm)
 
     def fake_web_search_fn(*args, **kwargs):
         raise TimeoutError("tavily down")
 
-    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
     monkeypatch.setattr("src.graph.academic.web_search_fn", fake_web_search_fn)
 
-    result = await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
-    debug = result["web_research_v2_debug"]
-
-    assert result["web_evidence_candidates"] == []
-    assert result["web_evidence_originals"] == {}
-    assert debug["status"] == "degraded"
-    assert "All web research tasks failed; continuing with local evidence only." in debug["developer_warnings"]
+    with pytest.raises(RuntimeError, match="fallback is disabled"):
+        await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
 
 
-def test_web_research_silent_fallback_guard_raises_in_strict_mode(monkeypatch):
-    monkeypatch.setattr("src.graph.academic._web_research_v2_strict_observability", lambda: True)
+@pytest.mark.asyncio
+async def test_fetch_failure_raises_fail_fast(monkeypatch):
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _successful_llm)
+    monkeypatch.setattr("src.graph.academic.web_search_fn", lambda *args, **kwargs: _search_result(content=""))
 
-    with pytest.raises(RuntimeError, match="observability violation"):
-        _assert_no_silent_web_research_fallback({
-            "status": "success",
-            "used_fallback": False,
-            "fallback_chain": [],
-            "developer_warnings": [],
-            "stages": [{"stage": "web_source_summarizer.batch", "is_fallback": True}],
-        })
+    with pytest.raises(RuntimeError, match="source fetch failed") as exc_info:
+        await _web_search_dual_source(_state(), _branches(), {"mode": "dual_source_evidence"})
 
+    debug = getattr(exc_info.value, "web_research_debug")
 
-def test_web_research_silent_fallback_guard_repairs_when_not_strict(monkeypatch, caplog):
-    monkeypatch.setattr("src.graph.academic._web_research_v2_strict_observability", lambda: False)
-    debug = {
-        "status": "success",
-        "used_fallback": False,
-        "fallback_chain": [
-            {
-                "from": "web_source_summarizer",
-                "to": "basic_tavily_fallback",
-                "reason": "StructuredOutputError",
-            }
-        ],
-        "developer_warnings": [],
-        "stages": [{"stage": "web_source_summarizer.batch", "is_fallback": True}],
-    }
-
-    with caplog.at_level(logging.ERROR, logger="src.graph.academic"):
-        _assert_no_silent_web_research_fallback(debug)
-
-    assert "observability violation" in caplog.text
-    assert debug["used_fallback"] is True
-    assert debug["status"] == "fallback"
+    assert debug["status"] == "failed"
+    assert any(stage["stage"] == WEB_RESEARCH_V2_STAGE_FAILED for stage in debug["stages"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -30,6 +31,7 @@ WebUseCase = Literal[
 ]
 WebQuality = Literal["high", "medium", "low"]
 WebRisk = Literal["low", "medium", "high"]
+WebFetchStatus = Literal["success", "failed", "not_attempted"]
 
 
 class WebResearchTask(BaseModel):
@@ -75,6 +77,56 @@ class WebSourceSummaryBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summaries: list[WebSourceSummary] = Field(default_factory=list, max_length=12)
+
+
+class WebRawSource(BaseModel):
+    """Program-normalized search result before fetch/compression.
+
+    Raw provider dictionaries must be converted to this shape before passing
+    into Web Research V2 downstream stages.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(...)
+    source_id: str = ""
+    original_url: str = ""
+    canonical_url: str = ""
+    title: str = ""
+    domain: str = ""
+    snippet: str = ""
+    raw_content: str = ""
+    provider: str = ""
+    provider_score: float | None = None
+    provider_rank: int = 0
+    retrieved_at: str = ""
+    subject: str = ""
+    role: str = ""
+    purpose: str = ""
+    search_query: str = ""
+    task_priority: float = 0.0
+    favicon: str = ""
+
+
+class WebFetchedSource(WebRawSource):
+    """Source after the lightweight fetch/content availability stage."""
+
+    fetch_status: WebFetchStatus = "not_attempted"
+    content_chars: int = 0
+    content_preview: str = ""
+    fetch_error_type: str | None = None
+    fetch_error_message_sanitized: str | None = None
+
+
+class WebCuratedSource(WebFetchedSource):
+    """Source after source-level curation.
+
+    Curation is intentionally source-level cleanup/ranking only. Evidence Judge
+    V2 remains responsible for final sufficiency decisions.
+    """
+
+    curator_keep: bool = True
+    curator_reason: str = ""
 
 
 def validate_web_research_plan(
@@ -211,9 +263,86 @@ def canonicalize_url(url: str) -> str:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_web_raw_source(
+    result: dict[str, Any],
+    *,
+    task_id: str,
+    subject: str,
+    role: str,
+    purpose: str,
+    search_query: str,
+    task_priority: float,
+    provider: str,
+    provider_rank: int,
+    retrieved_at: str | None = None,
+) -> WebRawSource:
+    """Convert a provider result into the WebRawSource contract."""
+
+    original_url = str(result.get("url") or result.get("href") or "")
+    raw_content = str(result.get("raw_content") or "")
+    snippet = str(result.get("content") or result.get("snippet") or result.get("body") or "")
+    score = result.get("score", result.get("tavily_score", result.get("provider_score")))
+    try:
+        provider_score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        provider_score = None
+    return WebRawSource(
+        task_id=str(task_id or ""),
+        original_url=original_url,
+        canonical_url=canonicalize_url(original_url),
+        title=str(result.get("title") or ""),
+        domain=domain_from_url(original_url),
+        snippet=snippet,
+        raw_content=raw_content,
+        provider=str(provider or ""),
+        provider_score=provider_score,
+        provider_rank=int(provider_rank),
+        retrieved_at=str(retrieved_at or utc_now_iso()),
+        subject=str(subject or ""),
+        role=str(role or ""),
+        purpose=str(purpose or ""),
+        search_query=str(search_query or ""),
+        task_priority=float(task_priority or 0.0),
+        favicon=str(result.get("favicon") or ""),
+    )
+
+
+def fetch_source_from_provider_content(
+    source: WebRawSource,
+    *,
+    min_content_chars: int = 1,
+    preview_chars: int = 1200,
+    sanitize_error,
+) -> WebFetchedSource:
+    """Use provider-supplied content as the lightweight fetch result."""
+
+    content = str(source.raw_content or source.snippet or "").strip()
+    content_chars = len(content)
+    if content_chars < max(1, int(min_content_chars or 1)):
+        return WebFetchedSource(
+            **source.model_dump(),
+            fetch_status="failed",
+            content_chars=content_chars,
+            content_preview=content[:preview_chars],
+            fetch_error_type="InsufficientProviderContent",
+            fetch_error_message_sanitized=sanitize_error("provider result did not include readable content"),
+        )
+    return WebFetchedSource(
+        **source.model_dump(),
+        fetch_status="success",
+        content_chars=content_chars,
+        content_preview=content[:preview_chars],
+    )
+
+
 def _score_for_dedupe(source: dict[str, Any]) -> tuple[float, float]:
     try:
-        tavily_score = float(source.get("tavily_score") if source.get("tavily_score") is not None else -1.0)
+        score = source.get("tavily_score", source.get("provider_score"))
+        tavily_score = float(score if score is not None else -1.0)
     except (TypeError, ValueError):
         tavily_score = -1.0
     try:

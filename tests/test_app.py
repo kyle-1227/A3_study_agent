@@ -155,6 +155,31 @@ class TestResourceFinalPayload:
         assert "Current evidence is insufficient" in payload["answer"]
         assert "study_plan" not in payload
 
+    def test_multi_resource_bundle_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "mindmap",
+                "requested_resource_types": ["mindmap", "quiz"],
+                "resource_generation_status": "partial_success",
+                "resource_bundle_artifact": {
+                    "type": "resource_bundle",
+                    "status": "partial_success",
+                    "resources": [{"resource_type": "mindmap", "title": "Mock Map"}],
+                    "errors": [{"resource_type": "quiz", "error_message_sanitized": "quiz failed"}],
+                },
+                "messages": [type("Msg", (), {"content": "bundle summary"})()],
+            }
+        )
+
+        assert payload is not None
+        assert payload["type"] == "resource_final"
+        assert payload["resource_type"] == "bundle"
+        assert payload["resource_generation_status"] == "partial_success"
+        assert payload["resources"] == [{"resource_type": "mindmap", "title": "Mock Map"}]
+        assert payload["errors"][0]["resource_type"] == "quiz"
+
 
 class TestDevMemoryClear:
     """Verify development-only persistent memory clearing."""

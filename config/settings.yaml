@@ -3,7 +3,7 @@
 
 academic:
   max_retries: 2                        # Hallucination retry loop limit
-  search_timeout: 6                     # Legacy/general web search timeout (seconds)
+  search_timeout: 6                     # Default external evidence timeout (seconds)
   temperature: 0.7                      # Answer generation temperature
   max_tokens: 4096                      # Answer bubble output budget (doubled)
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
@@ -22,16 +22,9 @@ checkpointer:
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
 web_search:
-  provider: tavily                       # Tavily is the only Web Search provider; no fallback
-  conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
-  skip_general_when_conditional: true     # Skip old fan-out web_search for academic intent
-  skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
-  timeout_seconds: 30                      # Timeout per Tavily web supplement attempt
-  max_total_attempts: 3                   # Global dynamic web attempts per request
-  max_attempts_per_subject: 2             # Dynamic web attempts per subject branch
-  max_supplement_subjects: 2              # Max subjects selected for web supplement
-  max_results_per_attempt: 3              # Max web results used from one attempt
-  max_query_chars: 160                    # Keep supplement queries short without breaking key phrases
+  provider: tavily                       # Web Research executor provider
+  timeout_seconds: 30                    # Timeout per web research task
+  max_query_chars: 160                   # Keep search queries short without breaking key phrases
   tavily:
     enabled: true
     api_key_env: TAVILY_API_KEY
@@ -44,15 +37,9 @@ web_search:
     topic: general
     include_usage: true
   preserve_key_phrases: true              # Preserve common complete technical phrases in compacted queries
-  retry_failed_subjects_first: true        # Give failed/no-result subjects the next retry opportunity
-  stop_subject_after_success: true         # Do not spend more budget once a subject has enough usable Web supplement
-  min_results_per_subject: 1               # Minimum usable results before a subject is considered successful
-  llm_decision_enabled: true              # Use LLM coverage decision before rule fallback
-  max_purposes_per_subject: 4             # Cap purpose labels per subject decision
-  max_plan_items_per_subject: 3           # Cap search queries per subject decision
 
 retrieval:
-  mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
+  mode: dual_source_evidence               # local RAG + Web Research evidence -> unified Evidence Judge
   dual_source_evidence:
     block_generation_when_evidence_judge_failed: true
   evidence_judge_v2:
@@ -61,16 +48,16 @@ retrieval:
     allow_sufficiency_deterministic_fallback: true
     expose_fallback_trace: true
     strict_observability: true
-    fallback_to_legacy_on_v2_failure: true
   web_research_v2:
     scope: dual_source_evidence_only
     enabled: true
+    fail_fast: true
+    allow_empty_web_evidence_on_failure: false
     max_tasks_per_subject: 2
     max_total_tasks: 6
     max_results_per_task: 3
     source_summary_batch_size: 6
     summarize_sources: true
-    fallback_to_legacy_web_supplement: true
     expose_fallback_trace: true
     strict_observability: true
   local_rag:
@@ -148,16 +135,6 @@ llm:
     temperature: 0.2
     max_tokens: 4096
     streaming: false
-  web_coverage_decision:
-    provider: deepseek_official
-    model: "deepseek-v4-flash"
-    base_url: "https://api.deepseek.com"
-    beta_base_url: "https://api.deepseek.com/beta"
-    api_key_env: "DEEPSEEK_API_KEY"
-    temperature: 0.0
-    max_tokens: 1024
-    thinking: disabled
-    streaming: false
   web_research_planner:
     provider: deepseek_official
     model: "deepseek-v4-flash"
@@ -179,19 +156,6 @@ llm:
     api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 1800
-    thinking: disabled
-    streaming: false
-    structured_output: true
-    strict_schema: true
-    include_raw: true
-  search_result_judge:
-    provider: deepseek_official
-    model: "deepseek-v4-flash"
-    base_url: "https://api.deepseek.com"
-    beta_base_url: "https://api.deepseek.com/beta"
-    api_key_env: "DEEPSEEK_API_KEY"
-    temperature: 0.0
-    max_tokens: 1024
     thinking: disabled
     streaming: false
     structured_output: true
@@ -240,6 +204,8 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+    reask_enabled: true
+    reask_business_validation: false
   supervisor:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
@@ -252,6 +218,7 @@ llm_outputs:
     failure_policy: block
     max_retries: 0
     max_raw_chars: 12000
+    reask_enabled: false
   memory_use_decider:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
@@ -288,30 +255,20 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
-  web_coverage_decision:
-    output_mode: deepseek_tool_call_strict
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 2
-    max_raw_chars: 12000
   web_research_planner:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+    reask_business_validation: true
   web_source_summarizer:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
-  evidence_judge:
-    output_mode: native_json_schema_pydantic
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 2
-    max_raw_chars: 12000
+    reask_business_validation: true
   evidence_item_grader:
     output_mode: native_json_schema_pydantic
     fallback_modes:
@@ -320,6 +277,7 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+    reask_business_validation: true
   evidence_sufficiency_judge:
     output_mode: native_json_schema_pydantic
     fallback_modes:
@@ -328,12 +286,7 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
-  search_result_judge:
-    output_mode: deepseek_tool_call_strict
-    fallback_modes: []
-    failure_policy: block
-    max_retries: 2
-    max_raw_chars: 12000
+    reask_business_validation: true
   study_plan_emotional_intel:
     output_mode: native_json_schema_pydantic
     fallback_modes: []
@@ -408,14 +361,6 @@ query_rewrite:
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic retrieval-query rewriting
   max_tokens: 1000
-  streaming: false
-
-web_coverage_decision:
-  model: "deepseek-v4-flash"
-  base_url: "https://api.deepseek.com"
-  api_key_env: "DEEPSEEK_API_KEY"
-  temperature: 0.0
-  max_tokens: 10000
   streaming: false
 
 hallucination_eval:

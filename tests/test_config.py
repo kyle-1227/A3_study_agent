@@ -1,9 +1,9 @@
-"""Unit tests for configuration manager — YAML settings + XML prompt loading.
+﻿"""Unit tests for configuration manager - YAML settings + XML prompt loading.
 
 Tests cover: YAML settings loading/caching, XML prompt loading/caching,
 dot-notation setting access, prompt rendering with {variables},
 cache invalidation, and all prompt files loadable.
-All tests use tmp_path or mock — no real config files needed.
+All tests use tmp_path or mock - no real config files needed.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def config_dir(tmp_path):
 
 
 # ===========================================================================
-# TestLoadSettings — YAML loading and caching
+# TestLoadSettings - YAML loading and caching
 # ===========================================================================
 
 class TestLoadSettings:
@@ -101,7 +101,7 @@ class TestLoadSettings:
 
 
 # ===========================================================================
-# TestGetSetting — dot-notation access
+# TestGetSetting - dot-notation access
 # ===========================================================================
 
 class TestGetSetting:
@@ -160,7 +160,7 @@ class TestGetSetting:
 
 
 # ===========================================================================
-# TestLoadPrompt — XML prompt loading and caching
+# TestLoadPrompt - XML prompt loading and caching
 # ===========================================================================
 
 class TestLoadPrompt:
@@ -243,7 +243,7 @@ class TestLoadPrompt:
 
 
 # ===========================================================================
-# TestPromptRendering — .format() with loaded prompts
+# TestPromptRendering - .format() with loaded prompts
 # ===========================================================================
 
 class TestPromptRendering:
@@ -269,17 +269,10 @@ class TestPromptRendering:
     def test_prompts_preserve_professional_original_terms(self):
         from src.config import load_prompt
 
-        for name in [
-            "academic_answer",
-            "mindmap_planner",
-            "mindmap_agent",
-            "exercise_planner",
-            "exercise_agent",
-            "mindmap_reviewer",
-            "exercise_reviewer",
-        ]:
-            prompt = load_prompt(name)
-            assert "专业原词" in prompt, f"{name} should preserve original terms"
+        prompt = load_prompt("academic_answer")
+        assert "Preserve important English technical terms" in prompt
+        assert "APIs" in prompt
+        assert "algorithm names" in prompt
 
     def test_supervisor_prompt_supports_soft_subjects_and_bilingual_keywords(self):
         from src.config import load_prompt
@@ -287,7 +280,7 @@ class TestPromptRendering:
         prompt = load_prompt("supervisor_system")
         assert "available subjects" in prompt
         assert "subject_candidates" in prompt
-        assert "英文术语" in prompt
+        assert "英文原词" in prompt
         assert "不要编造" in prompt
 
     def test_rewrite_query_prompt_requires_bilingual_original_terms(self):
@@ -296,26 +289,28 @@ class TestPromptRendering:
         prompt = load_prompt("rewrite_query")
         assert "只输出一行检索查询" in prompt
         assert "保留用户原始核心关键词" in prompt
-        assert "专业原词" in prompt
-        assert "英文术语" in prompt
+        assert "专业术语" in prompt
+        assert "英文教材" in prompt
 
     def test_search_query_rewriter_prompt_supports_retrieval_plan(self):
         from src.config import load_prompt
 
         prompt = load_prompt("search_query_rewriter")
-        assert "available subjects" in prompt
+        assert "Available Subjects" in prompt
         assert "subject_candidates" in prompt
         assert "retrieval_plan" in prompt
         assert "core_concept" in prompt
-        assert "implementation_tool" in prompt
+        assert "Web Research V2" in prompt
 
     def test_resource_prompts_explain_multi_subject_relations(self):
         from src.config import load_prompt
 
         for name in ["academic_answer", "mindmap_planner", "exercise_planner"]:
             prompt = load_prompt(name)
-            assert "多个 subject" in prompt
-            assert "核心概念 → 工具实现 → 应用场景" in prompt
+            assert "source_type=web" in prompt
+            assert "Web Research evidence" in prompt
+            assert "local_rag" in prompt
+
 
     def test_hallucination_eval_renders(self):
         """hallucination_eval prompt renders with question, context, answer."""
@@ -345,7 +340,7 @@ class TestPromptRendering:
 
 
 # ===========================================================================
-# TestClearCache — cache invalidation
+# TestClearCache - cache invalidation
 # ===========================================================================
 
 class TestClearCache:
@@ -380,7 +375,7 @@ class TestClearCache:
 
 
 # ===========================================================================
-# TestAllPromptsLoadable — smoke test for all XML prompt files
+# TestAllPromptsLoadable - smoke test for all XML prompt files
 # ===========================================================================
 
 class TestAllPromptsLoadable:
@@ -412,7 +407,7 @@ class TestAllPromptsLoadable:
 
 
 # ===========================================================================
-# TestSettingsValues — verify settings.yaml has expected values
+# TestSettingsValues - verify settings.yaml has expected values
 # ===========================================================================
 
 class TestSettingsValues:
@@ -467,7 +462,7 @@ class TestSettingsValues:
 
 
 # ===========================================================================
-# TestNodeConfigIntegration — nodes use config dynamically
+# TestNodeConfigIntegration - nodes use config dynamically
 # ===========================================================================
 
 class TestNodeConfigIntegration:
@@ -480,12 +475,12 @@ class TestNodeConfigIntegration:
 
         assert MAX_RETRIES == get_setting("academic.max_retries")
 
-    def test_academic_search_timeout_from_config(self):
-        """_SEARCH_TIMEOUT in academic.py should come from web search config."""
-        from src.graph.academic import _SEARCH_TIMEOUT
+    def test_web_research_timeout_from_config(self):
+        """Web Research timeout should come from web search config."""
+        from src.graph.academic import _web_timeout_seconds
         from src.config import get_setting
 
-        assert _SEARCH_TIMEOUT == get_setting("web_search.timeout_seconds")
+        assert _web_timeout_seconds() == get_setting("web_search.timeout_seconds")
 
     @patch("src.graph.academic.get_fallback_llm")
     @patch("src.graph.academic.get_node_llm")

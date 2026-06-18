@@ -126,7 +126,7 @@ class EvidenceSufficiencyOutput(BaseModel):
         "cannot_answer",
     ] = "cannot_answer"
     need_more_local_rag: bool = False
-    need_more_web_search: bool = False
+    need_more_web_research: bool = False
     coverage_gaps: list[EvidenceCoverageGap] = Field(default_factory=list, max_length=5)
     decision_summary: str = Field("", max_length=600)
 
@@ -140,7 +140,7 @@ class EvidenceJudgeOutput(BaseModel):
         "insufficient",
     ] = "insufficient"
 
-    need_more_web_search: bool = False
+    need_more_web_research: bool = False
     judged_evidence: list[EvidenceJudgeItem] = Field(default_factory=list)
     coverage_gaps: list[EvidenceCoverageGap] = Field(default_factory=list)
     decision_summary: str = ""
