@@ -1883,13 +1883,14 @@ def _assert_no_silent_fallback(debug: dict) -> None:
 def _candidate_trace_payload(candidates: list[EvidenceCandidate]) -> list[dict]:
     payload: list[dict] = []
     for candidate in candidates:
+        metadata = candidate.metadata or {}
+        covered_roles = metadata.get("covered_roles") or ([candidate.role] if candidate.role else [])
         payload.append({
             "evidence_id": candidate.evidence_id,
             "source_type": candidate.source_type,
             "subject": candidate.subject,
             "role": candidate.role,
-            "title": _clip_text(candidate.title, 160),
-            "source": _clip_text(candidate.source, 160),
+            "covered_roles": covered_roles,
         })
     return payload
 
@@ -2060,6 +2061,136 @@ def validate_evidence_sufficiency_output(parsed: BaseModel, *, kept_count: int) 
     return "; ".join(problems)
 
 
+def _candidate_covered_roles(candidate: EvidenceCandidate) -> list[str]:
+    metadata = candidate.metadata or {}
+    roles = [str(role) for role in _metadata_list(metadata.get("covered_roles"))]
+    if candidate.role:
+        roles.append(candidate.role)
+    return [role for role in _ordered_unique(roles) if str(role).strip()]
+
+
+def _candidate_roles_include(candidate: EvidenceCandidate, wanted: set[str]) -> bool:
+    return any(role in wanted for role in _candidate_covered_roles(candidate))
+
+
+def _is_valid_web_evidence_candidate(candidate: EvidenceCandidate) -> bool:
+    if candidate.source_type != "web":
+        return False
+    if not candidate.evidence_id.strip():
+        return False
+    if not candidate.content_preview.strip():
+        return False
+    metadata = candidate.metadata or {}
+    fetch_status = str(metadata.get("fetch_status") or "").strip().lower()
+    if fetch_status and ("failed" in fetch_status or "empty" in fetch_status):
+        return False
+    content_chars = metadata.get("content_chars")
+    try:
+        if content_chars is not None and int(content_chars) <= 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
+def _candidate_is_usable_for_first_batch_role(candidate: EvidenceCandidate) -> bool:
+    return candidate.source_type != "web" or _is_valid_web_evidence_candidate(candidate)
+
+
+def _first_batch_source_type_counts(candidates: list[EvidenceCandidate]) -> dict[str, int]:
+    return dict(Counter(candidate.source_type for candidate in candidates))
+
+
+def _first_batch_role_coverage(candidates: list[EvidenceCandidate]) -> list[str]:
+    roles: list[str] = []
+    for candidate in candidates:
+        roles.extend(_candidate_covered_roles(candidate))
+    return [str(role) for role in _ordered_unique(roles)]
+
+
+def _append_candidate_once(
+    selected: list[EvidenceCandidate],
+    candidate: EvidenceCandidate | None,
+    selected_ids: set[str],
+    *,
+    limit: int,
+) -> None:
+    if candidate is None or len(selected) >= limit or candidate.evidence_id in selected_ids:
+        return
+    selected.append(candidate)
+    selected_ids.add(candidate.evidence_id)
+
+
+def _order_evidence_candidates_for_grading(
+    candidates: list[EvidenceCandidate],
+    *,
+    batch_size: int,
+    requested_resource_types: list[str] | None = None,
+) -> tuple[list[EvidenceCandidate], dict]:
+    duplicate_ids = _duplicate_evidence_ids(candidates)
+    if duplicate_ids:
+        raise _duplicate_evidence_id_error("evidence item grading", duplicate_ids)
+
+    ranked = sorted(candidates, key=_candidate_rank, reverse=True)
+    first_batch: list[EvidenceCandidate] = []
+    selected_ids: set[str] = set()
+    resource_types = set(requested_resource_types or [])
+    wants_bundle = "mindmap" in resource_types and "quiz" in resource_types
+
+    if wants_bundle:
+        core_candidate = next(
+            (
+                candidate
+                for candidate in ranked
+                if _candidate_is_usable_for_first_batch_role(candidate)
+                and _candidate_roles_include(candidate, {"core_concept"})
+            ),
+            None,
+        )
+        practice_candidate = next(
+            (
+                candidate
+                for candidate in ranked
+                if _candidate_is_usable_for_first_batch_role(candidate)
+                and _candidate_roles_include(candidate, {"practice", "exercise"})
+            ),
+            None,
+        )
+        _append_candidate_once(first_batch, core_candidate, selected_ids, limit=batch_size)
+        _append_candidate_once(first_batch, practice_candidate, selected_ids, limit=batch_size)
+
+    valid_web_candidates = [candidate for candidate in ranked if _is_valid_web_evidence_candidate(candidate)]
+    _append_candidate_once(
+        first_batch,
+        valid_web_candidates[0] if valid_web_candidates else None,
+        selected_ids,
+        limit=batch_size,
+    )
+
+    local_candidate = next((candidate for candidate in ranked if candidate.source_type == "local_rag"), None)
+    _append_candidate_once(first_batch, local_candidate, selected_ids, limit=batch_size)
+
+    preferred_fill = [
+        candidate
+        for candidate in ranked
+        if candidate.source_type == "local_rag" or _is_valid_web_evidence_candidate(candidate)
+    ]
+    for candidate in [*preferred_fill, *ranked]:
+        _append_candidate_once(first_batch, candidate, selected_ids, limit=batch_size)
+        if len(first_batch) >= batch_size:
+            break
+
+    ordered = first_batch + [candidate for candidate in ranked if candidate.evidence_id not in selected_ids]
+    return ordered, {
+        "first_batch_evidence_ids": [candidate.evidence_id for candidate in first_batch],
+        "first_batch_source_type_counts": _first_batch_source_type_counts(first_batch),
+        "first_batch_role_coverage": _first_batch_role_coverage(first_batch),
+        "ordered_candidate_count": len(ordered),
+        "candidate_count_preserved": len(ordered) == len(candidates),
+        "valid_web_candidate_count": len(valid_web_candidates),
+    }
+
+
 async def _grade_evidence_items_with_llm(
     *,
     state: LearningState,
@@ -2074,12 +2205,39 @@ async def _grade_evidence_items_with_llm(
     batch_size = _evidence_judge_v2_batch_size()
     all_items: list[EvidenceJudgeItem] = []
     debug = {"stages": []}
+    duplicate_ids = _duplicate_evidence_ids(candidates)
+    if duplicate_ids:
+        stage = _make_execution_status(
+            node_name="evidence_item_grader",
+            stage="evidence_item_grader.precheck",
+            status="failed",
+            error_type="DuplicateEvidenceIdBeforeGrading",
+            error_message=f"Duplicate evidence_id values before grading: {duplicate_ids}",
+            structured_output_mode=get_llm_output_mode("evidence_item_grader"),
+            fallback_modes_attempted=get_fallback_modes("evidence_item_grader"),
+            retry_count=0,
+            validation_errors=[f"duplicate evidence_id values: {duplicate_ids}"],
+            action_taken="fail_before_calling_evidence_item_grader",
+            candidate_count=len(candidates),
+            duplicate_evidence_ids_before_grading=duplicate_ids,
+        )
+        debug["stages"].append(stage)
+        _emit_evidence_stage_trace(state, stage)
+        return None, debug
+
+    candidates, ordering_debug = _order_evidence_candidates_for_grading(
+        candidates,
+        batch_size=batch_size,
+        requested_resource_types=requested_resource_types,
+    )
+    debug["candidate_ordering"] = ordering_debug
     batches = [candidates[index : index + batch_size] for index in range(0, len(candidates), batch_size)]
     output_mode = get_llm_output_mode("evidence_item_grader")
     fallback_modes = get_fallback_modes("evidence_item_grader")
 
     for batch_index, batch in enumerate(batches):
         expected_ids = [candidate.evidence_id for candidate in batch]
+        batch_ordering_debug = ordering_debug if batch_index == 0 else {}
         messages = _build_evidence_item_grader_messages(
             candidates=batch,
             original_user_query=original_user_query,
@@ -2121,6 +2279,7 @@ async def _grade_evidence_items_with_llm(
                 action_taken="return_failed_stage_for_v2_dispatcher",
                 batch_index=batch_index,
                 candidate_count=len(batch),
+                **batch_ordering_debug,
                 expected_ids=expected_ids,
                 judged_ids=raw_trace["judged_ids"],
                 missing_ids=id_summary["missing_ids"],
@@ -2149,6 +2308,7 @@ async def _grade_evidence_items_with_llm(
                 action_taken="return_failed_stage_for_v2_dispatcher",
                 batch_index=batch_index,
                 candidate_count=len(batch),
+                **batch_ordering_debug,
                 expected_ids=expected_ids,
                 judged_ids=[],
                 kept_count=0,
@@ -2181,6 +2341,7 @@ async def _grade_evidence_items_with_llm(
                 action_taken="return_failed_stage_for_v2_dispatcher",
                 batch_index=batch_index,
                 candidate_count=len(batch),
+                **batch_ordering_debug,
                 expected_ids=expected_ids,
                 judged_ids=raw_trace["judged_ids"],
                 missing_ids=id_summary["missing_ids"],
@@ -2214,6 +2375,7 @@ async def _grade_evidence_items_with_llm(
                 action_taken="return_failed_stage_for_v2_dispatcher",
                 batch_index=batch_index,
                 candidate_count=len(batch),
+                **batch_ordering_debug,
                 expected_ids=expected_ids,
                 judged_ids=judged_ids,
                 kept_count=sum(1 for item in parsed.judged_evidence if item.keep),
@@ -2242,6 +2404,7 @@ async def _grade_evidence_items_with_llm(
             action_taken="accepted_batch_judgement",
             batch_index=batch_index,
             candidate_count=len(batch),
+            **batch_ordering_debug,
             expected_ids=expected_ids,
             judged_ids=judged_ids,
             kept_count=sum(1 for item in parsed.judged_evidence if item.keep),
@@ -2720,21 +2883,252 @@ def _candidate_rank(candidate: EvidenceCandidate) -> float:
     return float(candidate.tavily_score or 0)
 
 
+_EVIDENCE_ID_HASH_CHARS = 8
+_LOCAL_EVIDENCE_ID_STRATEGY = "local:{safe_subject}:{source_hash8}:{chunk_key_hash8}"
+_SAFE_EVIDENCE_ID_PART_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _sha256_hex(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _safe_evidence_id_part(value: Any, *, default: str = "unknown") -> str:
+    """Make an ID segment safe without changing business meaning."""
+    text = str(value or "").strip().lower()
+    safe = _SAFE_EVIDENCE_ID_PART_RE.sub("_", text).strip("_")
+    return safe[:48] or default
+
+
+def _local_doc_metadata(doc: dict) -> dict:
+    return dict(doc.get("metadata") or {})
+
+
+def _local_doc_source_identity(doc: dict) -> str:
+    metadata = _local_doc_metadata(doc)
+    value = (
+        doc.get("source")
+        or metadata.get("source")
+        or metadata.get("source_file")
+        or metadata.get("file_path")
+        or metadata.get("path")
+        or doc.get("url")
+        or "unknown_source"
+    )
+    return str(value or "unknown_source")
+
+
+def _local_doc_full_content(doc: dict) -> str:
+    return str(doc.get("page_content") or doc.get("content") or "")
+
+
+def _first_present_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and str(value) != "":
+            return value
+    return None
+
+
+def _local_doc_chunk_identity(doc: dict) -> tuple[str, str]:
+    metadata = _local_doc_metadata(doc)
+    chunk_id = _first_present_value(
+        doc.get("chunk_id"),
+        metadata.get("chunk_id"),
+        metadata.get("id"),
+        metadata.get("doc_id"),
+        metadata.get("document_id"),
+    )
+    if chunk_id is not None:
+        return "chunk_id", str(chunk_id)
+
+    page = _first_present_value(
+        doc.get("page"),
+        doc.get("page_number"),
+        metadata.get("page"),
+        metadata.get("page_number"),
+    )
+    chunk_index = _first_present_value(
+        doc.get("chunk_index"),
+        doc.get("chunk"),
+        metadata.get("chunk_index"),
+        metadata.get("chunk"),
+    )
+    if page is not None and chunk_index is not None:
+        return "page_chunk", f"{page}:{chunk_index}"
+
+    return "content_hash", _sha256_hex(_local_doc_full_content(doc))
+
+
+def _local_candidate_identity(doc: dict, *, subject: str) -> dict:
+    source_identity = _local_doc_source_identity(doc)
+    source_hash = _sha256_hex(source_identity)
+    content_hash = _sha256_hex(_local_doc_full_content(doc))
+    chunk_identity_kind, chunk_identity_value = _local_doc_chunk_identity(doc)
+    chunk_key_hash = _sha256_hex(f"{chunk_identity_kind}:{chunk_identity_value}")
+    safe_subject = _safe_evidence_id_part(subject, default="other")
+    dedupe_key = f"{safe_subject}:{source_hash}:{chunk_identity_kind}:{chunk_key_hash}"
+    source_hash8 = source_hash[:_EVIDENCE_ID_HASH_CHARS]
+    chunk_key_hash8 = chunk_key_hash[:_EVIDENCE_ID_HASH_CHARS]
+    return {
+        "safe_subject": safe_subject,
+        "source_hash": source_hash,
+        "source_hash8": source_hash8,
+        "content_hash": content_hash,
+        "content_hash8": content_hash[:_EVIDENCE_ID_HASH_CHARS],
+        "chunk_identity_kind": chunk_identity_kind,
+        "chunk_key_hash": chunk_key_hash,
+        "chunk_key_hash8": chunk_key_hash8,
+        "dedupe_key": dedupe_key,
+        "evidence_id": f"local:{safe_subject}:{source_hash8}:{chunk_key_hash8}",
+    }
+
+
+def _ordered_unique(values: list[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        key = str(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _metadata_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None or value == "":
+        return []
+    return [value]
+
+
+def _candidate_identity_signature(candidate: EvidenceCandidate) -> tuple[str, str, str]:
+    metadata = candidate.metadata or {}
+    return (
+        str(metadata.get("dedupe_key") or ""),
+        str(metadata.get("source_hash") or metadata.get("source_hash8") or ""),
+        str(metadata.get("content_hash") or metadata.get("content_hash8") or ""),
+    )
+
+
+def _merge_local_evidence_candidate(
+    base: EvidenceCandidate,
+    incoming: EvidenceCandidate,
+) -> EvidenceCandidate:
+    base_metadata = dict(base.metadata or {})
+    incoming_metadata = dict(incoming.metadata or {})
+    base_priority = float(base_metadata.get("max_priority") or base_metadata.get("retrieval_priority") or 0)
+    incoming_priority = float(incoming_metadata.get("max_priority") or incoming_metadata.get("retrieval_priority") or 0)
+    covered_roles = _ordered_unique([
+        *_metadata_list(base_metadata.get("covered_roles")),
+        base.role,
+        *_metadata_list(incoming_metadata.get("covered_roles")),
+        incoming.role,
+    ])
+    covered_branch_indices = _ordered_unique([
+        *_metadata_list(base_metadata.get("covered_branch_indices")),
+        *_metadata_list(incoming_metadata.get("covered_branch_indices")),
+    ])
+    covered_retrieval_queries = _ordered_unique([
+        *_metadata_list(base_metadata.get("covered_retrieval_queries")),
+        base_metadata.get("retrieval_query"),
+        *_metadata_list(incoming_metadata.get("covered_retrieval_queries")),
+        incoming_metadata.get("retrieval_query"),
+    ])
+    merged_from_ids = _ordered_unique([
+        *_metadata_list(base_metadata.get("merged_from_ids")),
+        base_metadata.get("candidate_origin_id"),
+        *_metadata_list(incoming_metadata.get("merged_from_ids")),
+        incoming_metadata.get("candidate_origin_id"),
+    ])
+    merged_metadata = {
+        **base_metadata,
+        "covered_roles": covered_roles,
+        "covered_branch_indices": covered_branch_indices,
+        "covered_retrieval_queries": covered_retrieval_queries,
+        "best_priority": max(base_priority, incoming_priority),
+        "max_priority": max(base_priority, incoming_priority),
+        "merged_from_ids": merged_from_ids,
+        "source_type": "local_rag",
+        "merged_candidate_count": len(merged_from_ids),
+    }
+    return base.model_copy(update={
+        "rerank_score": max(float(base.rerank_score or 0), float(incoming.rerank_score or 0)),
+        "raw_vector_score": max(float(base.raw_vector_score or 0), float(incoming.raw_vector_score or 0)),
+        "metadata": merged_metadata,
+    })
+
+
+def _dedupe_and_merge_local_candidates(candidates: list[EvidenceCandidate]) -> tuple[list[EvidenceCandidate], dict]:
+    by_dedupe_key: dict[str, EvidenceCandidate] = {}
+    id_signatures: dict[str, tuple[str, str, str]] = {}
+    deduped_chunk_count = 0
+    merged_candidate_count = 0
+    collision_ids: list[str] = []
+
+    for candidate in candidates:
+        metadata = candidate.metadata or {}
+        dedupe_key = str(metadata.get("dedupe_key") or candidate.evidence_id)
+        signature = _candidate_identity_signature(candidate)
+        previous_signature = id_signatures.get(candidate.evidence_id)
+        if previous_signature is not None and previous_signature != signature:
+            collision_ids.append(candidate.evidence_id)
+            continue
+        id_signatures[candidate.evidence_id] = signature
+
+        existing = by_dedupe_key.get(dedupe_key)
+        if existing is None:
+            by_dedupe_key[dedupe_key] = candidate
+            continue
+        deduped_chunk_count += 1
+        merged_candidate_count += 1
+        by_dedupe_key[dedupe_key] = _merge_local_evidence_candidate(existing, candidate)
+
+    if collision_ids:
+        unique_collisions = sorted(set(collision_ids))
+        raise RuntimeError(
+            "duplicate evidence_id collision before local candidate grading: "
+            f"{unique_collisions}"
+        )
+
+    merged = list(by_dedupe_key.values())
+    return merged, {
+        "local_candidate_raw_count": len(candidates),
+        "local_candidate_deduped_count": len(merged),
+        "deduped_chunk_count": deduped_chunk_count,
+        "merged_candidate_count": merged_candidate_count,
+    }
+
+
+def _duplicate_evidence_ids(candidates: list[EvidenceCandidate]) -> list[str]:
+    counts = Counter(candidate.evidence_id for candidate in candidates)
+    return sorted(evidence_id for evidence_id, count in counts.items() if count > 1)
+
+
+def _duplicate_evidence_id_error(stage: str, duplicate_ids: list[str]) -> RuntimeError:
+    return RuntimeError(f"duplicate evidence_id values before {stage}: {duplicate_ids}")
+
+
 def _build_local_evidence_candidates(
     *,
     docs: list[dict],
     subject: str,
     role: str,
+    branch_index: int,
     branch_status: str,
     branch_status_score_source: str,
 ) -> list[EvidenceCandidate]:
     candidates: list[EvidenceCandidate] = []
     for rank, doc in enumerate(docs):
         metadata = dict(doc.get("metadata") or {})
-        source = str(doc.get("source") or metadata.get("source") or "")
+        source = _local_doc_source_identity(doc)
         content = str(doc.get("content") or doc.get("page_content") or "")
+        identity = _local_candidate_identity(doc, subject=subject)
+        candidate_origin_id = f"{identity['evidence_id']}:branch{branch_index}:doc{rank}"
+        retrieval_query = str(doc.get("retrieval_query") or "")
+        priority = _clamp_priority(doc.get("retrieval_priority", 0))
         candidates.append(EvidenceCandidate(
-            evidence_id=f"local:{subject or 'other'}:{rank}",
+            evidence_id=identity["evidence_id"],
             source_type="local_rag",
             provider="chroma_rag",
             subject=subject,
@@ -2751,10 +3145,30 @@ def _build_local_evidence_candidates(
             branch_status_score_source=branch_status_score_source,
             metadata={
                 "metadata": metadata,
-                "retrieval_query": doc.get("retrieval_query", ""),
+                "retrieval_query": retrieval_query,
                 "weak_reason": doc.get("weak_reason", ""),
                 "relation_to_goal": doc.get("relation_to_goal", ""),
-                "retrieval_priority": doc.get("retrieval_priority", 0),
+                "retrieval_priority": priority,
+                "branch_index": branch_index,
+                "doc_index": rank,
+                "safe_subject": identity["safe_subject"],
+                "safe_role": _safe_evidence_id_part(role or "supporting_context", default="supporting_context"),
+                "dedupe_key": identity["dedupe_key"],
+                "source_hash": identity["source_hash"],
+                "source_hash8": identity["source_hash8"],
+                "chunk_identity_kind": identity["chunk_identity_kind"],
+                "chunk_key_hash": identity["chunk_key_hash"],
+                "chunk_key_hash8": identity["chunk_key_hash8"],
+                "content_hash": identity["content_hash"],
+                "content_hash8": identity["content_hash8"],
+                "covered_roles": [role] if role else [],
+                "covered_branch_indices": [branch_index],
+                "covered_retrieval_queries": [retrieval_query] if retrieval_query else [],
+                "best_priority": priority,
+                "max_priority": priority,
+                "candidate_origin_id": candidate_origin_id,
+                "merged_from_ids": [candidate_origin_id],
+                "source_type": "local_rag",
             },
         ))
     return candidates
@@ -3712,6 +4126,8 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
                 "content_chars": doc.get("content_chars", 0),
                 "source_summarizer_used": True,
                 "evidence_boundary_reason": WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+                "covered_roles": [str(doc.get("retrieval_role") or "")] if doc.get("retrieval_role") else [],
+                "source_type": "web",
             },
         )
         candidates.append(candidate)
@@ -3719,6 +4135,9 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
 
 
 def _cap_evidence_candidates(candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
+    duplicate_ids = _duplicate_evidence_ids(candidates)
+    if duplicate_ids:
+        raise _duplicate_evidence_id_error("candidate capping", duplicate_ids)
     max_candidates = int(_retrieval_setting("fusion.max_evidence_candidates", 16))
     max_local = int(_retrieval_setting("fusion.max_local_candidates", 8))
     max_web = int(_retrieval_setting("fusion.max_web_candidates", 8))
@@ -3937,12 +4356,13 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                     docs=local_docs,
                     subject=subject,
                     role=role,
+                    branch_index=branch_index,
                     branch_status=branch_eval["branch_status"],
                     branch_status_score_source=branch_eval["branch_status_score_source"],
                 )
                 for candidate, original in zip(local_candidates, local_docs):
                     local_candidates_all.append(candidate)
-                    originals[candidate.evidence_id] = original
+                    originals.setdefault(candidate.evidence_id, original)
                 emit_a3_trace(
                     logger,
                     "rag_retrieve_plan_item",
@@ -3970,12 +4390,39 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                     env_flag="LOG_RAG_RESULT",
                 )
 
-    candidates = _cap_evidence_candidates(local_candidates_all)
+    try:
+        merged_local_candidates, local_merge_debug = _dedupe_and_merge_local_candidates(local_candidates_all)
+        duplicate_ids = _duplicate_evidence_ids(merged_local_candidates)
+        if duplicate_ids:
+            raise _duplicate_evidence_id_error("local candidate build", duplicate_ids)
+    except RuntimeError as exc:
+        emit_a3_trace(
+            logger,
+            "local_evidence_candidate_build",
+            {
+                "branch_mode": "dual_source_evidence",
+                "status": "failed",
+                "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
+                "local_candidate_raw_count": len(local_candidates_all),
+                "duplicate_evidence_ids_before_grading": _duplicate_evidence_ids(local_candidates_all),
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+            state=state,
+            env_flag="LOG_RAG_RESULT",
+        )
+        raise
+
+    candidates = _cap_evidence_candidates(merged_local_candidates)
     emit_a3_trace(
         logger,
         "local_evidence_candidate_build",
         {
             "branch_mode": "dual_source_evidence",
+            "status": "success",
+            "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
+            **local_merge_debug,
+            "duplicate_evidence_ids_before_grading": [],
             "local_candidate_count": len(candidates),
             "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
             "candidate_preview": [
@@ -3983,10 +4430,12 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                     "evidence_id": candidate.evidence_id,
                     "source_type": candidate.source_type,
                     "subject": candidate.subject,
+                    "role": candidate.role,
+                    "covered_roles": (candidate.metadata or {}).get("covered_roles", []),
+                    "source_hash8": (candidate.metadata or {}).get("source_hash8", ""),
+                    "chunk_key_hash8": (candidate.metadata or {}).get("chunk_key_hash8", ""),
                     "rerank_score": candidate.rerank_score,
                     "tavily_score": candidate.tavily_score,
-                    "source": candidate.source,
-                    "url": candidate.url,
                 }
                 for candidate in candidates[:10]
             ],
@@ -4532,7 +4981,41 @@ async def evidence_judge(state: LearningState) -> dict:
         EvidenceCandidate.model_validate(item)
         for item in [*local_candidate_dicts, *web_candidate_dicts]
     ]
+    duplicate_ids_before_cap = _duplicate_evidence_ids(candidates)
+    if duplicate_ids_before_cap:
+        emit_a3_trace(
+            logger,
+            "evidence_candidate_build",
+            {
+                "branch_mode": "dual_source_evidence",
+                "status": "failed",
+                "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
+                "candidate_count": len(candidates),
+                "local_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "local_rag"),
+                "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
+                "duplicate_evidence_ids_before_grading": duplicate_ids_before_cap,
+            },
+            state=state,
+            env_flag="LOG_RAG_RESULT",
+        )
+        raise _duplicate_evidence_id_error("evidence candidate build", duplicate_ids_before_cap)
     candidates = _cap_evidence_candidates(candidates)
+    duplicate_ids_before_grading = _duplicate_evidence_ids(candidates)
+    if duplicate_ids_before_grading:
+        emit_a3_trace(
+            logger,
+            "evidence_candidate_build",
+            {
+                "branch_mode": "dual_source_evidence",
+                "status": "failed",
+                "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
+                "candidate_count": len(candidates),
+                "duplicate_evidence_ids_before_grading": duplicate_ids_before_grading,
+            },
+            state=state,
+            env_flag="LOG_RAG_RESULT",
+        )
+        raise _duplicate_evidence_id_error("evidence candidate build", duplicate_ids_before_grading)
     local_originals = dict(state.get("local_evidence_originals") or {})
     web_originals = dict(state.get("web_evidence_originals") or {})
     all_originals = {**local_originals, **web_originals}
@@ -4548,9 +5031,12 @@ async def evidence_judge(state: LearningState) -> dict:
         "evidence_candidate_build",
         {
             "branch_mode": "dual_source_evidence",
+            "status": "success",
+            "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
             "candidate_count": len(candidates),
             "local_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "local_rag"),
             "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
+            "duplicate_evidence_ids_before_grading": [],
             "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
             "source_type_distribution": dict(Counter(candidate.source_type for candidate in candidates)),
             "requested_resource_type": requested_resource_type,
@@ -4560,10 +5046,10 @@ async def evidence_judge(state: LearningState) -> dict:
                     "evidence_id": candidate.evidence_id,
                     "source_type": candidate.source_type,
                     "subject": candidate.subject,
+                    "role": candidate.role,
+                    "covered_roles": _candidate_covered_roles(candidate),
                     "rerank_score": candidate.rerank_score,
                     "tavily_score": candidate.tavily_score,
-                    "source": candidate.source,
-                    "url": candidate.url,
                 }
                 for candidate in candidates[:10]
             ],

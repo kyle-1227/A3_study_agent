@@ -12,11 +12,15 @@ from langchain_core.messages import HumanMessage
 from src.config import get_setting
 from src.graph.academic import (
     _best_doc_score,
+    _build_local_evidence_candidates,
+    _dedupe_and_merge_local_candidates,
     _deterministic_memory_use_decision,
     _evaluate_retrieval_branch,
     _format_retrieved,
     _format_web_research_context,
     _normalize_retrieval_plan,
+    _order_evidence_candidates_for_grading,
+    _safe_evidence_id_part,
     _select_docs_with_subject_quota,
     MemoryUseDecisionOutput,
     RetrievalPlanItem,
@@ -736,6 +740,263 @@ class TestRagRetrieveDualSource:
         assert result["local_evidence_candidates"][0]["source_type"] == "local_rag"
         assert result["local_evidence_originals"]
         mock_retrieve.assert_called_once_with(query="Python functions", subject="python", top_k=3)
+
+    @patch("src.graph.academic.retrieve")
+    async def test_core_and_practice_branches_generate_unique_stable_local_ids(self, mock_retrieve):
+        mock_retrieve.side_effect = [
+            {
+                "docs": [{
+                    "content": "Python functions explain parameters.",
+                    "source": "python.pdf",
+                    "metadata": {"chunk_id": "intro"},
+                    "rerank_score": 0.9,
+                }],
+                "is_hit": True,
+            },
+            {
+                "docs": [{
+                    "content": "Python function practice exercises.",
+                    "source": "python.pdf",
+                    "metadata": {"chunk_id": "practice"},
+                    "rerank_score": 0.8,
+                }],
+                "is_hit": True,
+            },
+        ]
+
+        result = await rag_retrieve({
+            "messages": [HumanMessage(content="给我 Python mindmap 和 quiz")],
+            "requested_resource_types": ["mindmap", "quiz"],
+            "retrieval_plan": [
+                {
+                    "subject": "python",
+                    "role": "core_concept",
+                    "local_retrieval_query": "Python functions concept",
+                    "priority": 0.9,
+                },
+                {
+                    "subject": "python",
+                    "role": "practice",
+                    "local_retrieval_query": "Python functions practice",
+                    "priority": 0.8,
+                },
+            ],
+        })
+
+        candidate_ids = [candidate["evidence_id"] for candidate in result["local_evidence_candidates"]]
+        assert len(candidate_ids) == len(set(candidate_ids)) == 2
+        assert all(candidate_id.startswith("local:python:") for candidate_id in candidate_ids)
+        assert "local:python:0" not in candidate_ids
+        assert {candidate["role"] for candidate in result["local_evidence_candidates"]} == {
+            "core_concept",
+            "practice",
+        }
+
+    @patch("src.graph.academic.retrieve")
+    async def test_math_core_and_practice_branches_do_not_reuse_rank_ids(self, mock_retrieve):
+        mock_retrieve.side_effect = [
+            {
+                "docs": [{
+                    "content": "线性代数核心概念",
+                    "source": "math.pdf",
+                    "metadata": {"chunk_id": "core"},
+                    "rerank_score": 0.9,
+                }],
+                "is_hit": True,
+            },
+            {
+                "docs": [{
+                    "content": "线性代数练习题",
+                    "source": "math.pdf",
+                    "metadata": {"chunk_id": "practice"},
+                    "rerank_score": 0.8,
+                }],
+                "is_hit": True,
+            },
+        ]
+
+        result = await rag_retrieve({
+            "messages": [HumanMessage(content="线性代数思维导图和练习题")],
+            "requested_resource_types": ["mindmap", "quiz"],
+            "retrieval_plan": [
+                {
+                    "subject": "math",
+                    "role": "core_concept",
+                    "local_retrieval_query": "linear algebra concept",
+                    "priority": 0.9,
+                },
+                {
+                    "subject": "math",
+                    "role": "practice",
+                    "local_retrieval_query": "linear algebra practice",
+                    "priority": 0.8,
+                },
+            ],
+        })
+
+        candidate_ids = [candidate["evidence_id"] for candidate in result["local_evidence_candidates"]]
+        assert len(candidate_ids) == len(set(candidate_ids)) == 2
+        assert all(candidate_id.startswith("local:math:") for candidate_id in candidate_ids)
+        assert "local:math:0" not in candidate_ids
+
+
+class TestEvidenceCandidateIdentity:
+    def test_same_chunk_across_branches_merges_and_preserves_metadata(self):
+        docs = [
+            {
+                "content": "Python functions shared chunk.",
+                "source": "python.pdf",
+                "metadata": {"chunk_id": "shared"},
+                "retrieval_query": "Python functions concept",
+                "retrieval_priority": 0.9,
+                "rerank_score": 0.9,
+            }
+        ]
+        core_candidates = _build_local_evidence_candidates(
+            docs=docs,
+            subject="python",
+            role="core_concept",
+            branch_index=0,
+            branch_status="strong",
+            branch_status_score_source="rerank_score",
+        )
+        practice_candidates = _build_local_evidence_candidates(
+            docs=[{**docs[0], "retrieval_query": "Python functions practice", "retrieval_priority": 0.8}],
+            subject="python",
+            role="practice",
+            branch_index=1,
+            branch_status="strong",
+            branch_status_score_source="rerank_score",
+        )
+
+        merged, debug = _dedupe_and_merge_local_candidates([*core_candidates, *practice_candidates])
+
+        assert len(merged) == 1
+        metadata = merged[0].metadata
+        assert set(metadata["covered_roles"]) == {"core_concept", "practice"}
+        assert metadata["covered_branch_indices"] == [0, 1]
+        assert set(metadata["covered_retrieval_queries"]) == {
+            "Python functions concept",
+            "Python functions practice",
+        }
+        assert metadata["max_priority"] == 0.9
+        assert metadata["source_type"] == "local_rag"
+        assert len(metadata["merged_from_ids"]) == 2
+        assert all(":branch" in origin_id for origin_id in metadata["merged_from_ids"])
+        assert debug["local_candidate_raw_count"] == 2
+        assert debug["local_candidate_deduped_count"] == 1
+        assert debug["deduped_chunk_count"] == 1
+
+    def test_same_evidence_id_with_different_identity_fails_fast(self):
+        first = EvidenceCandidate(
+            evidence_id="local:python:source:chunk",
+            source_type="local_rag",
+            subject="python",
+            role="core_concept",
+            content_preview="First chunk.",
+            metadata={
+                "dedupe_key": "python:source-a:chunk-a",
+                "source_hash": "source-a",
+                "content_hash": "content-a",
+            },
+        )
+        second = EvidenceCandidate(
+            evidence_id="local:python:source:chunk",
+            source_type="local_rag",
+            subject="python",
+            role="practice",
+            content_preview="Different chunk.",
+            metadata={
+                "dedupe_key": "python:source-b:chunk-b",
+                "source_hash": "source-b",
+                "content_hash": "content-b",
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="duplicate evidence_id collision"):
+            _dedupe_and_merge_local_candidates([first, second])
+
+    def test_full_content_hash_fallback_does_not_use_truncated_preview(self):
+        shared_prefix = "A" * 900
+        candidates = _build_local_evidence_candidates(
+            docs=[
+                {"content": f"{shared_prefix} first tail", "source": "python.pdf"},
+                {"content": f"{shared_prefix} second tail", "source": "python.pdf"},
+            ],
+            subject="python",
+            role="core_concept",
+            branch_index=0,
+            branch_status="strong",
+            branch_status_score_source="rerank_score",
+        )
+
+        assert candidates[0].content_preview == candidates[1].content_preview
+        assert candidates[0].evidence_id != candidates[1].evidence_id
+        assert candidates[0].metadata["chunk_identity_kind"] == "content_hash"
+        assert candidates[0].metadata["content_hash8"] != candidates[1].metadata["content_hash8"]
+
+    def test_safe_id_part_does_not_alias_normalize_roles(self):
+        assert _safe_evidence_id_part("practice") == "practice"
+        assert _safe_evidence_id_part("exercise") == "exercise"
+        assert _safe_evidence_id_part("Practice Quiz") == "practice_quiz"
+
+    def test_first_batch_reorders_for_valid_web_and_core_practice_without_dropping_candidates(self):
+        local_core = EvidenceCandidate(
+            evidence_id="local:python:source1:chunk1",
+            source_type="local_rag",
+            subject="python",
+            role="core_concept",
+            content_preview="Core concepts.",
+            rerank_score=0.9,
+            metadata={"covered_roles": ["core_concept"], "source_type": "local_rag"},
+        )
+        local_practice = EvidenceCandidate(
+            evidence_id="local:python:source1:chunk2",
+            source_type="local_rag",
+            subject="python",
+            role="practice",
+            content_preview="Practice exercises.",
+            rerank_score=0.8,
+            metadata={"covered_roles": ["practice"], "source_type": "local_rag"},
+        )
+        invalid_web = EvidenceCandidate(
+            evidence_id="web:invalid",
+            source_type="web",
+            subject="python",
+            role="practice",
+            content_preview="",
+            tavily_score=1.0,
+            metadata={"fetch_status": "failed", "content_chars": 0, "covered_roles": ["practice"]},
+        )
+        valid_web = EvidenceCandidate(
+            evidence_id="web:valid",
+            source_type="web",
+            subject="python",
+            role="practice",
+            content_preview="Useful web evidence.",
+            tavily_score=0.1,
+            metadata={"fetch_status": "success", "content_chars": 120, "covered_roles": ["practice"]},
+        )
+
+        ordered, debug = _order_evidence_candidates_for_grading(
+            [invalid_web, local_core, valid_web, local_practice],
+            batch_size=3,
+            requested_resource_types=["mindmap", "quiz"],
+        )
+
+        assert len(ordered) == 4
+        assert {candidate.evidence_id for candidate in ordered} == {
+            "local:python:source1:chunk1",
+            "local:python:source1:chunk2",
+            "web:valid",
+            "web:invalid",
+        }
+        assert debug["candidate_count_preserved"] is True
+        assert "web:valid" in debug["first_batch_evidence_ids"]
+        assert "web:invalid" not in debug["first_batch_evidence_ids"]
+        assert len(debug["first_batch_evidence_ids"]) == len(set(debug["first_batch_evidence_ids"]))
+        assert set(debug["first_batch_role_coverage"]) >= {"core_concept", "practice"}
+        assert debug["first_batch_source_type_counts"]["web"] == 1
 
 
 def _web_research_structured_result(parsed, *, node_name: str, schema_name: str) -> StructuredLLMResult:

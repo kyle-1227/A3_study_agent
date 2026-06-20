@@ -1,0 +1,24 @@
+repos:
+  - repo: local
+    hooks:
+      - id: a3-python-py-compile
+        name: A3 Python syntax compile
+        entry: python -m py_compile
+        language: system
+        types: [python]
+
+      - id: a3-block-secret-env-files
+        name: A3 block secret-bearing env files
+        entry: >-
+          python -c "import pathlib, sys; blocked={'.env','.env.local','.env.production','.env.development','.env.staging'}; bad=[p for p in sys.argv[1:] if pathlib.Path(p).name in blocked]; [print('blocked secret-bearing env file: ' + p) for p in bad]; sys.exit(1 if bad else 0)"
+        language: system
+        pass_filenames: true
+        files: '(^|/)\.env$|(^|/)\.env\.(local|production|development|staging)$'
+
+      - id: a3-conflict-marker-scan
+        name: A3 conflict marker scan
+        entry: >-
+          python -c "import pathlib, sys; markers=('<<<<<<< ','=======','>>>>>>> '); bad=[]; [bad.append(p) for p in sys.argv[1:] if pathlib.Path(p).is_file() and any(m in pathlib.Path(p).read_text(encoding='utf-8', errors='ignore') for m in markers)]; [print('conflict marker found: ' + p) for p in bad]; sys.exit(1 if bad else 0)"
+        language: system
+        pass_filenames: true
+        types: [text]

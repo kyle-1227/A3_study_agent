@@ -1,0 +1,114 @@
+rules:
+  - id: a3.openrouter-deepseek-residual
+    languages: [python]
+    severity: ERROR
+    message: Do not reintroduce OpenRouter DeepSeek routing, keys, or host assumptions.
+    pattern-regex: '(?i)(openrouter\.ai|OPENROUTER_|sk-or-v1|deepseek/[A-Za-z0-9_.:-]+)'
+
+  - id: a3.hardcoded-provider-config-in-business-node
+    languages: [python]
+    severity: ERROR
+    message: Provider/model/base_url/api_key values in graph/profile/tools must come from the config resolver, not literals.
+    paths:
+      include:
+        - src/graph/**/*.py
+        - src/profile/**/*.py
+        - src/tools/**/*.py
+    pattern-regex: '(?i)\b(provider|model|base_url|api_key|api_key_env)\b\s*=\s*["''][^"'']+["'']'
+
+  - id: a3.provider-env-default-in-business-node
+    languages: [python]
+    severity: ERROR
+    message: Do not use env/default fallback for provider/model/base_url/api_key in business nodes.
+    paths:
+      include:
+        - src/graph/**/*.py
+        - src/profile/**/*.py
+        - src/tools/**/*.py
+    pattern-regex: '(?i)(os\.getenv|get_setting)\([^)\n]*(MODEL|PROVIDER|BASE_URL|API_KEY|api_key|base_url|model|provider)[^)\n]*,\s*["''][^"'']+["'']'
+
+  - id: a3.pydantic-alias-auto-normalize
+    languages: [python]
+    severity: ERROR
+    message: Do not add alias normalization or alias generators to make drifted structured output pass.
+    pattern-regex: '(?i)(validation_alias|alias_generator|populate_by_name\s*=\s*True|AliasChoices|by_alias\s*=\s*True)'
+
+  - id: a3.pydantic-validation-bypass
+    languages: [python]
+    severity: ERROR
+    message: Do not bypass Pydantic validation for structured LLM output.
+    pattern-either:
+      - pattern: $MODEL.model_construct(...)
+      - pattern: BaseModel.model_construct(...)
+
+  - id: a3.validation-error-default-result
+    languages: [python]
+    severity: ERROR
+    message: Do not catch validation errors and return a default business result.
+    pattern-either:
+      - pattern: |
+          try:
+              ...
+          except ValidationError:
+              ...
+              return {}
+      - pattern: |
+          try:
+              ...
+          except ValidationError:
+              ...
+              return []
+      - pattern: |
+          try:
+              ...
+          except ValidationError:
+              ...
+              return None
+      - pattern: |
+          try:
+              ...
+          except ValidationError:
+              ...
+              return False
+      - pattern: |
+          try:
+              ...
+          except ValidationError:
+              ...
+              return True
+      - pattern: |
+          try:
+              ...
+          except _BusinessValidationError:
+              ...
+              return $X
+
+  - id: a3.except-return-default-business-result
+    languages: [python]
+    severity: WARNING
+    message: Review except blocks that return default-looking business values; do not hide failures as valid results.
+    pattern-either:
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              ...
+              return {}
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              ...
+              return []
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              ...
+              return None
+
+  - id: a3.new-fallback-symbol
+    languages: [python]
+    severity: WARNING
+    message: New fallback symbols require explicit approval; existing legacy fallback should be reported, not extended.
+    pattern-regex: '(?i)\b(fallback|failover|degraded|deterministic_sufficiency_fallback|fallback_chain|fallback_modes)\b'
