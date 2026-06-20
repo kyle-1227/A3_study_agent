@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from src.config import get_setting
 from src.graph.academic import (
@@ -564,6 +564,93 @@ class TestSearchQueryRewriter:
         assert debug["raw_plan_count"] == 5
         assert debug["normalized_plan_count"] == 1
         assert debug["accepted_subjects"] == ["python"]
+        assert any(
+            item["reason"] == "invalid_role"
+            for item in debug["rejected_items"]
+        )
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    def test_normalize_retrieval_plan_keeps_core_and_practice_roles(
+        self,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["math"]
+
+        plan, debug = _normalize_retrieval_plan(
+            [
+                RetrievalPlanItem(
+                    subject="math",
+                    role="core_concept",
+                    local_retrieval_query="math concepts",
+                    priority=0.9,
+                ),
+                RetrievalPlanItem(
+                    subject="math",
+                    role="practice",
+                    local_retrieval_query="math practice exercises",
+                    priority=0.8,
+                ),
+            ],
+            {"subject": "math"},
+        )
+
+        assert debug["normalized_plan_count"] == 2
+        assert set(debug["accepted_plan_keys"]) == {
+            "math/core_concept",
+            "math/practice",
+        }
+        assert {(item["subject"], item["role"]) for item in plan} == {
+            ("math", "core_concept"),
+            ("math", "practice"),
+        }
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    def test_normalize_retrieval_plan_dedupes_by_subject_and_role(
+        self,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["math"]
+
+        plan, debug = _normalize_retrieval_plan(
+            [
+                RetrievalPlanItem(
+                    subject="math",
+                    role="practice",
+                    local_retrieval_query="old practice",
+                    priority=0.1,
+                ),
+                RetrievalPlanItem(
+                    subject="math",
+                    role="practice",
+                    local_retrieval_query="new practice",
+                    priority=0.9,
+                ),
+                RetrievalPlanItem(
+                    subject="math",
+                    role="exercise",
+                    local_retrieval_query="math exercise set",
+                    priority=0.8,
+                ),
+            ],
+            {"subject": "math"},
+        )
+
+        assert debug["normalized_plan_count"] == 2
+        assert {(item["subject"], item["role"]) for item in plan} == {
+            ("math", "practice"),
+            ("math", "exercise"),
+        }
+        assert any(
+            item["reason"] == "duplicate_subject_role_lower_priority"
+            for item in debug["rejected_items"]
+        )
+        assert all(
+            item["reason"] != "invalid_role"
+            for item in debug["rejected_items"]
+        )
+        assert next(item for item in plan if item["role"] == "practice")[
+            "local_retrieval_query"
+        ] == "new practice"
 
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     async def test_structured_runtime_failure_raises(self, mock_invoke):
