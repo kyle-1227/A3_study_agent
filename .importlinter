@@ -1,0 +1,56 @@
+[importlinter]
+root_package = src
+
+[importlinter:contract:llm-does-not-import-graph-business]
+name = src.llm must not import graph business nodes
+type = forbidden
+source_modules =
+    src.llm
+forbidden_modules =
+    src.graph.academic
+    src.graph.builder
+    src.graph.emotional
+    src.graph.evidence
+    src.graph.exercises
+    src.graph.json_output
+    src.graph.mindmap
+    src.graph.resource_generation
+    src.graph.review_doc
+    src.graph.state
+    src.graph.study_plan
+    src.graph.supervisor
+    src.graph.web_research
+
+[importlinter:contract:provider-sdks-stay-out-of-business-nodes]
+name = Provider SDKs stay out of graph/profile/tools business nodes
+type = forbidden
+source_modules =
+    src.graph.academic
+    src.graph.builder
+    src.graph.emotional
+    src.graph.evidence
+    src.graph.exercises
+    src.graph.json_output
+    src.graph.mindmap
+    src.graph.resource_generation
+    src.graph.review_doc
+    src.graph.state
+    src.graph.study_plan
+    src.graph.supervisor
+    src.graph.web_research
+    src.profile
+    src.tools
+forbidden_modules =
+    langchain_openai
+    openai
+
+[importlinter:contract:config-stays-low-level]
+name = src.config must not import runtime business layers
+type = forbidden
+source_modules =
+    src.config
+forbidden_modules =
+    src.graph
+    src.profile
+    src.tools
+    src.llm

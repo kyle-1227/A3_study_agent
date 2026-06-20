@@ -749,6 +749,59 @@ async def test_business_validator_failure_is_exposed_in_stage_debug(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_grade_evidence_items_duplicate_ids_fail_before_llm(monkeypatch):
+    async def fail_if_called(**_kwargs):
+        raise AssertionError("evidence_item_grader should not be called with duplicate ids")
+
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fail_if_called)
+    web_duplicate = EvidenceCandidate(
+        evidence_id="local:python:source:chunk",
+        source_type="web",
+        provider="unit",
+        subject="python",
+        role="practice",
+        content_preview="Useful web evidence.",
+        metadata={"fetch_status": "success", "content_chars": 120, "covered_roles": ["practice"]},
+    )
+
+    judged, debug = await _grade_evidence_items_with_llm(
+        state=_state(),
+        candidates=[_candidate("local:python:source:chunk"), web_duplicate],
+        original_user_query="Explain Python functions",
+        learning_goal="Understand functions",
+        requested_resource_type="answer",
+        round_index=1,
+    )
+
+    assert judged is None
+    failed_stage = debug["stages"][0]
+    assert failed_stage["stage"] == "evidence_item_grader.precheck"
+    assert failed_stage["error_type"] == "DuplicateEvidenceIdBeforeGrading"
+    assert failed_stage["duplicate_evidence_ids_before_grading"] == ["local:python:source:chunk"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_judge_duplicate_ids_fail_before_dispatch(monkeypatch):
+    async def fail_if_called(**_kwargs):
+        raise AssertionError("Evidence Judge dispatcher should not receive duplicate ids")
+
+    monkeypatch.setattr("src.graph.academic._judge_evidence_candidates_with_llm", fail_if_called)
+
+    duplicate = _candidate("local:python:source:chunk").model_dump(mode="json")
+    with pytest.raises(RuntimeError, match="duplicate evidence_id values before evidence candidate build"):
+        await evidence_judge(
+            {
+                **_state(),
+                "local_evidence_candidates": [duplicate, duplicate],
+                "web_evidence_candidates": [],
+                "local_evidence_originals": {},
+                "web_evidence_originals": {},
+                "requested_resource_type": "mindmap",
+            }
+        )
+
+
+@pytest.mark.asyncio
 async def test_evidence_judge_runtime_error_includes_failed_stage_details(monkeypatch):
     async def fake_judge(**_kwargs):
         return None, {

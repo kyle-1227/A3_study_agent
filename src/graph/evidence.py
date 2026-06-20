@@ -10,7 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class EvidenceCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    evidence_id: str = Field(..., description="Stable internal id, e.g. local:math:0 or web:math:0")
+    evidence_id: str = Field(
+        ...,
+        description=(
+            "Stable internal id, e.g. local:math:sourcehash:chunkhash or web:source_id. "
+            "It must be globally unique within one evidence judge call."
+        ),
+    )
     source_type: Literal["local_rag", "web"] = Field(...)
 
     provider: str = ""
