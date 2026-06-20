@@ -297,6 +297,16 @@ llm:
     max_tokens: 1200
     thinking: disabled
     streaming: false
+  memory_semantic_summarizer:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    thinking: disabled
+    streaming: false
 
 llm_outputs:
   default:
@@ -421,6 +431,12 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+  memory_semantic_summarizer:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
 
 study_plan:
   temperature: 0.2
@@ -480,3 +496,48 @@ hallucination_eval:
   temperature: 0.0                      # Deterministic answer faithfulness evaluation
   max_tokens: 1000
   streaming: false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Long-term Memory System
+# ═══════════════════════════════════════════════════════════════════════════
+memory:
+  # Storage
+  db_path: "data/memory.db"
+  backend: "sqlite"
+
+  # Embedding
+  embedding_provider: "deepseek"         # "deepseek" | "dummy"
+
+  # Retrieval
+  retrieval:
+    top_k_episodic: 3
+    top_k_semantic: 2
+    keyword_weight: 0.4
+    vector_weight: 0.6
+    importance_boost: 0.1               # Bonus added to score for high-importance memories
+
+  # Consolidation
+  consolidation_episodic_threshold: 5   # Consolidate after N unconsolidated episodic
+  consolidation_max_per_batch: 5         # Max episodic events per consolidation batch
+  background_enabled: true               # Enable fire-and-forget background consolidation
+
+  # Forgetting
+  forgetting_retention_days: 30          # Delete episodic older than this
+  forgetting_importance_min: 0.2         # Only delete episodic below this importance
+  forgetting_duplicate_similarity: 0.95  # Cosine similarity threshold for duplicate detection
+
+  # Token budget (character counts, approximate)
+  token_budget:
+    system_prompt: 500
+    user_profile: 300
+    episodic_memories: 800
+    semantic_summary: 400
+    current_task: 500
+    rag_evidence: 1500
+    conversation_summary: 200
+    total_budget: 4096
+    buffer: 96
+
+  # Development
+  fail_fast_memory_write: false          # Non-fatal by default
+  log_memory_retrieval: true             # Trace retrieval decisions

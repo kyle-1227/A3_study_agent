@@ -77,6 +77,8 @@ def initial_request_reset_transient_state() -> dict:
         "memory_confirmation_required": False,
         "memory_confirmation_question": "",
         "selected_evidence_memory_summaries": [],
+        "episodic_memory_results": [],
+        "semantic_memory_results": [],
         # query / retrieval plan
         "local_retrieval_query": "",
         "web_research_seed_query": "",
@@ -222,6 +224,8 @@ class LearningState(TypedDict):
     memory_confirmation_required: bool                                  # Whether memory use confirmation was requested
     memory_confirmation_question: str                                   # HIL question shown to the user
     selected_evidence_memory_summaries: list[dict]                      # Compact evidence summaries selected for current query
+    episodic_memory_results: list[dict]                                 # Top-K episodic memories with scores (from episodic_memory_retriever)
+    semantic_memory_results: list[dict]                                 # Top-K semantic memories with scores (from episodic_memory_retriever)
     mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
     mindmap_tree: dict                                                  # Reviewed JSON tree draft
     mindmap_artifact: dict                                              # Generated mindmap tree and artifact metadata
