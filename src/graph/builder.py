@@ -6,6 +6,9 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
+    adaptive_practice_responder,
+    assessment_result_handler,
+    curriculum_planner,
     episodic_memory_retriever,
     episodic_memory_writer,
     evidence_judge,
@@ -14,6 +17,7 @@ from src.graph.academic import (
     generate_answer,
     memory_use_decider,
     rag_retrieve,
+    recommendation_provider,
     rewrite_query,
     search_query_rewriter,
     should_retry_or_end,
@@ -88,6 +92,12 @@ def build_graph() -> StateGraph:
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
+
+    # Dynamic curriculum + recommendation + assessment
+    graph.add_node("curriculum_planner", curriculum_planner)
+    graph.add_node("assessment_result_handler", assessment_result_handler)
+    graph.add_node("adaptive_practice_responder", adaptive_practice_responder)
+    graph.add_node("recommendation_provider", recommendation_provider)
 
     # Emotional support
     graph.add_node("emotional_response", emotional_response)
@@ -222,7 +232,9 @@ def build_graph() -> StateGraph:
         },
     )
     graph.add_edge("exercise_rewrite", "exercise_agent")
-    graph.add_edge("exercise_output", END)
+    graph.add_edge("exercise_output", "assessment_result_handler")
+    graph.add_edge("assessment_result_handler", "adaptive_practice_responder")
+    graph.add_edge("adaptive_practice_responder", END)
 
     # Review document resource generation: plan -> Markdown -> review -> output
     graph.add_edge("review_doc_planner", "review_doc_agent")
@@ -238,7 +250,8 @@ def build_graph() -> StateGraph:
     graph.add_edge("review_doc_rewrite", "review_doc_agent")
     graph.add_edge("review_doc_output", END)
 
-    graph.add_edge("study_plan_emotional_intel", "study_plan_planner")
+    graph.add_edge("study_plan_emotional_intel", "curriculum_planner")
+    graph.add_edge("curriculum_planner", "study_plan_planner")
     graph.add_edge("study_plan_planner", "study_plan_agent")
     graph.add_edge("study_plan_agent", "study_plan_reviewer_academic")
     graph.add_edge("study_plan_agent", "study_plan_reviewer_emotional")

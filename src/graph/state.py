@@ -167,6 +167,12 @@ def initial_request_reset_transient_state() -> dict:
         "resource_bundle_artifact": {},
         "resource_generation_debug": {},
         "resource_generation_status": "",
+        "learning_path": {},
+        "curriculum_context": "",
+        "quiz_results": [],
+        "adaptive_tasks": [],
+        "recommendations": [],
+        "review_schedule": [],
     }
 
 
@@ -305,6 +311,12 @@ class LearningState(TypedDict):
     resource_bundle_artifact: dict                                      # Aggregated multi-resource artifact metadata
     resource_generation_debug: dict                                     # Resource generation execution status/debug summary
     resource_generation_status: str                                     # success / partial_success / failed / skipped
+    learning_path: dict                                                 # Curriculum Engine: LearningPath serialized
+    curriculum_context: str                                             # KG-aware context string for study_plan_planner
+    quiz_results: list[dict]                                            # Assessment: recent quiz attempts with error classifications
+    adaptive_tasks: list[dict]                                          # Assessment: generated adaptive practice tasks
+    recommendations: list[dict]                                         # Recommendation Engine: ranked recommendations
+    review_schedule: list[dict]                                         # Assessment: due spaced repetition review items
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag
     rewritten_query: str                                                # Rewritten query on retry

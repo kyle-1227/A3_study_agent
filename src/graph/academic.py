@@ -6327,3 +6327,178 @@ async def episodic_memory_writer(state: LearningState) -> dict:
         )
 
     return {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dynamic Curriculum + Recommendation + Adaptive Assessment Nodes
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@traced_node
+async def curriculum_planner(state: LearningState) -> dict:
+    """Compute a KG-aware learning path before study plan generation."""
+    thread_id = state.get("thread_id", "")
+    subject = state.get("subject", "") or state.get("primary_subject", "")
+
+    if not subject:
+        return {}
+
+    try:
+        from src.curriculum.path_planner import compute_learning_path, build_curriculum_context
+        from src.profile import get_profile_manager
+
+        manager = get_profile_manager()
+        profile = await manager.get_profile(thread_id)
+
+        learning_path = await compute_learning_path(
+            user_id=thread_id,
+            goal_subject=subject,
+            profile=profile,
+        )
+
+        path_dict = learning_path.model_dump()
+        curriculum_context = build_curriculum_context(learning_path)
+
+        emit_a3_trace(
+            logger, "curriculum_planner",
+            {
+                "subject": subject,
+                "steps": len(learning_path.steps),
+                "skip": learning_path.skip_count,
+                "reinforce": learning_path.reinforce_count,
+                "repeat": learning_path.repeat_count,
+                "ready": learning_path.ready_count,
+                "blocked": learning_path.blocked_count,
+                "total_hours": learning_path.estimated_total_hours,
+            },
+            state=state, env_flag="LOG_A3_TRACE",
+        )
+
+        return {
+            "learning_path": path_dict,
+            "curriculum_context": curriculum_context,
+        }
+
+    except Exception as exc:
+        logger.exception("Curriculum planner failed for thread=%s", thread_id)
+        return {}
+
+
+@traced_node
+async def assessment_result_handler(state: LearningState) -> dict:
+    """Process exercise output, classify errors, and record results."""
+    thread_id = state.get("thread_id", "")
+    exercise_items = state.get("exercise_items") or []
+    subject = state.get("subject", "") or state.get("primary_subject", "")
+
+    if not exercise_items:
+        return {}
+
+    quiz_results: list[dict] = []
+
+    try:
+        from src.assessment.types import QuizAttemptResult
+        from src.memory.episodic import write_episodic_memory
+
+        for item in exercise_items[:10]:
+            quiz_rec = QuizAttemptResult(
+                user_id=thread_id,
+                subject=subject,
+                topic=item.get("tags", [""])[0] if item.get("tags") else "",
+                question=str(item.get("question", ""))[:300],
+                user_answer="",
+                correct_answer=str(item.get("answer", ""))[:300],
+                is_correct=True,
+                knowledge_points=list(item.get("tags", [])),
+                difficulty_level=item.get("level", "basic"),
+            )
+            quiz_results.append(quiz_rec.model_dump())
+
+            await write_episodic_memory(
+                state,
+                memory_type="learning_behavior",
+                content=f"生成了{quiz_rec.difficulty_level}练习: {quiz_rec.question[:150]}",
+                importance=0.5,
+                subject=subject,
+            )
+
+    except Exception as exc:
+        logger.exception("Assessment handler failed for thread=%s", thread_id)
+
+    return {"quiz_results": quiz_results}
+
+
+@traced_node
+async def adaptive_practice_responder(state: LearningState) -> dict:
+    """Format assessment results as a user-facing progress summary."""
+    quiz_results = state.get("quiz_results") or []
+
+    if not quiz_results:
+        return {}
+
+    total = len(quiz_results)
+    parts: list[str] = [
+        f"[练习评估] 已生成 {total} 道练习题。",
+        "完成练习后，系统将自动分析错题类型（概念错误/逻辑错误/实现错误），",
+        "并生成自适应强化练习。",
+        "",
+        "[下一步] 可以输入 '推荐学习资源' 获取个性化推荐。",
+    ]
+
+    response_text = "\n".join(parts)
+    return {"messages": [AIMessage(content=response_text)]}
+
+
+@traced_node
+async def recommendation_provider(state: LearningState) -> dict:
+    """Generate ranked learning resource recommendations."""
+    thread_id = state.get("thread_id", "")
+    subject = state.get("subject", "") or state.get("primary_subject", "")
+
+    try:
+        from src.profile import get_profile_manager
+        from src.recommendation.engine import generate_recommendations
+
+        manager = get_profile_manager()
+        profile = await manager.get_profile(thread_id)
+
+        if profile is None:
+            return {"recommendations": []}
+
+        rec_list = await generate_recommendations(
+            user_id=thread_id,
+            profile=profile,
+            subject_filter=subject if subject else None,
+        )
+
+        recommendations = [r.model_dump() for r in rec_list.items]
+
+        if recommendations:
+            summary_lines: list[str] = ["[个性化学习推荐]"]
+            for i, rec in enumerate(rec_list.items[:5], 1):
+                resource_label = {
+                    "quiz": "练习题", "mindmap": "思维导图",
+                    "doc": "学习文档", "review_doc": "复习文档",
+                    "case": "案例分析",
+                }.get(rec.resource_type, rec.resource_type)
+                summary_lines.append(
+                    f"{i}. [{resource_label}] {rec.title} (匹配度={rec.priority:.0%})\n"
+                    f"   理由: {rec.reason}"
+                )
+            response_text = "\n".join(summary_lines)
+
+            emit_a3_trace(
+                logger, "recommendation_provider",
+                {"count": len(recommendations)},
+                state=state, env_flag="LOG_A3_TRACE",
+            )
+
+            return {
+                "recommendations": recommendations,
+                "messages": [AIMessage(content=response_text)],
+            }
+
+    except Exception as exc:
+        logger.exception("Recommendation provider failed for thread=%s", thread_id)
+
+    return {"recommendations": []}

@@ -226,11 +226,22 @@ async def study_plan_planner(state: LearningState) -> dict:
     """Create a non-empty outline for the study-plan artifact."""
     query = _last_human_query(state)
     context = state.get("context", [])
+    curriculum_context = state.get("curriculum_context", "")
+
+    curriculum_section = ""
+    if curriculum_context:
+        curriculum_section = (
+            f"\n\n[Curriculum Engine Context — use this to adjust topic ordering, "
+            f"skip mastered topics, reinforce weak topics, and respect prerequisites]\n"
+            f"{curriculum_context}\n"
+        )
+
     prompt = (
         "Create a concise outline for a personalized university learning plan.\n"
         "Use the judged evidence only as support. Do not invent course materials or citations.\n\n"
         f"User query:\n{query}\n\nKeypoints:\n{_format_keypoints(state)}\n\n"
-        f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}\n\n"
+        f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}"
+        f"{curriculum_section}\n\n"
         f"Judged evidence:\n{_format_context(context)}"
     )
     outline = await invoke_plain_llm_fail_fast(

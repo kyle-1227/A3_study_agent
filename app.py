@@ -153,6 +153,8 @@ TEXT_EMIT_NODES = {
     "review_doc_output",
     "study_plan_output",
     "resource_bundle_output",
+    "adaptive_practice_responder",
+    "recommendation_provider",
 }
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
@@ -188,6 +190,10 @@ GRAPH_NODES = {
     "review_doc_reviewer",
     "review_doc_rewrite",
     "review_doc_output",
+    "curriculum_planner",
+    "assessment_result_handler",
+    "adaptive_practice_responder",
+    "recommendation_provider",
     "study_plan_emotional_intel",
     "study_plan_planner",
     "study_plan_agent",

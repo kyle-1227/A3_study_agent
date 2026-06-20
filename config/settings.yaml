@@ -307,6 +307,26 @@ llm:
     max_tokens: 1600
     thinking: disabled
     streaming: false
+  error_classifier:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 800
+    thinking: disabled
+    streaming: false
+  practice_generator:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.2
+    max_tokens: 2000
+    thinking: disabled
+    streaming: false
 
 llm_outputs:
   default:
@@ -437,6 +457,18 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+  error_classifier:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 8000
+  practice_generator:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
 
 study_plan:
   temperature: 0.2
@@ -541,3 +573,42 @@ memory:
   # Development
   fail_fast_memory_write: false          # Non-fatal by default
   log_memory_retrieval: true             # Trace retrieval decisions
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dynamic Curriculum Engine
+# ═══════════════════════════════════════════════════════════════════════════
+curriculum:
+  knowledge_graph_path: "data/knowledge_graph.yaml"
+  default_difficulty: 0.5
+
+  path_planner:
+    skip_threshold: 0.8              # skill.level above this → skip
+    confidence_threshold: 0.7        # skill.confidence above this → reliable to skip
+    reinforce_min: 0.3               # skill.level 0.3–0.8 → reinforce
+    repeat_window_days: 7            # recent failures within this window → repeat
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Memory-driven Recommendation Engine
+# ═══════════════════════════════════════════════════════════════════════════
+recommendation:
+  top_n: 10
+  weights:
+    weakness: 0.35
+    forgetting: 0.25
+    preference: 0.15
+    goal: 0.25
+  decay_days: 14                     # Forgetting curve half-life (sigmoid midpoint)
+  min_score_threshold: 0.2           # Don't recommend resources below this combined score
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Adaptive Learning Loop (Assessment)
+# ═══════════════════════════════════════════════════════════════════════════
+assessment:
+  error_classifier:
+    temperature: 0.0
+  practice_generator:
+    temperature: 0.2
+    max_adaptive_tasks: 5
+  spaced_repetition:
+    intervals: [1, 3, 7, 14, 30]     # Ebbinghaus review intervals (days)
+    max_intervals: 5
