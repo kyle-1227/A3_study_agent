@@ -443,6 +443,11 @@ def _compose_bundle_message(status: str, successes: list[dict], failures: list[d
         lines.append("### 已生成")
         for result in successes:
             lines.append(f"- {result.get('resource_type')}: {result.get('title')}")
+            content = str(result.get("message_content") or "").strip()
+            if content:
+                lines.append("")
+                lines.append(content)
+                lines.append("")
         lines.append("")
     if failures:
         lines.append("### 未完成")

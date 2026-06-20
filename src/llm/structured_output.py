@@ -32,6 +32,21 @@ from src.llm.http_messages import (
     preview_openai_messages,
     validate_openai_messages,
 )
+from src.llm.schema_drift import (
+    analyze_schema_drift_trace_only,
+    drift_report_summary,
+    render_drift_report_text,
+)
+from src.llm.schema_manifest import (
+    DriftGuardConfig,
+    SchemaManifest,
+    build_canonical_manifest,
+    config_error_message,
+    get_structured_output_manifest_config,
+    load_drift_guard_config,
+    manifest_summary,
+    render_manifest_text,
+)
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
@@ -66,6 +81,14 @@ class _BusinessValidationError(Exception):
 
 class _DeepSeekStructuredOutputError(RuntimeError):
     """Raised for DeepSeek official structured-output protocol failures."""
+
+    def __init__(self, failure_phase: str, message: str):
+        self.failure_phase = failure_phase
+        super().__init__(message)
+
+
+class _StructuredManifestError(RuntimeError):
+    """Raised when prompt/debug manifest config cannot be built safely."""
 
     def __init__(self, failure_phase: str, message: str):
         self.failure_phase = failure_phase
@@ -285,6 +308,10 @@ class _ReaskContext:
     attempt_number: int
     previous_failure_phase: str
     previous_error_summary: str
+    schema_manifest_summary: dict[str, Any] = field(default_factory=dict)
+    schema_drift_report: dict[str, Any] = field(default_factory=dict)
+    drift_guard_source: str = ""
+    drift_guard_config_validated: bool = False
 
     def to_debug(self) -> dict[str, Any]:
         return {
@@ -293,6 +320,10 @@ class _ReaskContext:
             "reask_attempt_number": self.attempt_number,
             "previous_failure_phase": self.previous_failure_phase,
             "previous_error_summary": self.previous_error_summary,
+            "schema_manifest": self.schema_manifest_summary,
+            "schema_drift_report": self.schema_drift_report,
+            "drift_guard_source": self.drift_guard_source,
+            "drift_guard_config_validated": self.drift_guard_config_validated,
         }
 
 
@@ -685,11 +716,113 @@ def _structured_error_summary(result: StructuredLLMResult) -> str:
     )
 
 
+def _schema_manifest_context(
+    *,
+    schema: type[BaseModel],
+    node_name: str,
+    mode: str,
+) -> tuple[SchemaManifest, DriftGuardConfig, str, dict[str, Any]]:
+    try:
+        manifest_config = get_structured_output_manifest_config()
+        drift_guard = load_drift_guard_config(node_name)
+    except Exception as exc:
+        raise _StructuredManifestError(
+            "drift_guard_config_error",
+            f"Invalid structured output manifest/drift guard config: {config_error_message(exc)}",
+        ) from exc
+
+    try:
+        manifest = build_canonical_manifest(schema, node_name=node_name, output_mode=mode)
+    except Exception as exc:
+        raise _StructuredManifestError(
+            "schema_manifest_error",
+            f"Failed to build schema manifest for {schema.__name__}: {config_error_message(exc)}",
+        ) from exc
+
+    full_text = render_manifest_text(
+        manifest,
+        max_chars=None,
+        include_descriptions=manifest_config.include_descriptions,
+        include_constraints=manifest_config.include_constraints,
+        include_enum_values=manifest_config.include_enum_values,
+    )
+    manifest_text = ""
+    truncated = False
+    if manifest_config.enabled:
+        manifest_text = render_manifest_text(
+            manifest,
+            max_chars=manifest_config.max_chars,
+            include_descriptions=manifest_config.include_descriptions,
+            include_constraints=manifest_config.include_constraints,
+            include_enum_values=manifest_config.include_enum_values,
+        )
+        truncated = len(full_text) > manifest_config.max_chars
+
+    debug = {
+        "manifest_enabled": manifest_config.enabled,
+        "manifest_injected": bool(manifest_config.enabled),
+        "manifest_truncated": truncated,
+        "manifest_max_chars": manifest_config.max_chars,
+        "schema_manifest": manifest_summary(manifest),
+        "drift_guard_source": manifest.drift_guard_source,
+        "drift_guard_config_validated": manifest.drift_guard_config_validated,
+    }
+    return manifest, drift_guard, manifest_text, debug
+
+
+def _schema_drift_report_debug(
+    *,
+    raw_output: str,
+    manifest: SchemaManifest,
+    drift_guard: DriftGuardConfig,
+    node_name: str,
+) -> tuple[str, dict[str, Any]]:
+    report = analyze_schema_drift_trace_only(
+        raw_output,
+        manifest=manifest,
+        drift_guard=drift_guard,
+        node_name=node_name,
+    )
+    return render_drift_report_text(report), drift_report_summary(report)
+
+
+def _attach_schema_drift_debug(
+    metrics: _InvokeMetrics,
+    *,
+    schema: type[BaseModel],
+    node_name: str,
+    mode: str,
+    raw_output: str,
+) -> None:
+    if "schema_drift_report" in metrics.extra_debug:
+        return
+    try:
+        manifest, drift_guard, _manifest_text, manifest_debug = _schema_manifest_context(
+            schema=schema,
+            node_name=node_name,
+            mode=mode,
+        )
+        _drift_text, drift_debug = _schema_drift_report_debug(
+            raw_output=raw_output,
+            manifest=manifest,
+            drift_guard=drift_guard,
+            node_name=node_name,
+        )
+        metrics.extra_debug.update(manifest_debug)
+        metrics.extra_debug["schema_drift_report"] = drift_debug
+    except Exception as exc:
+        metrics.extra_debug["schema_drift_report_error"] = _sanitize(str(exc), max_chars=800)
+
+
 def _build_reask_instruction(
     *,
     result: StructuredLLMResult,
     schema_name: str,
     previous_error_summary: str,
+    node_name: str | None = None,
+    schema_manifest_text: str = "",
+    drift_report_text: str = "",
+    drift_guard: DriftGuardConfig | None = None,
 ) -> str:
     phase = result.failure_phase or "structured_output_error"
     if phase == "parsing_error":
@@ -725,13 +858,36 @@ def _build_reask_instruction(
     else:
         channel_rule = "Return exactly one corrected JSON object."
 
+    manifest_section = ""
+    if schema_manifest_text:
+        manifest_section = f"\nCanonical schema manifest:\n{schema_manifest_text}\n"
+    drift_section = ""
+    if drift_report_text:
+        drift_section = f"\nSchema drift report:\n{drift_report_text}\n"
+    guard_section = ""
+    if drift_guard is not None:
+        guard_section = (
+            "\nDrift guard:\n"
+            f"- Forbidden output fields: {', '.join(drift_guard.forbidden_output_fields) or '<none>'}\n"
+            f"- Canonical aliases are forbidden: {json.dumps(drift_guard.canonical_aliases, ensure_ascii=False, sort_keys=True)}\n"
+        )
+
     return (
         "Structured output correction required.\n"
+        f"- Node: {node_name or result.node_name or '<unknown>'}\n"
         f"- Schema: {schema_name}\n"
         f"- Previous failure_phase: {phase}\n"
         f"- Issue: {issue}\n"
         f"- Previous error summary: {previous_error_summary}\n"
         f"- {channel_rule}\n"
+        "- Keep already-correct canonical fields unchanged.\n"
+        "- Add missing required fields.\n"
+        "- Remove extra fields not listed in the manifest.\n"
+        "- Use canonical field names exactly.\n"
+        "- Do not output aliases, translations, abbreviations, or wrapper keys.\n"
+        "- If enum drift occurred, use one of the allowed enum values only.\n"
+        "- If a non-empty business rule failed, provide a meaningful non-empty value.\n"
+        "- Return exactly one structured tool/function result matching the schema.\n"
         "- Do not explain the error.\n"
         "- Do not output markdown, code fences, comments, or extra prose.\n"
         "- Do not change the schema, omit fields, invent fields, or use non-schema enum values.\n"
@@ -744,6 +900,9 @@ def _build_reask_instruction(
         "validation error says non-empty or the business validation error says a field "
         "must be non-empty, you must provide a valid non-empty value. Do not use an "
         "empty value to satisfy a field that failed a non-empty business rule."
+        f"{manifest_section}"
+        f"{drift_section}"
+        f"{guard_section}"
     )
 
 
@@ -751,6 +910,7 @@ def _build_reask_context(
     *,
     node_name: str,
     schema_name: str,
+    schema: type[BaseModel],
     result: StructuredLLMResult,
     attempt_number: int,
 ) -> _ReaskContext | None:
@@ -770,16 +930,35 @@ def _build_reask_context(
         return None
 
     previous_error_summary = _structured_error_summary(result)
+    manifest, drift_guard, schema_manifest_text, manifest_debug = _schema_manifest_context(
+        schema=schema,
+        node_name=node_name,
+        mode=result.output_mode,
+    )
+    drift_report_text, drift_debug = _schema_drift_report_debug(
+        raw_output=result.raw_output,
+        manifest=manifest,
+        drift_guard=drift_guard,
+        node_name=node_name,
+    )
     return _ReaskContext(
         instruction=_build_reask_instruction(
             result=result,
             schema_name=schema_name,
             previous_error_summary=previous_error_summary,
+            node_name=node_name,
+            schema_manifest_text=schema_manifest_text,
+            drift_report_text=drift_report_text,
+            drift_guard=drift_guard,
         ),
         reason=phase,
         attempt_number=attempt_number,
         previous_failure_phase=phase,
         previous_error_summary=previous_error_summary,
+        schema_manifest_summary=manifest_debug["schema_manifest"],
+        schema_drift_report=drift_debug,
+        drift_guard_source=manifest_debug["drift_guard_source"],
+        drift_guard_config_validated=bool(manifest_debug["drift_guard_config_validated"]),
     )
 
 
@@ -815,7 +994,11 @@ def _validate_mode(mode: str) -> None:
         )
 
 
-def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
+def _json_output_contract_with_debug(
+    schema: type[BaseModel],
+    node_name: str,
+    mode: str,
+) -> tuple[str, dict[str, Any]]:
     contract = (
         "Structured output contract for this call:\n"
         f"- Node: {node_name}\n"
@@ -824,6 +1007,8 @@ def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) ->
         "- Return exactly one valid JSON object matching the configured Pydantic schema.\n"
         "- Do not output markdown, code fences, comments, explanations, or extra text.\n"
         "- Do not omit required fields. Use only schema-compatible enum values.\n"
+        "- Use canonical field names exactly. Do not output aliases, translations, abbreviations, wrapper keys, or extra fields.\n"
+        "- If a business rule requires a non-empty value, provide a meaningful non-empty value.\n"
         "- If unsure, still return the best schema-valid JSON object; never answer in prose."
     )
     if mode == "deepseek_tool_call_strict":
@@ -835,14 +1020,41 @@ def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) ->
             "\n- The response_format is json_object, so the response must be valid json."
             f"\n- Example json object shape: {json.dumps(_minimal_json_example(schema), ensure_ascii=False)}"
         )
+    _manifest, _drift_guard, manifest_text, debug = _schema_manifest_context(
+        schema=schema,
+        node_name=node_name,
+        mode=mode,
+    )
+    if manifest_text:
+        contract += f"\n\n{manifest_text}"
+    elif not debug.get("manifest_enabled", True):
+        contract += "\n\nCanonical schema manifest injection is disabled by configuration."
+    return contract, debug
+
+
+def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
+    contract, _debug = _json_output_contract_with_debug(schema, node_name, mode)
     return contract
 
 
 def _inject_json_contract(messages: list, *, schema: type[BaseModel], node_name: str, mode: str) -> list:
-    contract = _json_output_contract(schema, node_name, mode)
+    contract, _debug = _json_output_contract_with_debug(schema, node_name, mode)
     if messages and isinstance(messages[0], dict):
         return [{"role": "system", "content": contract}, *messages]
     return [SystemMessage(content=contract), *messages]
+
+
+def _inject_json_contract_with_debug(
+    messages: list,
+    *,
+    schema: type[BaseModel],
+    node_name: str,
+    mode: str,
+) -> tuple[list, dict[str, Any]]:
+    contract, debug = _json_output_contract_with_debug(schema, node_name, mode)
+    if messages and isinstance(messages[0], dict):
+        return [{"role": "system", "content": contract}, *messages], debug
+    return [SystemMessage(content=contract), *messages], debug
 
 
 def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
@@ -859,8 +1071,8 @@ def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
 def _minimal_json_example(schema: type[BaseModel]) -> dict[str, Any]:
     example: dict[str, Any] = {}
     fields = getattr(schema, "model_fields", {}) or {}
-    for name, field in fields.items():
-        annotation = getattr(field, "annotation", None)
+    for name, model_field in fields.items():
+        annotation = getattr(model_field, "annotation", None)
         annotation_text = str(annotation)
         if "bool" in annotation_text:
             value: Any = False
@@ -1441,9 +1653,24 @@ async def _invoke_one_mode(
     state: dict | None = None,
     reask_context: _ReaskContext | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
-    messages = _inject_json_contract(messages, schema=schema, node_name=node_name, mode=mode)
-    prompt_chars = _compute_prompt_chars(messages)
-    metrics = _InvokeMetrics(prompt_chars=prompt_chars)
+    metrics = _InvokeMetrics()
+    try:
+        messages, contract_debug = _inject_json_contract_with_debug(
+            messages,
+            schema=schema,
+            node_name=node_name,
+            mode=mode,
+        )
+    except _StructuredManifestError as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+    except Exception as exc:
+        wrapped = _StructuredManifestError(
+            "schema_manifest_error",
+            f"Failed to inject structured output schema manifest: {exc}",
+        )
+        raise _InvokeOneModeError(wrapped, metrics, raw_output="") from exc
+    metrics.prompt_chars = _compute_prompt_chars(messages)
+    metrics.extra_debug.update(contract_debug)
     if reask_context is not None:
         metrics.extra_debug.update(reask_context.to_debug())
 
@@ -1732,6 +1959,7 @@ async def invoke_structured_llm(
             _build_reask_context(
                 node_name=node_name,
                 schema_name=schema_name,
+                schema=schema,
                 result=result,
                 attempt_number=attempts_for_mode,
             )
@@ -1886,6 +2114,13 @@ async def invoke_structured_llm(
             _refresh_parse_validate_total(metrics)
 
             if business_error:
+                _attach_schema_drift_debug(
+                    metrics,
+                    schema=schema,
+                    node_name=node_name,
+                    mode=mode,
+                    raw_output=raw_output,
+                )
                 attempt = StructuredLLMAttempt(
                     output_mode=mode,
                     success=False,
@@ -2004,6 +2239,17 @@ async def invoke_structured_llm(
             status_code = _extract_status_code(exc)
             provider_error_body = _extract_provider_error_body(exc)
             phase = _classify_failure_phase(exc, mode, metrics)
+            if _is_semantic_retryable_failure(
+                phase,
+                include_business_validation=_reask_business_validation_enabled(node_name),
+            ):
+                _attach_schema_drift_debug(
+                    metrics,
+                    schema=schema,
+                    node_name=node_name,
+                    mode=mode,
+                    raw_output=last_raw_output,
+                )
 
             attempt = StructuredLLMAttempt(
                 output_mode=mode,
@@ -2076,6 +2322,18 @@ async def invoke_structured_llm(
             status_code = _extract_status_code(exc)
             provider_error_body = _extract_provider_error_body(exc)
             phase = _classify_failure_phase(exc, mode, metrics)
+            raw_output = getattr(exc, "raw_output", "")
+            if _is_semantic_retryable_failure(
+                phase,
+                include_business_validation=_reask_business_validation_enabled(node_name),
+            ):
+                _attach_schema_drift_debug(
+                    metrics,
+                    schema=schema,
+                    node_name=node_name,
+                    mode=mode,
+                    raw_output=raw_output,
+                )
 
             attempt = StructuredLLMAttempt(
                 output_mode=mode,
@@ -2111,7 +2369,7 @@ async def invoke_structured_llm(
                 error_type=type(exc).__name__,
                 error_message=str(exc),
                 status_code=status_code,
-                raw_output=getattr(exc, "raw_output", ""),
+                raw_output=raw_output,
                 parsing_error=str(exc) if phase == "parsing_error" else "",
                 validation_error=str(exc) if phase == "validation_error" else "",
                 business_validation_error="",

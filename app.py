@@ -235,18 +235,6 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             or bundle_artifact.get("status") in {"partial_success", "failed"}
         )
     )
-    if is_multi_resource_bundle:
-        return {
-            "type": "resource_final",
-            "resource_type": "bundle",
-            "answer": _last_ai_message_content(final_state),
-            "resource_generation_status": final_state.get("resource_generation_status", ""),
-            "resource_bundle": bundle_artifact,
-            "resources": bundle_resources,
-            "errors": bundle_errors,
-        }
-
-    resource_type = str(final_state.get("requested_resource_type") or "")
     mindmap_artifact = final_state.get("mindmap_artifact") or {}
     mindmap_tree = final_state.get("mindmap_tree") or {}
     exercise_items = final_state.get("exercise_items") or []
@@ -255,6 +243,82 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
+
+    if is_multi_resource_bundle:
+        answer = _last_ai_message_content(final_state)
+        payload: dict = {
+            "type": "resource_final",
+            "resource_type": "bundle",
+            "answer": answer,
+            "resource_generation_status": final_state.get(
+                "resource_generation_status", ""
+            ),
+            "resource_bundle": bundle_artifact,
+            "resources": bundle_resources,
+            "errors": bundle_errors,
+        }
+
+        if mindmap_artifact or mindmap_tree:
+            payload["mindmap"] = {
+                "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
+                "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
+                "xmind_url": mindmap_artifact.get("xmind_url", ""),
+            }
+
+        if exercise_items or exercise_artifact:
+            if (not answer or len(answer.strip()) < 40) and exercise_items:
+                title = str(exercise_artifact.get("title") or "Leveled exercises")
+                answer = _render_exercise_markdown(
+                    title,
+                    exercise_items,
+                    review_reason=str(
+                        exercise_artifact.get("review_reason")
+                        or final_state.get("exercise_review_reason")
+                        or ""
+                    ),
+                    quality_warning=bool(exercise_artifact.get("quality_warning")),
+                )
+                payload["answer"] = answer
+            payload["exercise_items"] = exercise_items
+            payload["exercise_artifact"] = exercise_artifact
+
+        if review_doc_artifact:
+            payload["review_doc"] = {
+                "subject": review_doc_artifact.get("subject", ""),
+                "title": review_doc_artifact.get("title", "Markdown Review Document"),
+                "filename": review_doc_artifact.get("filename", ""),
+                "docx_filename": review_doc_artifact.get("docx_filename", ""),
+                "markdown_url": review_doc_artifact.get("markdown_url", ""),
+                "docx_url": review_doc_artifact.get("docx_url", ""),
+                "markdown": review_doc_artifact.get("markdown", ""),
+            }
+        if review_doc_artifacts:
+            payload["review_doc_artifacts"] = [
+                {
+                    "subject": artifact.get("subject", ""),
+                    "title": artifact.get("title", "Markdown复习文档"),
+                    "filename": artifact.get("filename", ""),
+                    "docx_filename": artifact.get("docx_filename", ""),
+                    "markdown_url": artifact.get("markdown_url", ""),
+                    "docx_url": artifact.get("docx_url", ""),
+                    "markdown": artifact.get("markdown", ""),
+                }
+                for artifact in review_doc_artifacts
+            ]
+
+        if study_plan_artifact or study_plan_document:
+            payload["study_plan"] = {
+                "title": study_plan_artifact.get("title")
+                or study_plan_document.get("title", "Personalized Study Plan"),
+                "filename": study_plan_document.get("filename", ""),
+                "docx_filename": study_plan_document.get("docx_filename", ""),
+                "markdown_url": study_plan_document.get("markdown_url", ""),
+                "docx_url": study_plan_document.get("docx_url", ""),
+            }
+
+        return payload
+
+    resource_type = str(final_state.get("requested_resource_type") or "")
 
     if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan"}:
         if mindmap_artifact or mindmap_tree:
@@ -309,7 +373,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         payload["review_doc_artifacts"] = [
             {
                 "subject": artifact.get("subject", ""),
-                                    "title": artifact.get("title", "Markdown复习文档"),
+                "title": artifact.get("title", "Markdown复习文档"),
                 "filename": artifact.get("filename", ""),
                 "docx_filename": artifact.get("docx_filename", ""),
                 "markdown_url": artifact.get("markdown_url", ""),

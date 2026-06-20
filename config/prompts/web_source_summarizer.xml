@@ -5,6 +5,12 @@
     the source as a structured web evidence candidate for the current learning goal.
     Web Source Summarizer prepares structured source summaries; Evidence Judge V2 makes final sufficiency decisions.
   </task>
+  <input_contract>
+    sources_json contains a WebSourceSummarizerInputDTO object with these keys:
+    query, requested_resource_type, requested_resource_types, output_language, sources.
+    Each source item contains only source_id, source_text, source_context, and provider_score.
+    Use source_text and source_context to decide usefulness, but output only WebSourceSummary fields.
+  </input_contract>
   <constraints>
     Return only schema-valid JSON for WebSourceSummaryBatch.
     Include every input source_id exactly once.

@@ -39,7 +39,10 @@ class EvidenceCandidate(BaseModel):
 class EvidenceJudgeItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    evidence_id: str = Field(..., description="Must match input EvidenceCandidate.evidence_id")
+    evidence_id: str = Field(
+        ...,
+        description="Stable id that must exactly match one input EvidenceCandidate.evidence_id.",
+    )
     keep: bool = Field(...)
 
     final_quality: Literal["high", "medium", "low"] = "low"
@@ -83,10 +86,17 @@ class EvidenceJudgeItem(BaseModel):
         description=(
             "Required for every judged item. If keep=true, this must be a non-empty "
             "sentence explaining what exact coverage this evidence contributes to the "
-            "user's request. If keep=false, use an empty string."
+            "user's request. If keep=false, use an empty string. This field describes "
+            "what coverage the evidence contributes."
         ),
     )
-    reason: str = Field(...)
+    reason: str = Field(
+        ...,
+        description=(
+            "Required decision rationale for keeping or rejecting this evidence. This "
+            "explains why the grading decision was made."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_keep_requires_coverage_contribution(self):
@@ -103,10 +113,13 @@ class EvidenceCoverageGap(BaseModel):
 
     subject: str = ""
     role: str = ""
-    gap: str = Field(..., description="What important coverage is missing or weak.")
+    gap: str = Field(
+        ...,
+        description="A concise description of important coverage that is missing or weak.",
+    )
     suggested_search_query: str = Field(
         ...,
-        description="Concise English-first Tavily search query for future search optimization.",
+        description="Concise English-first Tavily search query to retrieve evidence for this gap.",
     )
     purpose: Literal[
         "coverage_expansion",

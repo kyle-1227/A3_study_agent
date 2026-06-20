@@ -17,6 +17,73 @@ provider_transport_retry:
   max_retries: 2                         # Retry transient provider transport errors 1-3 times
   base_delay_seconds: 0.25               # Linear backoff base delay between retry attempts
 
+structured_output:
+  manifest:
+    enabled: true
+    max_chars: 6000
+    include_descriptions: true
+    include_constraints: true
+    include_enum_values: true
+  drift_guards:
+    default:
+      global_forbidden_output_fields:
+        - metadata
+        - debug
+        - raw
+        - raw_output
+      global_forbidden_aliases:
+        reason:
+          - rationale
+          - explanation
+          - why
+    web_source_summarizer:
+      forbidden_output_fields:
+        - task_id
+        - subject
+        - role
+        - purpose
+        - search_query
+        - url
+        - title
+        - domain
+        - canonical_url
+        - original_url
+      canonical_aliases:
+        coverage_points:
+          - key_points
+          - points
+          - coverage
+        evidence_type:
+          - type
+          - category
+        use_case:
+          - usage
+          - purpose
+          - role
+    evidence_item_grader:
+      forbidden_output_fields:
+        - source_id
+        - url
+        - title
+        - metadata
+      canonical_aliases:
+        coverage_contribution:
+          - coverage
+          - contribution
+          - coverage_reason
+          - support_reason
+          - supports
+    evidence_sufficiency_judge:
+      canonical_aliases:
+        gap:
+          - topic
+          - description
+          - missing_topic
+        suggested_search_query:
+          - query
+          - search_query
+          - followup_query
+
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence

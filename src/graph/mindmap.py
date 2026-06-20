@@ -28,7 +28,12 @@ class MindmapNode(BaseModel):
     """Unified JSON tree node used by all mindmap renderers."""
 
     title: str = Field(description="Short concrete node label")
-    note: str | None = Field(default=None, description="Optional learning hint")
+    note: str = Field(
+        default="",
+        description=(
+            "Optional learning hint; use an empty string when no note is needed"
+        ),
+    )
     children: list["MindmapNode"] = Field(default_factory=list)
 
 

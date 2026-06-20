@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_setting, load_prompt
 from src.graph.evidence import (
@@ -30,15 +30,15 @@ from src.graph.evidence import (
     EvidenceSufficiencyOutput,
 )
 from src.graph.llm import invoke_plain_llm_fail_fast
-from src.graph.state import CONTEXT_CLEAR, EVIDENCE_MEMORY_MAX_ENTRIES, LearningState
+from src.graph.state import CONTEXT_CLEAR, LearningState
 from src.graph.web_research import (
     WebCuratedSource,
     WebFetchedSource,
     WebRawSource,
     WebResearchPlan,
     WebResearchTask,
-    WebSourceSummary,
     WebSourceSummaryBatch,
+    build_web_source_summarizer_input_dto,
     canonicalize_url,
     dedupe_sources_by_canonical_url,
     domain_from_url,
@@ -59,7 +59,7 @@ from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
 from src.tools.search_tool import sanitize_error_message, search_with_diagnostics as web_search_fn
-from src.tracing import traced_llm_call, traced_node, traced_retrieval, traced_search
+from src.tracing import traced_llm_call, traced_node, traced_retrieval
 
 logger = logging.getLogger(__name__)
 
@@ -1684,6 +1684,25 @@ def _attempted_modes(result: StructuredLLMResult | None) -> list[str]:
     return modes
 
 
+def _structured_contract_debug(result: StructuredLLMResult | None) -> dict:
+    if result is None:
+        return {}
+    debug = dict(result.extra_debug or {})
+    if not debug:
+        for attempt in reversed(result.attempts or []):
+            if attempt.extra_debug:
+                debug = dict(attempt.extra_debug)
+                break
+    return {
+        "schema_manifest": debug.get("schema_manifest", {}),
+        "schema_drift_report": debug.get("schema_drift_report", {}),
+        "drift_guard_source": debug.get("drift_guard_source", ""),
+        "drift_guard_config_validated": bool(debug.get("drift_guard_config_validated", False)),
+        "manifest_injected": bool(debug.get("manifest_injected", False)),
+        "manifest_truncated": bool(debug.get("manifest_truncated", False)),
+    }
+
+
 def _make_execution_status(
     *,
     node_name: str,
@@ -2090,6 +2109,7 @@ async def _grade_evidence_items_with_llm(
                 rejected_count=raw_trace["rejected_count"],
                 raw_preview=_raw_preview(result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+                **_structured_contract_debug(result),
             )
             debug["stages"].append(stage)
             _emit_evidence_stage_trace(state, stage)
@@ -2149,6 +2169,7 @@ async def _grade_evidence_items_with_llm(
                 rejected_count=raw_trace["rejected_count"],
                 raw_preview=_raw_preview(structured_result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+                **_structured_contract_debug(structured_result),
             )
             debug["stages"].append(stage)
             _emit_evidence_stage_trace(state, stage)
@@ -2177,6 +2198,7 @@ async def _grade_evidence_items_with_llm(
                 rejected_count=sum(1 for item in parsed.judged_evidence if not item.keep),
                 raw_preview=_raw_preview(structured_result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
+                **_structured_contract_debug(structured_result),
             )
             debug["stages"].append(stage)
             _emit_evidence_stage_trace(state, stage)
@@ -2358,6 +2380,7 @@ async def _judge_evidence_sufficiency_with_llm(
                 kept_count=kept_count,
                 schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
                 raw_preview=_raw_preview(result.raw_output),
+                **_structured_contract_debug(result),
             )
             _emit_evidence_stage_trace(state, stage)
             return None, stage
@@ -2483,6 +2506,7 @@ async def _judge_evidence_sufficiency_with_llm(
             kept_count=kept_count,
             schema_size_chars=_schema_size_chars(EvidenceSufficiencyOutput),
             raw_preview=_raw_preview(structured_result.raw_output),
+            **_structured_contract_debug(structured_result),
         )
         _emit_evidence_stage_trace(state, stage)
         return None, stage
@@ -3340,30 +3364,26 @@ def _build_web_source_summarizer_messages(
     sources: list[dict],
     original_user_query: str,
 ) -> list[dict]:
-    source_payload = [
-        {
-            "source_id": source.get("source_id", ""),
-            "task_id": source.get("task_id", ""),
-            "subject": source.get("subject", ""),
-            "role": source.get("role", ""),
-            "purpose": _clip_text(source.get("purpose", ""), 160),
-            "title": _clip_text(source.get("title", ""), 160),
-            "domain": source.get("domain", ""),
-            "provider": source.get("provider", ""),
-            "provider_score": source.get("provider_score"),
-            "fetch_status": source.get("fetch_status", ""),
-            "content_chars": source.get("content_chars", 0),
-            "content_preview": _clip_text(source.get("content_preview") or source.get("raw_content") or source.get("snippet") or "", 1200),
-        }
-        for source in sources
-    ]
+    requested_resource_type = _clip_text(state.get("requested_resource_type", ""), 120)
+    requested_resource_types = _normalize_requested_resource_types_for_evidence(
+        state.get("requested_resource_types") or [],
+        requested_resource_type,
+    )
+    summarizer_input = build_web_source_summarizer_input_dto(
+        query=original_user_query,
+        learning_goal=str(state.get("learning_goal", "") or ""),
+        requested_resource_type=requested_resource_type,
+        requested_resource_types=requested_resource_types,
+        output_language=str(state.get("output_language", "") or "same_as_user_query"),
+        sources=sources,
+    )
     prompt = _render_prompt(
         "web_source_summarizer",
         {
             "original_user_query": _clip_text(original_user_query, 1000),
             "learning_goal": _clip_text(state.get("learning_goal", ""), 500),
-            "requested_resource_type": _clip_text(state.get("requested_resource_type", ""), 120),
-            "sources_json": json.dumps(source_payload, ensure_ascii=False),
+            "requested_resource_type": requested_resource_type,
+            "sources_json": summarizer_input.model_dump_json(),
         },
     )
     return [

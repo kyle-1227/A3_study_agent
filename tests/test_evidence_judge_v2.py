@@ -24,10 +24,11 @@ from src.graph.evidence import (
     EvidenceCoverageGap,
     EvidenceGradeBatch,
     EvidenceJudgeItem,
-    EvidenceJudgeOutput,
     EvidenceSufficiencyOutput,
 )
-from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
+from src.llm.schema_drift import analyze_schema_drift_trace_only
+from src.llm.schema_manifest import build_canonical_manifest, load_drift_guard_config
+from src.llm.structured_output import StructuredLLMResult, StructuredOutputError, _build_reask_context
 
 
 def _candidate(evidence_id: str = "local:python:0") -> EvidenceCandidate:
@@ -97,6 +98,7 @@ def _structured_error(
     message: str,
     business_error: str = "",
     raw_output: str = "{}",
+    extra_debug: dict | None = None,
 ):
     return StructuredOutputError(
         StructuredLLMResult(
@@ -114,6 +116,7 @@ def _structured_error(
             business_validation_error=business_error,
             validation_error="" if business_error else message,
             raw_output=raw_output,
+            extra_debug=extra_debug or {},
         )
     )
 
@@ -159,6 +162,73 @@ def test_evidence_judge_item_requires_explicit_coverage_contribution():
 
     kept = _judge_item(coverage_contribution="Covers Python quiz practice.")
     assert kept.coverage_contribution == "Covers Python quiz practice."
+
+
+def test_evidence_descriptions_are_canonical_without_alias_lists():
+    coverage_description = EvidenceJudgeItem.model_fields["coverage_contribution"].description or ""
+    reason_description = EvidenceJudgeItem.model_fields["reason"].description or ""
+    gap_description = EvidenceCoverageGap.model_fields["gap"].description or ""
+
+    assert "what coverage the evidence contributes" in coverage_description
+    assert "why the grading decision was made" in reason_description
+    assert "missing or weak" in gap_description
+    for forbidden_alias in ("coverage_reason", "support_reason", "topic", "followup_query"):
+        assert forbidden_alias not in coverage_description
+        assert forbidden_alias not in reason_description
+        assert forbidden_alias not in gap_description
+
+
+def test_evidence_alias_drift_is_reported_but_not_normalized():
+    with pytest.raises(ValidationError):
+        EvidenceGradeBatch.model_validate({
+            "judged_evidence": [
+                {
+                    "evidence_id": "local:python:0",
+                    "keep": True,
+                    "final_quality": "high",
+                    "relevance": "high",
+                    "authority": "medium",
+                    "usefulness": "high",
+                    "risk": "low",
+                    "evidence_type": "local_textbook_chunk",
+                    "use_case": "core_evidence",
+                    "coverage_reason": "Covers functions.",
+                    "reason": "Useful.",
+                }
+            ]
+        })
+
+    manifest = build_canonical_manifest(
+        EvidenceGradeBatch,
+        node_name="evidence_item_grader",
+        output_mode="deepseek_tool_call_strict",
+    )
+    drift_guard = load_drift_guard_config("evidence_item_grader")
+    report = analyze_schema_drift_trace_only(
+        {
+            "judged_evidence": [
+                {
+                    "evidence_id": "local:python:0",
+                    "keep": True,
+                    "final_quality": "high",
+                    "relevance": "high",
+                    "authority": "medium",
+                    "usefulness": "high",
+                    "risk": "low",
+                    "evidence_type": "local_textbook_chunk",
+                    "use_case": "core_evidence",
+                    "coverage_reason": "Covers functions.",
+                    "reason": "Useful.",
+                }
+            ]
+        },
+        manifest=manifest,
+        drift_guard=drift_guard,
+        node_name="evidence_item_grader",
+    )
+
+    assert report.alias_hits_by_path["judged_evidence[0].coverage_reason"] == "coverage_contribution"
+    assert "judged_evidence[0].coverage_contribution" in report.missing_required_by_path
 
 
 def _coverage_gap(index: int = 0, *, query: str = "python function exercises") -> EvidenceCoverageGap:
@@ -214,6 +284,99 @@ def test_evidence_sufficiency_output_schema_validates_limits():
             coverage_gaps=[],
             decision_summary="x" * 601,
         )
+
+
+def test_sufficiency_gap_alias_drift_is_reported_but_not_normalized():
+    with pytest.raises(ValidationError):
+        EvidenceSufficiencyOutput.model_validate({
+            "overall_evidence_state": "insufficient",
+            "answerability": "cannot_answer",
+            "need_more_local_rag": True,
+            "need_more_web_research": True,
+            "coverage_gaps": [
+                {
+                    "subject": "python",
+                    "role": "core_concept",
+                    "topic": "Missing practice exercises",
+                    "query": "Python functions practice questions",
+                    "purpose": "coverage_expansion",
+                    "priority": 0.8,
+                }
+            ],
+            "decision_summary": "Need more practice evidence.",
+        })
+
+    manifest = build_canonical_manifest(
+        EvidenceSufficiencyOutput,
+        node_name="evidence_sufficiency_judge",
+        output_mode="deepseek_tool_call_strict",
+    )
+    drift_guard = load_drift_guard_config("evidence_sufficiency_judge")
+    report = analyze_schema_drift_trace_only(
+        {
+            "overall_evidence_state": "insufficient",
+            "answerability": "cannot_answer",
+            "need_more_local_rag": True,
+            "need_more_web_research": True,
+            "coverage_gaps": [
+                {
+                    "subject": "python",
+                    "role": "core_concept",
+                    "topic": "Missing practice exercises",
+                    "query": "Python functions practice questions",
+                    "purpose": "coverage_expansion",
+                    "priority": 0.8,
+                }
+            ],
+            "decision_summary": "Need more practice evidence.",
+        },
+        manifest=manifest,
+        drift_guard=drift_guard,
+        node_name="evidence_sufficiency_judge",
+    )
+
+    assert report.alias_hits_by_path["coverage_gaps[0].topic"] == "gap"
+    assert report.alias_hits_by_path["coverage_gaps[0].query"] == "suggested_search_query"
+    assert "coverage_gaps[0].gap" in report.missing_required_by_path
+    assert "coverage_gaps[0].suggested_search_query" in report.missing_required_by_path
+
+
+def test_sufficiency_reask_prompt_contains_manifest_and_drift_report():
+    result = StructuredLLMResult(
+        success=False,
+        parsed=None,
+        node_name="evidence_sufficiency_judge",
+        llm_node="evidence_judge",
+        schema_name="EvidenceSufficiencyOutput",
+        provider="unit",
+        model="unit",
+        output_mode="deepseek_tool_call_strict",
+        failure_phase="validation_error",
+        error_type="ValidationError",
+        error_message="coverage_gaps.0.gap Field required",
+        validation_error="coverage_gaps.0.gap Field required",
+        raw_output=(
+            '{"overall_evidence_state":"insufficient","answerability":"cannot_answer",'
+            '"need_more_local_rag":true,"need_more_web_research":true,'
+            '"coverage_gaps":[{"topic":"Missing practice","query":"Python practice"}],'
+            '"decision_summary":"Need more evidence."}'
+        ),
+    )
+
+    context = _build_reask_context(
+        node_name="evidence_sufficiency_judge",
+        schema_name="EvidenceSufficiencyOutput",
+        schema=EvidenceSufficiencyOutput,
+        result=result,
+        attempt_number=1,
+    )
+
+    assert context is not None
+    assert "Canonical schema manifest" in context.instruction
+    assert "Schema drift report" in context.instruction
+    assert "coverage_gaps[].gap" in context.instruction
+    assert "coverage_gaps[0].topic" in context.instruction
+    assert context.schema_drift_report["alias_hits_by_path"]["coverage_gaps[0].topic"] == "gap"
 
 
 def test_grade_batch_validator_finds_missing_duplicate_and_unknown_ids():
@@ -546,6 +709,17 @@ async def test_business_validator_failure_is_exposed_in_stage_debug(monkeypatch)
             message="business validation failed",
             business_error="missing evidence_id values: ['local:python:0']; duplicate evidence_id values: ['x']",
             raw_output=raw_output,
+            extra_debug={
+                "schema_manifest": {"schema_name": "EvidenceGradeBatch", "field_paths": ["judged_evidence[].coverage_contribution"]},
+                "schema_drift_report": {
+                    "alias_hits_by_path": {"judged_evidence[0].coverage_reason": "coverage_contribution"},
+                    "missing_required_by_path": ["judged_evidence[0].coverage_contribution"],
+                },
+                "drift_guard_source": "default+evidence_item_grader",
+                "drift_guard_config_validated": True,
+                "manifest_injected": True,
+                "manifest_truncated": False,
+            },
         )
 
     monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm)
@@ -567,6 +741,11 @@ async def test_business_validator_failure_is_exposed_in_stage_debug(monkeypatch)
     assert failed_stage["kept_count"] == 1
     assert failed_stage["rejected_count"] == 1
     assert failed_stage["unknown_ids"] == ["web:python:1"]
+    assert failed_stage["schema_manifest"]["schema_name"] == "EvidenceGradeBatch"
+    assert failed_stage["schema_drift_report"]["alias_hits_by_path"] == {
+        "judged_evidence[0].coverage_reason": "coverage_contribution"
+    }
+    assert failed_stage["drift_guard_source"] == "default+evidence_item_grader"
 
 
 @pytest.mark.asyncio

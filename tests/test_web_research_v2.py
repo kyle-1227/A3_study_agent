@@ -33,6 +33,7 @@ from src.graph.academic import (
     WEB_RESEARCH_V2_WARNING_PLANNER_FAILED_FAIL_FAST,
     WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
     _build_web_research_planner_messages,
+    _build_web_source_summarizer_messages,
     _dedupe_web_sources_by_canonical_url,
     _drop_deprecated_web_state_keys,
     _trace_parse_web_source_summary_raw,
@@ -46,6 +47,7 @@ from src.graph.web_research import (
     WebResearchTask,
     WebSourceSummary,
     WebSourceSummaryBatch,
+    build_web_source_summarizer_input_dto,
     normalize_web_raw_source,
     validate_web_research_plan,
     validate_web_source_summary_batch,
@@ -356,6 +358,125 @@ def test_web_research_prompts_define_v2_boundaries_and_enum_mapping():
     assert "reason is required" in summarizer_prompt
     assert "Forbidden fields: task_id, subject, role, purpose" in summarizer_prompt
     assert "Do not copy task metadata fields into summary items" in summarizer_prompt
+    assert "WebSourceSummarizerInputDTO" in summarizer_prompt
+    assert "source_id, source_text, source_context, and provider_score" in summarizer_prompt
+
+
+def _keys_recursive(value) -> set[str]:
+    if isinstance(value, dict):
+        keys = set(value)
+        for item in value.values():
+            keys.update(_keys_recursive(item))
+        return keys
+    if isinstance(value, list):
+        keys: set[str] = set()
+        for item in value:
+            keys.update(_keys_recursive(item))
+        return keys
+    return set()
+
+
+def test_web_research_task_reason_description_is_task_semantic():
+    description = WebResearchTask.model_fields["reason"].description or ""
+
+    assert "search task" in description
+    assert "expected to retrieve" in description
+    assert "keep=true" not in description
+    assert "rejected" not in description
+    assert "summary item" not in description
+
+
+def test_web_source_summarizer_input_dto_excludes_metadata_keys():
+    source = {
+        "source_id": "websrc:task-1:abc",
+        "task_id": "task-1",
+        "subject": "python",
+        "role": "core_concept",
+        "purpose": "Find Python practice material.",
+        "search_query": "python practice questions",
+        "url": "https://example.com/python",
+        "domain": "example.com",
+        "title": "Python Practice",
+        "canonical_url": "https://example.com/python",
+        "original_url": "https://example.com/python?utm=1",
+        "metadata": {"debug": True},
+        "provider_score": 0.88,
+        "snippet": "Short practice snippet.",
+        "content_preview": "Readable source content.",
+    }
+
+    dto = build_web_source_summarizer_input_dto(
+        query="Give me Python exercises",
+        learning_goal="Practice Python basics",
+        requested_resource_type="quiz",
+        requested_resource_types=["quiz", "exercise"],
+        output_language="same_as_user_query",
+        sources=[source],
+    )
+    dumped = dto.model_dump(mode="json")
+    keys = _keys_recursive(dumped)
+
+    forbidden_keys = {
+        "task_id",
+        "subject",
+        "role",
+        "purpose",
+        "search_query",
+        "url",
+        "domain",
+        "title",
+        "canonical_url",
+        "original_url",
+        "metadata",
+        "debug",
+    }
+    assert forbidden_keys.isdisjoint(keys)
+    assert dumped["sources"][0]["source_id"] == "websrc:task-1:abc"
+    assert "Readable source content" in dumped["sources"][0]["source_text"]
+    assert "Python Practice" in dumped["sources"][0]["source_text"]
+    assert "Practice Python basics" in dumped["sources"][0]["source_context"]
+    assert dumped["sources"][0]["provider_score"] == 0.88
+
+
+def test_web_source_summarizer_messages_use_dto_projection():
+    source = WebFetchedSource(
+        **WebRawSource(
+            task_id="task-1",
+            source_id="websrc:task-1:abc",
+            original_url="https://example.com/python",
+            canonical_url="https://example.com/python",
+            title="Python Practice",
+            domain="example.com",
+            snippet="Short practice snippet.",
+            provider="tavily",
+            provider_score=0.9,
+            subject="python",
+            role="core_concept",
+            purpose="Find Python practice material.",
+            search_query="python practice questions",
+        ).model_dump(),
+        fetch_status="success",
+        content_chars=24,
+        content_preview="Readable source content.",
+    ).model_dump(mode="json")
+    messages = _build_web_source_summarizer_messages(
+        state={**_state("Give me Python exercises"), "requested_resource_types": ["quiz", "exercise"]},
+        sources=[source],
+        original_user_query="Give me Python exercises",
+    )
+    content = messages[-1]["content"]
+
+    assert '"sources":' in content
+    assert '"source_text"' in content
+    assert '"source_context"' in content
+    assert '"task_id"' not in content
+    assert '"subject"' not in content
+    assert '"role"' not in content
+    assert '"purpose"' not in content
+    assert '"search_query"' not in content
+    assert '"url"' not in content
+    assert '"domain"' not in content
+    assert '"title"' not in content
 
 
 def test_web_source_summary_raw_trace_parser_counts_missing_reason_and_extra_fields():

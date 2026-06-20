@@ -45,10 +45,9 @@ class WebResearchTask(BaseModel):
     reason: str = Field(
         ...,
         description=(
-            "Required for every summary item. Explain why this source is kept or "
-            "rejected. If keep=true, this must be non-empty and explain why the "
-            "source is useful for the user's learning goal. If keep=false, this "
-            "field must still exist and explain why the source is rejected."
+            "Required for every web research task. Explain why this search task is needed "
+            "for the user's current learning goal and what coverage it is expected to retrieve. "
+            "This is not a keep/reject reason for a source."
         ),
     )
     priority: float = Field(...)
@@ -85,6 +84,123 @@ class WebSourceSummaryBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summaries: list[WebSourceSummary] = Field(default_factory=list, max_length=12)
+
+
+class WebSourceSummarizerSourceDTO(BaseModel):
+    """Minimal LLM-facing input for one web source summary item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(...)
+    source_text: str = Field(...)
+    source_context: str = Field(...)
+    provider_score: float | None = None
+
+
+class WebSourceSummarizerInputDTO(BaseModel):
+    """LLM-facing input envelope for the Web Source Summarizer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(...)
+    requested_resource_type: str = ""
+    requested_resource_types: list[str] = Field(default_factory=list)
+    output_language: str = "same_as_user_query"
+    sources: list[WebSourceSummarizerSourceDTO] = Field(default_factory=list)
+
+
+def build_web_source_summarizer_input_dto(
+    *,
+    query: str,
+    learning_goal: str,
+    requested_resource_type: str,
+    requested_resource_types: list[str],
+    output_language: str,
+    sources: list[dict[str, Any]],
+    max_source_text_chars: int = 1600,
+    max_source_context_chars: int = 600,
+) -> WebSourceSummarizerInputDTO:
+    """Project internal source records into the narrow LLM-facing DTO."""
+
+    dto_sources: list[WebSourceSummarizerSourceDTO] = []
+    for source in sources:
+        source_id = str(source.get("source_id") or "")
+        source_text = _summarizer_source_text(source, max_chars=max_source_text_chars)
+        source_context = _summarizer_source_context(
+            source,
+            learning_goal=learning_goal,
+            requested_resource_type=requested_resource_type,
+            requested_resource_types=requested_resource_types,
+            max_chars=max_source_context_chars,
+        )
+        provider_score = source.get("provider_score")
+        try:
+            provider_score = float(provider_score) if provider_score is not None else None
+        except Exception:
+            provider_score = None
+        dto_sources.append(
+            WebSourceSummarizerSourceDTO(
+                source_id=source_id,
+                source_text=source_text,
+                source_context=source_context,
+                provider_score=provider_score,
+            )
+        )
+    return WebSourceSummarizerInputDTO(
+        query=_compact_text(query, 1000),
+        requested_resource_type=_compact_text(requested_resource_type, 120),
+        requested_resource_types=[
+            _compact_text(item, 120)
+            for item in requested_resource_types
+            if str(item or "").strip()
+        ],
+        output_language=_compact_text(output_language or "same_as_user_query", 80),
+        sources=dto_sources,
+    )
+
+
+def _summarizer_source_text(source: dict[str, Any], *, max_chars: int) -> str:
+    parts = [
+        ("Title", source.get("title")),
+        ("Snippet", source.get("snippet")),
+        ("Content", source.get("content_preview") or source.get("raw_content")),
+    ]
+    text = "\n".join(
+        f"{label}: {_compact_text(value, max_chars)}"
+        for label, value in parts
+        if str(value or "").strip()
+    )
+    return _compact_text(text, max_chars)
+
+
+def _summarizer_source_context(
+    source: dict[str, Any],
+    *,
+    learning_goal: str,
+    requested_resource_type: str,
+    requested_resource_types: list[str],
+    max_chars: int,
+) -> str:
+    resource_types = ", ".join(
+        _compact_text(item, 80)
+        for item in requested_resource_types
+        if str(item or "").strip()
+    )
+    parts = [
+        f"Current learning goal: {_compact_text(learning_goal, 240)}",
+        f"Requested resource type: {_compact_text(requested_resource_type, 120)}",
+        f"Requested resource types: {resource_types}" if resource_types else "",
+        f"Search task purpose: {_compact_text(source.get('purpose'), 160)}",
+        "Use source_id as the only source identity in output.",
+    ]
+    return _compact_text("\n".join(part for part in parts if part), max_chars)
+
+
+def _compact_text(value: Any, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
 
 
 class WebRawSource(BaseModel):
