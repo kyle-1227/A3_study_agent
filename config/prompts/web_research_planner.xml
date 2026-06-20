@@ -10,6 +10,10 @@
     Keep search_query concise and search-engine friendly.
     Do not create duplicate search_query values.
     Do not exceed max_total_tasks or max_tasks_per_subject.
+    Per subject, output at most {max_tasks_per_subject} tasks total.
+    For mindmap+quiz or multiple-resource requests, prioritize exactly two task roles per subject when both are needed: core_concept plus practice or exercise.
+    Do not add extra deep_dive, application, or application_context tasks when core_concept and practice/exercise already use the per-subject task budget.
+    Only use deep_dive, application, or application_context by replacing a lower-priority task while staying within max_tasks_per_subject.
     The only allowed task fields are task_id, subject, role, purpose, search_query, reason, and priority.
     seed_search_query appears only in the input branch payload; never output seed_search_query.
     Forbidden output fields: rag_query, web_search_query, expected_coverage, coverage_hint, seed_search_query, url, title, domain.

@@ -514,6 +514,8 @@ _RETRIEVAL_ROLES = {
     "core_concept",
     "implementation_tool",
     "application_context",
+    "practice",
+    "exercise",
     "prerequisite",
     "comparison",
     "extension",
@@ -522,6 +524,12 @@ _RETRIEVAL_ROLES = {
     "constraint",
     "supporting_context",
 }
+
+
+def _normalize_retrieval_role(role: str) -> str:
+    """Normalize the role key used for retrieval-plan validation and dedupe."""
+
+    return role.strip() or "supporting_context"
 
 
 def _clear_retrieval_plan_state() -> dict:
@@ -979,7 +987,7 @@ def _normalize_retrieval_plan(
 ) -> tuple[list[dict], dict]:
     """Filter and normalize LLM-produced per-subject retrieval plan."""
     allowed_subjects = _allowed_retrieval_subjects(state)
-    by_subject: dict[str, dict] = {}
+    by_plan_key: dict[tuple[str, str], dict] = {}
     rejected_items: list[dict] = []
 
     for item in raw_plan or []:
@@ -995,10 +1003,14 @@ def _normalize_retrieval_plan(
             rejected_items.append({"subject": subject, "reason": "subject_not_in_available_subjects"})
             continue
 
-        role = item.role.strip() or "supporting_context"
+        role = _normalize_retrieval_role(item.role)
         if role not in _RETRIEVAL_ROLES:
-            rejected_items.append({"subject": subject, "reason": "invalid_role_fallback_to_supporting_context"})
-            role = "supporting_context"
+            rejected_items.append({
+                "subject": subject,
+                "role": role,
+                "reason": "invalid_role",
+            })
+            continue
 
         normalized = {
             "subject": subject,
@@ -1016,20 +1028,30 @@ def _normalize_retrieval_plan(
             ],
         }
 
-        existing = by_subject.get(subject)
+        plan_key = (subject, role)
+        existing = by_plan_key.get(plan_key)
         if existing is None or normalized["priority"] > existing["priority"]:
             if existing is not None:
-                rejected_items.append({"subject": subject, "reason": "duplicate_subject_lower_priority"})
-            by_subject[subject] = normalized
+                rejected_items.append({
+                    "subject": subject,
+                    "role": role,
+                    "reason": "duplicate_subject_role_lower_priority",
+                })
+            by_plan_key[plan_key] = normalized
         else:
-            rejected_items.append({"subject": subject, "reason": "duplicate_subject_lower_priority"})
+            rejected_items.append({
+                "subject": subject,
+                "role": role,
+                "reason": "duplicate_subject_role_lower_priority",
+            })
 
-    plan = sorted(by_subject.values(), key=lambda item: item["priority"], reverse=True)[:4]
+    plan = sorted(by_plan_key.values(), key=lambda item: item["priority"], reverse=True)[:4]
 
     return plan, {
         "raw_plan_count": len(raw_plan or []),
         "normalized_plan_count": len(plan),
         "accepted_subjects": [item["subject"] for item in plan],
+        "accepted_plan_keys": [f"{item['subject']}/{item['role']}" for item in plan],
         "rejected_items": rejected_items,
     }
 

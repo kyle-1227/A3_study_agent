@@ -350,6 +350,15 @@ def test_web_research_prompts_define_v2_boundaries_and_enum_mapping():
     assert "Forbidden output fields: rag_query, web_search_query" in planner_prompt
     assert "never output seed_search_query" in planner_prompt
     assert "Return only fields defined by WebResearchTask" in planner_prompt
+    assert (
+        "Per subject, output at most {max_tasks_per_subject} tasks total"
+        in planner_prompt
+    )
+    assert "core_concept plus practice or exercise" in planner_prompt
+    assert (
+        "Do not add extra deep_dive, application, or application_context tasks"
+        in planner_prompt
+    )
     assert "Web Source Summarizer prepares structured source summaries" in summarizer_prompt
     assert "Evidence Judge V2 makes final sufficiency decisions" in summarizer_prompt
     assert "use_case=exercise_material" in summarizer_prompt
@@ -513,6 +522,8 @@ def test_web_research_planner_input_uses_v2_friendly_branch_payload():
     branch_item = branch_payload[0]
 
     assert messages[-1]["content"]
+    assert "Per subject, output at most 2 tasks total" in messages[-1]["content"]
+    assert "core_concept plus practice or exercise" in messages[-1]["content"]
     assert branch_item["seed_search_query"] == "big data exercises course"
     assert "local_branch_status" in branch_item
     assert "weak_reason" in branch_item

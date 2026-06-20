@@ -591,13 +591,17 @@ export default function Home() {
         return
       }
 
-      const mindmap = data.resource_type === "mindmap" ? data.mindmap : null
-      const reviewDoc = data.resource_type === "review_doc" ? data.review_doc : null
+      const isBundle = data.resource_type === "bundle"
+      const mindmap =
+        (data.resource_type === "mindmap" || isBundle) && data.mindmap ? data.mindmap : null
+      const reviewDoc =
+        (data.resource_type === "review_doc" || isBundle) && data.review_doc ? data.review_doc : null
       const reviewDocArtifacts =
-        data.resource_type === "review_doc" && Array.isArray(data.review_doc_artifacts)
+        (data.resource_type === "review_doc" || isBundle) && Array.isArray(data.review_doc_artifacts)
           ? data.review_doc_artifacts
           : []
-      const exerciseArtifact = data.resource_type === "quiz" ? data.exercise_artifact : null
+      const exerciseArtifact =
+        (data.resource_type === "quiz" || isBundle) && data.exercise_artifact ? data.exercise_artifact : null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
