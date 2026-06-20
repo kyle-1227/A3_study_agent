@@ -158,6 +158,8 @@ TEXT_EMIT_NODES = {
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
     "supervisor",
+    "episodic_memory_retriever",
+    "episodic_memory_writer",
     "memory_use_decider",
     "academic_router",
     "search_query_rewriter",
@@ -416,11 +418,15 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "conversation_summary",
         "evidence_summary_memory",
         "evidence_gap_memory",
+        "episodic_memory_results",
+        "semantic_memory_results",
     ]
     values = {
         "conversation_summary": "",
         "evidence_summary_memory": MEMORY_CLEAR,
         "evidence_gap_memory": MEMORY_CLEAR,
+        "episodic_memory_results": [],
+        "semantic_memory_results": [],
     }
     await graph.aupdate_state(config, values)
 
@@ -765,6 +771,24 @@ async def generate_sse(
 
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
+    # Record user input as episodic memory (non-fatal, fire-and-forget)
+    if user_id:
+        try:
+            from src.memory.episodic import compute_importance_for_user_query, write_episodic_memory
+            importance, mem_type, content = compute_importance_for_user_query(
+                query=query,
+                subject="",
+                resource_types=None,
+            )
+            await write_episodic_memory(
+                {"thread_id": thread_id},
+                memory_type=mem_type,
+                content=content,
+                importance=importance,
+            )
+        except Exception:
+            logger.exception("Failed to record user input episodic memory")
+
     async for chunk in _stream_graph_events(graph, state_input, config, thread_id):
         yield chunk
 
@@ -776,9 +800,9 @@ async def generate_sse(
                 user_message=query,
                 assistant_response="",
             )
-            logger.debug("鐢诲儚杞宸茶褰?user=%s", user_id)
+            logger.debug("Profile turn recorded user=%s", user_id)
         except Exception:
-            logger.exception("鐢诲儚璁板綍澶辫触锛堥潪鑷村懡锛?user=%s", user_id)
+            logger.exception("Profile recording failed (non-fatal) user=%s", user_id)
 
 
 async def generate_resume_sse(

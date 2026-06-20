@@ -201,6 +201,8 @@ class TestDevMemoryClear:
         assert values["conversation_summary"] == ""
         assert values["evidence_summary_memory"] is MEMORY_CLEAR
         assert values["evidence_gap_memory"] is MEMORY_CLEAR
+        assert values["episodic_memory_results"] == []
+        assert values["semantic_memory_results"] == []
         assert result == {
             "ok": True,
             "thread_id": "thread-1",
@@ -208,6 +210,8 @@ class TestDevMemoryClear:
                 "conversation_summary",
                 "evidence_summary_memory",
                 "evidence_gap_memory",
+                "episodic_memory_results",
+                "semantic_memory_results",
             ],
         }
 

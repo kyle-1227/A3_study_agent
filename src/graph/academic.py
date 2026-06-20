@@ -256,6 +256,37 @@ def _compact_memory_for_prompt(entry: dict, *, max_summary_chars: int = 800) -> 
     }
 
 
+def _serialize_episodic_for_prompt(state: LearningState, max_items: int = 3) -> list[dict]:
+    """Serialize episodic memory results from state for LLM prompt injection."""
+    episodic_results = state.get("episodic_memory_results") or []
+    serialized: list[dict] = []
+    for entry in episodic_results[:max_items]:
+        serialized.append({
+            "content": str(entry.get("content", ""))[:300],
+            "memory_type": str(entry.get("memory_type", "")),
+            "importance": float(entry.get("importance", 0.5)),
+            "score": float(entry.get("score", 0.0)),
+            "match_reason": str(entry.get("match_reason", "")),
+        })
+    return serialized
+
+
+def _serialize_semantic_for_prompt(state: LearningState, max_items: int = 2) -> list[dict]:
+    """Serialize semantic memory results from state for LLM prompt injection."""
+    semantic_results = state.get("semantic_memory_results") or []
+    serialized: list[dict] = []
+    for entry in semantic_results[:max_items]:
+        weak_points = entry.get("weak_knowledge_points") or []
+        serialized.append({
+            "content": str(entry.get("content", ""))[:400],
+            "weak_knowledge_points": weak_points[:5] if isinstance(weak_points, list) else [],
+            "confidence": float(entry.get("confidence", 0.5)),
+            "score": float(entry.get("score", 0.0)),
+            "match_reason": str(entry.get("match_reason", "")),
+        })
+    return serialized
+
+
 def _deterministic_memory_use_decision(
     current_query: str,
     *,
@@ -5452,10 +5483,16 @@ async def memory_use_decider(state: LearningState) -> dict:
     decision_source = "deterministic"
 
     if decision is None:
+        # Serialize episodic and semantic memory results for the LLM prompt
+        episodic_for_prompt = _serialize_episodic_for_prompt(state)
+        semantic_for_prompt = _serialize_semantic_for_prompt(state)
+
         prompt_payload = {
             "current_user_query": current_query,
             "conversation_summary": str(state.get("conversation_summary") or "")[:1200],
             "selected_evidence_memory_summaries": selected_memories,
+            "episodic_memories": episodic_for_prompt,
+            "semantic_memories": semantic_for_prompt,
             "requested_resource_type": requested_resource_type,
             "subject": subject,
             "selected_memory_count": selected_memory_count,
@@ -6360,8 +6397,32 @@ async def generate_answer(state: LearningState) -> dict:
         resource_offer_instruction=_resource_offer_instruction(state),
     )
 
+    # ── Memory-augmented context injection ──────────────────────────────
+    system_prompt = load_prompt("academic_system")
+    memory_context_text = ""
+    thread_id = state.get("thread_id", "")
+    if thread_id:
+        try:
+            from src.context.context_builder import build_memory_context
+            memory_injection = await build_memory_context(
+                user_id=thread_id,
+                current_query=question,
+                subject=state.get("subject", "") or state.get("primary_subject", ""),
+                profile_context="",
+                conversation_summary=state.get("conversation_summary", ""),
+            )
+            if memory_injection.context_text:
+                memory_context_text = memory_injection.context_text
+                system_prompt = f"{memory_context_text}\n\n{system_prompt}"
+                logger.debug(
+                    "Injected memory context into generate_answer: %d chars, %d estimated tokens",
+                    len(memory_context_text), memory_injection.total_estimated_tokens,
+                )
+        except Exception:
+            logger.debug("Failed to build memory context for generate_answer", exc_info=True)
+
     messages = [
-        SystemMessage(content=load_prompt("academic_system")),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ]
 
@@ -6377,6 +6438,34 @@ async def generate_answer(state: LearningState) -> dict:
             state=state,
             temperature=temperature,
         )
+
+    # ── Append memory influence explanation (transparent AI) ────────────
+    try:
+        episodic_results = state.get("episodic_memory_results") or []
+        semantic_results = state.get("semantic_memory_results") or []
+        all_dicts = episodic_results + semantic_results
+        relevant = [d for d in all_dicts if float(d.get("score", 0)) > 0.1][:3]
+        if relevant:
+            items: list[str] = []
+            for d in relevant:
+                content = str(d.get("content", ""))
+                preview = content[:120] + "..." if len(content) > 120 else content
+                reason = str(d.get("match_reason", ""))
+                reason_label = reason.replace("keyword_overlap", "关键词匹配").replace(
+                    "vector_similarity", "语义相似"
+                ).replace("high_importance", "高重要性").replace("fallback", "历史记录")
+                score = float(d.get("score", 0))
+                items.append(f"- {reason_label} (score={score:.2f}): {preview}")
+            if items:
+                memory_footer = (
+                    "\n\n---\n"
+                    "*以上回答参考了你的学习记忆:*\n"
+                    + "\n".join(items) + "\n"
+                    "*记忆系统帮助 AI 更准确地理解你的学习背景和薄弱点.*"
+                )
+                response = response.rstrip() + memory_footer
+    except Exception:
+        logger.debug("Failed to append memory explanation footer", exc_info=True)
 
     return {"messages": [AIMessage(content=response)]}
 
@@ -6554,3 +6643,173 @@ def should_retry_or_end(state: LearningState) -> str:
     ):
         return "retry"
     return "end"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Long-term Memory Nodes (Episodic + Semantic Memory System)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@traced_node
+async def episodic_memory_retriever(state: LearningState) -> dict:
+    """Retrieve Top-K episodic and semantic memories for the current query.
+
+    Runs after supervisor intent classification, before memory_use_decider.
+    Triggers background consolidation (fire-and-forget) if unconsolidated
+    episodic count reaches threshold.
+
+    Stores results in state.episodic_memory_results and state.semantic_memory_results
+    for downstream nodes (memory_use_decider, generate_answer) to consume.
+    """
+    thread_id = state.get("thread_id", "")
+    current_query = _last_human_query(state)
+
+    if not current_query:
+        emit_a3_trace(
+            logger, "episodic_memory_retrieval",
+            {"query": "", "episodic_count": 0, "semantic_count": 0, "error": "empty_query"},
+            state=state, env_flag="LOG_A3_TRACE",
+        )
+        return {"episodic_memory_results": [], "semantic_memory_results": []}
+
+    try:
+        from src.memory.retrieval import retrieve_top_k_memories
+
+        results = await retrieve_top_k_memories(
+            user_id=thread_id,
+            query=current_query,
+            top_k=6,
+            include_episodic=True,
+            include_semantic=True,
+        )
+    except Exception as exc:
+        logger.exception("Episodic memory retrieval failed for thread=%s", thread_id)
+        emit_a3_trace(
+            logger, "episodic_memory_retrieval",
+            {"query": current_query[:200], "error": str(exc)},
+            state=state, env_flag="LOG_A3_TRACE",
+        )
+        return {"episodic_memory_results": [], "semantic_memory_results": []}
+
+    episodic = [r for r in results if r.memory_type == "episodic"]
+    semantic = [r for r in results if r.memory_type == "semantic"]
+
+    # Serialize to dict for graph state (TypedDict can't hold Pydantic objects)
+    episodic_dicts = [
+        {
+            "memory_id": r.memory.memory_id if hasattr(r.memory, "memory_id") else "",
+            "memory_type": r.memory_type,
+            "content": r.memory.content[:400] if hasattr(r.memory, "content") else "",
+            "importance": getattr(r.memory, "importance", 0.5),
+            "score": r.score,
+            "keyword_score": r.keyword_score,
+            "vector_score": r.vector_score,
+            "match_reason": r.match_reason,
+        }
+        for r in episodic
+    ]
+    semantic_dicts = [
+        {
+            "summary_id": r.memory.summary_id if hasattr(r.memory, "summary_id") else "",
+            "memory_type": r.memory_type,
+            "content": r.memory.content[:500] if hasattr(r.memory, "content") else "",
+            "weak_knowledge_points": getattr(r.memory, "weak_knowledge_points", []),
+            "confidence": getattr(r.memory, "confidence", 0.5),
+            "score": r.score,
+            "keyword_score": r.keyword_score,
+            "vector_score": r.vector_score,
+            "match_reason": r.match_reason,
+        }
+        for r in semantic
+    ]
+
+    emit_a3_trace(
+        logger, "episodic_memory_retrieval",
+        {
+            "query": current_query[:200],
+            "episodic_count": len(episodic_dicts),
+            "semantic_count": len(semantic_dicts),
+            "top_scores": [r.score for r in (episodic + semantic)[:3]],
+        },
+        state=state, env_flag="LOG_A3_TRACE",
+    )
+
+    # Fire-and-forget background consolidation
+    if get_setting("memory.background_enabled", True):
+        try:
+            import asyncio as _asyncio
+            _asyncio.create_task(_background_consolidation(thread_id))
+        except Exception:
+            logger.debug("Background consolidation task creation failed", exc_info=True)
+
+    return {
+        "episodic_memory_results": episodic_dicts,
+        "semantic_memory_results": semantic_dicts,
+    }
+
+
+async def _background_consolidation(user_id: str) -> None:
+    """Fire-and-forget consolidation + forgetting check.
+
+    Runs in a separate asyncio task so it never blocks the request path.
+    Errors are logged and swallowed.
+    """
+    try:
+        from src.memory.consolidation import run_consolidation_and_forgetting
+        stats = await run_consolidation_and_forgetting(user_id)
+        if stats.get("summaries_created") or stats.get("low_importance_deleted"):
+            logger.info(
+                "Background memory maintenance for user=%s: %s", user_id, stats,
+            )
+    except Exception as exc:
+        logger.debug("Background memory consolidation failed: %s", exc)
+
+
+@traced_node
+async def episodic_memory_writer(state: LearningState) -> dict:
+    """Write the current interaction outcome as an episodic memory.
+
+    Runs on the exit path after evaluate_hallucination, before END.
+    Computes importance from state signals:
+    - Hallucination detected → high importance error memory
+    - Resource generation → medium-high importance behavior memory
+    - Standard Q&A → medium importance conversation memory
+
+    Non-fatal: errors are logged but never block the graph.
+    """
+    thread_id = state.get("thread_id", "")
+
+    if not thread_id:
+        return {}
+
+    try:
+        from src.memory.episodic import compute_importance_from_state, write_episodic_memory
+
+        importance, mem_type, content = compute_importance_from_state(state)
+
+        record = await write_episodic_memory(
+            state,
+            memory_type=mem_type,
+            content=content,
+            importance=importance,
+        )
+
+        emit_a3_trace(
+            logger, "episodic_memory_write",
+            {
+                "memory_id": record.memory_id,
+                "memory_type": mem_type,
+                "importance": importance,
+                "content_preview": content[:200],
+            },
+            state=state, env_flag="LOG_A3_TRACE",
+        )
+    except Exception as exc:
+        logger.exception("Failed to write episodic memory for thread=%s", thread_id)
+        emit_a3_trace(
+            logger, "episodic_memory_write",
+            {"error": str(exc)},
+            state=state, env_flag="LOG_A3_TRACE",
+        )
+
+    return {}

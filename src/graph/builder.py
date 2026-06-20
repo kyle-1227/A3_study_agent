@@ -6,6 +6,8 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
+    episodic_memory_retriever,
+    episodic_memory_writer,
     evidence_judge,
     evidence_summary_output,
     evaluate_hallucination,
@@ -74,6 +76,8 @@ def build_graph() -> StateGraph:
     graph.add_node("supervisor", supervisor_node)
 
     # SubGraph A: Academic (parallel retrieval + answer generation)
+    graph.add_node("episodic_memory_retriever", episodic_memory_retriever)
+    graph.add_node("episodic_memory_writer", episodic_memory_writer)
     graph.add_node("academic_router", academic_router)
     graph.add_node("memory_use_decider", memory_use_decider)
     graph.add_node("search_query_rewriter", search_query_rewriter)
@@ -133,12 +137,14 @@ def build_graph() -> StateGraph:
         "supervisor",
         route_by_intent,    # judge users intent
         {
-            "academic": "memory_use_decider",
+            "academic": "episodic_memory_retriever",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
     )
 
+    # Retrieve long-term episodic/semantic memories before memory use decision.
+    graph.add_edge("episodic_memory_retriever", "memory_use_decider")
     # Decide whether historical evidence memory may influence retrieval.
     graph.add_edge("memory_use_decider", "search_query_rewriter")
 
@@ -181,9 +187,10 @@ def build_graph() -> StateGraph:
         should_retry_or_end,
         {
             "retry": "rewrite_query",
-            "end": END,
+            "end": "episodic_memory_writer",
         },
     )
+    graph.add_edge("episodic_memory_writer", END)
     graph.add_edge("rewrite_query", "academic_router")
 
     # Emotional support ends after the response node.
