@@ -5615,6 +5615,16 @@ async def memory_use_decider(state: LearningState) -> dict:
             "selected_evidence_memory_summaries": selected_memories if choice == "use" else [],
         }
 
+    # Record decision trace (fire-and-forget)
+    import asyncio as _asyncio
+    _asyncio.create_task(_record_trace(
+        state, "memory_use_decider",
+        f"policy={decision.decision}",
+        evidence=f"eligible_memory={eligible_memory_count}",
+        steps=[f"deterministic={decision_source == 'deterministic'}", f"reason={decision.reason}"],
+        confidence=decision.confidence,
+    ))
+
     return {
         "memory_use_policy": decision.decision,
         "memory_use_reason": decision.reason,
@@ -5624,6 +5634,18 @@ async def memory_use_decider(state: LearningState) -> dict:
         "eligible_evidence_memory_count": eligible_memory_count,
         "selected_evidence_memory_summaries": selected_memories if decision.decision == "use" else [],
     }
+
+
+async def _record_trace(state: dict, node: str, decision: str, evidence: str = "", steps: list | None = None, confidence: float = 0.5):
+    """Fire-and-forget decision trace recording."""
+    try:
+        from src.analytics.explainability_engine import record_decision_from_state
+        await record_decision_from_state(
+            state, node_name=node, decision=decision,
+            evidence=evidence, reasoning_steps=steps, confidence=confidence,
+        )
+    except Exception:
+        pass
 
 
 # Node 0b: query rewriting (retry path only, fail-fast)
@@ -6467,6 +6489,16 @@ async def generate_answer(state: LearningState) -> dict:
     except Exception:
         logger.debug("Failed to append memory explanation footer", exc_info=True)
 
+    # Record decision trace (fire-and-forget)
+    import asyncio as _asyncio
+    _asyncio.create_task(_record_trace(
+        state, "generate_answer",
+        f"answer_generated len={len(response)}",
+        evidence=f"context_chunks={len(context)}",
+        steps=["memory_context_injected" if memory_context_text else "no_memory_context"],
+        confidence=0.7,
+    ))
+
     return {"messages": [AIMessage(content=response)]}
 
 
@@ -6859,6 +6891,22 @@ async def curriculum_planner(state: LearningState) -> dict:
             },
             state=state, env_flag="LOG_A3_TRACE",
         )
+
+        # Record decision trace (fire-and-forget)
+        import asyncio as _asyncio
+        _asyncio.create_task(_record_trace(
+            state, "curriculum_planner",
+            f"path={len(learning_path.steps)}steps skip={learning_path.skip_count} reinforce={learning_path.reinforce_count}",
+            evidence=f"subject={subject}",
+            steps=[
+                f"skip={learning_path.skip_count} topics mastered",
+                f"reinforce={learning_path.reinforce_count} topics need work",
+                f"repeat={learning_path.repeat_count} topics to retry",
+                f"ready={learning_path.ready_count} topics ready",
+                f"blocked={learning_path.blocked_count} topics blocked",
+            ],
+            confidence=0.7,
+        ))
 
         return {
             "learning_path": path_dict,

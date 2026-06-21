@@ -1060,6 +1060,61 @@ async def get_subjects_endpoint():
     return {"subjects": get_available_subjects_from_data()}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Analytics Endpoints — Growth, Cognitive Graph, Explainability, Dashboard
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/analytics/dashboard/{user_id}")
+async def analytics_dashboard(user_id: str, subject: str = "", days: int = 30):
+    """Return aggregated analytics dashboard data."""
+    from src.analytics.memory_dashboard import get_dashboard_data
+    from src.profile import get_profile_manager
+
+    manager = get_profile_manager()
+    profile = await manager.get_profile(user_id)
+    data = await get_dashboard_data(
+        user_id=user_id, profile=profile, subject=subject, days=days,
+    )
+    return data.model_dump()
+
+
+@app.get("/analytics/growth/{user_id}")
+async def analytics_growth(user_id: str, subject: str = "", days: int = 30):
+    """Return skill growth time-series data."""
+    from src.analytics.growth_analyzer import analyze_growth
+
+    data = await analyze_growth(user_id=user_id, subject=subject, days=days)
+    return data.model_dump()
+
+
+@app.get("/analytics/cognitive-graph/{user_id}")
+async def analytics_cognitive_graph(user_id: str, subject: str = ""):
+    """Return cognitive model graph (nodes + edges)."""
+    from src.analytics.cognitive_graph import build_cognitive_graph
+    from src.profile import get_profile_manager
+
+    manager = get_profile_manager()
+    profile = await manager.get_profile(user_id)
+    data = await build_cognitive_graph(
+        user_id=user_id, profile=profile, subject=subject,
+    )
+    return data.model_dump()
+
+
+@app.get("/analytics/decisions/{user_id}")
+async def analytics_decisions(user_id: str, limit: int = 20, node: str = ""):
+    """Return recent agent decision traces."""
+    from src.analytics.explainability_engine import get_decision_traces
+
+    node_name = node if node else None
+    data = await get_decision_traces(
+        user_id=user_id, limit=limit, node_name=node_name,
+    )
+    return data.model_dump()
+
+
+
 if __name__ == "__main__":
     import uvicorn
 
