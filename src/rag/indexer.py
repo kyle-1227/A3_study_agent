@@ -41,6 +41,7 @@ def _l2_to_relevance(distance: float) -> float:
     """
     return 1.0 - distance / math.sqrt(2)
 
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -83,7 +84,9 @@ def _embedding_base_url() -> str:
 
 def _embedding_request_timeout() -> float:
     try:
-        return max(1.0, float(os.getenv("EMBEDDING_TIMEOUT", DEFAULT_EMBEDDING_TIMEOUT)))
+        return max(
+            1.0, float(os.getenv("EMBEDDING_TIMEOUT", DEFAULT_EMBEDDING_TIMEOUT))
+        )
     except ValueError:
         return DEFAULT_EMBEDDING_TIMEOUT
 
@@ -186,9 +189,7 @@ def _get_embedding(model_name: Optional[str] = None) -> Embeddings:
         A configured ``OpenAIEmbeddings`` instance pointing at the configured
         embedding provider.
     """
-    model_name = model_name or os.getenv(
-        "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
-    )
+    model_name = model_name or os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
     return OpenAICompatibleEmbeddings(
         model=model_name,
         api_key=_embedding_api_key(),
@@ -215,7 +216,11 @@ def _index_max_retries() -> int:
 
 
 def _content_id(doc: Document) -> str:
-    """Deterministic ID from chunk content — true dedup across repeated runs."""
+    """Return the stable chunk ID, or legacy content ID for old documents."""
+    chunk_id = doc.metadata.get("chunk_id")
+    if isinstance(chunk_id, str) and chunk_id.strip():
+        return chunk_id.strip()
+
     digest = hashlib.md5(doc.page_content.encode("utf-8")).hexdigest()
     return f"{doc.metadata.get('source_file', 'unknown')}_{digest}"
 
@@ -302,7 +307,7 @@ def _add_batch_with_retry(
                     f"Embedding/indexing failed for single chunk from {source}: {exc}"
                 ) from exc
 
-            delay = min(2 ** attempt, 8)
+            delay = min(2**attempt, 8)
             logger.warning(
                 "Index batch %s failed on attempt %s/%s (%s: %s); retrying in %ss",
                 batch_label,
