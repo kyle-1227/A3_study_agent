@@ -1,11 +1,11 @@
-"""Unit tests for app.py — CORS, lifespan graph, and endpoint wiring."""
+"""Unit tests for app.py: CORS, lifespan graph, and endpoint wiring."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -109,8 +109,8 @@ class TestInputValidation:
     def test_chat_request_accepts_normal_query(self):
         from src.schemas import ChatRequest
 
-        req = ChatRequest(query="正常长度的问题")
-        assert req.query == "正常长度的问题"
+        req = ChatRequest(query="normal length question")
+        assert req.query == "normal length question"
 
     def test_resume_request_rejects_oversized_plan(self):
         from pydantic import ValidationError
@@ -122,8 +122,160 @@ class TestInputValidation:
     def test_resume_request_accepts_normal_plan(self):
         from src.schemas import ResumeRequest
 
-        req = ResumeRequest(thread_id="t-1", edited_plan="## 正常计划")
-        assert req.edited_plan == "## 正常计划"
+        req = ResumeRequest(thread_id="t-1", edited_plan="## Normal plan")
+        assert req.edited_plan == "## Normal plan"
+
+    def test_resume_request_accepts_memory_use_choice(self):
+        from src.schemas import ResumeRequest
+
+        req = ResumeRequest(thread_id="t-1", memory_use_choice="use")
+        assert req.memory_use_choice == "use"
+
+class TestResourceFinalPayload:
+    """Verify final resource payload shaping."""
+
+    def test_evidence_controlled_stop_is_evidence_summary_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "evidence_controlled_stop": True,
+                "final_response_type": "evidence_summary",
+                "requested_resource_type": "study_plan",
+                "evidence_controlled_stop_reason": "evidence_insufficient",
+                "plan": "## Evidence summary\nCurrent evidence is insufficient.",
+                "study_plan_artifact": {},
+            }
+        )
+
+        assert payload is not None
+        assert payload["type"] == "resource_final"
+        assert payload["resource_type"] == "evidence_summary"
+        assert payload["controlled_stop"] is True
+        assert payload["controlled_stop_reason"] == "evidence_insufficient"
+        assert "Current evidence is insufficient" in payload["answer"]
+        assert "study_plan" not in payload
+
+    def test_multi_resource_bundle_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "mindmap",
+                "requested_resource_types": ["mindmap", "quiz"],
+                "resource_generation_status": "partial_success",
+                "resource_bundle_artifact": {
+                    "type": "resource_bundle",
+                    "status": "partial_success",
+                    "resources": [{"resource_type": "mindmap", "title": "Mock Map"}],
+                    "errors": [{"resource_type": "quiz", "error_message_sanitized": "quiz failed"}],
+                },
+                "messages": [type("Msg", (), {"content": "bundle summary"})()],
+            }
+        )
+
+        assert payload is not None
+        assert payload["type"] == "resource_final"
+        assert payload["resource_type"] == "bundle"
+        assert payload["resource_generation_status"] == "partial_success"
+        assert payload["resources"] == [{"resource_type": "mindmap", "title": "Mock Map"}]
+        assert payload["errors"][0]["resource_type"] == "quiz"
+
+
+class TestDevMemoryClear:
+    """Verify development-only persistent memory clearing."""
+
+    @pytest.mark.anyio
+    async def test_clear_persistent_memory_for_thread_updates_memory_fields(self, monkeypatch):
+        from app import clear_persistent_memory_for_thread
+        from src.graph.state import MEMORY_CLEAR
+
+        graph = AsyncMock()
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.delenv("A3_ENV", raising=False)
+
+        with patch("app.get_setting", return_value=True):
+            result = await clear_persistent_memory_for_thread(graph, "thread-1")
+
+        graph.aupdate_state.assert_awaited_once()
+        _, values = graph.aupdate_state.await_args.args
+        assert values["conversation_summary"] == ""
+        assert values["evidence_summary_memory"] is MEMORY_CLEAR
+        assert values["evidence_gap_memory"] is MEMORY_CLEAR
+        assert values["episodic_memory_results"] == []
+        assert values["semantic_memory_results"] == []
+        assert result == {
+            "ok": True,
+            "thread_id": "thread-1",
+            "cleared_fields": [
+                "conversation_summary",
+                "evidence_summary_memory",
+                "evidence_gap_memory",
+                "episodic_memory_results",
+                "semantic_memory_results",
+            ],
+        }
+
+    @pytest.mark.anyio
+    async def test_clear_persistent_memory_for_thread_rejects_production(self, monkeypatch):
+        from app import clear_persistent_memory_for_thread
+
+        graph = AsyncMock()
+        monkeypatch.setenv("APP_ENV", "production")
+
+        with patch("app.get_setting", return_value=True):
+            with pytest.raises(Exception) as exc_info:
+                await clear_persistent_memory_for_thread(graph, "thread-1")
+
+        assert getattr(exc_info.value, "status_code", None) == 403
+        graph.aupdate_state.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_clear_persistent_memory_for_thread_rejects_a3_production(self, monkeypatch):
+        from app import clear_persistent_memory_for_thread
+
+        graph = AsyncMock()
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("A3_ENV", "prod")
+
+        with patch("app.get_setting", return_value=True):
+            with pytest.raises(Exception) as exc_info:
+                await clear_persistent_memory_for_thread(graph, "thread-1")
+
+        assert getattr(exc_info.value, "status_code", None) == 403
+        graph.aupdate_state.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_clear_persistent_memory_for_thread_rejects_disabled_config(self, monkeypatch):
+        from app import clear_persistent_memory_for_thread
+
+        graph = AsyncMock()
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.delenv("A3_ENV", raising=False)
+
+        with patch("app.get_setting", return_value=False):
+            with pytest.raises(Exception) as exc_info:
+                await clear_persistent_memory_for_thread(graph, "thread-1")
+
+        assert getattr(exc_info.value, "status_code", None) == 403
+        graph.aupdate_state.assert_not_called()
+
+    def test_clear_thread_memory_endpoint_returns_helper_result(self):
+        from fastapi.testclient import TestClient
+        from app import app
+
+        helper_result = {
+            "ok": True,
+            "thread_id": "thread-1",
+            "cleared_fields": ["conversation_summary", "evidence_summary_memory", "evidence_gap_memory"],
+        }
+
+        with patch("app.clear_persistent_memory_for_thread", new_callable=AsyncMock, return_value=helper_result):
+            with TestClient(app) as client:
+                response = client.post("/dev/threads/thread-1/memory/clear")
+
+        assert response.status_code == 200
+        assert response.json() == helper_result
 
 
 class TestMindmapArtifacts:

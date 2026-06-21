@@ -1,7 +1,9 @@
 "use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import { LeftSidebar } from "@/components/left-sidebar"
+import { useUser } from "@/hooks/use-user"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
@@ -17,6 +19,7 @@ const A3_CHAT_HISTORY_KEY = "a3_chat_history"
 const A3_CURRENT_CHAT_ID_KEY = "a3_current_chat_id"
 const A3_CURRENT_THREAD_ID_KEY = "a3_current_thread_id"
 const A3_MESSAGES_KEY_PREFIX = "a3_messages:"
+const CONTROLLED_STOP_SUMMARY = "证据不足，已保存摘要并停止完整资源生成。"
 
 type ChatHistoryItem = {
   id: string
@@ -24,6 +27,13 @@ type ChatHistoryItem = {
   title: string
   updatedAt?: number
 }
+
+type MemoryConfirmationState = {
+  question: string
+  reason?: string
+  selectedMemoryCount?: number
+}
+
 const initialChatHistory: ChatHistoryItem[] = []
 
 function isBrowser(): boolean {
@@ -108,6 +118,7 @@ function getAuthHeaders(): Record<string, string> {
 
 const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
   supervisor: { title: "解析学习需求", detail: "识别课程主题、学习目标和需要生成的资源类型。" },
+  memory_use_decider: { title: "确认历史上下文", detail: "判断本轮检索是否需要结合历史学习记录。" },
   search_query_rewriter: { title: "改写检索查询", detail: "将原始问题改写为适合本地课程库和网络搜索的查询。" },
   academic_router: { title: "选择学习资源链路", detail: "调度本地 RAG、网络搜索和资源生成子 Agent。" },
   rag_retrieve: { title: "本地 RAG", detail: "从本地课程资料库检索候选证据。" },
@@ -195,7 +206,19 @@ export default function Home() {
   const [isInterrupted, setIsInterrupted] = useState(false)
   const [interruptDraft, setInterruptDraft] = useState("")
   const [isResuming, setIsResuming] = useState(false)
+  const [memoryConfirmation, setMemoryConfirmation] = useState<MemoryConfirmationState | null>(null)
+  const [isMemoryConfirming, setIsMemoryConfirming] = useState(false)
   const threadIdRef = useRef<string | null>(null)
+  const router = useRouter()
+  const { userId, nickname, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
+
+  // Redirect to onboarding if user exists but has no profile
+  useEffect(() => {
+    if (userLoading || !storageReady) return
+    if (userId && !hasProfile) {
+      router.push("/onboarding")
+    }
+  }, [userId, hasProfile, userLoading, storageReady, router])
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
@@ -285,6 +308,7 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
+    setMemoryConfirmation(null)
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
   }, [setActiveThreadId])
@@ -297,6 +321,7 @@ export default function Home() {
     setNodeEvents([])
     setIsInterrupted(false)
     setInterruptDraft("")
+    setMemoryConfirmation(null)
     setActiveThreadId(threadId)
     setLogs((prev) => [
       ...prev,
@@ -320,10 +345,66 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
+    setMemoryConfirmation(null)
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
     setLogs([{ type: "info", message: "[INFO] 对话历史已清空。", ts: timestamp() }])
   }, [setActiveThreadId])
+
+  const handleClearChat = useCallback(async (id: string) => {
+    const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
+    const threadId = chat?.threadId || id
+    const nextHistory = chatHistory.filter((item) => item.id !== id && item.threadId !== threadId)
+
+    if (isBrowser()) {
+      localStorage.removeItem(messageStorageKey(threadId))
+      if (selectedChatId === id || selectedChatId === threadId) {
+        localStorage.removeItem(A3_CURRENT_CHAT_ID_KEY)
+        localStorage.removeItem(A3_CURRENT_THREAD_ID_KEY)
+      }
+    }
+
+    setChatHistory(nextHistory)
+    if (selectedChatId === id || selectedChatId === threadId) {
+      setSelectedChatId(undefined)
+      setMessages([])
+      setNodeEvents([])
+      setTokenUsage({ input: 0, output: 0, total: 0 })
+      setIsInterrupted(false)
+      setInterruptDraft("")
+      setMemoryConfirmation(null)
+      setActiveThreadId(null)
+      pendingChatTitleRef.current = ""
+    }
+
+    setLogs((prev) => [
+      ...prev,
+      { type: "info", message: `[INFO] 已清除此对话：${threadId.slice(0, 8)}...`, ts: timestamp() },
+    ])
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/dev/threads/${encodeURIComponent(threadId)}/memory/clear`, {
+        method: "POST",
+        headers: { ...getAuthHeaders() },
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      setLogs((prev) => [
+        ...prev,
+        { type: "info", message: `[INFO] 已清理后端记忆：${threadId.slice(0, 8)}...`, ts: timestamp() },
+      ])
+    } catch (error: any) {
+      setLogs((prev) => [
+        ...prev,
+        {
+          type: "warning",
+          message: `[WARN] 本地对话已清除，后端记忆清理未完成：${error.message}`,
+          ts: timestamp(),
+        },
+      ])
+    }
+  }, [chatHistory, selectedChatId, setActiveThreadId])
 
   /** Process a single SSE data payload shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
@@ -351,6 +432,31 @@ export default function Home() {
     }
 
     if (data.type === "interrupt") {
+      if (data.interrupt_type === "memory_confirmation") {
+        setMemoryConfirmation({
+          question:
+            typeof data.question === "string" && data.question.trim()
+              ? data.question
+              : "我检测到之前有相关学习记录。你希望这次结合历史内容，还是只根据当前问题重新生成？",
+          reason: typeof data.reason === "string" ? data.reason : "",
+          selectedMemoryCount: typeof data.selected_memory_count === "number" ? data.selected_memory_count : undefined,
+        })
+        setIsInterrupted(false)
+        setInterruptDraft("")
+        if (data.thread_id) setActiveThreadId(data.thread_id)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "waiting_review",
+          summary: "等待确认是否结合历史学习记录。",
+          waitingForReview: true,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[HIL] 等待确认是否结合历史学习记录。", ts: timestamp() },
+        ])
+        return
+      }
+
       setInterruptDraft(data.draft)
       setIsInterrupted(true)
       if (data.thread_id) setActiveThreadId(data.thread_id)
@@ -364,6 +470,31 @@ export default function Home() {
         ...prev,
         { type: "warning", message: "[HIL] 图执行已暂停，等待你审核学习计划。", ts: timestamp() },
       ])
+      return
+    }
+
+    if (data.type === "provider_retry") {
+      const retryCount = typeof data.retry_count === "number" ? data.retry_count : 0
+      const maxRetries = typeof data.max_retries === "number" ? data.max_retries : 0
+      const stage = typeof data.stage === "string" ? data.stage : ""
+      const node = typeof data.node === "string" && data.node ? data.node : typeof data.llm_node === "string" ? data.llm_node : "provider"
+      const errorType = typeof data.error_type === "string" ? data.error_type : "TransportError"
+      const isFinalFailure = stage === "final_failure_after_retries"
+      const summary = isFinalFailure
+        ? `Provider 连接重试 ${retryCount}/${maxRetries} 次后仍失败。`
+        : `Provider 连接异常，正在第 ${retryCount}/${maxRetries} 次重试。`
+      setLogs((prev) => [
+        ...prev,
+        {
+          type: isFinalFailure ? "error" : "warning",
+          message: `[RETRY] ${node}: ${summary} (${errorType})`,
+          ts: timestamp(),
+        },
+      ])
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        summary,
+      }))
       return
     }
 
@@ -439,6 +570,27 @@ export default function Home() {
 
     if (data.type === "resource_final") {
       const finalAnswer = typeof data.answer === "string" ? data.answer : ""
+      if (data.resource_type === "evidence_summary" && data.controlled_stop === true) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === asstId
+              ? {
+                  ...msg,
+                  content: finalAnswer || msg.content,
+                }
+              : msg
+          )
+        )
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "done",
+          summary: CONTROLLED_STOP_SUMMARY,
+          waitingForReview: false,
+          error: undefined,
+        }))
+        return
+      }
+
       const mindmap = data.mindmap ?? null
       const reviewDoc = data.review_doc ?? null
       const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
@@ -530,7 +682,7 @@ export default function Home() {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: status.state === "error" ? "error" : "done",
-        summary: "个性化学习资源生成状态已更新。",
+        summary: status.summary === CONTROLLED_STOP_SUMMARY ? status.summary : "个性化学习资源生成状态已更新。",
         waitingForReview: false,
       }))
       return
@@ -760,6 +912,7 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setIsInterrupted(false)
     setInterruptDraft("")
+    setMemoryConfirmation(null)
     setLogs((prev) => [
       ...prev,
       { type: "info" as const, message: `[INFO] 用户问题：${content.slice(0, 60)}`, ts: timestamp() },
@@ -773,7 +926,7 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query: content, thread_id: threadId }),
+        body: JSON.stringify({ query: content, thread_id: threadId, user_id: userId }),
       })
 
       if (!body) return
@@ -905,14 +1058,74 @@ export default function Home() {
     }
   }, [fetchWithErrorHandling, consumeSSEStream])
 
+  const handleMemoryConfirmation = useCallback(async (choice: "use" | "ignore") => {
+    const threadId = threadIdRef.current
+    if (!threadId) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法继续执行。", ts: timestamp() },
+      ])
+      return
+    }
+
+    setIsMemoryConfirming(true)
+    setIsLoading(true)
+    setLogs((prev) => [
+      ...prev,
+      {
+        type: "info",
+        message: choice === "use" ? "[INFO] 已选择结合历史学习记录。" : "[INFO] 已选择只看当前问题。",
+        ts: timestamp(),
+      },
+    ])
+
+    try {
+      const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ thread_id: threadId, memory_use_choice: choice }),
+      })
+
+      if (!body) return
+
+      setMemoryConfirmation(null)
+      await consumeSSEStream(body)
+
+      setLogs((prev) => [
+        ...prev,
+        { type: "info", message: "[INFO] 历史上下文确认后已继续执行。", ts: timestamp() },
+      ])
+    } catch (error: any) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: `[ERROR] Memory confirmation failed: ${error.message}`, ts: timestamp() },
+      ])
+    } finally {
+      setIsMemoryConfirming(false)
+      setIsLoading(false)
+    }
+  }, [fetchWithErrorHandling, consumeSSEStream])
+
   return (
     <div className="a3-app-shell flex overflow-hidden">
       <LeftSidebar
         chatHistory={chatHistory}
         onNewChat={handleNewChat}
         onSelectChat={handleSelectChat}
+        onClearChat={handleClearChat}
         onClearChatHistory={handleClearChatHistory}
         selectedChatId={selectedChatId}
+        userId={userId}
+        nickname={nickname}
+        onStartOnboarding={startOnboarding}
+        onClearUser={() => {
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("a3_user_id")
+            localStorage.removeItem("a3_nickname")
+            localStorage.removeItem("a3_onboarding_completed")
+            window.location.reload()
+          }
+        }}
       />
       <div className="flex min-w-0 flex-1 flex-col h-full">
         <ChatArea
@@ -927,6 +1140,48 @@ export default function Home() {
             onFeedback={handleFeedback}
             isSubmitting={isResuming}
           />
+        )}
+        {memoryConfirmation && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(36,48,39,0.22)] px-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="memory-confirmation-title"
+          >
+            <div className="w-full max-w-[440px] rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-[0_12px_30px_rgba(36,48,39,0.12)]">
+              <div className="mb-4">
+                <p id="memory-confirmation-title" className="text-base font-semibold text-foreground">
+                  是否结合历史学习记录？
+                </p>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                  {memoryConfirmation.question}
+                </p>
+                {memoryConfirmation.selectedMemoryCount ? (
+                  <p className="mt-3 rounded-lg border border-border bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
+                    已找到 {memoryConfirmation.selectedMemoryCount} 条可参考的历史证据摘要。选择后我会继续生成，不会修改历史记录。
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  className="rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => handleMemoryConfirmation("ignore")}
+                  disabled={isMemoryConfirming}
+                >
+                  只看当前问题
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-[var(--primary-deep)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => handleMemoryConfirmation("use")}
+                  disabled={isMemoryConfirming}
+                >
+                  结合历史
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
       <RightPanel

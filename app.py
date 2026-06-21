@@ -1,4 +1,4 @@
-﻿"""A3 Study Agent 鈥?AI-powered university learning resource generation system."""
+﻿"""A3 Study Agent - AI-powered university learning resource generation system."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -15,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -26,16 +27,23 @@ from src.database.checkpointer import (
     get_db_uri,
     make_thread_config,
 )
+from src.config import get_setting
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
-from src.graph.state import CONTEXT_CLEAR, initial_request_reset_transient_state
-from src.schemas import ChatRequest, ResumeRequest
-from src.observability.a3_trace import emit_a3_trace
+from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_transient_state
+from src.profile import get_profile_manager
+from src.schemas import ChatRequest, OnboardRequest, ProfileResponse, ResumeRequest
+from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
 from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+PROVIDER_RETRY_TRACE_STAGES = {
+    "provider_transport_retry_attempt",
+    "provider_transport_error",
+    "final_failure_after_retries",
+}
 
 
 def _graph_checkpointer_type(graph) -> str:
@@ -145,11 +153,15 @@ TEXT_EMIT_NODES = {
     "review_doc_output",
     "study_plan_output",
     "multi_resource_runner",
+    "resource_bundle_output",
 }
 
 # All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
 GRAPH_NODES = {
     "supervisor",
+    "episodic_memory_retriever",
+    "episodic_memory_writer",
+    "memory_use_decider",
     "academic_router",
     "search_query_rewriter",
     "rag_retrieve",
@@ -159,6 +171,9 @@ GRAPH_NODES = {
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",
+    "resource_orchestrator",
+    "resource_worker",
+    "resource_bundle_output",
     "mindmap_planner",
     "mindmap_agent",
     "mindmap_reviewer",
@@ -202,7 +217,28 @@ def _last_ai_message_content(final_state: dict) -> str:
 
 
 def _resource_final_payload(final_state: dict) -> dict | None:
-    resource_type = str(final_state.get("requested_resource_type") or "")
+    if final_state.get("evidence_controlled_stop") is True or final_state.get("final_response_type") == "evidence_summary":
+        answer = _last_ai_message_content(final_state) or str(final_state.get("plan") or "")
+        return {
+            "type": "resource_final",
+            "resource_type": "evidence_summary",
+            "controlled_stop": True,
+            "controlled_stop_reason": final_state.get("evidence_controlled_stop_reason", ""),
+            "answer": answer,
+        }
+
+    bundle_artifact = final_state.get("resource_bundle_artifact") or {}
+    requested_resource_types = list(final_state.get("requested_resource_types") or [])
+    bundle_resources = list(bundle_artifact.get("resources") or [])
+    bundle_errors = list(bundle_artifact.get("errors") or [])
+    is_multi_resource_bundle = (
+        bool(bundle_artifact)
+        and (
+            len(requested_resource_types) > 1
+            or len(bundle_resources) > 1
+            or bundle_artifact.get("status") in {"partial_success", "failed"}
+        )
+    )
     mindmap_artifact = final_state.get("mindmap_artifact") or {}
     mindmap_tree = final_state.get("mindmap_tree") or {}
     exercise_items = final_state.get("exercise_items") or []
@@ -213,6 +249,82 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
     multi_resource_results = final_state.get("multi_resource_results") or []
     multi_resource_summary = final_state.get("multi_resource_summary") or ""
+
+    if is_multi_resource_bundle:
+        answer = _last_ai_message_content(final_state) or str(multi_resource_summary or "")
+        payload: dict = {
+            "type": "resource_final",
+            "resource_type": "bundle",
+            "answer": answer,
+            "resource_generation_status": final_state.get(
+                "resource_generation_status", ""
+            ),
+            "resource_bundle": bundle_artifact,
+            "resources": bundle_resources,
+            "errors": bundle_errors,
+        }
+
+        if mindmap_artifact or mindmap_tree:
+            payload["mindmap"] = {
+                "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
+                "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
+                "xmind_url": mindmap_artifact.get("xmind_url", ""),
+            }
+
+        if exercise_items or exercise_artifact:
+            if not answer and exercise_items:
+                title = str(exercise_artifact.get("title") or "Leveled exercises")
+                answer = _render_exercise_markdown(
+                    title,
+                    exercise_items,
+                    review_reason=str(
+                        exercise_artifact.get("review_reason")
+                        or final_state.get("exercise_review_reason")
+                        or ""
+                    ),
+                    quality_warning=bool(exercise_artifact.get("quality_warning")),
+                )
+                payload["answer"] = answer
+            payload["exercise_items"] = exercise_items
+            payload["exercise_artifact"] = exercise_artifact
+
+        if review_doc_artifact:
+            payload["review_doc"] = {
+                "subject": review_doc_artifact.get("subject", ""),
+                "title": review_doc_artifact.get("title", "Markdown Review Document"),
+                "filename": review_doc_artifact.get("filename", ""),
+                "docx_filename": review_doc_artifact.get("docx_filename", ""),
+                "markdown_url": review_doc_artifact.get("markdown_url", ""),
+                "docx_url": review_doc_artifact.get("docx_url", ""),
+                "markdown": review_doc_artifact.get("markdown", ""),
+            }
+        if review_doc_artifacts:
+            payload["review_doc_artifacts"] = [
+                {
+                    "subject": artifact.get("subject", ""),
+                    "title": artifact.get("title", "Markdown复习文档"),
+                    "filename": artifact.get("filename", ""),
+                    "docx_filename": artifact.get("docx_filename", ""),
+                    "markdown_url": artifact.get("markdown_url", ""),
+                    "docx_url": artifact.get("docx_url", ""),
+                    "markdown": artifact.get("markdown", ""),
+                }
+                for artifact in review_doc_artifacts
+            ]
+
+        if study_plan_artifact or study_plan_document:
+            payload["study_plan"] = {
+                "title": study_plan_artifact.get("title")
+                or study_plan_document.get("title", "Personalized Study Plan"),
+                "filename": study_plan_document.get("filename", ""),
+                "docx_filename": study_plan_document.get("docx_filename", ""),
+                "markdown_url": study_plan_document.get("markdown_url", ""),
+                "docx_url": study_plan_document.get("docx_url", ""),
+            }
+
+        return payload
+
+    resource_type = str(final_state.get("requested_resource_type") or "")
 
     if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan", "multi_resource"}:
         if mindmap_artifact or mindmap_tree:
@@ -227,6 +339,8 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             return None
 
     answer = _last_ai_message_content(final_state)
+    if resource_type == "multi_resource" and multi_resource_summary:
+        answer = multi_resource_summary
     payload: dict = {
         "type": "resource_final",
         "resource_type": resource_type,
@@ -251,7 +365,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         payload["mindmap_tree"] = mindmap_artifact.get("tree") or mindmap_tree or {}
 
     if include_quiz:
-        if (not answer or len(answer.strip()) < 40) and exercise_items:
+        if (
+            not answer
+            or (resource_type == "quiz" and len(answer.strip()) < 40)
+        ) and exercise_items:
             title = str(exercise_artifact.get("title") or "Leveled exercises")
             answer = _render_exercise_markdown(
                 title,
@@ -278,7 +395,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
         payload["review_doc_artifacts"] = [
             {
                 "subject": artifact.get("subject", ""),
-                "title": artifact.get("title", "Markdown Review Document"),
+                "title": artifact.get("title", "Markdown复习文档"),
                 "filename": artifact.get("filename", ""),
                 "docx_filename": artifact.get("docx_filename", ""),
                 "markdown_url": artifact.get("markdown_url", ""),
@@ -300,6 +417,58 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     return payload
 
 
+def _dev_memory_clear_enabled() -> bool:
+    """Return whether the dev-only persistent-memory clear endpoint is enabled."""
+    env_values = {
+        (os.getenv("APP_ENV") or "").strip().lower(),
+        (os.getenv("A3_ENV") or "").strip().lower(),
+    }
+    if env_values & {"production", "prod"}:
+        return False
+    return bool(get_setting("development.enable_dev_memory_clear", False))
+
+
+async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
+    """Clear persistent memory fields for a thread in development mode."""
+    if not _dev_memory_clear_enabled():
+        raise HTTPException(status_code=403, detail="Dev memory clear is disabled")
+
+    config = make_thread_config(thread_id)
+    cleared_fields = [
+        "conversation_summary",
+        "evidence_summary_memory",
+        "evidence_gap_memory",
+        "episodic_memory_results",
+        "semantic_memory_results",
+    ]
+    values = {
+        "conversation_summary": "",
+        "evidence_summary_memory": MEMORY_CLEAR,
+        "evidence_gap_memory": MEMORY_CLEAR,
+        "episodic_memory_results": [],
+        "semantic_memory_results": [],
+    }
+    await graph.aupdate_state(config, values)
+
+    trace_state = {
+        "thread_id": thread_id,
+        "session_id": thread_id,
+        "cleared_fields": cleared_fields,
+    }
+    emit_a3_trace(
+        logger,
+        "dev_memory_clear",
+        {
+            "thread_id": thread_id,
+            "cleared_fields": cleared_fields,
+            "success": True,
+        },
+        state=trace_state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return {"ok": True, "thread_id": thread_id, "cleared_fields": cleared_fields}
+
+
 
 async def _stream_graph_events(
     graph,
@@ -314,12 +483,39 @@ async def _stream_graph_events(
     """
     node_start_times: dict[str, float] = {}
     active_nodes: list[str] = []
+    trace_events: list[dict] = []
+    trace_sink_token = set_trace_event_sink(trace_events)
+
+    def _drain_provider_retry_events() -> list[str]:
+        drained: list[str] = []
+        while trace_events:
+            event = trace_events.pop(0)
+            if event.get("stage") not in PROVIDER_RETRY_TRACE_STAGES:
+                continue
+            payload = {
+                "type": "provider_retry",
+                "stage": event.get("stage", ""),
+                "node": event.get("node_name", ""),
+                "llm_node": event.get("llm_node", ""),
+                "provider": event.get("provider", ""),
+                "model": event.get("model", ""),
+                "retry_count": event.get("retry_count", 0),
+                "max_retries": event.get("max_retries", 0),
+                "next_attempt": event.get("next_attempt", 0),
+                "error_type": event.get("error_type", ""),
+                "error_message": event.get("error_message", ""),
+                "status_code": event.get("status_code"),
+            }
+            drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+        return drained
 
     try:
         async for event in graph.astream_events(input_data, config=config, version="v2"):
+            for retry_payload in _drain_provider_retry_events():
+                yield retry_payload
             event_type = event["event"]
 
-            # 鈹€鈹€ Node lifecycle events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Node lifecycle events
             if event_type in ("on_chain_start", "on_chain_end"):
                 node_name = event.get("name")
                 meta_node = event.get("metadata", {}).get("langgraph_node")
@@ -378,7 +574,7 @@ async def _stream_graph_events(
                             mindmap_payload = json.dumps(
                                 {
                                     "type": "mindmap_result",
-                                    "title": artifact.get("title", "鐭ヨ瘑鐐规€濈淮瀵煎浘"),
+                                    "title": artifact.get("title", "Markdown复习文档"),
                                     "tree": artifact.get("tree", {}),
                                     "xmind_url": artifact.get("xmind_url", ""),
                                 },
@@ -393,7 +589,7 @@ async def _stream_graph_events(
                             review_doc_payload = json.dumps(
                                 {
                                     "type": "review_doc_result",
-                                    "title": artifact.get("title", "Markdown澶嶄範鏂囨。"),
+                                    "title": artifact.get("title", "Markdown复习文档"),
                                     "filename": artifact.get("filename", ""),
                                     "docx_filename": artifact.get("docx_filename", ""),
                                     "markdown_url": artifact.get("markdown_url", ""),
@@ -402,8 +598,10 @@ async def _stream_graph_events(
                                 ensure_ascii=False,
                             )
                             yield f"data: {review_doc_payload}\n\n"
+                    for retry_payload in _drain_provider_retry_events():
+                        yield retry_payload
 
-            # 鈹€鈹€ Token streaming 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Token streaming
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 if node_name in ALLOWED_NODES:
@@ -415,7 +613,7 @@ async def _stream_graph_events(
                         )
                         yield f"data: {payload}\n\n"
 
-            # 鈹€鈹€ Token usage events 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            # Token usage events
             elif event_type == "on_chat_model_end":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 output = event.get("data", {}).get("output")
@@ -433,6 +631,8 @@ async def _stream_graph_events(
                     )
                     yield f"data: {payload}\n\n"
     except Exception as e:
+        for retry_payload in _drain_provider_retry_events():
+            yield retry_payload
         logger.exception("Unhandled error in graph streaming")
         failed_node = active_nodes[-1] if active_nodes else None
         if failed_node:
@@ -456,8 +656,10 @@ async def _stream_graph_events(
         )
         yield f"data: {error_payload}\n\n"
         return
+    finally:
+        reset_trace_event_sink(trace_sink_token)
 
-    # 鈹€鈹€ Check for interrupt after stream completes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Check for interrupt after stream completes
     try:
         state_snapshot = await graph.aget_state(config)
     except Exception:
@@ -488,11 +690,25 @@ async def _stream_graph_events(
     if state_snapshot.next:
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
-                draft = task.interrupts[0].value
-                payload = json.dumps(
-                    {"type": "interrupt", "draft": draft, "thread_id": thread_id},
-                    ensure_ascii=False,
-                )
+                interrupt_value = task.interrupts[0].value
+                if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "memory_confirmation":
+                    payload_data = {
+                        "type": "interrupt",
+                        "interrupt_type": "memory_confirmation",
+                        "question": interrupt_value.get("question", ""),
+                        "reason": interrupt_value.get("reason", ""),
+                        "selected_memory_count": interrupt_value.get("selected_memory_count", 0),
+                        "options": interrupt_value.get("options", []),
+                        "thread_id": thread_id,
+                    }
+                else:
+                    payload_data = {
+                        "type": "interrupt",
+                        "interrupt_type": "plan_review",
+                        "draft": interrupt_value,
+                        "thread_id": thread_id,
+                    }
+                payload = json.dumps(payload_data, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
                 return
 
@@ -512,6 +728,7 @@ async def _stream_graph_events(
                 "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
                 "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
+                "controlled_stop": bool(resource_payload.get("controlled_stop")),
             },
             state=final_state,
             env_flag="LOG_A3_TRACE",
@@ -525,31 +742,46 @@ async def generate_sse(
     query: str,
     graph,
     thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream LangGraph events as Server-Sent Events (SSE).
 
     Yields SSE payload types:
 
     * ``{"type": "thread_id", "thread_id": "..."}``
-      鈥?emitted once at stream start so frontend can use it for /resume.
+      - emitted once at stream start so frontend can use it for /resume.
     * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
-      鈥?emitted when a graph node begins or finishes execution.
+      - emitted when a graph node begins or finishes execution.
     * ``{"type": "token", "content": "<text>"}``
-      鈥?emitted for each streamed token from an allowed LLM node.
+      - emitted for each streamed token from an allowed LLM node.
     * ``{"type": "interrupt", "draft": "...", "thread_id": "..."}``
-      鈥?emitted when the graph pauses for human review (HIL).
+      - emitted when the graph pauses for human review (HIL).
 
     Args:
         query: The user-provided string to be processed by the graph.
         graph: The compiled LangGraph instance from app.state.
         thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
+        user_id: Optional user ID for profile context injection and recording.
     """
     if thread_id is None:
         thread_id = str(uuid.uuid4())
     request_id = str(uuid.uuid4())
     config = make_thread_config(thread_id)
+
+    # Inject profile context as a SystemMessage if a user profile exists
+    messages = [HumanMessage(content=query)]
+    if user_id:
+        try:
+            manager = get_profile_manager()
+            profile_ctx = await manager.build_profile_context(user_id)
+            if profile_ctx:
+                messages.insert(0, SystemMessage(content=profile_ctx))
+                logger.info("Injected profile context user=%s (%d chars)", user_id, len(profile_ctx))
+        except Exception:
+            logger.exception("Failed to load profile context user=%s", user_id)
+
     state_input = {
-        "messages": [HumanMessage(content=query)],
+        "messages": messages,
         "request_id": request_id,
         "session_id": thread_id,
         "thread_id": thread_id,
@@ -558,11 +790,40 @@ async def generate_sse(
     }
     _emit_graph_config_trace(graph, config, state_input)
 
-    # Emit thread_id so frontend can use it for /resume
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+
+    # Record user input as episodic memory (non-fatal, fire-and-forget)
+    if user_id:
+        try:
+            from src.memory.episodic import compute_importance_for_user_query, write_episodic_memory
+            importance, mem_type, content = compute_importance_for_user_query(
+                query=query,
+                subject="",
+                resource_types=None,
+            )
+            await write_episodic_memory(
+                {"thread_id": thread_id},
+                memory_type=mem_type,
+                content=content,
+                importance=importance,
+            )
+        except Exception:
+            logger.exception("Failed to record user input episodic memory")
 
     async for chunk in _stream_graph_events(graph, state_input, config, thread_id):
         yield chunk
+
+    # Record the conversation turn for profile evolution (non-fatal)
+    if user_id:
+        try:
+            await manager.process_conversation(
+                user_id=user_id,
+                user_message=query,
+                assistant_response="",
+            )
+            logger.debug("Profile turn recorded user=%s", user_id)
+        except Exception:
+            logger.exception("Profile recording failed (non-fatal) user=%s", user_id)
 
 
 async def generate_resume_sse(
@@ -570,6 +831,7 @@ async def generate_resume_sse(
     feedback: str | None,
     graph,
     thread_id: str,
+    memory_use_choice: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Resume an interrupted graph and stream remaining events as SSE.
 
@@ -581,7 +843,9 @@ async def generate_resume_sse(
     """
     config = make_thread_config(thread_id)
 
-    if feedback:
+    if memory_use_choice:
+        resume_value = {"type": "memory_confirmation", "choice": memory_use_choice}
+    elif feedback:
         resume_value = {"action": "feedback", "text": feedback}
     else:
         resume_value = edited_plan
@@ -600,7 +864,7 @@ async def generate_resume_sse(
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
     return StreamingResponse(
-        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id),
+        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id, user_id=chat.user_id),
         media_type="text/event-stream",
     )
 
@@ -608,9 +872,20 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
     return StreamingResponse(
-        generate_resume_sse(req.edited_plan, req.feedback, request.app.state.graph, req.thread_id),
+        generate_resume_sse(
+            req.edited_plan,
+            req.feedback,
+            request.app.state.graph,
+            req.thread_id,
+            memory_use_choice=req.memory_use_choice,
+        ),
         media_type="text/event-stream",
     )
+
+
+@app.post("/dev/threads/{thread_id}/memory/clear")
+async def clear_thread_memory_endpoint(thread_id: str, request: Request):
+    return await clear_persistent_memory_for_thread(request.app.state.graph, thread_id)
 
 
 @app.get("/artifacts/mindmaps/{artifact_id}/{filename}")
@@ -680,6 +955,124 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
         media_type=media_type,
         filename=filename,
     )
+
+
+# User profile and onboarding
+
+
+@app.post("/onboard")
+async def onboard_endpoint(req: OnboardRequest):
+    """Create an initial user profile from the onboarding wizard.
+
+    All values are explicit self-reports -> stored with confidence=0.9.
+    """
+    from src.profile.schema import (
+        AgentObservation,
+        Goal,
+        LearningStyle,
+        SkillEntry,
+        UserProfile,
+    )
+
+    manager = get_profile_manager()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Build skills from self-assessed levels
+    skills: dict[str, SkillEntry] = {}
+    for subject in req.subjects:
+        level = req.skill_levels.get(subject, 0.25)
+        skills[subject] = SkillEntry(
+            level=level,
+            confidence=0.9,
+            last_observed=now,
+            evidence_count=1,
+        )
+
+    # Build learning style from self-report
+    learning_style = LearningStyle()
+    for dim, val in req.learning_style.items():
+        if hasattr(learning_style, dim):
+            setattr(learning_style, dim, val)
+
+    # Build goals
+    goals = [
+        Goal(goal=g.strip(), importance=0.9, progress=0.0, created_at=now)
+        for g in req.goals
+        if g.strip()
+    ]
+
+    # Record observations about the onboarding
+    obs_list: list[AgentObservation] = []
+    if req.grade:
+        obs_list.append(AgentObservation(
+            content=f"鐢ㄦ埛鑷堪骞寸骇: {req.grade}",
+            category="general",
+            importance=0.8,
+            created_at=now,
+        ))
+    if req.subjects:
+        obs_list.append(AgentObservation(
+            content=f"用户首次选择 {len(req.subjects)} 个学习方向: {', '.join(req.subjects)}",
+            category="general",
+            importance=0.8,
+            created_at=now,
+        ))
+
+    profile = UserProfile(
+        user_id=req.user_id,
+        skills=skills,
+        learning_style=learning_style,
+        goals=goals,
+        dislikes=req.dislikes or [],
+        agent_observations=obs_list,
+        extra={
+            "nickname": req.nickname,
+            "grade": req.grade,
+            "onboarding_completed": True,
+        },
+        created_at=now,
+        updated_at=now,
+    )
+
+    await manager.store.save(profile)
+    logger.info(
+        "Onboarding 鐢诲儚宸插垱寤?user=%s nickname=%s subjects=%d goals=%d",
+        req.user_id, req.nickname, len(skills), len(goals),
+    )
+
+    return {
+        "user_id": req.user_id,
+        "summary": profile.to_summary(),
+        "skills_count": len(skills),
+        "goals_count": len(goals),
+    }
+
+
+@app.get("/profile/{user_id}")
+async def get_profile_endpoint(user_id: str):
+    """Return the current user profile, or 404 if not found."""
+    manager = get_profile_manager()
+    profile = await manager.store.load(user_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {
+        "user_id": user_id,
+        "has_profile": True,
+        "summary": profile.to_summary(),
+        "skills": {
+            name: {"level": entry.level, "confidence": entry.confidence}
+            for name, entry in profile.skills.items()
+        },
+        "goals": [{"goal": g.goal, "importance": g.importance} for g in profile.goals],
+    }
+
+
+@app.get("/subjects")
+async def get_subjects_endpoint():
+    """Return the list of available learning subjects discovered from data/."""
+    from src.rag.course_catalog import get_available_subjects_from_data
+
+    return {"subjects": get_available_subjects_from_data()}
 
 
 if __name__ == "__main__":

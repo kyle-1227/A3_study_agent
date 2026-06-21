@@ -1,6 +1,6 @@
 """Unit tests for LearningState definition."""
 
-from src.graph.state import LearningState
+from src.graph.state import MEMORY_CLEAR, LearningState, evidence_memory_reducer
 
 
 class TestLearningState:
@@ -34,3 +34,19 @@ class TestLearningState:
                 "plan": "",
             }
             assert state["intent"] == intent
+
+
+class TestEvidenceMemoryReducer:
+
+    def test_memory_clear_sentinel_returns_empty_list(self):
+        existing = [{"memory_id": "m1", "created_at": "2026-01-01T00:00:00"}]
+        assert evidence_memory_reducer(existing, MEMORY_CLEAR) == []
+
+    def test_dedupes_by_memory_id_latest_wins(self):
+        existing = [{"memory_id": "m1", "created_at": "2026-01-01T00:00:00", "summary": "old"}]
+        update = [{"memory_id": "m1", "created_at": "2026-01-02T00:00:00", "summary": "new"}]
+
+        result = evidence_memory_reducer(existing, update)
+
+        assert len(result) == 1
+        assert result[0]["summary"] == "new"

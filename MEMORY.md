@@ -1,0 +1,1 @@
+- [Long-term Memory System](C:\Users\Lexi\.claude\projects\d--ruanjian-A3-study-agent\memory\long-term-memory-system.md) — Complete memory layer architecture with episodic, semantic, retrieval, consolidation, forgetting, and context engineering

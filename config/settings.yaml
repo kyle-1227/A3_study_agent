@@ -1,9 +1,9 @@
-﻿# A3 Study Agent 鈥?System Logic Parameters
+# A3 Study Agent - System Logic Parameters
 # Loaded by src/config/config_manager.py at runtime.
 
 academic:
   max_retries: 2                        # Hallucination retry loop limit
-  search_timeout: 6                     # Legacy/general web search timeout (seconds)
+  search_timeout: 6                     # Default external evidence timeout (seconds)
   temperature: 0.7                      # Answer generation temperature
   max_tokens: 4096                      # Answer bubble output budget (doubled)
   hallucination_eval_temperature: 0.0   # Evaluation requires determinism
@@ -11,22 +11,87 @@ academic:
 development:
   fail_fast_structured_output: true      # Structured Pydantic calls fail visibly in development
   fail_fast_evidence_judge: true         # Evidence Judge failure interrupts graph in development
+  enable_dev_memory_clear: true          # Dev-only API to clear persistent memory for a thread
+
+provider_transport_retry:
+  max_retries: 2                         # Retry transient provider transport errors 1-3 times
+  base_delay_seconds: 0.25               # Linear backoff base delay between retry attempts
+
+structured_output:
+  manifest:
+    enabled: true
+    max_chars: 6000
+    include_descriptions: true
+    include_constraints: true
+    include_enum_values: true
+  drift_guards:
+    default:
+      global_forbidden_output_fields:
+        - metadata
+        - debug
+        - raw
+        - raw_output
+      global_forbidden_aliases:
+        reason:
+          - rationale
+          - explanation
+          - why
+    web_source_summarizer:
+      forbidden_output_fields:
+        - task_id
+        - subject
+        - role
+        - purpose
+        - search_query
+        - url
+        - title
+        - domain
+        - canonical_url
+        - original_url
+      canonical_aliases:
+        coverage_points:
+          - key_points
+          - points
+          - coverage
+        evidence_type:
+          - type
+          - category
+        use_case:
+          - usage
+          - purpose
+          - role
+    evidence_item_grader:
+      forbidden_output_fields:
+        - source_id
+        - url
+        - title
+        - metadata
+      canonical_aliases:
+        coverage_contribution:
+          - coverage
+          - contribution
+          - coverage_reason
+          - support_reason
+          - supports
+    evidence_sufficiency_judge:
+      canonical_aliases:
+        gap:
+          - topic
+          - description
+          - missing_topic
+        suggested_search_query:
+          - query
+          - search_query
+          - followup_query
 
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
 web_search:
-  provider: tavily                       # Tavily is the only Web Search provider; no fallback
-  conditional_supplement_enabled: true   # Let rag_retrieve handle branch-aware web supplement
-  skip_general_when_conditional: true     # Skip old fan-out web_search for academic intent
-  skip_general_when_multi_subject: true   # Compatibility switch for previous multi-subject behavior
-  timeout_seconds: 30                      # Timeout per Tavily web supplement attempt
-  max_total_attempts: 3                   # Global dynamic web attempts per request
-  max_attempts_per_subject: 2             # Dynamic web attempts per subject branch
-  max_supplement_subjects: 2              # Max subjects selected for web supplement
-  max_results_per_attempt: 3              # Max web results used from one attempt
-  max_query_chars: 160                    # Keep supplement queries short without breaking key phrases
+  provider: tavily                       # Web Research executor provider
+  timeout_seconds: 120                   # Timeout per web research task
+  max_query_chars: 160                   # Keep search queries short without breaking key phrases
   tavily:
     enabled: true
     api_key_env: TAVILY_API_KEY
@@ -39,17 +104,29 @@ web_search:
     topic: general
     include_usage: true
   preserve_key_phrases: true              # Preserve common complete technical phrases in compacted queries
-  retry_failed_subjects_first: true        # Give failed/no-result subjects the next retry opportunity
-  stop_subject_after_success: true         # Do not spend more budget once a subject has enough usable Web supplement
-  min_results_per_subject: 1               # Minimum usable results before a subject is considered successful
-  llm_decision_enabled: true              # Use LLM coverage decision before rule fallback
-  max_purposes_per_subject: 4             # Cap purpose labels per subject decision
-  max_plan_items_per_subject: 3           # Cap search queries per subject decision
 
 retrieval:
-  mode: dual_source_evidence               # local RAG + first-round Tavily -> unified Evidence Judge
+  mode: dual_source_evidence               # local RAG + Web Research evidence -> unified Evidence Judge
   dual_source_evidence:
     block_generation_when_evidence_judge_failed: true
+  evidence_judge_v2:
+    enabled: true
+    item_batch_size: 5
+    allow_sufficiency_deterministic_fallback: false
+    expose_fallback_trace: true
+    strict_observability: true
+  web_research_v2:
+    scope: dual_source_evidence_only
+    enabled: true
+    fail_fast: true
+    allow_empty_web_evidence_on_failure: false
+    max_tasks_per_subject: 2
+    max_total_tasks: 6
+    max_results_per_task: 3
+    source_summary_batch_size: 6
+    summarize_sources: true
+    expose_fallback_trace: true
+    strict_observability: true
   local_rag:
     enabled: true
     per_subject_top_k: 3
@@ -57,7 +134,7 @@ retrieval:
     enabled: true
     provider: tavily
     max_results_per_query: 3
-    timeout_seconds: 30
+    timeout_seconds: 120
   fusion:
     max_context_docs: 8
     max_evidence_candidates: 16
@@ -73,191 +150,292 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  academic:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.7
+    max_tokens: 4096
+    streaming: false
   supervisor:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
-    max_tokens: 1200
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
   query_rewrite:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 1600
+    thinking: disabled
+    streaming: false
+  memory_use_decider:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1024
+    thinking: disabled
     streaming: false
   hallucination_eval:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 800
+    thinking: disabled
     streaming: false
   mindmap:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
   exercise:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
-  web_coverage_decision:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
-    temperature: 0.0
-    max_tokens: 1600
-    streaming: false
-  search_result_judge:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+  web_research_planner:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 1200
+    thinking: disabled
+    streaming: false
+    structured_output: true
+    strict_schema: true
+    include_raw: true
+  web_source_summarizer:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1800
+    thinking: disabled
     streaming: false
     structured_output: true
     strict_schema: true
     include_raw: true
   evidence_judge:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.0
     max_tokens: 4096
+    thinking: disabled
     streaming: false
     structured_output: true
     strict_schema: true
     include_raw: true
   emotional:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 800
     streaming: false
   review_doc:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
     streaming: false
   study_plan:
-    provider: openrouter
-    model: "deepseek/deepseek-v4-flash"
-    base_url: "https://openrouter.ai/api/v1"
-    api_key_env: "OPENROUTER_API_KEY"
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
     max_tokens: 4096
+    thinking: disabled
+    streaming: false
+  profile_extractor:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1200
+    thinking: disabled
+    streaming: false
+  memory_semantic_summarizer:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1600
+    thinking: disabled
     streaming: false
 
 llm_outputs:
   default:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
+    transport_max_retries: 2
     max_raw_chars: 12000
+    reask_enabled: true
+    reask_business_validation: true
   supervisor:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   search_query_rewriter:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
+    max_raw_chars: 12000
+    reask_enabled: true
+  memory_use_decider:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
     max_raw_chars: 12000
   exercise_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   exercise_reviewer:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   mindmap_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   mindmap_reviewer:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   hallucination_eval:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
-  web_coverage_decision:
-    output_mode: native_json_schema_pydantic
+  web_research_planner:
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
-  evidence_judge:
-    output_mode: native_json_schema_pydantic
+    reask_business_validation: true
+  web_source_summarizer:
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
-  search_result_judge:
-    output_mode: native_json_schema_pydantic
+    reask_business_validation: true
+  evidence_item_grader:
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
+    reask_business_validation: true
+  evidence_sufficiency_judge:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+    reask_business_validation: true
   study_plan_emotional_intel:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   study_plan_agent:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   study_plan_reviewer_academic:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
     max_raw_chars: 12000
   study_plan_reviewer_emotional:
-    output_mode: native_json_schema_pydantic
+    output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 0
+    max_retries: 2
+    max_raw_chars: 12000
+  review_doc_reviewer:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  profile_extractor:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  memory_semantic_summarizer:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
     max_raw_chars: 12000
 
 study_plan:
@@ -294,7 +472,7 @@ rag:
   branch_strong_threshold: 0.7            # Minimum score for strong local evidence
 
 supervisor:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic intent routing
@@ -304,25 +482,62 @@ supervisor:
     - unknown
 
 query_rewrite:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic retrieval-query rewriting
   max_tokens: 1000
   streaming: false
 
-web_coverage_decision:
-  model: "deepseek-v4-flash"
-  base_url: "https://api.deepseek.com"
-  api_key_env: "DEEPSEEK_API_KEY"
-  temperature: 0.0
-  max_tokens: 10000
-  streaming: false
-
 hallucination_eval:
-  model: "deepseek-v4-flash"
+  model: "deepseek-v4-pro"
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.0                      # Deterministic answer faithfulness evaluation
   max_tokens: 1000
   streaming: false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Long-term Memory System
+# ═══════════════════════════════════════════════════════════════════════════
+memory:
+  # Storage
+  db_path: "data/memory.db"
+  backend: "sqlite"
+
+  # Embedding
+  embedding_provider: "deepseek"         # "deepseek" | "dummy"
+
+  # Retrieval
+  retrieval:
+    top_k_episodic: 3
+    top_k_semantic: 2
+    keyword_weight: 0.4
+    vector_weight: 0.6
+    importance_boost: 0.1               # Bonus added to score for high-importance memories
+
+  # Consolidation
+  consolidation_episodic_threshold: 5   # Consolidate after N unconsolidated episodic
+  consolidation_max_per_batch: 5         # Max episodic events per consolidation batch
+  background_enabled: true               # Enable fire-and-forget background consolidation
+
+  # Forgetting
+  forgetting_retention_days: 30          # Delete episodic older than this
+  forgetting_importance_min: 0.2         # Only delete episodic below this importance
+  forgetting_duplicate_similarity: 0.95  # Cosine similarity threshold for duplicate detection
+
+  # Token budget (character counts, approximate)
+  token_budget:
+    system_prompt: 500
+    user_profile: 300
+    episodic_memories: 800
+    semantic_summary: 400
+    current_task: 500
+    rag_evidence: 1500
+    conversation_summary: 200
+    total_budget: 4096
+    buffer: 96
+
+  # Development
+  fail_fast_memory_write: false          # Non-fatal by default
+  log_memory_retrieval: true             # Trace retrieval decisions

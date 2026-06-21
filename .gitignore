@@ -17,8 +17,9 @@ data/
 # artifacts
 artifacts/
 
-#reports
-reports/
+# reports
+reports/*
+!reports/mojibake_cleanup.md
 
 # Jetbrains IDE
 .idea/

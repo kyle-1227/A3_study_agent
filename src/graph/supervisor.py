@@ -8,13 +8,16 @@ Uses structured output (Pydantic) instead of manual JSON parsing.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
+from src.graph.resource_generation import (
+    SUPPORTED_RESOURCE_TYPES,
+    normalize_requested_resource_types,
+)
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
@@ -41,8 +44,7 @@ class SupervisorOutput(BaseModel):
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc", "multi_resource"})
-_VALID_INDIVIDUAL_RESOURCE_TYPES = frozenset({"study_plan", "mindmap", "quiz", "review_doc"})
+_VALID_RESOURCE_TYPES = SUPPORTED_RESOURCE_TYPES
 
 
 def _sanitize_valid_intents() -> set[str]:
@@ -94,17 +96,28 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
     if not isinstance(parsed.requested_resource_types, list):
         return "requested_resource_types must be a list"
     # ── Intent/resource combination validation ─────────────────────
-    resource_type = (parsed.requested_resource_type or "").strip()
-    resource_types = [str(item).strip() for item in parsed.requested_resource_types or [] if str(item).strip()]
-    has_resource = bool(resource_type or resource_types)
-    if has_resource:
-        if parsed.intent in ("emotional", "unknown"):
-            if resource_type in _VALID_RESOURCE_TYPES or any(item in _VALID_INDIVIDUAL_RESOURCE_TYPES for item in resource_types):
-                return (
-                    f"intent={parsed.intent} may not carry "
-                    f"requested_resource_type={resource_type}. "
-                    f"Only academic intent supports resource generation."
-                )
+    resource_types = normalize_requested_resource_types(
+        parsed.requested_resource_types,
+        parsed.requested_resource_type,
+    )
+    raw_resource_values = [
+        str(item or "").strip()
+        for item in [parsed.requested_resource_type, *(parsed.requested_resource_types or [])]
+        if str(item or "").strip()
+    ]
+    invalid_resources = [
+        item
+        for item in raw_resource_values
+        if item not in _VALID_RESOURCE_TYPES and not normalize_requested_resource_types(item)
+    ]
+    if invalid_resources:
+        return f"invalid requested_resource_types: {invalid_resources}"
+    if resource_types and parsed.intent in ("emotional", "unknown"):
+        return (
+            f"intent={parsed.intent} may not carry "
+            f"requested_resource_types={resource_types}. "
+            f"Only academic intent supports resource generation."
+        )
     return ""
 
 
@@ -134,7 +147,7 @@ async def supervisor_node(state: LearningState) -> dict:
     )
 
     temperature = get_setting("supervisor.temperature", 0.0)
-    model_name = get_setting("supervisor.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.supervisor.model", get_setting("supervisor.model", ""))
     with traced_llm_call(
         model_name=model_name,
         node_name="supervisor",
@@ -165,31 +178,15 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    # Deterministic resource detection has priority over LLM output.
-    llm_resource = (result.requested_resource_type or "").strip()
-    llm_resource_types = _normalize_requested_resource_types(
-        result.requested_resource_types or ([llm_resource] if llm_resource else [])
+    # Use LLM resource requests first, then add deterministic detections for
+    # explicit multi-resource phrasing the model may have collapsed to one type.
+    requested_resource_types = normalize_requested_resource_types(
+        result.requested_resource_types,
+        result.requested_resource_type,
+        _detect_requested_resource_types(user_text),
     )
-    deterministic_resource_types = _detect_requested_resource_types(user_text)
-    if len(deterministic_resource_types) > 1:
-        requested_resource_type = "multi_resource"
-        requested_resource_types = deterministic_resource_types
-    elif len(deterministic_resource_types) == 1:
-        requested_resource_type = deterministic_resource_types[0]
-        requested_resource_types = deterministic_resource_types
-    elif len(llm_resource_types) > 1:
-        requested_resource_type = "multi_resource"
-        requested_resource_types = llm_resource_types
-    elif len(llm_resource_types) == 1:
-        requested_resource_type = llm_resource_types[0]
-        requested_resource_types = llm_resource_types
-    elif llm_resource in _VALID_RESOURCE_TYPES:
-        requested_resource_type = llm_resource
-        requested_resource_types = [] if llm_resource == "multi_resource" else [llm_resource]
-    else:
-        requested_resource_type = ""
-        requested_resource_types = []
-    multi_resource_mode = requested_resource_type == "multi_resource"
+    requested_resource_type = requested_resource_types[0] if requested_resource_types else ""
+    multi_resource_mode = len(requested_resource_types) > 1
 
     # academic intent with resource type stays academic
     # emotional/unknown with resource type was already blocked by validation
@@ -370,40 +367,96 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _normalize_requested_resource_types(values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    for value in values or []:
-        resource_type = str(value or "").strip()
-        if resource_type == "multi_resource":
-            continue
-        if resource_type in _VALID_INDIVIDUAL_RESOURCE_TYPES and resource_type not in normalized:
-            normalized.append(resource_type)
-    return normalized
+_READABLE_RESOURCE_ACTION_MARKERS = (
+    "生成",
+    "制作",
+    "创建",
+    "导出",
+    "整理",
+    "汇总",
+    "总结",
+    "转成",
+    "输出",
+    "来一份",
+    "做一个",
+    "做一份",
+    "画一个",
+    "画一份",
+    "设计一份",
+    "帮我做",
+    "帮我生成",
+    "给我做",
+    "给我生成",
+    "generate",
+    "create",
+    "export",
+    "make",
+    "give me",
+)
+
+_READABLE_WEAK_REQUEST_MARKERS = (
+    "帮我",
+    "给我",
+    "我要",
+    "我想要",
+    "我还想要",
+    "请",
+)
+
+_READABLE_EXPLANATION_MARKERS = (
+    "是什么",
+    "什么是",
+    "怎么理解",
+    "如何理解",
+    "为什么",
+    "讲讲",
+    "解释",
+    "介绍",
+    "原理",
+    "区别",
+    "作用",
+    "用途",
+    "what is",
+)
+
+_READABLE_RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
+    ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目", "quiz", "exercise", "practice questions")),
+    ("review_doc", ("复习资料", "复习文档", "学习资料", "学习文档", "学习材料", "课程资料", "考试讲义", "复习讲义", "讲义", "笔记", "知识整理", "知识点整理", "章节复习", "期末复习", "考前复习", "review doc", "review document")),
+    ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
+)
 
 
 def _detect_requested_resource_types(text: str) -> list[str]:
-    """Deterministically identify explicit one-turn resource requests."""
-    lowered = text.lower()
-    has_strong_action = any(marker.lower() in lowered for marker in _RESOURCE_ACTION_MARKERS)
-    has_weak_request = any(marker.lower() in lowered for marker in _WEAK_REQUEST_MARKERS)
-    asks_explanation = any(marker.lower() in lowered for marker in _EXPLANATION_MARKERS)
-    has_generation_action = any(marker.lower() in lowered for marker in _RESOURCE_GENERATION_ACTION_MARKERS)
+    """Deterministically identify explicit single or multi-resource requests."""
+    lowered = str(text or "").lower()
+    asks_explanation = any(marker.lower() in lowered for marker in _READABLE_EXPLANATION_MARKERS)
+    has_action = any(marker.lower() in lowered for marker in _READABLE_RESOURCE_ACTION_MARKERS)
+    has_weak_request = any(marker.lower() in lowered for marker in _READABLE_WEAK_REQUEST_MARKERS)
 
-    if asks_explanation and not has_generation_action:
-        return []
-    if not has_strong_action and not has_weak_request:
+    detected: list[tuple[int, str]] = []
+    for resource_type, markers in _READABLE_RESOURCE_TYPE_MARKERS:
+        positions = [lowered.find(marker.lower()) for marker in markers if marker.lower() in lowered]
+        if positions:
+            detected.append((min(positions), resource_type))
+
+    if not detected:
         return []
 
-    detected: list[str] = []
-    for resource_type, markers in _RESOURCE_TYPE_MARKERS_FOR_DETECTION:
-        if any(marker.lower() in lowered for marker in markers):
-            detected.append(resource_type)
-    return detected
+    has_study_plan = any(resource_type == "study_plan" for _, resource_type in detected)
+    if not has_study_plan and not has_action and (not has_weak_request or asks_explanation):
+        return []
+    if asks_explanation and not has_action and not has_weak_request:
+        return []
+
+    ordered: list[str] = []
+    for _, resource_type in sorted(detected, key=lambda item: item[0]):
+        if resource_type not in ordered:
+            ordered.append(resource_type)
+    return ordered
 
 
 def _detect_requested_resource_type(text: str) -> str:
-    """Backward-compatible single-resource detector."""
-    detected = _detect_requested_resource_types(text)
-    if len(detected) > 1:
-        return "multi_resource"
-    return detected[0] if detected else ""
+    """Backward-compatible single resource detector."""
+    resources = _detect_requested_resource_types(text)
+    return resources[0] if resources else ""

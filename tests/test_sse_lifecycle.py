@@ -2,7 +2,7 @@
 
 Tests cover: node start/end events, token streaming coexistence,
 sub-chain filtering, internal node filtering, and event ordering.
-All tests mock astream_events 鈥?no real graph execution required.
+All tests mock astream_events - no real graph execution required.
 
 NOTE: generate_sse now emits a thread_id event first (REQ-08 HIL),
 and calls graph.aget_state() after streaming to detect interrupts.
@@ -12,10 +12,13 @@ All mock graphs must provide aget_state as AsyncMock.
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from src.observability.a3_trace import emit_a3_trace
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +115,7 @@ class TestSSENodeLifecycle:
 
     @pytest.mark.anyio
     async def test_yields_node_start_event(self):
-        """on_chain_start for a graph node 鈫?{"type": "node_event", "status": "start"}."""
+        """on_chain_start for a graph node -> {"type": "node_event", "status": "start"}."""
         from app import generate_sse
 
         mock_graph = _make_mock_graph([_node_start("supervisor")])
@@ -127,7 +130,7 @@ class TestSSENodeLifecycle:
 
     @pytest.mark.anyio
     async def test_yields_node_end_event(self):
-        """on_chain_end for a graph node 鈫?{"type": "node_event", "status": "end"}."""
+        """on_chain_end for a graph node -> {"type": "node_event", "status": "end"}."""
         from app import generate_sse
 
         mock_graph = _make_mock_graph([_node_end("rag_retrieve")])
@@ -245,7 +248,7 @@ class TestSSEMixedEventOrdering:
 
     @pytest.mark.anyio
     async def test_full_academic_flow(self):
-        """Simulate supervisor 鈫?rag_retrieve 鈫?generate_answer with tokens."""
+        """Simulate supervisor -> rag_retrieve -> generate_answer with tokens."""
         from app import generate_sse
 
         events = [
@@ -266,7 +269,7 @@ class TestSSEMixedEventOrdering:
             collected.append(sse)
 
         payloads = _parse_payloads(collected)
-        # Sub-chain event dropped 鈫?8 graph events
+        # Sub-chain event dropped -> 8 graph events
         assert len(payloads) == 8
 
         assert payloads[0] == {"type": "node_event", "status": "start", "node": "supervisor"}
@@ -286,7 +289,7 @@ class TestSSEMixedEventOrdering:
 
     @pytest.mark.anyio
     async def test_emotional_flow(self):
-        """Simulate supervisor 鈫?emotional_response with tokens."""
+        """Simulate supervisor -> emotional_response with tokens."""
         from app import generate_sse
 
         events = [
@@ -326,6 +329,9 @@ class TestSSEAllGraphNodes:
         "generate_answer",
         "evaluate_hallucination",
         "rewrite_query",
+        "resource_orchestrator",
+        "resource_worker",
+        "resource_bundle_output",
         "study_plan_emotional_intel",
         "study_plan_planner",
         "study_plan_agent",
@@ -435,7 +441,7 @@ class TestSSEErrorCapture:
 
     @pytest.mark.anyio
     async def test_error_null_on_success(self):
-        """Normal end 鈫?error is null."""
+        """Normal end -> error is null."""
         from app import generate_sse
 
         mock_graph = _make_mock_graph([_node_start("supervisor"), _node_end("supervisor")])
@@ -449,7 +455,7 @@ class TestSSEErrorCapture:
 
     @pytest.mark.anyio
     async def test_error_captured_from_output(self):
-        """End event with error in output 鈫?error field populated."""
+        """End event with error in output -> error field populated."""
         from app import generate_sse
 
         end_event = {
@@ -542,7 +548,7 @@ class TestSSEUsageEvents:
 
     @pytest.mark.anyio
     async def test_emits_usage_event(self):
-        """on_chat_model_end with usage_metadata 鈫?usage SSE event."""
+        """on_chat_model_end with usage_metadata -> usage SSE event."""
         from app import generate_sse
 
         mock_graph = _make_mock_graph([_chat_model_end("generate_answer", 100, 50, 150)])
@@ -563,7 +569,7 @@ class TestSSEUsageEvents:
 
     @pytest.mark.anyio
     async def test_no_usage_event_when_no_metadata(self):
-        """on_chat_model_end without usage_metadata 鈫?no event emitted."""
+        """on_chat_model_end without usage_metadata -> no event emitted."""
         from app import generate_sse
 
         mock_graph = _make_mock_graph([_chat_model_end_no_usage("generate_answer")])
@@ -598,7 +604,7 @@ class TestSSEUsageEvents:
 
 
 # ---------------------------------------------------------------------------
-# TestSSETextEvent 鈥?"text" SSE event for non-streaming nodes (AC-02)
+# TestSSETextEvent - "text" SSE event for non-streaming nodes (AC-02)
 # ---------------------------------------------------------------------------
 
 class TestSSETextEvent:
@@ -650,9 +656,33 @@ class TestSSETextEvent:
         text_events = [p for p in all_payloads if p.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["content"] == "I could not understand the request."
+
+    @pytest.mark.anyio
+    async def test_text_event_emitted_for_resource_bundle_output(self):
+        """on_chain_end for resource_bundle_output emits the bundle text SSE."""
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        end_event = {
+            "event": "on_chain_end",
+            "name": "resource_bundle_output",
+            "metadata": {"langgraph_node": "resource_bundle_output"},
+            "data": {"output": {"messages": [AIMessage(content="## 学习资源生成结果")]}},
+        }
+        mock_graph = _make_mock_graph([_node_start("resource_bundle_output"), end_event])
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        text_events = [p for p in all_payloads if p.get("type") == "text"]
+        assert len(text_events) == 1
+        assert text_events[0]["node"] == "resource_bundle_output"
+
     @pytest.mark.anyio
     async def test_no_text_event_for_non_text_emit_node(self):
-        """on_chain_end for a node NOT in TEXT_EMIT_NODES 鈫?no text event."""
+        """on_chain_end for a node NOT in TEXT_EMIT_NODES -> no text event."""
         from langchain_core.messages import AIMessage
         from app import generate_sse
 
@@ -708,8 +738,88 @@ class TestSSEMindmapResult:
         assert mindmap_events[0]["title"] == "Mock Mindmap"
         assert mindmap_events[0]["tree"]["title"] == "Mock Mindmap"
 
+
+class TestSSEEvidenceSummaryResourceFinal:
+    """Evidence controlled stop should emit a normal resource_final event."""
+
+    @pytest.mark.anyio
+    async def test_evidence_summary_resource_final_emitted(self):
+        from app import generate_sse
+
+        final_state = {
+            "evidence_controlled_stop": True,
+            "final_response_type": "evidence_summary",
+            "requested_resource_type": "study_plan",
+            "evidence_controlled_stop_reason": "evidence_insufficient",
+            "plan": "## Evidence summary\nEvidence is insufficient for a full resource.",
+            "study_plan_artifact": {},
+        }
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values=final_state),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
+        assert len(resource_events) == 1
+        assert resource_events[0]["resource_type"] == "evidence_summary"
+        assert resource_events[0]["controlled_stop"] is True
+        assert "study_plan" not in resource_events[0]
+        assert all_payloads[-1] == {"type": "done"}
+
+
+class TestSSEProviderRetryEvents:
+    """Provider transport retry traces should be visible to the frontend."""
+
+    @pytest.mark.anyio
+    async def test_provider_retry_trace_is_emitted_as_sse_event(self):
+        from app import generate_sse
+
+        async def events():
+            emit_a3_trace(
+                logging.getLogger("test_sse_provider_retry"),
+                "provider_transport_retry_attempt",
+                {
+                    "node_name": "evidence_judge",
+                    "llm_node": "evidence_judge",
+                    "provider": "openrouter",
+                    "model": "test-model",
+                    "retry_count": 1,
+                    "max_retries": 2,
+                    "next_attempt": 2,
+                    "fallback_used": False,
+                    "error_type": "ConnectError",
+                    "error_message": "connection failed",
+                    "status_code": None,
+                },
+                state={"request_id": "r1"},
+            )
+            yield _node_start("evidence_judge")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={}),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        retry_events = [payload for payload in payloads if payload.get("type") == "provider_retry"]
+        assert len(retry_events) == 1
+        assert retry_events[0]["stage"] == "provider_transport_retry_attempt"
+        assert retry_events[0]["node"] == "evidence_judge"
+        assert retry_events[0]["retry_count"] == 1
+        assert retry_events[0]["max_retries"] == 2
+
 # ---------------------------------------------------------------------------
-# TestSSEDoneEvent 鈥?"done" SSE event at stream completion (BUG-09)
+# TestSSEDoneEvent - "done" SSE event at stream completion (BUG-09)
 # ---------------------------------------------------------------------------
 
 class TestSSEDoneEvent:
@@ -737,7 +847,7 @@ class TestSSEDoneEvent:
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
 
-        interrupt_obj = SimpleNamespace(value="## 璁″垝鑽夌")
+        interrupt_obj = SimpleNamespace(value="## 请确认是否继续生成学习计划")
         task = SimpleNamespace(interrupts=[interrupt_obj])
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(next=("study_plan_output",), tasks=[task]),
@@ -751,5 +861,50 @@ class TestSSEDoneEvent:
         done_events = [p for p in all_payloads if p.get("type") == "done"]
         assert len(done_events) == 0
 
+    @pytest.mark.anyio
+    async def test_memory_confirmation_interrupt_payload_is_typed(self):
+        """Memory confirmation interrupt should be distinguishable from plan review."""
+        from app import generate_sse
 
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "memory_confirmation",
+                "question": "Use memory?",
+                "reason": "ambiguous",
+                "selected_memory_count": 2,
+                "options": [
+                    {"label": "Use", "value": "use"},
+                    {"label": "Ignore", "value": "ignore"},
+                ],
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=("memory_use_decider",), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert interrupt_events == [
+            {
+                "type": "interrupt",
+                "interrupt_type": "memory_confirmation",
+                "question": "Use memory?",
+                "reason": "ambiguous",
+                "selected_memory_count": 2,
+                "options": [
+                    {"label": "Use", "value": "use"},
+                    {"label": "Ignore", "value": "ignore"},
+                ],
+                "thread_id": "t-1",
+            }
+        ]
+        assert not [p for p in all_payloads if p.get("type") == "done"]
 

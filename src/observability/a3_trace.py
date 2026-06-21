@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextvars import ContextVar
 from typing import Any
+
+
+_TRACE_EVENT_SINK: ContextVar[Any] = ContextVar("a3_trace_event_sink", default=None)
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -51,6 +55,16 @@ def _trace_ids_from_state(state: dict | None) -> dict[str, str]:
     }
 
 
+def set_trace_event_sink(sink: Any):
+    """Attach a best-effort per-context sink for selected trace events."""
+    return _TRACE_EVENT_SINK.set(sink)
+
+
+def reset_trace_event_sink(token) -> None:
+    """Reset the per-context trace event sink."""
+    _TRACE_EVENT_SINK.reset(token)
+
+
 def emit_a3_trace(
     logger: logging.Logger,
     stage: str,
@@ -70,14 +84,21 @@ def emit_a3_trace(
     - Truncate long values.
     """
     try:
-        if not (_env_enabled("LOG_A3_TRACE") or _env_enabled(env_flag)):
-            return
-
         safe_payload = {
             "stage": stage,
             **_trace_ids_from_state(state),
             **_truncate(payload, max_chars=max_chars),
         }
+        sink = _TRACE_EVENT_SINK.get()
+        if sink is not None:
+            try:
+                sink.append(safe_payload)
+            except Exception:
+                pass
+
+        if not (_env_enabled("LOG_A3_TRACE") or _env_enabled(env_flag)):
+            return
+
         line = "A3_TRACE " + json.dumps(safe_payload, ensure_ascii=False, default=str)
 
         if level == "info":

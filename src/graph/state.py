@@ -1,4 +1,4 @@
-"""LearningState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
+﻿"""LearningState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
 
 from __future__ import annotations
 
@@ -11,7 +11,13 @@ from typing_extensions import TypedDict
 # Sentinel value: returning this from a node signals "clear all context"
 CONTEXT_CLEAR: list[dict] = [{"__clear__": True}]
 
-# ── Evidence memory reducer ────────────────────────────────────────────────
+# Sentinel value: returning this to evidence memory reducers clears the list.
+MEMORY_CLEAR: list[dict] = [{"__memory_clear__": True}]
+
+# Sentinel value: returning this to resource result reducers clears the list.
+RESOURCE_RESULTS_CLEAR: list[dict] = [{"__resource_results_clear__": True}]
+
+# Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
 
 
@@ -23,6 +29,9 @@ def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[di
     - Retain only the most recent ``EVIDENCE_MEMORY_MAX_ENTRIES`` entries.
     - Never store raw docs or full old context.
     """
+    if update and update[0].get("__memory_clear__"):
+        return []
+
     merged: dict[str, dict] = {}
     for entry in existing:
         mid = entry.get("memory_id", "")
@@ -40,7 +49,7 @@ def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[di
     return sorted_entries[:EVIDENCE_MEMORY_MAX_ENTRIES]
 
 
-# ── Current-turn transient state reset ─────────────────────────────────────
+# Current-turn transient state reset
 def initial_request_reset_transient_state() -> dict:
     """Return reset values for current-turn-only fields.
 
@@ -64,9 +73,18 @@ def initial_request_reset_transient_state() -> dict:
         "multi_resource_results": [],
         "multi_resource_summary": "",
         "needs_mindmap": False,
+        # memory use policy for current query rewrite
+        "memory_use_policy": "unset",
+        "memory_use_reason": "",
+        "memory_use_user_choice": "",
+        "memory_confirmation_required": False,
+        "memory_confirmation_question": "",
+        "selected_evidence_memory_summaries": [],
+        "episodic_memory_results": [],
+        "semantic_memory_results": [],
         # query / retrieval plan
-        "search_rag_query": "",
-        "search_web_query": "",
+        "local_retrieval_query": "",
+        "web_research_seed_query": "",
         "expanded_keypoints": [],
         "search_query_rewrite_reason": "",
         "search_query_rewrite_error": "",
@@ -79,24 +97,11 @@ def initial_request_reset_transient_state() -> dict:
         "retry_count": 0,
         "hallucination_detected": False,
         "hallucination_reason": "",
-        # retrieval / web supplement
-        "web_supplement_decisions": [],
-        "web_supplement_results": [],
-        "coverage_decision_summary": "",
+        # retrieval / web research
         "retrieval_branch_mode": "",
-        "web_supplement_provider": "tavily",
-        "web_supplement_failed": False,
-        "web_supplement_failure_reason": "",
-        "web_supplement_status_by_subject": {},
-        "web_supplement_success_subjects": [],
-        "web_supplement_failed_subjects": [],
-        "web_supplement_partial_failed": False,
         "web_evidence_count": 0,
-        "web_supplement_count": 0,
-        "web_judge_provider": "openrouter",
-        "web_judge_model": "deepseek/deepseek-v4-flash",
-        "web_judge_failed_subjects": [],
-        "web_judge_rejected_all_subjects": [],
+        "web_research_debug": {},
+        "web_research_outcome": "",
         # evidence
         "local_evidence_candidates": [],
         "web_evidence_candidates": [],
@@ -104,6 +109,7 @@ def initial_request_reset_transient_state() -> dict:
         "web_evidence_originals": {},
         "evidence_candidates": [],
         "evidence_judge_output": {},
+        "evidence_judge_debug": {},
         "evidence_judge_rounds": 0,
         "evidence_judge_state": "",
         "evidence_coverage_gaps": [],
@@ -159,6 +165,11 @@ def initial_request_reset_transient_state() -> dict:
         "study_plan_revision_notes": "",
         "study_plan_document_artifact": {},
         "plan": "",
+        "resource_generation_plan": {},
+        "resource_branch_results": RESOURCE_RESULTS_CLEAR,
+        "resource_bundle_artifact": {},
+        "resource_generation_debug": {},
+        "resource_generation_status": "",
     }
 
 
@@ -171,6 +182,28 @@ def context_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
     if update and update[0].get("__clear__"):
         return []
     return existing + update
+
+
+def resource_branch_results_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
+    """Merge resource worker results from dynamic fan-out branches."""
+    if not update or update[0].get("__resource_results_clear__"):
+        return []
+
+    merged: dict[str, dict] = {}
+    for entry in existing or []:
+        resource_type = str((entry or {}).get("resource_type") or "").strip()
+        if resource_type:
+            merged[resource_type] = entry
+    for entry in update or []:
+        resource_type = str((entry or {}).get("resource_type") or "").strip()
+        if resource_type:
+            merged[resource_type] = entry
+
+    order = ["mindmap", "quiz", "review_doc", "study_plan"]
+    return sorted(
+        merged.values(),
+        key=lambda item: order.index(item.get("resource_type")) if item.get("resource_type") in order else len(order),
+    )
 
 
 class LearningState(TypedDict):
@@ -186,11 +219,19 @@ class LearningState(TypedDict):
     subject_candidates: list[str]                                       # Ordered available-subject candidates
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
-    requested_resource_types: list[str]                                  # Requested resource types in one turn
+    requested_resource_types: list[str]                                  # Ordered resource types requested for parallel generation
     multi_resource_mode: bool                                            # Whether multiple resources were requested
     multi_resource_results: list[dict]                                   # Per-resource generation result metadata
     multi_resource_summary: str                                          # Summary of multi-resource generation output
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
+    memory_use_policy: Literal["use", "ignore", "ask_user", "unset"]    # Whether query rewrite may use selected memory
+    memory_use_reason: str                                              # Reason for the memory use policy
+    memory_use_user_choice: Literal["use", "ignore", ""]               # User choice after HIL confirmation
+    memory_confirmation_required: bool                                  # Whether memory use confirmation was requested
+    memory_confirmation_question: str                                   # HIL question shown to the user
+    selected_evidence_memory_summaries: list[dict]                      # Compact evidence summaries selected for current query
+    episodic_memory_results: list[dict]                                 # Top-K episodic memories with scores (from episodic_memory_retriever)
+    semantic_memory_results: list[dict]                                 # Top-K semantic memories with scores (from episodic_memory_retriever)
     mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
     mindmap_tree: dict                                                  # Reviewed JSON tree draft
     mindmap_artifact: dict                                              # Generated mindmap tree and artifact metadata
@@ -232,35 +273,23 @@ class LearningState(TypedDict):
     primary_subject: str                                                # Main subject of the user goal
     learning_goal: str                                                  # Normalized learning goal
     subject_relation_summary: str                                       # How subjects relate to the goal
-    search_rag_query: str                                               # Initial rewritten query for local course retrieval
-    search_web_query: str                                               # Initial rewritten query for web search
+    local_retrieval_query: str                                               # Initial rewritten query for local course retrieval
+    web_research_seed_query: str                                               # Initial rewritten query for Web Research
     expanded_keypoints: list[str]                                       # Query rewriter expanded concrete keypoints
     search_query_rewrite_reason: str                                    # Query rewriter rationale
     search_query_rewrite_error: str                                     # Query rewriter failure reason, if any
     search_query_rewrite_raw_preview: str                               # Truncated raw query-rewriter output for diagnostics
-    web_supplement_decisions: list[dict]                                # Dynamic web supplement coverage decisions
-    web_supplement_results: list[dict]                                  # Dynamic web supplement result docs
-    coverage_decision_summary: str                                      # Summary of coverage risk and web supplement decision
     retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
-    web_supplement_provider: str                                        # Web supplement provider, e.g. tavily
-    web_supplement_failed: bool                                         # Dynamic web supplement was needed but produced no usable result
-    web_supplement_failure_reason: str                                  # Reason for failed dynamic web supplement
-    web_supplement_status_by_subject: dict                              # Per-subject dynamic web supplement status
-    web_supplement_success_subjects: list[str]                          # Subjects with usable web supplement
-    web_supplement_failed_subjects: list[str]                           # Subjects that needed but failed web supplement
-    web_supplement_partial_failed: bool                                 # At least one subject failed while another succeeded
     web_evidence_count: int                                             # Approved source_type=web evidence count
-    web_supplement_count: int                                           # Legacy-compatible alias for web_evidence_count
-    web_judge_provider: str                                             # Search Result Judge provider
-    web_judge_model: str                                                # Search Result Judge model
-    web_judge_failed_subjects: list[str]                                 # Subjects where Search Result Judge failed
-    web_judge_rejected_all_subjects: list[str]                           # Subjects where Judge worked but rejected every result
+    web_research_debug: dict                                             # Web Research V2 execution status/debug summary
+    web_research_outcome: Literal["", "success", "failed", "skipped"]  # Web Research V2 outcome
     local_evidence_candidates: list[dict]                                # Local RAG EvidenceCandidate snapshots from rag_retrieve
-    web_evidence_candidates: list[dict]                                  # Web EvidenceCandidate snapshots from web_search
+    web_evidence_candidates: list[dict]                                  # Web EvidenceCandidate snapshots from Web Research V2
     local_evidence_originals: dict                                       # Original local RAG docs keyed by evidence_id
     web_evidence_originals: dict                                         # Original Tavily results keyed by evidence_id
     evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
     evidence_judge_output: dict                                          # Raw structured Evidence Judge output
+    evidence_judge_debug: dict                                           # Evidence Judge execution status/debug summary
     evidence_judge_rounds: int                                           # Evidence Judge rounds executed
     evidence_judge_state: str                                            # sufficient / partially_sufficient / insufficient
     evidence_coverage_gaps: list[dict]                                   # Coverage gaps reserved for future search optimization
@@ -277,6 +306,11 @@ class LearningState(TypedDict):
     evidence_controlled_stop: bool                                       # Controlled stop due to insufficient evidence
     evidence_controlled_stop_reason: str                                 # Reason for controlled stop
     plan: str                                                           # Generated plans
+    resource_generation_plan: dict                                      # Parallel resource generation plan
+    resource_branch_results: Annotated[list[dict], resource_branch_results_reducer]  # Parallel resource worker results
+    resource_bundle_artifact: dict                                      # Aggregated multi-resource artifact metadata
+    resource_generation_debug: dict                                     # Resource generation execution status/debug summary
+    resource_generation_status: str                                     # success / partial_success / failed / skipped
     retry_count: int                                                    # Hallucination retry counter
     hallucination_detected: bool                                        # Hallucination flag
     rewritten_query: str                                                # Rewritten query on retry

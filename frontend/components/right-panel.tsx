@@ -53,6 +53,7 @@ interface RightPanelProps {
 
 const NODE_LABELS: Record<string, string> = {
   supervisor: "意图识别",
+  memory_use_decider: "历史确认",
   emotional_response: "学业支持",
   handle_unknown: "范围确认",
   search_query_rewriter: "查询改写",
@@ -67,7 +68,7 @@ const NODE_LABELS: Record<string, string> = {
   mindmap_planner: "导图规划",
   mindmap_agent: "JSON Tree",
   mindmap_reviewer: "导图审查",
-  mindmap_rewrite: "导图重写",
+  mindmap_rewrite: "导图修订",
   mindmap_output: "导图导出",
   exercise_planner: "练习规划",
   exercise_agent: "题目生成",
@@ -88,9 +89,9 @@ const NODE_LABELS: Record<string, string> = {
   study_plan_rewrite: "计划修订",
   study_plan_output: "计划输出",
 }
-
 const DAG_NODE_IDS = [
   "supervisor",
+  "memory_use_decider",
   "emotional_response",
   "handle_unknown",
   "search_query_rewriter",
@@ -136,7 +137,8 @@ interface DagEdgeDef {
 const DAG_EDGE_DEFS: DagEdgeDef[] = [
   { from: "supervisor", to: "emotional_response" },
   { from: "supervisor", to: "handle_unknown" },
-  { from: "supervisor", to: "search_query_rewriter" },
+  { from: "supervisor", to: "memory_use_decider" },
+  { from: "memory_use_decider", to: "search_query_rewriter" },
   { from: "search_query_rewriter", to: "academic_router" },
   { from: "academic_router", to: "rag_retrieve" },
   { from: "academic_router", to: "web_search" },
@@ -312,7 +314,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                     <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--warning)] opacity-60" />
                     <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--warning)]" />
                   </span>
-                  等待用户审核
+                  等待用户确认
                 </p>
               </div>
             )}

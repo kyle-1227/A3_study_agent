@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
 from langchain_core.messages import AIMessage, SystemMessage
 
 from src.config import get_setting, load_prompt
-from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm
+from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.tracing import traced_llm_call, traced_node
 
@@ -15,22 +13,23 @@ from src.tracing import traced_llm_call, traced_node
 @traced_node
 async def emotional_response(state: LearningState) -> dict:
     """Respond with warm, practical emotional support."""
-    llm = get_node_llm("emotional")
-
     history = [SystemMessage(content=load_prompt("emotional_system"))]
     for msg in state["messages"]:
         history.append(msg)
 
     temperature = get_setting("emotional.temperature", 0.8)
-    fallback = get_fallback_llm(temperature=temperature)
 
     with traced_llm_call(
-        model_name=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        model_name=get_setting("llm.emotional.model", ""),
         node_name="emotional_response",
         temperature=temperature,
-    ) as span:
-        response = await async_invoke_with_fallback(
-            llm, history, fallback=fallback, span=span,
+    ):
+        response = await invoke_plain_llm_fail_fast(
+            node_name="emotional_response",
+            llm_node="emotional",
+            messages=history,
+            state=state,
+            temperature=temperature,
         )
 
-    return {"messages": [AIMessage(content=response.content)]}
+    return {"messages": [AIMessage(content=response)]}

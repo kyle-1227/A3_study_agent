@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -30,7 +29,12 @@ class MindmapNode(BaseModel):
     """Unified JSON tree node used by all mindmap renderers."""
 
     title: str = Field(description="Short concrete node label")
-    note: str | None = Field(default=None, description="Optional learning hint")
+    note: str = Field(
+        default="",
+        description=(
+            "Optional learning hint; use an empty string when no note is needed"
+        ),
+    )
     children: list["MindmapNode"] = Field(default_factory=list)
 
 
@@ -118,9 +122,7 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
 def _is_web_evidence(item: dict) -> bool:
     return (
         item.get("source_type") == "web"
-        or item.get("type") in {"web_evidence", "web_supplement"}
-        or item.get("legacy_type") == "web_supplement"
-        or item.get("type_legacy") == "web_supplement"
+        or item.get("type") == "web_evidence"
     )
 
 
@@ -308,7 +310,7 @@ async def mindmap_agent(state: LearningState) -> dict:
             "revision_notes": state.get("mindmap_revision_notes", "") or "None",
         },
     )
-    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.mindmap.model", get_setting("mindmap.model", ""))
     fallback_used = False
     error_type = ""
     error_reason = ""
@@ -402,7 +404,7 @@ async def mindmap_reviewer(state: LearningState) -> dict:
             "mindmap_tree": str(tree),
         },
     )
-    model_name = get_setting("llm.mindmap.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.mindmap.model", get_setting("mindmap.model", ""))
     with traced_llm_call(model_name=model_name, node_name="mindmap_reviewer", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="mindmap_reviewer",

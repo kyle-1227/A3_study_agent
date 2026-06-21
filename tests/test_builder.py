@@ -28,6 +28,7 @@ class TestBuildGraph:
         node_names = set(graph.nodes.keys())
         expected = {
             "supervisor",
+            "memory_use_decider",
             "academic_router",
             "search_query_rewriter",
             "rag_retrieve",
@@ -36,6 +37,9 @@ class TestBuildGraph:
             "generate_answer",
             "evaluate_hallucination",
             "rewrite_query",
+            "resource_orchestrator",
+            "resource_worker",
+            "resource_bundle_output",
             "study_plan_emotional_intel",
             "study_plan_planner",
             "study_plan_agent",
@@ -75,14 +79,14 @@ class TestBuildGraph:
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
 
-    def test_route_after_evidence_judge_routes_resource_chains(self):
-        assert route_after_evidence_judge({"requested_resource_type": "mindmap"}) == "mindmap"
-        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "exercise"
+    def test_route_after_evidence_judge_routes_resource_requests_to_orchestrator(self):
+        assert route_after_evidence_judge({"requested_resource_type": "mindmap"}) == "resources"
+        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "resources"
         assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
-        assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "exercise"
-        assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "review_doc"
-        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "study_plan"
-        assert route_after_evidence_judge({"requested_resource_type": "multi_resource"}) == "multi_resource"
+        assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_types": ["mindmap", "quiz"]}) == "resources"
         assert route_after_evidence_judge({}) == "answer"
         assert route_after_academic_retrieval({}) == "answer"
 
@@ -112,9 +116,14 @@ class TestBuildGraph:
         }
         assert old_direct_edges.isdisjoint(graph.edges)
         assert "route_after_evidence_judge" in graph.branches["evidence_judge"]
+        assert "dispatch_resource_workers" in graph.branches["resource_orchestrator"]
+        assert ("resource_worker", "resource_bundle_output") in graph.edges
+        assert ("resource_bundle_output", "__end__") in graph.edges
 
     def test_search_query_rewriter_is_shared_after_supervisor(self):
         graph = build_graph()
+        assert ("memory_use_decider", "search_query_rewriter") in graph.edges
+        assert "memory_use_decider" in graph.nodes
         assert "search_query_rewriter" in graph.branches
         assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]
 
@@ -133,6 +142,9 @@ class TestBuildGraph:
 
         async def fake_supervisor(state):
             return {"intent": "academic"}
+
+        async def fake_memory_use_decider(state):
+            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
 
         async def fake_search_query_rewriter(state):
             return {}
@@ -167,6 +179,7 @@ class TestBuildGraph:
 
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
+            patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
             patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
@@ -190,6 +203,9 @@ class TestBuildGraph:
         async def fake_supervisor(state):
             return {"intent": "academic"}
 
+        async def fake_memory_use_decider(state):
+            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
+
         async def fake_search_query_rewriter(state):
             return {}
 
@@ -212,6 +228,7 @@ class TestBuildGraph:
 
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
+            patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
             patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),

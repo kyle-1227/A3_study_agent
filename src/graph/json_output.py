@@ -14,6 +14,8 @@ from typing import Any, TypeVar
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ValidationError
 
+from src.graph.llm import get_llm_call_max_retries
+
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
@@ -103,16 +105,22 @@ async def ainvoke_strict_json(
     span=None,
 ) -> SchemaT:
     """Invoke a normal chat model and parse its response as strict JSON."""
-    response = await llm.ainvoke(messages)
-    if span is not None:
-        span.set_attribute("llm.fallback_used", False)
+    max_retries = get_llm_call_max_retries(node_name)
+    retry_count = 0
+    while True:
+        response = await llm.ainvoke(messages)
+        if span is not None:
+            span.set_attribute("llm.fallback_used", False)
 
-    text = _content_to_text(getattr(response, "content", response))
-    try:
-        data = extract_json_object(text)
-        return validate_json_schema(data, schema)
-    except JSONOutputError as exc:
-        raise JSONOutputError(
-            f"{node_name} failed to produce valid {schema.__name__}: {exc}; "
-            f"raw_output={_preview(text)}"
-        ) from exc
+        text = _content_to_text(getattr(response, "content", response))
+        try:
+            data = extract_json_object(text)
+            return validate_json_schema(data, schema)
+        except JSONOutputError as exc:
+            wrapped = JSONOutputError(
+                f"{node_name} failed to produce valid {schema.__name__}: {exc}; "
+                f"raw_output={_preview(text)}"
+            )
+            if retry_count >= max_retries:
+                raise wrapped from exc
+            retry_count += 1

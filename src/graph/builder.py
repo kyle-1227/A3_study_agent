@@ -1,4 +1,4 @@
-﻿"""Graph construction 鈥?assemble Supervisor + 3 branches, compile."""
+"""Graph construction: assemble Supervisor branches and compile."""
 
 from __future__ import annotations
 
@@ -6,10 +6,13 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
+    episodic_memory_retriever,
+    episodic_memory_writer,
     evidence_judge,
     evidence_summary_output,
     evaluate_hallucination,
     generate_answer,
+    memory_use_decider,
     rag_retrieve,
     rewrite_query,
     search_query_rewriter,
@@ -42,6 +45,13 @@ from src.graph.review_doc import (
     review_doc_rewrite,
     should_rewrite_review_doc,
 )
+from src.graph.resource_generation import (
+    dispatch_resource_workers,
+    normalize_requested_resource_types,
+    resource_bundle_output,
+    resource_orchestrator,
+    resource_worker,
+)
 from src.graph.state import LearningState
 from src.graph.study_plan import (
     route_after_study_plan_consensus,
@@ -63,11 +73,14 @@ def build_graph() -> StateGraph:
     # Build graph
     graph = StateGraph(LearningState)
 
-    # 鈹€鈹€ Nodes 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Nodes
     graph.add_node("supervisor", supervisor_node)
 
-    # SubGraph A 鈥?Academic (parallel retrieval + answer generation)
+    # SubGraph A: Academic (parallel retrieval + answer generation)
+    graph.add_node("episodic_memory_retriever", episodic_memory_retriever)
+    graph.add_node("episodic_memory_writer", episodic_memory_writer)
     graph.add_node("academic_router", academic_router)
+    graph.add_node("memory_use_decider", memory_use_decider)
     graph.add_node("search_query_rewriter", search_query_rewriter)
     graph.add_node("rag_retrieve", rag_retrieve)
     graph.add_node("web_search", web_search)
@@ -77,8 +90,7 @@ def build_graph() -> StateGraph:
     graph.add_node("evaluate_hallucination", evaluate_hallucination)
     graph.add_node("rewrite_query", rewrite_query)
 
-    # Planner (gather intel 鈫?flattened adversarial planning)
-    # Emotional
+    # Emotional support
     graph.add_node("emotional_response", emotional_response)
 
     # Mindmap resource generation
@@ -103,6 +115,9 @@ def build_graph() -> StateGraph:
     graph.add_node("review_doc_output", review_doc_output)
 
     # Study plan resource generation
+    graph.add_node("resource_orchestrator", resource_orchestrator)
+    graph.add_node("resource_worker", resource_worker)
+    graph.add_node("resource_bundle_output", resource_bundle_output)
     graph.add_node("study_plan_emotional_intel", study_plan_emotional_intel)
     graph.add_node("study_plan_planner", study_plan_planner)
     graph.add_node("study_plan_agent", study_plan_agent)
@@ -118,7 +133,7 @@ def build_graph() -> StateGraph:
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
 
-    # 鈹€鈹€ Edges 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # Edges
     graph.set_entry_point("supervisor")
 
     # Conditional fork edges
@@ -126,13 +141,18 @@ def build_graph() -> StateGraph:
         "supervisor",
         route_by_intent,    # judge users intent
         {
-            "academic": "search_query_rewriter",
+            "academic": "episodic_memory_retriever",
             "emotional": "emotional_response",
             "unknown": "handle_unknown",
         },
     )
 
-    # Shared initial query rewrite, then route into academic or planning flow.
+    # Retrieve long-term episodic/semantic memories before memory use decision.
+    graph.add_edge("episodic_memory_retriever", "memory_use_decider")
+    # Decide whether historical evidence memory may influence retrieval.
+    graph.add_edge("memory_use_decider", "search_query_rewriter")
+
+    # Shared initial query rewrite, then route into academic evidence flow.
     graph.add_conditional_edges(
         "search_query_rewriter",
         route_after_query_rewrite,
@@ -141,7 +161,7 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Academic flow 鈥?fan-out/fan-in parallel retrieval
+    # Academic flow: fan-out/fan-in parallel retrieval
     graph.add_edge("academic_router", "rag_retrieve")
     graph.add_edge("academic_router", "web_search")
 
@@ -154,15 +174,15 @@ def build_graph() -> StateGraph:
         route_after_evidence_judge,
         {
             "answer": "generate_answer",
-            "mindmap": "mindmap_planner",
-            "exercise": "exercise_planner",
-            "review_doc": "review_doc_planner",
-            "study_plan": "study_plan_emotional_intel",
-            "multi_resource": "multi_resource_runner",
+            "resources": "resource_orchestrator",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
     graph.add_edge("evidence_summary_output", END)
+
+    graph.add_conditional_edges("resource_orchestrator", dispatch_resource_workers)
+    graph.add_edge("resource_worker", "resource_bundle_output")
+    graph.add_edge("resource_bundle_output", END)
 
     # Hallucination evaluation with retry loop
     graph.add_edge("generate_answer", "evaluate_hallucination")
@@ -171,9 +191,10 @@ def build_graph() -> StateGraph:
         should_retry_or_end,
         {
             "retry": "rewrite_query",
-            "end": END,
+            "end": "episodic_memory_writer",
         },
     )
+    graph.add_edge("episodic_memory_writer", END)
     graph.add_edge("rewrite_query", "academic_router")
 
     # Emotional support ends after the response node.
@@ -240,7 +261,7 @@ def build_graph() -> StateGraph:
     # Multi-resource runner returns the combined result and then ends.
     graph.add_edge("multi_resource_runner", END)
 
-    # Unknown 鈥?direct to END
+    # Unknown: direct to END
     graph.add_edge("handle_unknown", END)
 
     return graph
@@ -251,17 +272,12 @@ def route_after_evidence_judge(state: LearningState) -> str:
     if state.get("evidence_controlled_stop"):
         return "evidence_summary_output"
 
-    resource_type = state.get("requested_resource_type")
-    if resource_type == "mindmap":
-        return "mindmap"
-    if resource_type == "quiz":
-        return "exercise"
-    if resource_type == "review_doc":
-        return "review_doc"
-    if resource_type == "study_plan":
-        return "study_plan"
-    if resource_type == "multi_resource":
-        return "multi_resource"
+    resource_types = normalize_requested_resource_types(
+        state.get("requested_resource_types") or [],
+        state.get("requested_resource_type") or "",
+    )
+    if resource_types:
+        return "resources"
     return "answer"
 
 

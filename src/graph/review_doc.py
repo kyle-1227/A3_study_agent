@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from typing import Literal
 
@@ -13,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from src.config import get_setting, load_prompt
-from src.graph.llm import async_invoke_with_fallback, get_fallback_llm, get_node_llm, invoke_plain_llm_fail_fast
+from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
@@ -189,7 +188,6 @@ def _doc_subject_values(item: dict) -> set[str]:
     metadata = item.get("metadata") or {}
     values = {
         item.get("retrieval_subject"),
-        item.get("supplement_for_subject"),
         item.get("subject"),
         metadata.get("subject") if isinstance(metadata, dict) else "",
     }
@@ -280,13 +278,10 @@ async def _generate_review_doc_markdown(
 ) -> dict:
     temperature = get_setting("review_doc.temperature", 0.2)
     timeout_seconds = float(get_setting("review_doc.timeout_seconds", 90) or 90)
-    max_retries = int(get_setting("review_doc.agent_max_retries", 2) or 2)
     model_name = get_setting(
         "llm.review_doc.model",
-        get_setting("review_doc.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+        get_setting("review_doc.model", ""),
     )
-    llm = get_node_llm("review_doc")
-    fallback = get_fallback_llm(temperature=temperature)
 
     subject_note = ""
     if subject and title:
@@ -312,93 +307,66 @@ async def _generate_review_doc_markdown(
     ]
 
     markdown = ""
-    fallback_used = False
     last_error_type = ""
     last_error_message = ""
-    retries_used = 0
-
-    for attempt in range(max_retries + 1):
-        try:
-            with traced_llm_call(model_name=model_name, node_name="review_doc_agent", temperature=temperature) as span:
-                result = await asyncio.wait_for(
-                    async_invoke_with_fallback(llm, messages, fallback=fallback, span=span),
-                    timeout=timeout_seconds,
-                )
-            markdown = str(getattr(result, "content", result) or "").strip()
-            if markdown:
-                break
-            last_error_type = "EmptyResponse"
-            last_error_message = "LLM returned empty Markdown content"
-        except Exception as exc:
-            last_error_type = _review_doc_error_type(exc)
-            last_error_message = str(exc)
-            if attempt < max_retries and _is_retriable_review_doc_error(exc):
-                retries_used = attempt + 1
-                logger.warning(
-                    "review_doc_agent retry %s/%s after %s: %s",
-                    retries_used,
-                    max_retries,
-                    last_error_type,
-                    last_error_message,
-                )
-                emit_a3_trace(
-                    logger,
-                    "review_doc_agent_retry",
-                    {
-                        "attempt": attempt + 1,
-                        "max_retries": max_retries,
-                        "error_type": last_error_type,
-                        "error_message": last_error_message[:300],
-                        "timeout_seconds": timeout_seconds,
-                        "subject": subject,
-                    },
+    try:
+        with traced_llm_call(model_name=model_name, node_name="review_doc_agent", temperature=temperature):
+            markdown = await asyncio.wait_for(
+                invoke_plain_llm_fail_fast(
+                    node_name="review_doc_agent",
+                    llm_node="review_doc",
+                    messages=messages,
                     state=state,
-                    env_flag="LOG_GENERATION_SUMMARY",
-                )
-                await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
-                continue
-            logger.warning(
-                "review_doc_agent generation failed; using fallback Markdown (%s: %s)",
-                last_error_type,
-                last_error_message,
+                    temperature=temperature,
+                ),
+                timeout=timeout_seconds,
             )
-            break
-
-    if not markdown:
-        fallback_used = True
-        fallback_reason = last_error_type or "UnknownGenerationError"
-        markdown = _fallback_review_doc_markdown(
-            title=title or _extract_markdown_title(outline),
-            keypoints=keypoints,
-            outline=outline,
-            context=context,
-            reason=fallback_reason,
-        )
+        markdown = str(markdown or "").strip()
+    except Exception as exc:
+        last_error_type = _review_doc_error_type(exc)
+        last_error_message = str(exc)
         emit_a3_trace(
             logger,
-            "review_doc_agent_fallback",
+            "review_doc_agent_failed",
             {
-                "fallback_used": True,
-                "review_doc_agent_error_type": fallback_reason,
+                "fallback_used": False,
+                "review_doc_agent_error_type": last_error_type,
                 "error_message": last_error_message[:300],
-                "retries_used": retries_used,
                 "timeout_seconds": timeout_seconds,
-                "markdown_chars": len(markdown),
                 "subject": subject,
             },
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
         )
+        raise
+
+    if not markdown:
+        last_error_type = "EmptyResponse"
+        last_error_message = "LLM returned empty Markdown content"
+        emit_a3_trace(
+            logger,
+            "review_doc_agent_failed",
+            {
+                "fallback_used": False,
+                "review_doc_agent_error_type": last_error_type,
+                "error_message": last_error_message,
+                "timeout_seconds": timeout_seconds,
+                "subject": subject,
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        raise ValueError(last_error_message)
 
     if title:
         markdown = _ensure_markdown_title(markdown, title)
 
     return {
         "markdown": markdown,
-        "fallback_used": fallback_used,
+        "fallback_used": False,
         "last_error_type": last_error_type,
         "last_error_message": last_error_message,
-        "retries_used": retries_used,
+        "retries_used": 0,
         "round": round_no,
         "timeout_seconds": timeout_seconds,
     }
@@ -624,7 +592,7 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             "review_doc_markdown": markdown,
         },
     )
-    model_name = get_setting("llm.review_doc.model", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    model_name = get_setting("llm.review_doc.model", get_setting("review_doc.model", ""))
     with traced_llm_call(model_name=model_name, node_name="review_doc_reviewer", temperature=0.0):
         structured_result = await invoke_structured_llm(
             node_name="review_doc_reviewer",

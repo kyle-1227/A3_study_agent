@@ -7,9 +7,13 @@ import {
   ChevronLeft,
   ChevronRight,
   GraduationCap,
+  LogIn,
+  LogOut,
   MessageSquare,
   MessageSquarePlus,
   Settings,
+  Trash2,
+  User2,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -35,8 +39,13 @@ interface LeftSidebarProps {
   chatHistory: ChatHistoryItem[]
   onNewChat: () => void
   onSelectChat: (id: string) => void
+  onClearChat?: (id: string) => void
   onClearChatHistory?: () => void
   selectedChatId?: string
+  userId?: string | null
+  nickname?: string | null
+  onStartOnboarding?: () => void
+  onClearUser?: () => void
 }
 
 const VOLUNTEER_STORAGE_KEY = "volunteer_chat_history"
@@ -60,8 +69,13 @@ export function LeftSidebar({
   chatHistory,
   onNewChat,
   onSelectChat,
+  onClearChat,
   onClearChatHistory,
   selectedChatId,
+  userId,
+  nickname,
+  onStartOnboarding,
+  onClearUser,
 }: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
@@ -235,22 +249,37 @@ export function LeftSidebar({
                     </p>
                   ) : (
                     chatHistory.map((chat) => (
-                      <button
+                      <div
                         key={chat.id}
-                        type="button"
-                        onClick={() => onSelectChat(chat.id)}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          "group flex items-center rounded-lg transition-colors",
                           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
                           selectedChatId === chat.id
                             ? "bg-sidebar-accent text-sidebar-accent-foreground"
                             : "text-foreground",
                         )}
-                        title={chat.title}
                       >
-                        <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="truncate">{chat.title}</span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => onSelectChat(chat.id)}
+                          className="flex min-w-0 flex-1 items-center gap-2 rounded-l-lg px-3 py-2 text-left text-sm"
+                          title={chat.title}
+                        >
+                          <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="truncate">{chat.title}</span>
+                        </button>
+                        {onClearChat ? (
+                          <button
+                            type="button"
+                            onClick={() => onClearChat(chat.id)}
+                            className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-60 transition hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100"
+                            title="清除此对话"
+                            aria-label={`清除对话：${chat.title}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
                     ))
                   )}
                 </div>
@@ -258,7 +287,43 @@ export function LeftSidebar({
             </div>
           </div>
 
-          <div className="border-t border-sidebar-border p-4">
+          <div className="border-t border-sidebar-border p-4 space-y-2">
+            {/* User identity section */}
+            {userId ? (
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--primary)] text-sm font-medium text-white">
+                  {(nickname || "U").charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {nickname || "用户"}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {userId.slice(0, 10)}...
+                  </p>
+                </div>
+                {onClearUser && (
+                  <button
+                    onClick={onClearUser}
+                    className="rounded-md p-1.5 text-muted-foreground hover:bg-[var(--muted)] hover:text-foreground"
+                    title="退出登录"
+                  >
+                    <LogOut className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+                onClick={onStartOnboarding}
+              >
+                <LogIn className="h-4 w-4" />
+                登录 / 注册
+              </Button>
+            )}
+
+            {/* Settings button (always shown) */}
             <Button variant="ghost" className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground">
               <Settings className="h-4 w-4" />
               设置与帮助

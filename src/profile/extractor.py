@@ -3,21 +3,26 @@ Profile extractor — uses LLM structured output to extract user traits from con
 
 Design:
 - One LLM call per conversation turn (batch mode supported)
-- Structured output via with_structured_output(json_mode)
+- Structured output via invoke_structured_llm / deepseek_tool_call_strict
 - Only extracts what is clearly evidenced
 - Returns ExtractedProfileInfo (all fields optional)
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.llm.structured_output import (
+    StructuredOutputError,
+    get_llm_output_mode,
+    get_max_raw_chars,
+    invoke_structured_llm,
+)
 from src.profile.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_prompt
-from src.profile.schema import ExtractedProfileInfo, UserProfile, profile_to_summary
+from src.profile.schema import ExtractedProfileInfo, ExtractedProfileInfoStrict, UserProfile, profile_to_summary
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,7 @@ _MAX_CONVERSATION_CHARS = 4000
 
 
 def _truncate_conversation(text: str, max_chars: int = _MAX_CONVERSATION_CHARS) -> str:
-    """Keep the tail of the conversation — most recent messages are most relevant."""
+    """Keep the tail of the conversation; recent messages are most relevant."""
     if len(text) <= max_chars:
         return text
     return "…(早期对话已截断)…\n" + text[-max_chars:]
@@ -63,18 +68,13 @@ class ProfileExtractor:
         )
     """
 
-    def __init__(self, llm):
-        """Initialize with a ChatOpenAI-compatible LLM instance.
+    def __init__(self, llm=None):
+        """Initialize the extractor.
 
-        Args:
-            llm: A langchain ChatOpenAI instance. We clone it with
-                 structured output mode for extraction.
+        ``llm`` is accepted for compatibility with older callers, but profile
+        extraction now resolves provider/model/schema through invoke_structured_llm.
         """
         self._base_llm = llm
-        self._structured_llm = llm.with_structured_output(
-            ExtractedProfileInfo,
-            method="json_mode",
-        )
 
     async def extract(
         self,
@@ -104,16 +104,37 @@ class ProfileExtractor:
 
         user_prompt = build_extraction_prompt(conversation_text, existing_summary)
 
+        messages = [
+            SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
+            HumanMessage(content=user_prompt),
+        ]
         try:
-            result: ExtractedProfileInfo = await self._structured_llm.ainvoke([
-                SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ])
+            structured_result = await invoke_structured_llm(
+                node_name="profile_extractor",
+                llm_node="profile_extractor",
+                schema=ExtractedProfileInfoStrict,
+                messages=messages,
+                output_mode=get_llm_output_mode("profile_extractor"),
+                fallback_modes=[],
+                state={},
+                max_raw_chars=get_max_raw_chars("profile_extractor"),
+            )
+        except StructuredOutputError as exc:
+            logger.warning("Profile extraction structured output failed: %s", exc)
+            return ExtractedProfileInfo()
         except Exception as exc:
             logger.warning("Profile extraction LLM call failed: %s", exc)
             return ExtractedProfileInfo()
 
-        # Validate — filter out nonsense
+        if not isinstance(structured_result.parsed, ExtractedProfileInfoStrict):
+            logger.warning(
+                "Profile extraction returned unexpected parsed type: %s",
+                type(structured_result.parsed).__name__,
+            )
+            return ExtractedProfileInfo()
+
+        result = self._strict_to_extracted(structured_result.parsed)
+        # Validate and filter out nonsense.
         result = self._sanitize(result)
         return result
 
@@ -144,7 +165,7 @@ class ProfileExtractor:
 
     @staticmethod
     def _sanitize(info: ExtractedProfileInfo) -> ExtractedProfileInfo:
-        """Clean up extracted info — clamp scores, remove noise."""
+        """Clean up extracted info: clamp scores and remove noise."""
         # Clamp skill scores
         sanitized_skills: dict[str, float] = {}
         for name, level in info.skills_observed.items():
@@ -162,7 +183,7 @@ class ProfileExtractor:
             if key in valid_style_keys:
                 sanitized_style[key] = max(0.0, min(1.0, float(val)))
 
-        # Sanitize goals — importance must be 0-1
+        # Sanitize goals; importance must be 0-1.
         sanitized_goals: list[dict[str, object]] = []
         for g in info.goals_observed:
             goal_text = str(g.get("goal", "")).strip()
@@ -188,24 +209,51 @@ class ProfileExtractor:
             dislikes_observed=[str(d)[:100].strip() for d in (info.dislikes_observed or []) if str(d).strip()],
         )
 
+    @staticmethod
+    def _strict_to_extracted(info: ExtractedProfileInfoStrict) -> ExtractedProfileInfo:
+        """Convert strict-tool DTOs back to the public profile extraction shape."""
+        skills: dict[str, float] = {}
+        for item in info.skills_observed:
+            name = item.name.strip()
+            if name:
+                skills[name] = float(item.level)
+
+        styles: dict[str, float] = {}
+        for item in info.style_signals:
+            dimension = item.dimension.strip()
+            if dimension:
+                styles[dimension] = float(item.strength)
+
+        goals = [
+            {"goal": item.goal.strip(), "importance": float(item.importance)}
+            for item in info.goals_observed
+            if item.goal.strip()
+        ]
+
+        behavior_update: dict[str, float] = {}
+        behavior = info.behavior_update
+        if behavior.avg_session_minutes > 0:
+            behavior_update["avg_session_minutes"] = float(behavior.avg_session_minutes)
+        if behavior.quiz_accuracy > 0:
+            behavior_update["quiz_accuracy"] = float(behavior.quiz_accuracy)
+        if behavior.questions_asked > 0:
+            behavior_update["questions_asked"] = float(behavior.questions_asked)
+
+        return ExtractedProfileInfo(
+            skills_observed=skills,
+            skill_evidence=info.skill_evidence,
+            style_signals=styles,
+            style_evidence=info.style_evidence,
+            goals_observed=goals,
+            behavior_update=behavior_update,
+            observations=list(info.observations),
+            dislikes_observed=list(info.dislikes_observed),
+        )
+
 
 def extractor_from_env() -> ProfileExtractor:
     """Factory: build a ProfileExtractor from environment / settings.
 
     Uses the same LLM configuration as the rest of the project.
     """
-    import os
-
-    from langchain_openai import ChatOpenAI
-
-    model = os.getenv("PROFILE_EXTRACTION_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
-    api_key = os.getenv("DEEPSEEK_API_KEY", "")
-    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-
-    llm = ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
-        temperature=0.0,  # Extraction needs consistency, not creativity
-    )
-    return ProfileExtractor(llm)
+    return ProfileExtractor()
