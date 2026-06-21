@@ -9,7 +9,7 @@ All tests mock external dependencies -- no real API calls required.
 from __future__ import annotations
 
 import re
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage

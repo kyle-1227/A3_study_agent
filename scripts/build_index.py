@@ -12,13 +12,22 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(project_root / ".env")
 
 try:
+    from src.rag.index_manifest import (
+        build_manifest_from_documents,
+        write_build_manifest,
+    )
+    from src.rag.indexer import (
+        COLLECTION_NAME,
+        DEFAULT_EMBEDDING_MODEL,
+        _resolve_persist_dir,
+        build_index,
+    )
     from src.rag.loader import load_documents
-    from src.rag.indexer import build_index
 except ModuleNotFoundError as e:
     missing = str(e).split("'")[1] if "'" in str(e) else str(e)
     print(f"Missing Python dependency: {missing}")
@@ -29,6 +38,7 @@ except ModuleNotFoundError as e:
     raise SystemExit(1)
 
 DATA_DIR = project_root / "data"
+MANIFEST_PATH = project_root / "reports" / "build_manifest.json"
 
 COURSE_DIRS = {
     "big_data": DATA_DIR / "big_data",
@@ -46,7 +56,7 @@ def main() -> None:
     print("=== build_index startup ===")
     print(f"Project root      : {project_root}")
     print(f"Data dir          : {DATA_DIR}")
-    print(f"Chroma persist dir: {os.getenv('CHROMA_PERSIST_DIR', 'NOT SET')}")
+    print(f"Chroma persist dir: {_resolve_persist_dir()}")
     print(f"Course dirs       : {list(COURSE_DIRS.keys())}")
     print()
 
@@ -79,10 +89,20 @@ def main() -> None:
         )
         return
 
-    print(f"\nBuilding university course RAG index with {len(all_docs)} total chunks ...")
+    print(
+        f"\nBuilding university course RAG index with {len(all_docs)} total chunks ..."
+    )
     vectorstore = build_index(all_docs)
     count = vectorstore._collection.count()
     print(f"Index built successfully — {count} course-material vectors in ChromaDB.")
+    manifest = build_manifest_from_documents(
+        all_docs,
+        collection_name=COLLECTION_NAME,
+        chroma_persist_dir=_resolve_persist_dir(),
+        embedding_model=os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+    )
+    write_build_manifest(manifest, MANIFEST_PATH)
+    print(f"Build manifest saved: {MANIFEST_PATH}")
 
 
 if __name__ == "__main__":

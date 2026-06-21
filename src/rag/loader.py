@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Optional
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.rag.cleaning import clean_document_text
+from src.rag.ids import enrich_chunk_metadata, enrich_source_metadata
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -93,18 +93,29 @@ def load_documents(
         if not cleaned_text.strip():
             continue
 
-        metadata = {
-            "subject": subject,
-            "source_file": filepath.name,
-            "year": _guess_year(filepath.name) or "unknown",
-            "doc_type": doc_type,
-            **cleaning_report.to_metadata(),
-        }
+        metadata = enrich_source_metadata(
+            {
+                "subject": subject,
+                "source_file": filepath.name,
+                "year": _guess_year(filepath.name) or "unknown",
+                "doc_type": doc_type,
+                **cleaning_report.to_metadata(),
+            },
+            source_path=filepath,
+            subject=subject,
+        )
 
         chunks = active_splitter.create_documents(
             texts=[cleaned_text],
             metadatas=[metadata],
         )
-        documents.extend(chunks)
+        documents.extend(
+            enrich_chunk_metadata(
+                chunk,
+                doc_id=str(metadata["doc_id"]),
+                chunk_index=chunk_index,
+            )
+            for chunk_index, chunk in enumerate(chunks)
+        )
 
     return documents
