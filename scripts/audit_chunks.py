@@ -9,8 +9,8 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.rag.audit import audit_chunks
-from src.rag.loader import load_documents
+from src.rag.audit import audit_chunks  # noqa: E402
+from src.rag.loader import load_documents  # noqa: E402
 
 
 DATA_DIR = project_root / "data"
@@ -33,7 +33,9 @@ def _load_all_documents() -> tuple[list, list[dict[str, str]]]:
         try:
             docs = load_documents(directory, subject=subject, doc_type=COURSE_DOC_TYPE)
         except Exception as exc:
-            skipped.append({"subject": subject, "reason": f"{type(exc).__name__}: {exc}"})
+            skipped.append(
+                {"subject": subject, "reason": f"{type(exc).__name__}: {exc}"}
+            )
             continue
         all_docs.extend(docs)
 
@@ -61,6 +63,7 @@ def main() -> None:
     print(f"Chunks       : {report.total_chunks}")
     print(f"Sources      : {report.source_count}")
     print(f"Warnings     : {', '.join(report.warnings) if report.warnings else 'none'}")
+    print(f"Suspicious sources: {len(report.suspicious_source_files)}")
     print(f"Report saved : {REPORT_PATH}")
 
 
