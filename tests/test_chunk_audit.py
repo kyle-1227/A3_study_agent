@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
+
 from langchain_core.documents import Document
+import pytest
 
 from src.rag.audit import audit_chunks
+import scripts.audit_chunks as audit_script
+
+
+@pytest.fixture
+def local_tmp_path():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmpdir:
+        yield Path(tmpdir)
 
 
 def test_audit_chunks_returns_statistics_without_modifying_documents():
@@ -122,3 +133,37 @@ def test_audit_chunks_handles_missing_phase4a_metadata():
     assert payload["per_source"][0]["source_relpath"] == "unknown"
     assert payload["per_source"][0]["source_file_size"] == 0
     assert payload["short_chunk_samples"][0]["chunk_index"] == 0
+
+
+def test_audit_chunks_script_skips_needs_ocr_directory(local_tmp_path, monkeypatch):
+    data_dir = local_tmp_path / "data"
+    formal_dir = data_dir / "python"
+    quarantined_dir = data_dir / "_needs_ocr"
+    formal_dir.mkdir(parents=True)
+    quarantined_dir.mkdir(parents=True)
+    (formal_dir / "formal.pdf").write_bytes(b"%PDF formal")
+    (quarantined_dir / "quarantined.pdf").write_bytes(b"%PDF quarantined")
+    calls: list[str] = []
+
+    def fake_load_documents(directory, *, subject, doc_type):
+        calls.append(subject)
+        return [
+            Document(
+                page_content="formal text",
+                metadata={"source_file": f"{subject}.pdf"},
+            )
+        ]
+
+    monkeypatch.setattr(audit_script, "DATA_DIR", data_dir)
+    monkeypatch.setattr(audit_script, "load_documents", fake_load_documents)
+
+    docs, skipped = audit_script._load_all_documents()
+
+    assert calls == ["python"]
+    assert len(docs) == 1
+    assert skipped == [
+        {
+            "subject": "_needs_ocr",
+            "reason": "quarantined OCR-needed directory",
+        }
+    ]

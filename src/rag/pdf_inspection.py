@@ -192,11 +192,28 @@ def _subject_for_pdf(path: Path, *, data_dir: Path, subject: str | None) -> str:
     return relative.parts[0] if len(relative.parts) > 1 else ""
 
 
-def _pdf_paths(data_dir: Path, *, subject: str | None) -> list[Path]:
+def _pdf_paths(
+    data_dir: Path,
+    *,
+    subject: str | None,
+    exclude_needs_ocr: bool = False,
+) -> list[Path]:
     root = data_dir / subject if subject else data_dir
     if not root.is_dir():
         return []
-    return sorted(path for path in root.rglob("*.pdf") if path.is_file())
+    paths = []
+    for path in root.rglob("*.pdf"):
+        if not path.is_file():
+            continue
+        if exclude_needs_ocr:
+            try:
+                relative = path.resolve().relative_to(data_dir.resolve())
+            except ValueError:
+                relative = path
+            if "_needs_ocr" in relative.parts:
+                continue
+        paths.append(path)
+    return sorted(paths)
 
 
 def inspect_pdf_tree(
@@ -204,11 +221,16 @@ def inspect_pdf_tree(
     *,
     subject: str | None = None,
     project_root: str | Path | None = None,
+    exclude_needs_ocr: bool = False,
 ) -> PdfInspectionReport:
     """Inspect all PDFs under a data directory, skipping unreadable files."""
 
     root = Path(data_dir)
-    pdf_paths = _pdf_paths(root, subject=subject)
+    pdf_paths = _pdf_paths(
+        root,
+        subject=subject,
+        exclude_needs_ocr=exclude_needs_ocr,
+    )
     inspections: list[PdfTextInspection] = []
     skipped: list[PdfInspectionSkipped] = []
     for pdf_path in pdf_paths:

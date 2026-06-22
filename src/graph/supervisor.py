@@ -186,7 +186,7 @@ async def supervisor_node(state: LearningState) -> dict:
         _detect_requested_resource_types(user_text),
     )
     requested_resource_type = requested_resource_types[0] if requested_resource_types else ""
-    multi_resource_mode = len(requested_resource_types) > 1
+    is_parallel_resource_request = len(requested_resource_types) > 1
 
     # academic intent with resource type stays academic
     # emotional/unknown with resource type was already blocked by validation
@@ -203,7 +203,7 @@ async def supervisor_node(state: LearningState) -> dict:
             "keypoints": keypoints,
             "requested_resource_type": requested_resource_type,
             "requested_resource_types": requested_resource_types,
-            "multi_resource_mode": multi_resource_mode,
+            "is_parallel_resource_request": is_parallel_resource_request,
             "needs_mindmap": needs_mindmap,
             "confidence": result.confidence if "result" in locals() else 0.0,
             "available_subjects": available_subjects,
@@ -221,9 +221,6 @@ async def supervisor_node(state: LearningState) -> dict:
         "keypoints": keypoints,
         "requested_resource_type": requested_resource_type,
         "requested_resource_types": requested_resource_types,
-        "multi_resource_mode": multi_resource_mode,
-        "multi_resource_results": [],
-        "multi_resource_summary": "",
         "needs_mindmap": needs_mindmap,
     }
 

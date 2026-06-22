@@ -27,6 +27,14 @@ def _load_all_documents() -> tuple[list, list[dict[str, str]]]:
 
     for directory in sorted(path for path in DATA_DIR.iterdir() if path.is_dir()):
         subject = directory.name
+        if subject == "_needs_ocr":
+            skipped.append(
+                {
+                    "subject": subject,
+                    "reason": "quarantined OCR-needed directory",
+                }
+            )
+            continue
         if not any(directory.iterdir()):
             skipped.append({"subject": subject, "reason": "empty directory"})
             continue

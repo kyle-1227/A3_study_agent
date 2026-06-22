@@ -69,9 +69,6 @@ def initial_request_reset_transient_state() -> dict:
         "keypoints": [],
         "requested_resource_type": "",
         "requested_resource_types": [],
-        "multi_resource_mode": False,
-        "multi_resource_results": [],
-        "multi_resource_summary": "",
         "needs_mindmap": False,
         # memory use policy for current query rewrite
         "memory_use_policy": "unset",
@@ -226,9 +223,6 @@ class LearningState(TypedDict):
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
     requested_resource_types: list[str]                                  # Ordered resource types requested for parallel generation
-    multi_resource_mode: bool                                            # Whether multiple resources were requested
-    multi_resource_results: list[dict]                                   # Per-resource generation result metadata
-    multi_resource_summary: str                                          # Summary of multi-resource generation output
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
     memory_use_policy: Literal["use", "ignore", "ask_user", "unset"]    # Whether query rewrite may use selected memory
     memory_use_reason: str                                              # Reason for the memory use policy

@@ -63,11 +63,11 @@ class TestBuildGraph:
             "review_doc_reviewer",
             "review_doc_rewrite",
             "review_doc_output",
-            "multi_resource_runner",
             "emotional_response",
             "handle_unknown",
         }
         assert expected.issubset(node_names), f"Missing nodes: {expected - node_names}"
+        assert "multi_resource_runner" not in node_names
 
     def test_graph_compiles_without_error(self):
         graph = build_graph()
@@ -119,6 +119,8 @@ class TestBuildGraph:
         assert "dispatch_resource_workers" in graph.branches["resource_orchestrator"]
         assert ("resource_worker", "resource_bundle_output") in graph.edges
         assert ("resource_bundle_output", "__end__") in graph.edges
+        assert "multi_resource_runner" not in graph.nodes
+        assert ("multi_resource_runner", "__end__") not in graph.edges
 
     def test_search_query_rewriter_is_shared_after_supervisor(self):
         graph = build_graph()

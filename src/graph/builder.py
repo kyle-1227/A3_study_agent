@@ -40,7 +40,6 @@ from src.graph.mindmap import (
     mindmap_rewrite,
     should_rewrite_mindmap,
 )
-from src.graph.multi_resource import multi_resource_runner
 from src.graph.review_doc import (
     review_doc_agent,
     review_doc_output,
@@ -136,9 +135,6 @@ def build_graph() -> StateGraph:
     graph.add_node("study_plan_consensus", study_plan_consensus)
     graph.add_node("study_plan_rewrite", study_plan_rewrite)
     graph.add_node("study_plan_output", study_plan_output)
-
-    # Multi-resource orchestration
-    graph.add_node("multi_resource_runner", multi_resource_runner)
 
     # Unknown / off-topic
     graph.add_node("handle_unknown", handle_unknown)
@@ -270,9 +266,6 @@ def build_graph() -> StateGraph:
     )
     graph.add_edge("study_plan_rewrite", "study_plan_agent")
     graph.add_edge("study_plan_output", END)
-
-    # Multi-resource runner returns the combined result and then ends.
-    graph.add_edge("multi_resource_runner", END)
 
     # Unknown: direct to END
     graph.add_edge("handle_unknown", END)

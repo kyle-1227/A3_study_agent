@@ -248,7 +248,8 @@ class TestSupervisorNode:
 
         assert result["requested_resource_type"] == expected_type
         assert result["requested_resource_types"] == expected_types
-        assert result["multi_resource_mode"] is (len(expected_types) > 1)
+        assert (len(result["requested_resource_types"]) > 1) is (len(expected_types) > 1)
+        assert result["requested_resource_type"] != "multi_resource"
 
 
 class TestResourceTypeDetection:

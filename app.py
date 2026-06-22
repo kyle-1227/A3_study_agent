@@ -152,7 +152,6 @@ TEXT_EMIT_NODES = {
     "exercise_output",
     "review_doc_output",
     "study_plan_output",
-    "multi_resource_runner",
     "resource_bundle_output",
     "adaptive_practice_responder",
     "recommendation_provider",
@@ -203,7 +202,6 @@ GRAPH_NODES = {
     "study_plan_consensus",
     "study_plan_rewrite",
     "study_plan_output",
-    "multi_resource_runner",
     "emotional_response",
     "handle_unknown",
 }
@@ -237,7 +235,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     requested_resource_types = list(final_state.get("requested_resource_types") or [])
     bundle_resources = list(bundle_artifact.get("resources") or [])
     bundle_errors = list(bundle_artifact.get("errors") or [])
-    is_multi_resource_bundle = (
+    is_resource_bundle_payload = (
         bool(bundle_artifact)
         and (
             len(requested_resource_types) > 1
@@ -253,11 +251,9 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
-    multi_resource_results = final_state.get("multi_resource_results") or []
-    multi_resource_summary = final_state.get("multi_resource_summary") or ""
 
-    if is_multi_resource_bundle:
-        answer = _last_ai_message_content(final_state) or str(multi_resource_summary or "")
+    if is_resource_bundle_payload:
+        answer = _last_ai_message_content(final_state) or str(bundle_artifact.get("message") or "")
         payload: dict = {
             "type": "resource_final",
             "resource_type": "bundle",
@@ -332,7 +328,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     resource_type = str(final_state.get("requested_resource_type") or "")
 
-    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan", "multi_resource"}:
+    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
@@ -345,21 +341,16 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             return None
 
     answer = _last_ai_message_content(final_state)
-    if resource_type == "multi_resource" and multi_resource_summary:
-        answer = multi_resource_summary
     payload: dict = {
         "type": "resource_final",
         "resource_type": resource_type,
         "answer": answer,
     }
-    if resource_type == "multi_resource":
-        payload["multi_resource_results"] = multi_resource_results
-        payload["multi_resource_summary"] = multi_resource_summary
 
-    include_mindmap = resource_type in {"mindmap", "multi_resource"} and (mindmap_artifact or mindmap_tree)
-    include_quiz = resource_type in {"quiz", "multi_resource"} and (exercise_items or exercise_artifact)
-    include_review_doc = resource_type in {"review_doc", "multi_resource"} and review_doc_artifact
-    include_review_doc_artifacts = resource_type in {"review_doc", "multi_resource"} and review_doc_artifacts
+    include_mindmap = resource_type == "mindmap" and (mindmap_artifact or mindmap_tree)
+    include_quiz = resource_type == "quiz" and (exercise_items or exercise_artifact)
+    include_review_doc = resource_type == "review_doc" and review_doc_artifact
+    include_review_doc_artifacts = resource_type == "review_doc" and review_doc_artifacts
 
     if include_mindmap:
         payload["mindmap"] = {

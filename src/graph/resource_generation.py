@@ -373,6 +373,19 @@ def _failed_result(resource_type: str, exc: BaseException, elapsed_ms: int) -> d
     }
 
 
+def _count_mindmap_nodes(tree: Any) -> int:
+    """Count mindmap nodes without assuming a perfect tree shape."""
+    try:
+        if isinstance(tree, dict):
+            children = tree.get("children") or []
+            return 1 + _count_mindmap_nodes(children)
+        if isinstance(tree, list):
+            return sum(_count_mindmap_nodes(child) for child in tree)
+    except Exception:
+        return 0
+    return 0
+
+
 @traced_node
 async def resource_worker(state: LearningState) -> dict:
     """Generate exactly one resource branch and return a reducer-safe result."""
@@ -432,34 +445,148 @@ async def resource_worker(state: LearningState) -> dict:
     return {"resource_branch_results": [result]}
 
 
+def _resource_display_name(resource_type: str) -> str:
+    return {
+        "review_doc": "复习资料",
+        "mindmap": "思维导图",
+        "quiz": "练习题",
+        "study_plan": "学习计划",
+    }.get(resource_type, resource_type)
+
+
+def _yes_no(value: bool) -> str:
+    return "是" if value else "否"
+
+
+def _bundle_display_order(result: dict) -> int:
+    order = {"review_doc": 0, "mindmap": 1, "quiz": 2, "study_plan": 3}
+    return order.get(str(result.get("resource_type") or ""), len(order))
+
+
+def _compose_resource_section(result: dict) -> list[str]:
+    resource_type = str(result.get("resource_type") or "")
+    title = str(result.get("title") or _resource_display_name(resource_type))
+    metrics = _resource_metrics(result)
+    lines = [f"### {_resource_display_name(resource_type)}"]
+
+    if resource_type == "review_doc":
+        lines.extend(
+            [
+                "已生成 Markdown / Word / PDF 等版本。",
+                f"- 标题：{title}",
+                f"- 文档数量：{metrics.get('artifact_count', 0)}",
+                f"- Markdown 字数：{metrics.get('markdown_chars', 0)}",
+            ]
+        )
+    elif resource_type == "mindmap":
+        lines.extend(
+            [
+                "已生成 XMind / Markdown / SVG / PNG 等导出版本。",
+                f"- 标题：{title}",
+                f"- 节点数量：{metrics.get('node_count', 0)}",
+            ]
+        )
+    elif resource_type == "quiz":
+        lines.extend(
+            [
+                "已生成 Markdown / Word / PDF 等版本。",
+                f"- 标题：{title}",
+                f"- 题目数量：{metrics.get('item_count', 0)}",
+            ]
+        )
+    elif resource_type == "study_plan":
+        lines.extend(
+            [
+                "已生成个性化学习计划文档。",
+                f"- 标题：{title}",
+                f"- 是否包含文档：{_yes_no(bool(metrics.get('has_document')))}",
+            ]
+        )
+    else:
+        lines.extend([f"- 标题：{title}"])
+    return lines
+
+
 def _compose_bundle_message(status: str, successes: list[dict], failures: list[dict]) -> str:
     if len(successes) == 1 and not failures:
         content = str(successes[0].get("message_content") or "").strip()
         if content:
             return content
 
-    lines = ["## 学习资源生成结果", ""]
+    lines = [
+        "# 已生成多类学习资源",
+        "",
+        "本次已根据你的请求生成以下学习资源，可分别查看或下载：",
+        "",
+    ]
+
     if successes:
-        lines.append("### 已生成")
-        for result in successes:
-            lines.append(f"- {result.get('resource_type')}: {result.get('title')}")
-            content = str(result.get("message_content") or "").strip()
-            if content:
-                lines.append("")
-                lines.append(content)
-                lines.append("")
-        lines.append("")
+        lines.extend(["## 已生成", ""])
+        for result in sorted(successes, key=_bundle_display_order):
+            lines.extend(_compose_resource_section(result))
+            lines.append("")
+
     if failures:
-        lines.append("### 未完成")
-        for result in failures:
+        lines.extend(["## 未完成", ""])
+        for result in sorted(failures, key=_bundle_display_order):
+            resource_type = result.get("resource_type") or "unknown"
             reason = result.get("error_message_sanitized") or result.get("error_type") or "unknown error"
-            lines.append(f"- {result.get('resource_type')}: {reason}")
+            lines.append(f"- {resource_type}: {reason}")
         lines.append("")
+
     if status == "failed":
         lines.append("所有请求的学习资源都生成失败，请稍后重试或缩小资源范围。")
     elif status == "partial_success":
         lines.append("部分资源已生成，失败的资源可以稍后单独重试。")
+
     return "\n".join(lines).strip()
+
+
+def _resource_metrics(result: dict) -> dict:
+    resource_type = result.get("resource_type")
+    artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+    state_updates = result.get("state_updates") if isinstance(result.get("state_updates"), dict) else {}
+
+    if resource_type == "review_doc":
+        markdown = state_updates.get("review_doc_markdown") or artifact.get("markdown") or ""
+        return {
+            "artifact_count": len(artifacts) or (1 if artifact else 0),
+            "markdown_chars": len(str(markdown)),
+            "has_markdown": bool(artifact.get("markdown_url") or artifact.get("markdown")),
+            "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
+        }
+
+    if resource_type == "mindmap":
+        tree = state_updates.get("mindmap_tree") or artifact.get("tree") or {}
+        return {
+            "has_xmind": bool(artifact.get("xmind_url")),
+            "node_count": _count_mindmap_nodes(tree),
+            "has_png": bool(artifact.get("png_url")),
+            "has_svg": bool(artifact.get("svg_url")),
+        }
+
+    if resource_type == "quiz":
+        exercise_items = state_updates.get("exercise_items")
+        if not isinstance(exercise_items, list):
+            exercise_items = []
+        return {
+            "item_count": len(exercise_items),
+            "has_markdown": bool(artifact.get("markdown_url") or artifact.get("markdown")),
+            "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
+            "has_pdf": bool(artifact.get("pdf_url") or artifact.get("pdf_filename")),
+        }
+
+    if resource_type == "study_plan":
+        document = artifact.get("document") if isinstance(artifact.get("document"), dict) else {}
+        markdown = state_updates.get("study_plan_markdown") or document.get("markdown") or artifact.get("markdown") or ""
+        return {
+            "has_markdown": bool(document.get("markdown_url") or document.get("markdown") or markdown),
+            "has_docx": bool(document.get("docx_url") or document.get("docx_filename")),
+            "has_document": bool(document),
+        }
+
+    return {}
 
 
 def _resource_summary(result: dict) -> dict:
@@ -473,6 +600,7 @@ def _resource_summary(result: dict) -> dict:
         "error_type": result.get("error_type"),
         "error_message_sanitized": result.get("error_message_sanitized"),
         "elapsed_ms": result.get("elapsed_ms"),
+        "metrics": _resource_metrics(result),
     }
 
 
@@ -535,6 +663,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
         }
     )
     message = _compose_bundle_message(status, successes, failures)
+    bundle["message"] = message
     emit_a3_trace(
         logger,
         "resource_generation.bundle.complete",

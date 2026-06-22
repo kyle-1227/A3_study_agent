@@ -1,4 +1,4 @@
-"""Frontend multi-resource resource_final parsing guardrails."""
+"""Frontend resource bundle resource_final parsing guardrails."""
 
 from __future__ import annotations
 
@@ -78,12 +78,22 @@ def test_page_resource_final_parser_uses_field_presence_not_resource_type():
     assert 'data.resource_type === "quiz" ? data.exercise_artifact : null' not in page_source
 
 
-def test_simulated_multi_resource_final_attaches_all_resource_cards():
+def test_simulated_resource_bundle_final_attaches_all_resource_cards():
     message = {"id": "a1", "role": "assistant", "content": ""}
     data = {
         "type": "resource_final",
-        "resource_type": "multi_resource",
+        "resource_type": "bundle",
         "answer": "# 已生成多类学习资源",
+        "resource_bundle": {
+            "type": "resource_bundle",
+            "status": "success",
+            "resources": [
+                {"resource_type": "review_doc", "title": "Python 复习资料"},
+                {"resource_type": "mindmap", "title": "Python 思维导图"},
+                {"resource_type": "quiz", "title": "Python 练习题"},
+            ],
+            "errors": [],
+        },
         "review_doc_artifacts": [
             {
                 "title": "Python 复习资料",

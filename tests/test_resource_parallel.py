@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Send
 
@@ -183,3 +185,162 @@ async def test_resource_bundle_output_all_failed_returns_failed_bundle():
     assert result["resource_generation_status"] == "failed"
     assert result["resource_bundle_artifact"]["status"] == "failed"
     assert "所有请求的学习资源都生成失败" in result["messages"][0].content
+
+
+def test_resource_summary_includes_review_doc_metrics():
+    summary = rg._resource_summary(
+        {
+            "resource_type": "review_doc",
+            "status": "success",
+            "title": "Review",
+            "artifact": {"markdown_url": "/r.md", "docx_url": "/r.docx"},
+            "artifacts": [{"filename": "r.md"}, {"filename": "r.docx"}],
+            "state_updates": {"review_doc_markdown": "hello"},
+        }
+    )
+
+    assert summary["metrics"]["artifact_count"] == 2
+    assert summary["metrics"]["markdown_chars"] == 5
+    assert summary["metrics"]["has_markdown"] is True
+    assert summary["metrics"]["has_docx"] is True
+
+
+def test_resource_summary_includes_mindmap_metrics_and_safe_node_count():
+    tree = {
+        "title": "Root",
+        "children": [
+            {"title": "A", "children": [{"title": "A1"}]},
+            {"title": "B"},
+        ],
+    }
+
+    summary = rg._resource_summary(
+        {
+            "resource_type": "mindmap",
+            "status": "success",
+            "title": "Map",
+            "artifact": {"tree": tree, "xmind_url": "/m.xmind"},
+            "state_updates": {},
+        }
+    )
+
+    assert summary["metrics"]["node_count"] == 4
+    assert summary["metrics"]["has_xmind"] is True
+    assert rg._count_mindmap_nodes(None) == 0
+    assert rg._count_mindmap_nodes([{"title": "A"}, {"children": [{"title": "B"}]}]) == 3
+    assert rg._count_mindmap_nodes("not a tree") == 0
+
+
+def test_resource_summary_includes_quiz_metrics():
+    summary = rg._resource_summary(
+        {
+            "resource_type": "quiz",
+            "status": "success",
+            "title": "Quiz",
+            "artifact": {"markdown_url": "/q.md", "docx_filename": "q.docx"},
+            "state_updates": {"exercise_items": [{"question": "Q1"}, {"question": "Q2"}]},
+        }
+    )
+
+    assert summary["metrics"]["item_count"] == 2
+    assert summary["metrics"]["has_markdown"] is True
+    assert summary["metrics"]["has_docx"] is True
+
+
+def test_resource_summary_includes_study_plan_metrics_without_fixed_shape():
+    summary = rg._resource_summary(
+        {
+            "resource_type": "study_plan",
+            "status": "success",
+            "title": "Plan",
+            "artifact": {
+                "title": "Plan",
+                "document": {
+                    "title": "Plan",
+                    "markdown_url": "/p.md",
+                    "docx_filename": "p.docx",
+                },
+            },
+            "state_updates": {"study_plan_markdown": "# Plan"},
+        }
+    )
+    empty_summary = rg._resource_summary({"resource_type": "study_plan", "artifact": {}, "state_updates": {}})
+
+    assert summary["metrics"]["has_document"] is True
+    assert summary["metrics"]["has_markdown"] is True
+    assert summary["metrics"]["has_docx"] is True
+    assert empty_summary["metrics"] == {"has_markdown": False, "has_docx": False, "has_document": False}
+
+
+async def test_resource_bundle_output_stores_message_on_bundle_artifact():
+    result = await resource_bundle_output(
+        {
+            "requested_resource_types": ["mindmap", "quiz"],
+            "resource_generation_debug": {"stages": []},
+            "resource_branch_results": [
+                {
+                    "resource_type": "mindmap",
+                    "status": "success",
+                    "title": "Mock Map",
+                    "artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}},
+                    "artifacts": [],
+                    "state_updates": {"mindmap_tree": {"title": "Mock Map"}},
+                    "message_content": "Generated mindmap: Mock Map",
+                    "message_preview": "Generated mindmap: Mock Map",
+                    "elapsed_ms": 10,
+                },
+                {
+                    "resource_type": "quiz",
+                    "status": "success",
+                    "title": "Mock Quiz",
+                    "artifact": {"title": "Mock Quiz"},
+                    "artifacts": [],
+                    "state_updates": {"exercise_items": [{"question": "Q1"}]},
+                    "message_content": "Generated quiz: Mock Quiz",
+                    "message_preview": "Generated quiz: Mock Quiz",
+                    "elapsed_ms": 10,
+                },
+            ],
+        }
+    )
+
+    message = result["resource_bundle_artifact"]["message"]
+    assert "# 已生成多类学习资源" in message
+    assert "### 思维导图" in message
+    assert "### 练习题" in message
+    assert result["messages"][0].content == message
+
+
+def test_compose_bundle_message_single_success_preserves_resource_message():
+    message = rg._compose_bundle_message(
+        "success",
+        [{"resource_type": "quiz", "status": "success", "message_content": "single quiz message"}],
+        [],
+    )
+
+    assert message == "single quiz message"
+
+
+def test_no_legacy_multi_resource_runtime_references():
+    project_root = Path(__file__).resolve().parent.parent
+    runtime_files = [
+        project_root / "app.py",
+        project_root / "src" / "graph" / "builder.py",
+        project_root / "src" / "graph" / "state.py",
+        project_root / "src" / "graph" / "supervisor.py",
+        project_root / "src" / "graph" / "resource_generation.py",
+        project_root / "src" / "graph" / "__init__.py",
+    ]
+    legacy_tokens = [
+        "multi_resource_runner",
+        "multi_resource_mode",
+        "multi_resource_results",
+        "multi_resource_summary",
+        '"multi_resource"',
+    ]
+
+    assert not (project_root / "src" / "graph" / "multi_resource.py").exists()
+    for path in runtime_files:
+        text = path.read_text(encoding="utf-8")
+        for token in legacy_tokens:
+            assert token not in text, f"{token} remains in {path}"
