@@ -595,6 +595,7 @@ export default function Home() {
       const reviewDoc = data.review_doc ?? null
       const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
       const exerciseArtifact = data.exercise_artifact ?? null
+      const codePracticeArtifact = data.code_practice_artifact ?? null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
@@ -634,6 +635,18 @@ export default function Home() {
         exerciseArtifact && typeof exerciseArtifact.docx_url === "string" && exerciseArtifact.docx_url.startsWith("/")
           ? `${API_BASE_URL}${exerciseArtifact.docx_url}`
           : exerciseArtifact?.docx_url
+      const codePracticeMarkdownUrl =
+        codePracticeArtifact && typeof codePracticeArtifact.markdown_url === "string" && codePracticeArtifact.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${codePracticeArtifact.markdown_url}`
+          : codePracticeArtifact?.markdown_url
+      const codePracticeDocxUrl =
+        codePracticeArtifact && typeof codePracticeArtifact.docx_url === "string" && codePracticeArtifact.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${codePracticeArtifact.docx_url}`
+          : codePracticeArtifact?.docx_url
+      const codePracticePythonUrl =
+        codePracticeArtifact && typeof codePracticeArtifact.python_url === "string" && codePracticeArtifact.python_url.startsWith("/")
+          ? `${API_BASE_URL}${codePracticeArtifact.python_url}`
+          : codePracticeArtifact?.python_url
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -671,6 +684,18 @@ export default function Home() {
                       docxUrl: exerciseDocxUrl || "",
                     }
                   : msg.exercise,
+                codePractice: codePracticeArtifact
+                  ? {
+                      title: codePracticeArtifact.title || "代码实操案例",
+                      filename: codePracticeArtifact.filename || "",
+                      markdownUrl: codePracticeMarkdownUrl || "",
+                      docxFilename: codePracticeArtifact.docx_filename || "",
+                      docxUrl: codePracticeDocxUrl || "",
+                      pythonFilename: codePracticeArtifact.python_filename || "",
+                      pythonUrl: codePracticePythonUrl || "",
+                      markdown: codePracticeArtifact.markdown || "",
+                    }
+                  : msg.codePractice,
               }
             : msg
         )

@@ -39,6 +39,7 @@ export interface Message {
   reviewDoc?: ReviewDocResult
   reviewDocs?: ReviewDocResult[]
   exercise?: ExerciseResult
+  codePractice?: CodePracticeResult
 }
 
 export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review"
@@ -92,6 +93,17 @@ export interface ExerciseResult {
   docxUrl?: string
   filename?: string
   docxFilename?: string
+}
+
+export interface CodePracticeResult {
+  title: string
+  markdownUrl?: string
+  docxUrl?: string
+  pythonUrl?: string
+  markdown?: string
+  filename?: string
+  docxFilename?: string
+  pythonFilename?: string
 }
 
 interface ChatAreaProps {
@@ -370,6 +382,12 @@ function MessageBubble({ message }: { message: Message }) {
                 )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
+            {message.codePractice && (
+              <CodePracticeCard
+                codePractice={message.codePractice}
+                markdownText={message.codePractice.markdown || message.content}
+              />
+            )}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
@@ -429,6 +447,40 @@ function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseRe
           {exercise.docxUrl && <DownloadButton href={exercise.docxUrl} label="下载 .docx" />}
           <SmallButton
             onClick={() => openReviewDocPrintPage(exercise.title || "练习题", markdownText)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CodePracticeCard({
+  codePractice,
+  markdownText,
+}: {
+  codePractice: CodePracticeResult
+  markdownText: string
+}) {
+  const printableMarkdown = codePractice.markdown || markdownText
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <FileText className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-primary">代码实操案例</p>
+            <p className="truncate text-xs text-muted-foreground">{codePractice.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {codePractice.markdownUrl && <DownloadButton href={codePractice.markdownUrl} label="下载 .md" />}
+          {codePractice.docxUrl && <DownloadButton href={codePractice.docxUrl} label="下载 .docx" />}
+          {codePractice.pythonUrl && <DownloadButton href={codePractice.pythonUrl} label="下载 .py" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(codePractice.title || "代码实操案例", printableMarkdown)}
             label="导出 PDF"
             icon={<FileText className="h-3.5 w-3.5" />}
           />

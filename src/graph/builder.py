@@ -24,6 +24,14 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
+from src.graph.code_practice import (
+    code_practice_agent,
+    code_practice_output,
+    code_practice_planner,
+    code_practice_reviewer,
+    code_practice_rewrite,
+    should_rewrite_code_practice,
+)
 from src.graph.exercises import (
     exercise_agent,
     exercise_output,
@@ -124,6 +132,13 @@ def build_graph() -> StateGraph:
     graph.add_node("review_doc_rewrite", review_doc_rewrite)
     graph.add_node("review_doc_output", review_doc_output)
 
+    # Code practice resource generation
+    graph.add_node("code_practice_planner", code_practice_planner)
+    graph.add_node("code_practice_agent", code_practice_agent)
+    graph.add_node("code_practice_reviewer", code_practice_reviewer)
+    graph.add_node("code_practice_rewrite", code_practice_rewrite)
+    graph.add_node("code_practice_output", code_practice_output)
+
     # Study plan resource generation
     graph.add_node("resource_orchestrator", resource_orchestrator)
     graph.add_node("resource_worker", resource_worker)
@@ -185,6 +200,8 @@ def build_graph() -> StateGraph:
         {
             "answer": "generate_answer",
             "resources": "resource_orchestrator",
+            "multi_resource": "multi_resource_runner",
+            "code_practice": "code_practice_planner",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
@@ -254,6 +271,20 @@ def build_graph() -> StateGraph:
     graph.add_edge("review_doc_rewrite", "review_doc_agent")
     graph.add_edge("review_doc_output", END)
 
+    # Code practice resource generation: plan -> Markdown/code -> review -> output
+    graph.add_edge("code_practice_planner", "code_practice_agent")
+    graph.add_edge("code_practice_agent", "code_practice_reviewer")
+    graph.add_conditional_edges(
+        "code_practice_reviewer",
+        should_rewrite_code_practice,
+        {
+            "rewrite": "code_practice_rewrite",
+            "output": "code_practice_output",
+        },
+    )
+    graph.add_edge("code_practice_rewrite", "code_practice_agent")
+    graph.add_edge("code_practice_output", END)
+
     graph.add_edge("study_plan_emotional_intel", "curriculum_planner")
     graph.add_edge("curriculum_planner", "study_plan_planner")
     graph.add_edge("study_plan_planner", "study_plan_agent")
@@ -282,12 +313,34 @@ def build_graph() -> StateGraph:
 
 def route_after_evidence_judge(state: LearningState) -> str:
     """Route judged evidence to answer generation, resource chains, or controlled stop."""
-    if state.get("evidence_controlled_stop"):
+    requested_resource_type = str(state.get("requested_resource_type") or "").strip()
+    requested_resource_types = [
+        str(item or "").strip()
+        for item in state.get("requested_resource_types", []) or []
+        if str(item or "").strip()
+    ]
+    explicit_resource_types = {"review_doc", "mindmap", "quiz", "code_practice", "multi_resource"}
+    has_explicit_resource_request = bool(
+        requested_resource_type in explicit_resource_types
+        or any(item in explicit_resource_types for item in requested_resource_types)
+    )
+    can_degrade_resource = (
+        state.get("degraded_generation") is True
+        or str(state.get("evidence_answerability") or "") in {"can_answer", "can_answer_with_caveats"}
+    )
+    if state.get("evidence_controlled_stop") and not (
+        has_explicit_resource_request and can_degrade_resource
+    ):
         return "evidence_summary_output"
 
+    if requested_resource_type == "code_practice" or requested_resource_types == ["code_practice"]:
+        return "code_practice"
+    if requested_resource_type == "multi_resource" or len(requested_resource_types) > 1:
+        return "multi_resource"
+
     resource_types = normalize_requested_resource_types(
-        state.get("requested_resource_types") or [],
-        state.get("requested_resource_type") or "",
+        requested_resource_types,
+        requested_resource_type,
     )
     if resource_types:
         return "resources"

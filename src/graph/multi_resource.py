@@ -8,6 +8,14 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from src.graph.code_practice import (
+    code_practice_agent,
+    code_practice_output,
+    code_practice_planner,
+    code_practice_reviewer,
+    code_practice_rewrite,
+    should_rewrite_code_practice,
+)
 from src.graph.exercises import (
     exercise_agent,
     exercise_output,
@@ -39,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 ResourceNode = Callable[[LearningState], Awaitable[dict]]
 
-RESOURCE_ORDER = ("review_doc", "mindmap", "quiz")
+RESOURCE_ORDER = ("review_doc", "mindmap", "quiz", "code_practice")
 SUPPORTED_RESOURCE_TYPES = set(RESOURCE_ORDER)
 
 
@@ -100,6 +108,18 @@ async def _run_quiz_chain(working_state: dict) -> dict:
     return await _run_node(working_state, exercise_output)
 
 
+async def _run_code_practice_chain(working_state: dict) -> dict:
+    working_state = await _run_node(working_state, code_practice_planner)
+    while True:
+        working_state = await _run_node(working_state, code_practice_agent)
+        working_state = await _run_node(working_state, code_practice_reviewer)
+        route = should_rewrite_code_practice(working_state)  # type: ignore[arg-type]
+        if route != "rewrite":
+            break
+        working_state = await _run_node(working_state, code_practice_rewrite)
+    return await _run_node(working_state, code_practice_output)
+
+
 def _requested_resources(state: dict) -> list[str]:
     requested = [
         str(item).strip()
@@ -151,6 +171,17 @@ def _resource_result(resource_type: str, working_state: dict) -> dict[str, Any]:
             "has_markdown": bool(artifact.get("markdown_url")),
             "has_docx": bool(artifact.get("docx_url")),
         }
+    if resource_type == "code_practice":
+        artifact = working_state.get("code_practice_artifact") or {}
+        return {
+            "resource_type": resource_type,
+            "status": "completed",
+            "title": artifact.get("title", "代码实操案例"),
+            "markdown_chars": len(str(working_state.get("code_practice_markdown") or "")),
+            "has_markdown": bool(artifact.get("markdown_url")),
+            "has_docx": bool(artifact.get("docx_url")),
+            "has_python": bool(artifact.get("python_url")),
+        }
     return {"resource_type": resource_type, "status": "completed"}
 
 
@@ -174,6 +205,8 @@ def _build_combined_answer(completed: list[str], results: list[dict]) -> str:
         lines.extend(["## 二、思维导图", "已生成 XMind / Markdown / SVG / PNG 导出版本。", ""])
     if "quiz" in completed:
         lines.extend(["## 三、练习题", "已生成 Markdown / Word / PDF 打印版本。", ""])
+    if "code_practice" in completed:
+        lines.extend(["## 四、代码实操案例", "已生成 Markdown / Word / Python 源码版本，可下载后直接运行。", ""])
 
     lines.extend(["---", "", "## 资源摘要"])
     for result in results:
@@ -187,6 +220,8 @@ def _build_combined_answer(completed: list[str], results: list[dict]) -> str:
             lines.append(f"- 思维导图：{title}，共 {result.get('node_count', 0)} 个节点。")
         elif resource_type == "quiz":
             lines.append(f"- 练习题：{title}，共 {result.get('item_count', 0)} 道题。")
+        elif resource_type == "code_practice":
+            lines.append(f"- 代码实操案例：{title}，已生成 Markdown、Word 和 Python 源码。")
     return "\n".join(lines).strip()
 
 
@@ -216,6 +251,7 @@ async def multi_resource_runner(state: LearningState) -> dict:
         "review_doc": _run_review_doc_chain,
         "mindmap": _run_mindmap_chain,
         "quiz": _run_quiz_chain,
+        "code_practice": _run_code_practice_chain,
     }
 
     for resource_type in requested_supported:
@@ -244,6 +280,8 @@ async def multi_resource_runner(state: LearningState) -> dict:
     review_doc_artifacts = working_state.get("review_doc_artifacts") or []
     mindmap_artifact = working_state.get("mindmap_artifact") or {}
     exercise_artifact = working_state.get("exercise_artifact") or {}
+    code_practice_artifact = working_state.get("code_practice_artifact") or {}
+    code_practice_markdown = working_state.get("code_practice_markdown", "")
 
     emit_a3_trace(
         logger,
@@ -256,6 +294,8 @@ async def multi_resource_runner(state: LearningState) -> dict:
             "review_doc_artifacts_count": len(review_doc_artifacts),
             "has_mindmap": bool(mindmap_artifact),
             "has_exercise": bool(exercise_artifact),
+            "has_code_practice": bool(code_practice_artifact),
+            "code_practice_artifact_exists": bool(code_practice_artifact),
             "answer_chars": len(combined_answer),
         },
         state=working_state,
@@ -270,6 +310,8 @@ async def multi_resource_runner(state: LearningState) -> dict:
         "mindmap_tree": working_state.get("mindmap_tree") or {},
         "exercise_artifact": exercise_artifact,
         "exercise_items": working_state.get("exercise_items") or [],
+        "code_practice_artifact": code_practice_artifact,
+        "code_practice_markdown": code_practice_markdown,
         "multi_resource_results": results,
         "multi_resource_summary": combined_answer,
         "messages": [AIMessage(content=combined_answer)],

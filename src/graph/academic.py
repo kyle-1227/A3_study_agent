@@ -5328,6 +5328,24 @@ async def evidence_judge(state: LearningState) -> dict:
 
     # Controlled stop logic.
     evidence_state = parsed.overall_evidence_state
+    answerability = ""
+    for stage_debug in reversed(judge_debug.get("stages") or []):
+        if isinstance(stage_debug, dict) and stage_debug.get("answerability"):
+            answerability = str(stage_debug.get("answerability") or "")
+            break
+    if not answerability:
+        answerability = "can_answer_with_caveats" if evidence_state == "partially_sufficient" else "cannot_answer"
+
+    explicit_resource_types = {"review_doc", "mindmap", "quiz", "code_practice", "multi_resource"}
+    requested_resource_set = {
+        str(item or "").strip()
+        for item in requested_resource_types
+        if str(item or "").strip()
+    }
+    if requested_resource_type:
+        requested_resource_set.add(requested_resource_type)
+    has_explicit_resource_request = bool(requested_resource_set & explicit_resource_types)
+
     controlled_stop = False
     controlled_stop_reason = ""
     degraded_generation = False
@@ -5341,16 +5359,39 @@ async def evidence_judge(state: LearningState) -> dict:
         degraded_generation = True
         degraded_reason = "Evidence Judge validation failed; fallback evidence selection was used."
     elif evidence_state == "insufficient":
-        if fail_fast_on_insufficient:
+        can_generate_with_caveats = answerability in {"can_answer", "can_answer_with_caveats"}
+        if has_explicit_resource_request and can_generate_with_caveats:
+            degraded_generation = True
+            degraded_reason = "Evidence is insufficient; generating resource with caveats and fallback structure."
+        elif fail_fast_on_insufficient:
             raise RuntimeError(
                 "Evidence Judge declared evidence insufficient and "
                 "fail_fast_on_insufficient_evidence is enabled."
             )
-        controlled_stop = True
-        controlled_stop_reason = "evidence_insufficient"
+        else:
+            controlled_stop = True
+            controlled_stop_reason = "evidence_insufficient"
     elif evidence_state == "partially_sufficient":
         degraded_generation = True
         degraded_reason = "evidence_partially_sufficient"
+
+    emit_a3_trace(
+        logger,
+        "evidence_control_decision",
+        {
+            "evidence_state": evidence_state,
+            "answerability": answerability,
+            "requested_resource_type": requested_resource_type,
+            "requested_resource_types": requested_resource_types,
+            "has_explicit_resource_request": has_explicit_resource_request,
+            "controlled_stop": controlled_stop,
+            "controlled_stop_reason": controlled_stop_reason,
+            "degraded_generation": degraded_generation,
+            "degraded_reason": degraded_reason,
+        },
+        state=state,
+        env_flag="LOG_RAG_RESULT",
+    )
 
     return {
         "context": context_docs,
@@ -5359,6 +5400,7 @@ async def evidence_judge(state: LearningState) -> dict:
         "evidence_judge_debug": judge_debug,
         "evidence_judge_rounds": 1,
         "evidence_judge_state": evidence_state,
+        "evidence_answerability": answerability,
         "evidence_coverage_gaps": []
         if fallback_used
         else [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],

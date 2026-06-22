@@ -151,6 +151,13 @@ def initial_request_reset_transient_state() -> dict:
         "review_doc_review_reason": "",
         "review_doc_revision_notes": "",
         "review_doc_round": 0,
+        "code_practice_outline": "",
+        "code_practice_markdown": "",
+        "code_practice_artifact": {},
+        "code_practice_review_verdict": "",
+        "code_practice_review_reason": "",
+        "code_practice_revision_notes": "",
+        "code_practice_round": 0,
         "study_plan_emotional_intel": "",
         "study_plan_emotional_profile": {},
         "study_plan_outline": "",
@@ -261,6 +268,13 @@ class LearningState(TypedDict):
     review_doc_review_reason: str                                       # Review document reviewer reasoning
     review_doc_revision_notes: str                                      # Feedback for review_doc_agent regeneration
     review_doc_round: int                                               # Review document generation/review round
+    code_practice_outline: str                                           # Planner-produced code practice case blueprint
+    code_practice_markdown: str                                          # Reviewed Markdown code practice case draft
+    code_practice_artifact: dict                                         # Generated code practice content and artifact metadata
+    code_practice_review_verdict: str                                    # "approve" / "reject"
+    code_practice_review_reason: str                                     # Code practice reviewer reasoning
+    code_practice_revision_notes: str                                    # Feedback for code_practice_agent regeneration
+    code_practice_round: int                                             # Code practice generation/review round
     study_plan_emotional_intel: str                                     # Study-plan learner workload/emotional summary
     study_plan_emotional_profile: dict                                  # Structured emotional/workload profile
     study_plan_outline: str                                             # Planner-produced study-plan outline

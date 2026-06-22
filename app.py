@@ -34,7 +34,11 @@ from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_t
 from src.profile import get_profile_manager
 from src.schemas import ChatRequest, OnboardRequest, ProfileResponse, ResumeRequest
 from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
-from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
+from src.tools.document_tool import (
+    get_code_practice_artifact_dir,
+    get_exercise_artifact_dir,
+    get_review_doc_artifact_dir,
+)
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
@@ -151,6 +155,7 @@ TEXT_EMIT_NODES = {
     "mindmap_output",
     "exercise_output",
     "review_doc_output",
+    "code_practice_output",
     "study_plan_output",
     "multi_resource_runner",
     "resource_bundle_output",
@@ -191,6 +196,11 @@ GRAPH_NODES = {
     "review_doc_reviewer",
     "review_doc_rewrite",
     "review_doc_output",
+    "code_practice_planner",
+    "code_practice_agent",
+    "code_practice_reviewer",
+    "code_practice_rewrite",
+    "code_practice_output",
     "curriculum_planner",
     "assessment_result_handler",
     "adaptive_practice_responder",
@@ -223,7 +233,25 @@ def _last_ai_message_content(final_state: dict) -> str:
 
 
 def _resource_final_payload(final_state: dict) -> dict | None:
-    if final_state.get("evidence_controlled_stop") is True or final_state.get("final_response_type") == "evidence_summary":
+    has_generated_resource_artifact = any(
+        bool(final_state.get(key))
+        for key in (
+            "mindmap_artifact",
+            "mindmap_tree",
+            "exercise_artifact",
+            "exercise_items",
+            "review_doc_artifact",
+            "review_doc_artifacts",
+            "code_practice_artifact",
+            "study_plan_artifact",
+            "study_plan_document_artifact",
+            "resource_bundle_artifact",
+        )
+    )
+    if (
+        final_state.get("evidence_controlled_stop") is True
+        or final_state.get("final_response_type") == "evidence_summary"
+    ) and not has_generated_resource_artifact:
         answer = _last_ai_message_content(final_state) or str(final_state.get("plan") or "")
         return {
             "type": "resource_final",
@@ -251,6 +279,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     exercise_artifact = final_state.get("exercise_artifact") or {}
     review_doc_artifact = final_state.get("review_doc_artifact") or {}
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
+    code_practice_artifact = final_state.get("code_practice_artifact") or {}
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
     multi_resource_results = final_state.get("multi_resource_results") or []
@@ -318,6 +347,9 @@ def _resource_final_payload(final_state: dict) -> dict | None:
                 for artifact in review_doc_artifacts
             ]
 
+        if code_practice_artifact:
+            payload["code_practice_artifact"] = code_practice_artifact
+
         if study_plan_artifact or study_plan_document:
             payload["study_plan"] = {
                 "title": study_plan_artifact.get("title")
@@ -332,13 +364,15 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     resource_type = str(final_state.get("requested_resource_type") or "")
 
-    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan", "multi_resource"}:
+    if resource_type not in {"mindmap", "quiz", "review_doc", "code_practice", "study_plan", "multi_resource"}:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
             resource_type = "quiz"
         elif review_doc_artifact or review_doc_artifacts:
             resource_type = "review_doc"
+        elif code_practice_artifact:
+            resource_type = "code_practice"
         elif study_plan_artifact or study_plan_document:
             resource_type = "study_plan"
         else:
@@ -360,6 +394,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     include_quiz = resource_type in {"quiz", "multi_resource"} and (exercise_items or exercise_artifact)
     include_review_doc = resource_type in {"review_doc", "multi_resource"} and review_doc_artifact
     include_review_doc_artifacts = resource_type in {"review_doc", "multi_resource"} and review_doc_artifacts
+    include_code_practice = resource_type in {"code_practice", "multi_resource"} and code_practice_artifact
 
     if include_mindmap:
         payload["mindmap"] = {
@@ -410,6 +445,9 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             }
             for artifact in review_doc_artifacts
         ]
+
+    if include_code_practice:
+        payload["code_practice_artifact"] = code_practice_artifact
 
     if resource_type == "study_plan" and (study_plan_artifact or study_plan_document):
         payload["study_plan"] = {
@@ -731,6 +769,7 @@ async def _stream_graph_events(
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
                 "has_exercise": bool(resource_payload.get("exercise_artifact")),
+                "has_code_practice": bool(resource_payload.get("code_practice_artifact")),
                 "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
                 "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
@@ -955,6 +994,32 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
         if artifact_path.suffix.lower() == ".docx"
         else "text/markdown; charset=utf-8"
     )
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+@app.get("/artifacts/code-practice/{artifact_id}/{filename}")
+async def download_code_practice_artifact(artifact_id: str, filename: str):
+    root = get_code_practice_artifact_dir()
+    artifact_path = (root / artifact_id / filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".md", ".docx", ".py"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".md": "text/markdown; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".py": "text/x-python",
+    }[suffix]
 
     return FileResponse(
         artifact_path,

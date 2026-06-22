@@ -8,7 +8,7 @@ Uses structured output (Pydantic) instead of manual JSON parsing.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from src.config import get_setting, load_prompt
 from src.graph.resource_generation import (
     SUPPORTED_RESOURCE_TYPES,
-    normalize_requested_resource_types,
+    normalize_requested_resource_types as _normalize_supported_requested_resource_types,
 )
 from src.graph.state import LearningState
 from src.llm.structured_output import (
@@ -44,7 +44,47 @@ class SupervisorOutput(BaseModel):
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = SUPPORTED_RESOURCE_TYPES
+_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES) | {"code_practice", "multi_resource"}
+
+_SUPERVISOR_RESOURCE_ALIASES = {
+    "code_case": "code_practice",
+    "project_case": "code_practice",
+    "coding_practice": "code_practice",
+    "code practice": "code_practice",
+    "hands-on project": "code_practice",
+    "hands_on project": "code_practice",
+    "hands_on_project": "code_practice",
+}
+
+
+def _normalize_supervisor_resource_type(value: Any) -> str:
+    """Normalize resource aliases known at supervisor time."""
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return ""
+    text = _SUPERVISOR_RESOURCE_ALIASES.get(text, text)
+    if text == "code_practice":
+        return "code_practice"
+    supported = _normalize_supported_requested_resource_types(text)
+    return supported[0] if supported else ""
+
+
+def normalize_requested_resource_types(*values: Any) -> list[str]:
+    """Return ordered, deduplicated resource types accepted by the supervisor."""
+    normalized: list[str] = []
+
+    def add_one(item: Any) -> None:
+        resource_type = _normalize_supervisor_resource_type(item)
+        if resource_type and resource_type not in normalized:
+            normalized.append(resource_type)
+
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add_one(item)
+        else:
+            add_one(value)
+    return normalized
 
 
 def _sanitize_valid_intents() -> set[str]:
@@ -178,15 +218,28 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    # Use LLM resource requests first, then add deterministic detections for
-    # explicit multi-resource phrasing the model may have collapsed to one type.
-    requested_resource_types = normalize_requested_resource_types(
-        result.requested_resource_types,
-        result.requested_resource_type,
-        _detect_requested_resource_types(user_text),
+    # Deterministic detections are intentionally authoritative for explicit
+    # resource phrasing. The LLM may over-broaden "代码实操案例" into review_doc,
+    # which would route a single code-practice request into multi_resource.
+    deterministic_resource_types = _detect_requested_resource_types(user_text)
+    requested_resource_types = (
+        deterministic_resource_types
+        if deterministic_resource_types
+        else normalize_requested_resource_types(
+            result.requested_resource_types,
+            result.requested_resource_type,
+        )
     )
-    requested_resource_type = requested_resource_types[0] if requested_resource_types else ""
+    requested_resource_type = (
+        "multi_resource"
+        if len(requested_resource_types) > 1
+        else requested_resource_types[0]
+        if requested_resource_types
+        else ""
+    )
     multi_resource_mode = len(requested_resource_types) > 1
+    if requested_resource_types and intent in {"emotional", "unknown"}:
+        intent = "academic"
 
     # academic intent with resource type stays academic
     # emotional/unknown with resource type was already blocked by validation
@@ -349,6 +402,23 @@ _RESOURCE_TYPE_MARKERS_FOR_DETECTION: tuple[tuple[str, tuple[str, ...]], ...] = 
     ),
     ("mindmap", ("思维导图", "脑图", "知识图谱", "mindmap", "xmind")),
     ("quiz", ("练习题", "习题", "题库", "测试题", "测验", "quiz", "exercises")),
+    (
+        "code_practice",
+        (
+            "代码实操",
+            "代码案例",
+            "实操案例",
+            "编程实战",
+            "项目实战",
+            "项目案例",
+            "完整代码",
+            "可运行代码",
+            "代码练习",
+            "coding practice",
+            "code practice",
+            "hands-on project",
+        ),
+    ),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "roadmap")),
 )
 
@@ -356,8 +426,7 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
     ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目")),
     ("ppt", ("ppt", "幻灯片", "演示文稿", "课件")),
-    ("code_case", ("代码案例", "代码实操", "实操案例", "编程案例", "示例代码", "demo")),
-    ("project_case", ("项目案例", "实践项目", "项目实战", "课程项目", "实验项目")),
+    ("code_practice", ("代码实操", "代码案例", "实操案例", "编程实战", "项目实战", "项目案例", "完整代码", "可运行代码", "代码练习", "coding practice", "code practice", "hands-on project")),
     ("video_script", ("视频脚本", "动画脚本", "讲解视频", "教学视频", "分镜")),
     ("review_doc", ("复习资料", "复习文档", "学习文档", "学习材料", "考试讲义", "复习讲义", "知识整理", "知识点整理", "章节复习", "期末复习")),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
@@ -394,6 +463,20 @@ _READABLE_RESOURCE_ACTION_MARKERS = (
     "give me",
 )
 
+_CODE_PRACTICE_ACTION_MARKERS = (
+    "生成",
+    "给我",
+    "帮我做",
+    "帮我生成",
+    "创建",
+    "输出",
+    "制作",
+    "generate",
+    "give me",
+    "create",
+    "make",
+)
+
 _READABLE_WEAK_REQUEST_MARKERS = (
     "帮我",
     "给我",
@@ -422,7 +505,8 @@ _READABLE_EXPLANATION_MARKERS = (
 _READABLE_RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
     ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目", "quiz", "exercise", "practice questions")),
-    ("review_doc", ("复习资料", "复习文档", "学习资料", "学习文档", "学习材料", "课程资料", "考试讲义", "复习讲义", "讲义", "笔记", "知识整理", "知识点整理", "章节复习", "期末复习", "考前复习", "review doc", "review document")),
+    ("code_practice", ("代码实操", "代码案例", "实操案例", "编程实战", "项目实战", "项目案例", "完整代码", "可运行代码", "代码练习", "coding practice", "code practice", "hands-on project")),
+    ("review_doc", ("复习资料", "复习文档", "学习资料", "课程讲解文档", "讲义", "知识点整理", "复习笔记", "课程文档", "review doc", "review document")),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
 )
 
@@ -433,11 +517,14 @@ def _detect_requested_resource_types(text: str) -> list[str]:
     asks_explanation = any(marker.lower() in lowered for marker in _READABLE_EXPLANATION_MARKERS)
     has_action = any(marker.lower() in lowered for marker in _READABLE_RESOURCE_ACTION_MARKERS)
     has_weak_request = any(marker.lower() in lowered for marker in _READABLE_WEAK_REQUEST_MARKERS)
+    has_code_practice_action = any(marker.lower() in lowered for marker in _CODE_PRACTICE_ACTION_MARKERS)
 
     detected: list[tuple[int, str]] = []
     for resource_type, markers in _READABLE_RESOURCE_TYPE_MARKERS:
         positions = [lowered.find(marker.lower()) for marker in markers if marker.lower() in lowered]
         if positions:
+            if resource_type == "code_practice" and not has_code_practice_action:
+                continue
             detected.append((min(positions), resource_type))
 
     if not detected:
