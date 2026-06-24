@@ -74,6 +74,12 @@ def test_audit_chunks_serializes_to_json_ready_dict_with_old_fields():
     assert payload["total_chunks"] == 1
     assert isinstance(payload["per_source"], list)
     assert payload["per_source"][0]["source_file"] == "x.txt"
+    assert payload["splitter_modes"] == {"recursive": 1}
+    assert payload["section_metadata_coverage"] == {
+        "chunks_with_section_id": 0,
+        "chunks_with_section_title": 0,
+        "coverage_ratio": 0.0,
+    }
 
 
 def test_audit_chunks_adds_short_chunk_samples_with_truncated_preview():
@@ -167,3 +173,32 @@ def test_audit_chunks_script_skips_needs_ocr_directory(local_tmp_path, monkeypat
             "reason": "quarantined OCR-needed directory",
         }
     ]
+
+
+def test_audit_chunks_reports_splitter_modes_and_section_coverage():
+    docs = [
+        Document(
+            page_content="structured text",
+            metadata={
+                "source_file": "a.txt",
+                "splitter_mode": "structure",
+                "section_id": "sec_123",
+                "section_title": "Overview",
+            },
+        ),
+        Document(
+            page_content="recursive text",
+            metadata={"source_file": "b.txt"},
+        ),
+    ]
+    before = [(doc.page_content, dict(doc.metadata)) for doc in docs]
+
+    payload = audit_chunks(docs).to_dict()
+
+    assert payload["splitter_modes"] == {"structure": 1, "recursive": 1}
+    assert payload["section_metadata_coverage"] == {
+        "chunks_with_section_id": 1,
+        "chunks_with_section_title": 1,
+        "coverage_ratio": 0.5,
+    }
+    assert [(doc.page_content, doc.metadata) for doc in docs] == before

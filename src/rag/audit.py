@@ -119,6 +119,8 @@ class ChunkAuditReport:
     warnings: tuple[str, ...] = ()
     short_chunk_samples: tuple[ShortChunkSample, ...] = ()
     suspicious_source_files: tuple[SuspiciousSourceFile, ...] = ()
+    splitter_modes: dict[str, int] = field(default_factory=dict)
+    section_metadata_coverage: dict[str, float | int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +142,8 @@ class ChunkAuditReport:
             "suspicious_source_files": [
                 item.to_dict() for item in self.suspicious_source_files
             ],
+            "splitter_modes": dict(self.splitter_modes),
+            "section_metadata_coverage": dict(self.section_metadata_coverage),
         }
 
 
@@ -201,6 +205,29 @@ def _missing_metadata_counts(
     return dict(counts)
 
 
+def _splitter_modes(documents: Iterable[Document]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for doc in documents:
+        mode = _metadata_text(doc.metadata, "splitter_mode") or "recursive"
+        counts[mode] += 1
+    return dict(counts)
+
+
+def _section_metadata_coverage(documents: list[Document]) -> dict[str, float | int]:
+    total = len(documents)
+    chunks_with_section_id = sum(
+        1 for doc in documents if doc.metadata.get("section_id")
+    )
+    chunks_with_section_title = sum(
+        1 for doc in documents if doc.metadata.get("section_title")
+    )
+    return {
+        "chunks_with_section_id": chunks_with_section_id,
+        "chunks_with_section_title": chunks_with_section_title,
+        "coverage_ratio": round(chunks_with_section_id / total, 4) if total else 0.0,
+    }
+
+
 def _duplicate_count(documents: list[Document]) -> int:
     keys = [
         _content_key(doc.page_content) for doc in documents if doc.page_content.strip()
@@ -247,7 +274,7 @@ def _source_warnings(
         warnings.append("very_low_chunk_count_for_large_source")
     if empty_chunk_count > 0:
         warnings.append("high_empty_chunk_count")
-    if chunk_count and (too_short_count >= 5 or too_short_count / chunk_count >= 0.2):
+    if chunk_count and too_short_count / chunk_count >= 0.2:
         warnings.append("high_short_chunk_count")
     if noise_count > 0:
         warnings.append("noise_chunks_detected")
@@ -387,4 +414,6 @@ def audit_chunks(
             min_chars=min_chars,
         ),
         suspicious_source_files=suspicious_source_files,
+        splitter_modes=_splitter_modes(documents),
+        section_metadata_coverage=_section_metadata_coverage(documents),
     )

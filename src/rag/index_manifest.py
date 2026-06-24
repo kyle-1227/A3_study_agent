@@ -31,6 +31,7 @@ class SourceManifest:
 class BuildManifest:
     index_version: str
     chunk_policy_version: str
+    splitter_mode: str
     collection_name: str
     chroma_persist_dir: str
     embedding_model: str
@@ -54,6 +55,21 @@ def _metadata_int(metadata: dict, key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _infer_splitter_mode(docs: list[Document]) -> str:
+    modes = {
+        _metadata_text(doc.metadata, "splitter_mode") or "recursive" for doc in docs
+    }
+    return modes.pop() if len(modes) == 1 else "mixed"
+
+
+def _infer_chunk_policy_version(docs: list[Document]) -> str:
+    versions = {
+        _metadata_text(doc.metadata, "chunk_policy_version") or "recursive_v1"
+        for doc in docs
+    }
+    return versions.pop() if len(versions) == 1 else "mixed"
+
+
 def build_manifest_from_documents(
     docs: list[Document],
     *,
@@ -61,7 +77,8 @@ def build_manifest_from_documents(
     chroma_persist_dir: str,
     embedding_model: str,
     index_version: str = "a3_rag_v1",
-    chunk_policy_version: str = "recursive_v1",
+    chunk_policy_version: str | None = None,
+    splitter_mode: str | None = None,
 ) -> BuildManifest:
     """Build a manifest describing the documents loaded in one build run."""
 
@@ -98,7 +115,12 @@ def build_manifest_from_documents(
 
     return BuildManifest(
         index_version=index_version,
-        chunk_policy_version=chunk_policy_version,
+        chunk_policy_version=chunk_policy_version
+        if chunk_policy_version is not None
+        else _infer_chunk_policy_version(docs),
+        splitter_mode=splitter_mode
+        if splitter_mode is not None
+        else _infer_splitter_mode(docs),
         collection_name=collection_name,
         chroma_persist_dir=chroma_persist_dir,
         embedding_model=embedding_model,

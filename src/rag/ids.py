@@ -10,6 +10,7 @@ from langchain_core.documents import Document
 
 INDEX_VERSION = "a3_rag_v1"
 CHUNK_POLICY_VERSION = "recursive_v1"
+STRUCTURE_CHUNK_POLICY_VERSION = "structure_v1"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _SCALAR_TYPES = (str, int, float, bool, type(None))

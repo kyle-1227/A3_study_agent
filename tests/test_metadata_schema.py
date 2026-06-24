@@ -57,6 +57,30 @@ def test_load_documents_outputs_scalar_metadata_with_stable_ids(local_tmp_path):
         assert any(key.startswith("cleaning_") for key in doc.metadata)
 
 
+def test_load_documents_structure_mode_outputs_scalar_section_metadata(
+    local_tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RAG_SPLITTER_MODE", "structure")
+    source = local_tmp_path / "notes_2026.txt"
+    source.write_text(
+        "# Overview\nUseful overview body.\n\n## Details\nUseful detail body.",
+        encoding="utf-8",
+    )
+
+    docs = load_documents(local_tmp_path, subject="general", doc_type="course_material")
+
+    assert docs
+    for doc in docs:
+        assert REQUIRED_STABLE_FIELDS.issubset(doc.metadata)
+        assert all(isinstance(value, SCALAR_TYPES) for value in doc.metadata.values())
+        assert doc.metadata["splitter_mode"] == "structure"
+        assert doc.metadata["chunk_policy_version"] == "structure_v1"
+        assert doc.metadata["section_id"].startswith("sec_")
+        assert doc.metadata["section_title"] in {"Overview", "Details"}
+        assert isinstance(doc.metadata["section_path"], str)
+        assert "parent_id" not in doc.metadata
+
+
 def test_indexer_content_id_prefers_chunk_id():
     doc = Document(page_content="content", metadata={"chunk_id": " stable_chunk_id "})
 

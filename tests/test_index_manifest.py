@@ -76,6 +76,8 @@ def test_build_manifest_from_documents_groups_sources():
 
     assert manifest.total_chunks == 3
     assert manifest.source_count == 2
+    assert manifest.splitter_mode == "recursive"
+    assert manifest.chunk_policy_version == "recursive_v1"
     assert manifest.notes == DEFAULT_MANIFEST_NOTES
     assert [source.chunk_count for source in manifest.sources] == [2, 1]
     assert [source.source_file for source in manifest.sources] == ["a.txt", "b.txt"]
@@ -129,5 +131,28 @@ def test_write_build_manifest_writes_json(local_tmp_path):
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["collection_name"] == "a3_study_docs"
+    assert payload["splitter_mode"] == "recursive"
     assert payload["notes"] == DEFAULT_MANIFEST_NOTES
     assert payload["sources"][0]["source_relpath"] == "data/python/a.txt"
+
+
+def test_build_manifest_infers_structure_splitter_mode():
+    doc = _doc(
+        "content",
+        doc_id="doc_a",
+        source_file="a.txt",
+        source_relpath="data/python/a.txt",
+        chunk_index=0,
+    )
+    doc.metadata["splitter_mode"] = "structure"
+    doc.metadata["chunk_policy_version"] = "structure_v1"
+
+    manifest = build_manifest_from_documents(
+        [doc],
+        collection_name="a3_study_docs",
+        chroma_persist_dir="D:/project/chroma_store",
+        embedding_model="embedding-model",
+    )
+
+    assert manifest.splitter_mode == "structure"
+    assert manifest.chunk_policy_version == "structure_v1"
