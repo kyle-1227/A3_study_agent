@@ -54,6 +54,9 @@ def load_documents(
     subject: str,
     doc_type: str = "exam",
     splitter=None,
+    splitter_mode: str | None = None,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
 ) -> list[Document]:
     """Load all supported files under *data_dir* and split into chunks.
 
@@ -68,11 +71,21 @@ def load_documents(
         splitter factory. The default mode is recursive; setting
         ``RAG_SPLITTER_MODE=structure`` enables structure-aware section
         splitting.
+    splitter_mode : optional
+        Explicit splitter mode for tooling such as evaluation harnesses. When
+        omitted, the splitter factory reads the environment/default mode.
     """
-    splitter_mode = get_splitter_mode() if splitter is None else None
+    if splitter is not None and splitter_mode is not None:
+        raise ValueError("splitter and splitter_mode cannot be used together")
+
+    active_splitter_mode = (
+        (splitter_mode if splitter_mode is not None else get_splitter_mode())
+        if splitter is None
+        else None
+    )
     chunk_policy_version = (
-        chunk_policy_version_for_mode(splitter_mode)
-        if splitter_mode is not None
+        chunk_policy_version_for_mode(active_splitter_mode)
+        if active_splitter_mode is not None
         else None
     )
 
@@ -120,9 +133,9 @@ def load_documents(
         else:
             chunks = split_documents_by_mode(
                 [Document(page_content=cleaned_text, metadata=metadata)],
-                mode=splitter_mode,
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
+                mode=active_splitter_mode,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
             )
         documents.extend(
             enrich_chunk_metadata(

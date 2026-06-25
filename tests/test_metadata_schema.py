@@ -13,20 +13,12 @@ from langchain_core.documents import Document
 from scripts import reset_index
 from src.rag.indexer import _content_id
 from src.rag.loader import load_documents
+from src.rag.metadata_schema import (
+    REQUIRED_STABLE_METADATA_FIELDS,
+    SCALAR_METADATA_TYPES,
+)
 
-SCALAR_TYPES = (str, int, float, bool, type(None))
-REQUIRED_STABLE_FIELDS = {
-    "doc_id",
-    "chunk_id",
-    "source_relpath",
-    "source_file_sha1",
-    "source_file_size",
-    "chunk_index",
-    "chunk_policy_version",
-    "index_version",
-    "content_sha1",
-    "chunk_chars",
-}
+REQUIRED_STABLE_FIELDS = set(REQUIRED_STABLE_METADATA_FIELDS)
 
 
 @pytest.fixture
@@ -44,7 +36,9 @@ def test_load_documents_outputs_scalar_metadata_with_stable_ids(local_tmp_path):
     assert docs
     for doc in docs:
         assert REQUIRED_STABLE_FIELDS.issubset(doc.metadata)
-        assert all(isinstance(value, SCALAR_TYPES) for value in doc.metadata.values())
+        assert all(
+            isinstance(value, SCALAR_METADATA_TYPES) for value in doc.metadata.values()
+        )
         assert doc.metadata["subject"] == "general"
         assert doc.metadata["source_file"] == "notes_2026.txt"
         assert doc.metadata["year"] == "2026"
@@ -72,13 +66,33 @@ def test_load_documents_structure_mode_outputs_scalar_section_metadata(
     assert docs
     for doc in docs:
         assert REQUIRED_STABLE_FIELDS.issubset(doc.metadata)
-        assert all(isinstance(value, SCALAR_TYPES) for value in doc.metadata.values())
+        assert all(
+            isinstance(value, SCALAR_METADATA_TYPES) for value in doc.metadata.values()
+        )
         assert doc.metadata["splitter_mode"] == "structure"
         assert doc.metadata["chunk_policy_version"] == "structure_v1"
         assert doc.metadata["section_id"].startswith("sec_")
         assert doc.metadata["section_title"] in {"Overview", "Details"}
         assert isinstance(doc.metadata["section_path"], str)
         assert "parent_id" not in doc.metadata
+
+
+def test_load_documents_rejects_splitter_and_splitter_mode_together(local_tmp_path):
+    source = local_tmp_path / "notes_2026.txt"
+    source.write_text("Useful source content. " * 20, encoding="utf-8")
+
+    class CustomSplitter:
+        def create_documents(self, *, texts, metadatas):
+            return []
+
+    with pytest.raises(ValueError, match="splitter and splitter_mode"):
+        load_documents(
+            local_tmp_path,
+            subject="general",
+            doc_type="course_material",
+            splitter=CustomSplitter(),
+            splitter_mode="recursive",
+        )
 
 
 def test_indexer_content_id_prefers_chunk_id():
