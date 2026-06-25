@@ -24,6 +24,9 @@ from src.observability.a3_trace import emit_a3_trace
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
+DEFAULT_DEEPSEEK_PROVIDER = "deepseek_official"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+
 # ---------------------------------------------------------------------------
 # Recoverable errors that trigger automatic fallback
 # ---------------------------------------------------------------------------
@@ -57,9 +60,12 @@ def get_node_llm(node_name: str, **overrides) -> ChatOpenAI:
     node has no explicit override in settings.
     """
     nested_prefix = f"llm.{node_name}"
-    provider = get_setting(f"{nested_prefix}.provider", get_setting(f"{node_name}.provider", "deepseek"))
+    provider = get_setting(
+        f"{nested_prefix}.provider",
+        get_setting(f"{node_name}.provider", DEFAULT_DEEPSEEK_PROVIDER),
+    )
     provider_name = str(provider or "").strip().lower()
-    default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    default_model = os.getenv("DEEPSEEK_MODEL") or DEFAULT_DEEPSEEK_MODEL
     default_api_key_env = "DEEPSEEK_API_KEY"
     default_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 

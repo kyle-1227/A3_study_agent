@@ -44,7 +44,12 @@ class SupervisorOutput(BaseModel):
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES) | {"code_practice", "multi_resource"}
+_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES) | {
+    "code_practice",
+    "video_script",
+    "video_animation",
+    "multi_resource",
+}
 
 _SUPERVISOR_RESOURCE_ALIASES = {
     "code_case": "code_practice",
@@ -54,6 +59,18 @@ _SUPERVISOR_RESOURCE_ALIASES = {
     "hands-on project": "code_practice",
     "hands_on project": "code_practice",
     "hands_on_project": "code_practice",
+    "animation script": "video_script",
+    "video script": "video_script",
+    "storyboard": "video_script",
+    "narration script": "video_script",
+    "video animation": "video_animation",
+    "animation video": "video_animation",
+    "animation_video": "video_animation",
+    "mp4": "video_animation",
+    "mp4 video": "video_animation",
+    "mp4_video": "video_animation",
+    "render video": "video_animation",
+    "render_video": "video_animation",
 }
 
 
@@ -63,8 +80,8 @@ def _normalize_supervisor_resource_type(value: Any) -> str:
     if not text:
         return ""
     text = _SUPERVISOR_RESOURCE_ALIASES.get(text, text)
-    if text == "code_practice":
-        return "code_practice"
+    if text in {"code_practice", "video_script", "video_animation"}:
+        return text
     supported = _normalize_supported_requested_resource_types(text)
     return supported[0] if supported else ""
 
@@ -419,6 +436,38 @@ _RESOURCE_TYPE_MARKERS_FOR_DETECTION: tuple[tuple[str, tuple[str, ...]], ...] = 
             "hands-on project",
         ),
     ),
+    (
+        "video_animation",
+        (
+            "教学动画",
+            "动画视频",
+            "mp4",
+            "真实视频",
+            "生成视频",
+            "教学视频 mp4",
+            "动画演示",
+            "可播放动画",
+            "video animation",
+            "animation video",
+            "mp4 video",
+            "render video",
+        ),
+    ),
+    (
+        "video_script",
+        (
+            "视频脚本",
+            "动画脚本",
+            "分镜脚本",
+            "旁白文案",
+            "字幕脚本",
+            "视频分镜",
+            "animation script",
+            "video script",
+            "storyboard",
+            "narration script",
+        ),
+    ),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "roadmap")),
 )
 
@@ -427,7 +476,8 @@ _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目")),
     ("ppt", ("ppt", "幻灯片", "演示文稿", "课件")),
     ("code_practice", ("代码实操", "代码案例", "实操案例", "编程实战", "项目实战", "项目案例", "完整代码", "可运行代码", "代码练习", "coding practice", "code practice", "hands-on project")),
-    ("video_script", ("视频脚本", "动画脚本", "讲解视频", "教学视频", "分镜")),
+    ("video_animation", ("教学动画", "动画视频", "MP4", "真实视频", "生成视频", "教学视频 MP4", "动画演示", "可播放动画", "video animation", "animation video", "mp4 video", "render video")),
+    ("video_script", ("视频脚本", "动画脚本", "分镜脚本", "旁白文案", "字幕脚本", "视频分镜", "animation script", "video script", "storyboard", "narration script")),
     ("review_doc", ("复习资料", "复习文档", "学习文档", "学习材料", "考试讲义", "复习讲义", "知识整理", "知识点整理", "章节复习", "期末复习")),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
     ("reading", ("拓展阅读", "阅读材料", "参考资料", "文献清单", "资料清单")),
@@ -506,6 +556,8 @@ _READABLE_RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
     ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目", "quiz", "exercise", "practice questions")),
     ("code_practice", ("代码实操", "代码案例", "实操案例", "编程实战", "项目实战", "项目案例", "完整代码", "可运行代码", "代码练习", "coding practice", "code practice", "hands-on project")),
+    ("video_animation", ("教学动画", "动画视频", "mp4", "真实视频", "生成视频", "教学视频 mp4", "动画演示", "可播放动画", "video animation", "animation video", "mp4 video", "render video")),
+    ("video_script", ("视频脚本", "动画脚本", "分镜脚本", "旁白文案", "字幕脚本", "视频分镜", "animation script", "video script", "storyboard", "narration script")),
     ("review_doc", ("复习资料", "复习文档", "学习资料", "课程讲解文档", "讲义", "知识点整理", "复习笔记", "课程文档", "review doc", "review document")),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
 )

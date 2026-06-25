@@ -41,13 +41,29 @@ from src.graph.review_doc import (
     should_rewrite_review_doc,
 )
 from src.graph.state import LearningState
+from src.graph.video_script import (
+    should_rewrite_video_script,
+    video_script_agent,
+    video_script_output,
+    video_script_planner,
+    video_script_reviewer,
+    video_script_rewrite,
+)
+from src.graph.video_animation import (
+    should_rewrite_video_animation,
+    video_animation_agent,
+    video_animation_output,
+    video_animation_planner,
+    video_animation_reviewer,
+    video_animation_rewrite,
+)
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
 
 ResourceNode = Callable[[LearningState], Awaitable[dict]]
 
-RESOURCE_ORDER = ("review_doc", "mindmap", "quiz", "code_practice")
+RESOURCE_ORDER = ("review_doc", "mindmap", "quiz", "code_practice", "video_script", "video_animation")
 SUPPORTED_RESOURCE_TYPES = set(RESOURCE_ORDER)
 
 
@@ -120,6 +136,30 @@ async def _run_code_practice_chain(working_state: dict) -> dict:
     return await _run_node(working_state, code_practice_output)
 
 
+async def _run_video_script_chain(working_state: dict) -> dict:
+    working_state = await _run_node(working_state, video_script_planner)
+    while True:
+        working_state = await _run_node(working_state, video_script_agent)
+        working_state = await _run_node(working_state, video_script_reviewer)
+        route = should_rewrite_video_script(working_state)  # type: ignore[arg-type]
+        if route != "rewrite":
+            break
+        working_state = await _run_node(working_state, video_script_rewrite)
+    return await _run_node(working_state, video_script_output)
+
+
+async def _run_video_animation_chain(working_state: dict) -> dict:
+    working_state = await _run_node(working_state, video_animation_planner)
+    while True:
+        working_state = await _run_node(working_state, video_animation_agent)
+        working_state = await _run_node(working_state, video_animation_reviewer)
+        route = should_rewrite_video_animation(working_state)  # type: ignore[arg-type]
+        if route != "rewrite":
+            break
+        working_state = await _run_node(working_state, video_animation_rewrite)
+    return await _run_node(working_state, video_animation_output)
+
+
 def _requested_resources(state: dict) -> list[str]:
     requested = [
         str(item).strip()
@@ -182,6 +222,31 @@ def _resource_result(resource_type: str, working_state: dict) -> dict[str, Any]:
             "has_docx": bool(artifact.get("docx_url")),
             "has_python": bool(artifact.get("python_url")),
         }
+    if resource_type == "video_script":
+        artifact = working_state.get("video_script_artifact") or {}
+        return {
+            "resource_type": resource_type,
+            "status": "completed",
+            "title": artifact.get("title", "教学视频脚本"),
+            "markdown_chars": len(str(working_state.get("video_script_markdown") or "")),
+            "srt_chars": len(str(working_state.get("video_script_srt") or "")),
+            "has_markdown": bool(artifact.get("markdown_url")),
+            "has_docx": bool(artifact.get("docx_url")),
+            "has_srt": bool(artifact.get("srt_url")),
+        }
+    if resource_type == "video_animation":
+        artifact = working_state.get("video_animation_artifact") or {}
+        return {
+            "resource_type": resource_type,
+            "status": "completed",
+            "title": artifact.get("title", "教学动画 / MP4 视频"),
+            "duration_seconds": artifact.get("duration_seconds", 0),
+            "render_success": bool(artifact.get("render_success")),
+            "has_html": bool(artifact.get("html_url")),
+            "has_json": bool(artifact.get("json_url")),
+            "has_srt": bool(artifact.get("srt_url")),
+            "has_mp4": bool(artifact.get("mp4_url") and artifact.get("render_success")),
+        }
     return {"resource_type": resource_type, "status": "completed"}
 
 
@@ -207,6 +272,15 @@ def _build_combined_answer(completed: list[str], results: list[dict]) -> str:
         lines.extend(["## 三、练习题", "已生成 Markdown / Word / PDF 打印版本。", ""])
     if "code_practice" in completed:
         lines.extend(["## 四、代码实操案例", "已生成 Markdown / Word / Python 源码版本，可下载后直接运行。", ""])
+    if "video_script" in completed:
+        lines.extend(["## 五、教学视频 / 动画脚本", "已生成 Markdown / Word / 字幕 SRT 版本，可用于制作教学视频或动画。", ""])
+    if "video_animation" in completed:
+        lines.extend([
+            "## 六、教学动画 / MP4 视频",
+            "已生成 HTML 动画预览、MP4 视频、字幕 SRT 和动画结构 JSON。",
+            "如果 MP4 渲染失败，则保留 HTML 预览和动画结构文件。",
+            "",
+        ])
 
     lines.extend(["---", "", "## 资源摘要"])
     for result in results:
@@ -222,6 +296,11 @@ def _build_combined_answer(completed: list[str], results: list[dict]) -> str:
             lines.append(f"- 练习题：{title}，共 {result.get('item_count', 0)} 道题。")
         elif resource_type == "code_practice":
             lines.append(f"- 代码实操案例：{title}，已生成 Markdown、Word 和 Python 源码。")
+        elif resource_type == "video_script":
+            lines.append(f"- 教学视频 / 动画脚本：{title}，已生成 Markdown、Word 和字幕 SRT。")
+        elif resource_type == "video_animation":
+            status = "MP4 已渲染" if result.get("render_success") else "MP4 渲染未成功，已保留 HTML 预览"
+            lines.append(f"- 教学动画 / MP4 视频：{title}，{status}。")
     return "\n".join(lines).strip()
 
 
@@ -252,6 +331,8 @@ async def multi_resource_runner(state: LearningState) -> dict:
         "mindmap": _run_mindmap_chain,
         "quiz": _run_quiz_chain,
         "code_practice": _run_code_practice_chain,
+        "video_script": _run_video_script_chain,
+        "video_animation": _run_video_animation_chain,
     }
 
     for resource_type in requested_supported:
@@ -282,6 +363,13 @@ async def multi_resource_runner(state: LearningState) -> dict:
     exercise_artifact = working_state.get("exercise_artifact") or {}
     code_practice_artifact = working_state.get("code_practice_artifact") or {}
     code_practice_markdown = working_state.get("code_practice_markdown", "")
+    video_script_artifact = working_state.get("video_script_artifact") or {}
+    video_script_markdown = working_state.get("video_script_markdown", "")
+    video_script_srt = working_state.get("video_script_srt", "")
+    video_animation_artifact = working_state.get("video_animation_artifact") or {}
+    video_animation_spec = working_state.get("video_animation_spec") or {}
+    video_animation_html = working_state.get("video_animation_html", "")
+    video_animation_render_log = working_state.get("video_animation_render_log", "")
 
     emit_a3_trace(
         logger,
@@ -296,6 +384,11 @@ async def multi_resource_runner(state: LearningState) -> dict:
             "has_exercise": bool(exercise_artifact),
             "has_code_practice": bool(code_practice_artifact),
             "code_practice_artifact_exists": bool(code_practice_artifact),
+            "has_video_script": bool(video_script_artifact),
+            "video_script_artifact_exists": bool(video_script_artifact),
+            "has_video_animation": bool(video_animation_artifact),
+            "video_animation_artifact_exists": bool(video_animation_artifact),
+            "video_animation_render_success": bool(video_animation_artifact.get("render_success")),
             "answer_chars": len(combined_answer),
         },
         state=working_state,
@@ -312,6 +405,13 @@ async def multi_resource_runner(state: LearningState) -> dict:
         "exercise_items": working_state.get("exercise_items") or [],
         "code_practice_artifact": code_practice_artifact,
         "code_practice_markdown": code_practice_markdown,
+        "video_script_artifact": video_script_artifact,
+        "video_script_markdown": video_script_markdown,
+        "video_script_srt": video_script_srt,
+        "video_animation_artifact": video_animation_artifact,
+        "video_animation_spec": video_animation_spec,
+        "video_animation_html": video_animation_html,
+        "video_animation_render_log": video_animation_render_log,
         "multi_resource_results": results,
         "multi_resource_summary": combined_answer,
         "messages": [AIMessage(content=combined_answer)],

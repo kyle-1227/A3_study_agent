@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -38,8 +39,10 @@ from src.tools.document_tool import (
     get_code_practice_artifact_dir,
     get_exercise_artifact_dir,
     get_review_doc_artifact_dir,
+    get_video_script_artifact_dir,
 )
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
+from src.tools.video_animation_tool import get_video_animation_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
@@ -156,6 +159,8 @@ TEXT_EMIT_NODES = {
     "exercise_output",
     "review_doc_output",
     "code_practice_output",
+    "video_script_output",
+    "video_animation_output",
     "study_plan_output",
     "multi_resource_runner",
     "resource_bundle_output",
@@ -201,6 +206,16 @@ GRAPH_NODES = {
     "code_practice_reviewer",
     "code_practice_rewrite",
     "code_practice_output",
+    "video_script_planner",
+    "video_script_agent",
+    "video_script_reviewer",
+    "video_script_rewrite",
+    "video_script_output",
+    "video_animation_planner",
+    "video_animation_agent",
+    "video_animation_reviewer",
+    "video_animation_rewrite",
+    "video_animation_output",
     "curriculum_planner",
     "assessment_result_handler",
     "adaptive_practice_responder",
@@ -243,6 +258,8 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             "review_doc_artifact",
             "review_doc_artifacts",
             "code_practice_artifact",
+            "video_script_artifact",
+            "video_animation_artifact",
             "study_plan_artifact",
             "study_plan_document_artifact",
             "resource_bundle_artifact",
@@ -280,6 +297,8 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     review_doc_artifact = final_state.get("review_doc_artifact") or {}
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
     code_practice_artifact = final_state.get("code_practice_artifact") or {}
+    video_script_artifact = final_state.get("video_script_artifact") or {}
+    video_animation_artifact = final_state.get("video_animation_artifact") or {}
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
     multi_resource_results = final_state.get("multi_resource_results") or []
@@ -349,6 +368,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
         if code_practice_artifact:
             payload["code_practice_artifact"] = code_practice_artifact
+        if video_script_artifact:
+            payload["video_script_artifact"] = video_script_artifact
+        if video_animation_artifact:
+            payload["video_animation_artifact"] = video_animation_artifact
 
         if study_plan_artifact or study_plan_document:
             payload["study_plan"] = {
@@ -364,7 +387,16 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     resource_type = str(final_state.get("requested_resource_type") or "")
 
-    if resource_type not in {"mindmap", "quiz", "review_doc", "code_practice", "study_plan", "multi_resource"}:
+    if resource_type not in {
+        "mindmap",
+        "quiz",
+        "review_doc",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+        "multi_resource",
+    }:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
@@ -373,6 +405,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             resource_type = "review_doc"
         elif code_practice_artifact:
             resource_type = "code_practice"
+        elif video_script_artifact:
+            resource_type = "video_script"
+        elif video_animation_artifact:
+            resource_type = "video_animation"
         elif study_plan_artifact or study_plan_document:
             resource_type = "study_plan"
         else:
@@ -395,6 +431,8 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     include_review_doc = resource_type in {"review_doc", "multi_resource"} and review_doc_artifact
     include_review_doc_artifacts = resource_type in {"review_doc", "multi_resource"} and review_doc_artifacts
     include_code_practice = resource_type in {"code_practice", "multi_resource"} and code_practice_artifact
+    include_video_script = resource_type in {"video_script", "multi_resource"} and video_script_artifact
+    include_video_animation = resource_type in {"video_animation", "multi_resource"} and video_animation_artifact
 
     if include_mindmap:
         payload["mindmap"] = {
@@ -448,6 +486,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     if include_code_practice:
         payload["code_practice_artifact"] = code_practice_artifact
+    if include_video_script:
+        payload["video_script_artifact"] = video_script_artifact
+    if include_video_animation:
+        payload["video_animation_artifact"] = video_animation_artifact
 
     if resource_type == "study_plan" and (study_plan_artifact or study_plan_document):
         payload["study_plan"] = {
@@ -770,6 +812,11 @@ async def _stream_graph_events(
                 "has_review_doc": bool(resource_payload.get("review_doc")),
                 "has_exercise": bool(resource_payload.get("exercise_artifact")),
                 "has_code_practice": bool(resource_payload.get("code_practice_artifact")),
+                "has_video_script": bool(resource_payload.get("video_script_artifact")),
+                "has_video_animation": bool(resource_payload.get("video_animation_artifact")),
+                "video_animation_render_success": bool(
+                    (resource_payload.get("video_animation_artifact") or {}).get("render_success")
+                ),
                 "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
                 "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
                 "exercise_items_count": len(resource_payload.get("exercise_items") or []),
@@ -1025,6 +1072,61 @@ async def download_code_practice_artifact(artifact_id: str, filename: str):
         artifact_path,
         media_type=media_type,
         filename=filename,
+    )
+
+
+@app.get("/artifacts/video-scripts/{artifact_id}/{filename}")
+async def download_video_script_artifact(artifact_id: str, filename: str):
+    root = get_video_script_artifact_dir()
+    decoded_filename = unquote(filename)
+    artifact_path = (root / artifact_id / decoded_filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".md", ".docx", ".srt"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".md": "text/markdown; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".srt": "application/x-subrip; charset=utf-8",
+    }[suffix]
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=decoded_filename,
+    )
+
+
+@app.get("/artifacts/video-animations/{artifact_id}/{filename}")
+async def download_video_animation_artifact(artifact_id: str, filename: str):
+    root = get_video_animation_artifact_dir()
+    decoded_filename = unquote(filename)
+    artifact_path = (root / artifact_id / decoded_filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".html", ".json", ".srt", ".mp4"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".html": "text/html; charset=utf-8",
+        ".json": "application/json",
+        ".srt": "application/x-subrip; charset=utf-8",
+        ".mp4": "video/mp4",
+    }[suffix]
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=decoded_filename,
     )
 
 

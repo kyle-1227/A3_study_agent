@@ -5336,15 +5336,27 @@ async def evidence_judge(state: LearningState) -> dict:
     if not answerability:
         answerability = "can_answer_with_caveats" if evidence_state == "partially_sufficient" else "cannot_answer"
 
-    explicit_resource_types = {"review_doc", "mindmap", "quiz", "code_practice", "multi_resource"}
+    explicit_resource_types = {
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "multi_resource",
+        "study_plan",
+    }
     requested_resource_set = {
-        str(item or "").strip()
+        str(item or "").strip().lower()
         for item in requested_resource_types
         if str(item or "").strip()
     }
     if requested_resource_type:
-        requested_resource_set.add(requested_resource_type)
-    has_explicit_resource_request = bool(requested_resource_set & explicit_resource_types)
+        requested_resource_set.add(str(requested_resource_type).strip().lower())
+    has_explicit_resource_request = bool(
+        requested_resource_types
+        or requested_resource_set & explicit_resource_types
+    )
 
     controlled_stop = False
     controlled_stop_reason = ""
@@ -5359,10 +5371,9 @@ async def evidence_judge(state: LearningState) -> dict:
         degraded_generation = True
         degraded_reason = "Evidence Judge validation failed; fallback evidence selection was used."
     elif evidence_state == "insufficient":
-        can_generate_with_caveats = answerability in {"can_answer", "can_answer_with_caveats"}
-        if has_explicit_resource_request and can_generate_with_caveats:
+        if has_explicit_resource_request:
             degraded_generation = True
-            degraded_reason = "Evidence is insufficient; generating resource with caveats and fallback structure."
+            degraded_reason = "evidence_insufficient_but_explicit_resource_request"
         elif fail_fast_on_insufficient:
             raise RuntimeError(
                 "Evidence Judge declared evidence insufficient and "

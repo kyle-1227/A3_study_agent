@@ -596,6 +596,8 @@ export default function Home() {
       const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
       const exerciseArtifact = data.exercise_artifact ?? null
       const codePracticeArtifact = data.code_practice_artifact ?? null
+      const videoScriptArtifact = data.video_script_artifact ?? null
+      const videoAnimationArtifact = data.video_animation_artifact ?? null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
@@ -647,6 +649,34 @@ export default function Home() {
         codePracticeArtifact && typeof codePracticeArtifact.python_url === "string" && codePracticeArtifact.python_url.startsWith("/")
           ? `${API_BASE_URL}${codePracticeArtifact.python_url}`
           : codePracticeArtifact?.python_url
+      const videoScriptMarkdownUrl =
+        videoScriptArtifact && typeof videoScriptArtifact.markdown_url === "string" && videoScriptArtifact.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${videoScriptArtifact.markdown_url}`
+          : videoScriptArtifact?.markdown_url
+      const videoScriptDocxUrl =
+        videoScriptArtifact && typeof videoScriptArtifact.docx_url === "string" && videoScriptArtifact.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${videoScriptArtifact.docx_url}`
+          : videoScriptArtifact?.docx_url
+      const videoScriptSrtUrl =
+        videoScriptArtifact && typeof videoScriptArtifact.srt_url === "string" && videoScriptArtifact.srt_url.startsWith("/")
+          ? `${API_BASE_URL}${videoScriptArtifact.srt_url}`
+          : videoScriptArtifact?.srt_url
+      const videoAnimationHtmlUrl =
+        videoAnimationArtifact && typeof videoAnimationArtifact.html_url === "string" && videoAnimationArtifact.html_url.startsWith("/")
+          ? `${API_BASE_URL}${videoAnimationArtifact.html_url}`
+          : videoAnimationArtifact?.html_url
+      const videoAnimationMp4Url =
+        videoAnimationArtifact && typeof videoAnimationArtifact.mp4_url === "string" && videoAnimationArtifact.mp4_url.startsWith("/")
+          ? `${API_BASE_URL}${videoAnimationArtifact.mp4_url}`
+          : videoAnimationArtifact?.mp4_url
+      const videoAnimationSrtUrl =
+        videoAnimationArtifact && typeof videoAnimationArtifact.srt_url === "string" && videoAnimationArtifact.srt_url.startsWith("/")
+          ? `${API_BASE_URL}${videoAnimationArtifact.srt_url}`
+          : videoAnimationArtifact?.srt_url
+      const videoAnimationJsonUrl =
+        videoAnimationArtifact && typeof videoAnimationArtifact.json_url === "string" && videoAnimationArtifact.json_url.startsWith("/")
+          ? `${API_BASE_URL}${videoAnimationArtifact.json_url}`
+          : videoAnimationArtifact?.json_url
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -696,6 +726,37 @@ export default function Home() {
                       markdown: codePracticeArtifact.markdown || "",
                     }
                   : msg.codePractice,
+                videoScript: videoScriptArtifact
+                  ? {
+                      title: videoScriptArtifact.title || "教学视频 / 动画脚本",
+                      filename: videoScriptArtifact.filename || "",
+                      markdownUrl: videoScriptMarkdownUrl || "",
+                      docxFilename: videoScriptArtifact.docx_filename || "",
+                      docxUrl: videoScriptDocxUrl || "",
+                      srtFilename: videoScriptArtifact.srt_filename || "",
+                      srtUrl: videoScriptSrtUrl || "",
+                      markdown: videoScriptArtifact.markdown || "",
+                      srt: videoScriptArtifact.srt || "",
+                    }
+                  : msg.videoScript,
+                videoAnimation: videoAnimationArtifact
+                  ? {
+                      title: videoAnimationArtifact.title || "教学动画 / MP4 视频",
+                      htmlUrl: videoAnimationHtmlUrl || "",
+                      mp4Url: videoAnimationMp4Url || "",
+                      srtUrl: videoAnimationSrtUrl || "",
+                      jsonUrl: videoAnimationJsonUrl || "",
+                      durationSeconds: videoAnimationArtifact.duration_seconds,
+                      fullDurationSeconds: videoAnimationArtifact.full_duration_seconds,
+                      renderDurationSeconds: videoAnimationArtifact.render_duration_seconds,
+                      renderMode: videoAnimationArtifact.render_mode || "",
+                      renderSuccess: videoAnimationArtifact.render_success === true,
+                      mp4Available: videoAnimationArtifact.mp4_available === true,
+                      isPreviewVideo: videoAnimationArtifact.is_preview_video === true,
+                      videoValidForTeaching: videoAnimationArtifact.video_valid_for_teaching === true,
+                      renderLog: videoAnimationArtifact.render_log || "",
+                    }
+                  : msg.videoAnimation,
               }
             : msg
         )

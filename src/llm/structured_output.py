@@ -51,6 +51,9 @@ from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_DEEPSEEK_PROVIDER = "deepseek_official"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+
 ALLOWED_OUTPUT_MODES = {
     "prompt_json_pydantic",
     "json_mode_pydantic",
@@ -381,11 +384,12 @@ def _reask_business_validation_enabled(node_name: str) -> bool:
 
 
 def _provider(node_name: str) -> str:
-    return str(_setting(node_name, "provider", "unknown") or "unknown")
+    return str(_setting(node_name, "provider", DEFAULT_DEEPSEEK_PROVIDER) or DEFAULT_DEEPSEEK_PROVIDER)
 
 
 def _model(node_name: str) -> str:
-    return str(_setting(node_name, "model", "") or "")
+    default_model = os.getenv("DEEPSEEK_MODEL") or DEFAULT_DEEPSEEK_MODEL
+    return str(_setting(node_name, "model", default_model) or default_model)
 
 
 def _sanitize(value: Any, *, max_chars: int = 4000) -> str:

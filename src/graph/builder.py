@@ -77,6 +77,22 @@ from src.graph.study_plan import (
     study_plan_rewrite,
 )
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
+from src.graph.video_script import (
+    should_rewrite_video_script,
+    video_script_agent,
+    video_script_output,
+    video_script_planner,
+    video_script_reviewer,
+    video_script_rewrite,
+)
+from src.graph.video_animation import (
+    should_rewrite_video_animation,
+    video_animation_agent,
+    video_animation_output,
+    video_animation_planner,
+    video_animation_reviewer,
+    video_animation_rewrite,
+)
 
 
 def build_graph() -> StateGraph:
@@ -138,6 +154,20 @@ def build_graph() -> StateGraph:
     graph.add_node("code_practice_reviewer", code_practice_reviewer)
     graph.add_node("code_practice_rewrite", code_practice_rewrite)
     graph.add_node("code_practice_output", code_practice_output)
+
+    # Teaching video / animation script resource generation
+    graph.add_node("video_script_planner", video_script_planner)
+    graph.add_node("video_script_agent", video_script_agent)
+    graph.add_node("video_script_reviewer", video_script_reviewer)
+    graph.add_node("video_script_rewrite", video_script_rewrite)
+    graph.add_node("video_script_output", video_script_output)
+
+    # Rendered teaching animation / MP4 resource generation
+    graph.add_node("video_animation_planner", video_animation_planner)
+    graph.add_node("video_animation_agent", video_animation_agent)
+    graph.add_node("video_animation_reviewer", video_animation_reviewer)
+    graph.add_node("video_animation_rewrite", video_animation_rewrite)
+    graph.add_node("video_animation_output", video_animation_output)
 
     # Study plan resource generation
     graph.add_node("resource_orchestrator", resource_orchestrator)
@@ -202,6 +232,8 @@ def build_graph() -> StateGraph:
             "resources": "resource_orchestrator",
             "multi_resource": "multi_resource_runner",
             "code_practice": "code_practice_planner",
+            "video_script": "video_script_planner",
+            "video_animation": "video_animation_planner",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
@@ -285,6 +317,34 @@ def build_graph() -> StateGraph:
     graph.add_edge("code_practice_rewrite", "code_practice_agent")
     graph.add_edge("code_practice_output", END)
 
+    # Teaching video / animation script generation: plan -> Markdown/SRT -> review -> output
+    graph.add_edge("video_script_planner", "video_script_agent")
+    graph.add_edge("video_script_agent", "video_script_reviewer")
+    graph.add_conditional_edges(
+        "video_script_reviewer",
+        should_rewrite_video_script,
+        {
+            "rewrite": "video_script_rewrite",
+            "output": "video_script_output",
+        },
+    )
+    graph.add_edge("video_script_rewrite", "video_script_agent")
+    graph.add_edge("video_script_output", END)
+
+    # Rendered teaching animation / MP4 generation: plan -> spec -> review -> output
+    graph.add_edge("video_animation_planner", "video_animation_agent")
+    graph.add_edge("video_animation_agent", "video_animation_reviewer")
+    graph.add_conditional_edges(
+        "video_animation_reviewer",
+        should_rewrite_video_animation,
+        {
+            "rewrite": "video_animation_rewrite",
+            "output": "video_animation_output",
+        },
+    )
+    graph.add_edge("video_animation_rewrite", "video_animation_agent")
+    graph.add_edge("video_animation_output", END)
+
     graph.add_edge("study_plan_emotional_intel", "curriculum_planner")
     graph.add_edge("curriculum_planner", "study_plan_planner")
     graph.add_edge("study_plan_planner", "study_plan_agent")
@@ -319,22 +379,29 @@ def route_after_evidence_judge(state: LearningState) -> str:
         for item in state.get("requested_resource_types", []) or []
         if str(item or "").strip()
     ]
-    explicit_resource_types = {"review_doc", "mindmap", "quiz", "code_practice", "multi_resource"}
+    explicit_resource_types = {
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "multi_resource",
+        "study_plan",
+    }
     has_explicit_resource_request = bool(
         requested_resource_type in explicit_resource_types
         or any(item in explicit_resource_types for item in requested_resource_types)
     )
-    can_degrade_resource = (
-        state.get("degraded_generation") is True
-        or str(state.get("evidence_answerability") or "") in {"can_answer", "can_answer_with_caveats"}
-    )
-    if state.get("evidence_controlled_stop") and not (
-        has_explicit_resource_request and can_degrade_resource
-    ):
+    if state.get("evidence_controlled_stop") and not has_explicit_resource_request:
         return "evidence_summary_output"
 
     if requested_resource_type == "code_practice" or requested_resource_types == ["code_practice"]:
         return "code_practice"
+    if requested_resource_type == "video_script" or requested_resource_types == ["video_script"]:
+        return "video_script"
+    if requested_resource_type == "video_animation" or requested_resource_types == ["video_animation"]:
+        return "video_animation"
     if requested_resource_type == "multi_resource" or len(requested_resource_types) > 1:
         return "multi_resource"
 
