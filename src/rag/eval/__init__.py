@@ -11,13 +11,23 @@ from src.rag.eval.chunk_metrics import (
     duplicate_flags,
     evaluate_documents,
 )
+from src.rag.eval.chunk_optimizer import (
+    ChunkOptimizerConfig,
+    ChunkPolicyCandidate,
+    generate_candidates,
+    optimize_chunking,
+)
 
 __all__ = [
     "ChunkEvaluationConfig",
     "ChunkMetricsConfig",
+    "ChunkOptimizerConfig",
+    "ChunkPolicyCandidate",
     "chunk_hash",
     "compare_modes",
     "duplicate_flags",
     "evaluate_documents",
     "evaluate_mode",
+    "generate_candidates",
+    "optimize_chunking",
 ]
