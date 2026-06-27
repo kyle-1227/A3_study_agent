@@ -16,14 +16,20 @@ This is preamble text.
 # Chapter One
 Alpha section body about data.
 Alpha section details stay in chapter one.
+Alpha section has enough explanatory content to avoid short-section merging.
+Alpha section keeps its own metadata in chapter one.
 
 ## 1.1 Data Types
 Beta section body about types.
 Beta section details stay in data types.
+Beta section has enough explanatory content to avoid short-section merging.
+Beta section keeps its own metadata in data types.
 
 # Chapter Two
 Gamma section body about processing.
 Gamma section details stay in chapter two.
+Gamma section has enough explanatory content to avoid short-section merging.
+Gamma section keeps its own metadata in chapter two.
 """
 
 
@@ -51,7 +57,6 @@ def test_structure_splitter_adds_scalar_section_metadata_and_preserves_preamble(
 
     assert len(chunks) >= 4
     titles = [chunk.metadata["section_title"] for chunk in chunks]
-    assert "Preamble" in titles
     assert "Chapter One" in titles
     assert "1.1 Data Types" in titles
     assert "Chapter Two" in titles
@@ -63,6 +68,9 @@ def test_structure_splitter_adds_scalar_section_metadata_and_preserves_preamble(
         assert not isinstance(metadata["section_path"], (tuple, list, dict))
         assert all(isinstance(value, SCALAR_TYPES) for value in metadata.values())
     assert any("This is preamble text." in chunk.page_content for chunk in chunks)
+    assert any(
+        "Preamble" in chunk.metadata["merged_section_titles"] for chunk in chunks
+    )
 
 
 def test_structure_splitter_does_not_merge_across_sections():
@@ -83,7 +91,7 @@ def test_structure_splitter_does_not_merge_across_sections():
             assert "Beta section body" not in chunk.page_content
 
 
-def test_structure_splitter_skips_toc_entries_with_only_page_numbers():
+def test_structure_splitter_merges_toc_entries_with_only_page_numbers_without_dropping():
     chunks = split_documents_by_structure(
         [
             _source_doc(
@@ -100,7 +108,10 @@ def test_structure_splitter_skips_toc_entries_with_only_page_numbers():
     titles = [chunk.metadata["section_title"] for chunk in chunks]
     assert "Table Entry" not in titles
     assert "Real Section" in titles
-    assert all("A. Table Entry" not in chunk.page_content for chunk in chunks)
+    assert any("A. Table Entry" in chunk.page_content for chunk in chunks)
+    assert any(
+        "Table Entry" in chunk.metadata["merged_section_titles"] for chunk in chunks
+    )
 
 
 def test_structure_splitter_section_id_is_stable():
