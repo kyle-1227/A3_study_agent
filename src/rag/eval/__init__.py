@@ -17,12 +17,19 @@ from src.rag.eval.chunk_optimizer import (
     generate_candidates,
     optimize_chunking,
 )
+from src.rag.eval.policy_optimizer import (
+    SplitterPolicyOptimizerConfig,
+    SubjectPolicyThresholds,
+    optimize_splitter_policy,
+)
 
 __all__ = [
     "ChunkEvaluationConfig",
     "ChunkMetricsConfig",
     "ChunkOptimizerConfig",
     "ChunkPolicyCandidate",
+    "SplitterPolicyOptimizerConfig",
+    "SubjectPolicyThresholds",
     "chunk_hash",
     "compare_modes",
     "duplicate_flags",
@@ -30,4 +37,5 @@ __all__ = [
     "evaluate_mode",
     "generate_candidates",
     "optimize_chunking",
+    "optimize_splitter_policy",
 ]
