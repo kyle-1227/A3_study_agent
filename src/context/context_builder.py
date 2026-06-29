@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 
 from src.config import get_setting
 from src.context.token_manager import TokenBudget, estimate_tokens, fit_to_budget
-from src.memory.embeddings import get_embedding_provider
 from src.memory.prompts import (
     MEMORY_CONTEXT_EPISODIC_HEADER,
     MEMORY_CONTEXT_HEADER,
@@ -32,7 +30,6 @@ from src.memory.schema import (
     MemoryRetrievalResult,
     SemanticMemorySummary,
 )
-from src.memory.storage import create_memory_store
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +83,12 @@ async def build_memory_context(
         include_semantic=True,
     )
 
-    episodic_results = [r for r in all_results if r.memory_type == "episodic"][:top_k_episodic]
-    semantic_results = [r for r in all_results if r.memory_type == "semantic"][:top_k_semantic]
+    episodic_results = [r for r in all_results if r.memory_type == "episodic"][
+        :top_k_episodic
+    ]
+    semantic_results = [r for r in all_results if r.memory_type == "semantic"][
+        :top_k_semantic
+    ]
 
     # ── 2. Build sections ─────────────────────────────────────────────
     sections: list[str] = []
@@ -116,7 +117,9 @@ async def build_memory_context(
             if isinstance(mem, SemanticMemorySummary):
                 lines.append(f"  {i}. {mem.content[:400]}")
                 if mem.weak_knowledge_points:
-                    lines.append(f"     薄弱点: {', '.join(mem.weak_knowledge_points[:5])}")
+                    lines.append(
+                        f"     薄弱点: {', '.join(mem.weak_knowledge_points[:5])}"
+                    )
         if lines:
             semantic_text = f"{MEMORY_CONTEXT_SEMANTIC_HEADER}\n" + "\n".join(lines)
             semantic_text = fit_to_budget(semantic_text, budget.semantic_summary)
@@ -192,9 +195,7 @@ def build_memory_explanation(
             mem.content[:120] + "..." if len(mem.content) > 120 else mem.content
         )
         match_label = _match_reason_label(r.match_reason)
-        items.append(
-            f"- {match_label} (score={r.score:.2f}): {content_preview}"
-        )
+        items.append(f"- {match_label} (score={r.score:.2f}): {content_preview}")
 
     return MEMORY_INFLUENCE_EXPLANATION_TEMPLATE.format(items="\n".join(items))
 
@@ -222,8 +223,11 @@ def format_memory_context_for_llm_node(
     # Compact mode: strip headers, just give the memory content lines
     lines = injection.context_text.split("\n")
     compact = [
-        line for line in lines
-        if not line.startswith("[记忆") and not line.startswith("相关学习") and not line.startswith("知识摘要")
+        line
+        for line in lines
+        if not line.startswith("[记忆")
+        and not line.startswith("相关学习")
+        and not line.startswith("知识摘要")
         and line.strip()
     ]
     return "\n".join(compact) if compact else None
@@ -238,7 +242,7 @@ def _match_reason_label(reason: str) -> str:
         "keyword_overlap": "关键词匹配",
         "vector_similarity": "语义相似",
         "high_importance": "高重要性记忆",
-        "fallback": "历史记录",
+        "low_signal_history": "历史记录",
     }
     parts = reason.split("+")
     labels = [label_map.get(p, p) for p in parts]

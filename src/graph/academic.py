@@ -6874,7 +6874,7 @@ async def episodic_memory_retriever(state: LearningState) -> dict:
             {"query": current_query[:200], "error": str(exc)},
             state=state, env_flag="LOG_A3_TRACE",
         )
-        return {"episodic_memory_results": [], "semantic_memory_results": []}
+        raise
 
     episodic = [r for r in results if r.memory_type == "episodic"]
     semantic = [r for r in results if r.memory_type == "semantic"]
@@ -6996,6 +6996,7 @@ async def episodic_memory_writer(state: LearningState) -> dict:
             {"error": str(exc)},
             state=state, env_flag="LOG_A3_TRACE",
         )
+        raise
 
     return {}
 

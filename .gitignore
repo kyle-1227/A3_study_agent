@@ -30,6 +30,9 @@ reports/*
 # some drafts
 docs/drafts/
 
+# local Context Engineering roadmap reference
+docs/context_engineering/
+
 # vector store(ChromaDB)
 chroma_store/
 

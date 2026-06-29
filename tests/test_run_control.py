@@ -30,7 +30,9 @@ def _payloads(collected: list[str]) -> list[dict]:
     return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
 
 
-def _snapshot(*, values: dict | None = None, interrupt_value=None, next_nodes=()) -> SimpleNamespace:
+def _snapshot(
+    *, values: dict | None = None, interrupt_value=None, next_nodes=()
+) -> SimpleNamespace:
     tasks = []
     if interrupt_value is not None:
         tasks = [SimpleNamespace(interrupts=[SimpleNamespace(value=interrupt_value)])]
@@ -174,7 +176,11 @@ async def test_user_stop_interrupt_emits_stopped_without_done_or_completed():
     graph.aget_state = AsyncMock(
         return_value=_snapshot(
             values={"schema_version": "run_control_v1", "run_status": "stopping"},
-            interrupt_value={"type": "user_stop", "node": "study_plan_agent", "reason": "user_stop"},
+            interrupt_value={
+                "type": "user_stop",
+                "node": "study_plan_agent",
+                "reason": "user_stop",
+            },
             next_nodes=("study_plan_agent",),
         ),
     )
@@ -184,13 +190,16 @@ async def test_user_stop_interrupt_emits_stopped_without_done_or_completed():
         collected.append(sse)
 
     payloads = _payloads(collected)
-    run_statuses = [payload for payload in payloads if payload.get("type") == "run_status"]
+    run_statuses = [
+        payload for payload in payloads if payload.get("type") == "run_status"
+    ]
     assert run_statuses[-1]["run_status"] == "stopped"
     assert not [payload for payload in payloads if payload.get("type") == "done"]
     assert not [
         payload
         for payload in payloads
-        if payload.get("type") == "run_status" and payload.get("run_status") == "completed"
+        if payload.get("type") == "run_status"
+        and payload.get("run_status") == "completed"
     ]
 
 
@@ -277,13 +286,13 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
                 "node_name": "study_plan_agent",
                 "llm_node": "study_plan",
                 "provider": "deepseek_official",
-                "model": "deepseek-v4-pro",
+                "model": "synthetic-model",
                 "prompt_tokens": 100,
                 "output_reserved_tokens": 20,
                 "used_tokens": 120,
-                "max_context_tokens": 128000,
+                "max_context_tokens": 64000,
                 "usage_ratio": 0.001,
-                "remaining_tokens": 127880,
+                "remaining_tokens": 63880,
                 "estimated": True,
                 "level": "ok",
             },
@@ -298,7 +307,9 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=events())
-    graph.aget_state = AsyncMock(return_value=_snapshot(values={"schema_version": "run_control_v1"}))
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(values={"schema_version": "run_control_v1"})
+    )
     graph.aupdate_state = AsyncMock()
 
     collected = []
@@ -306,11 +317,15 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
         collected.append(sse)
 
     payloads = _payloads(collected)
-    context_events = [payload for payload in payloads if payload.get("type") == "context_usage"]
+    context_events = [
+        payload for payload in payloads if payload.get("type") == "context_usage"
+    ]
     assert len(context_events) == 1
     assert context_events[0]["used_tokens"] == 120
     state_updates = [call.args[1] for call in graph.aupdate_state.await_args_list]
-    context_updates = [update for update in state_updates if "context_usage_history" in update]
+    context_updates = [
+        update for update in state_updates if "context_usage_history" in update
+    ]
     assert context_updates
     assert len(context_updates[-1]["context_usage_history"]) <= 30
 
@@ -342,7 +357,9 @@ async def test_context_usage_error_trace_becomes_warning_sse():
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=events())
-    graph.aget_state = AsyncMock(return_value=_snapshot(values={"schema_version": "run_control_v1"}))
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(values={"schema_version": "run_control_v1"})
+    )
     graph.aupdate_state = AsyncMock()
 
     collected = []
@@ -350,7 +367,9 @@ async def test_context_usage_error_trace_becomes_warning_sse():
         collected.append(sse)
 
     payloads = _payloads(collected)
-    error_events = [payload for payload in payloads if payload.get("type") == "context_usage_error"]
+    error_events = [
+        payload for payload in payloads if payload.get("type") == "context_usage_error"
+    ]
     assert error_events == [
         {
             "type": "context_usage_error",

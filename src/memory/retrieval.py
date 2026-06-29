@@ -27,7 +27,8 @@ from src.memory.schema import (
     SemanticMemorySummary,
 )
 from src.memory.storage import MemoryStore, create_memory_store
-from src.memory.embeddings import get_embedding_provider
+from src.memory.embeddings import EmbeddingProvider, get_embedding_provider
+from src.memory.errors import MemoryEmbeddingRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,7 @@ async def retrieve_top_k_memories(
     include_episodic: bool = True,
     include_semantic: bool = True,
     store: MemoryStore | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> list[MemoryRetrievalResult]:
     """Hybrid retrieval combining BM25 keyword + embedding vector search.
 
@@ -154,6 +156,8 @@ async def retrieve_top_k_memories(
         include_episodic: Whether to include episodic memories.
         include_semantic: Whether to include semantic summaries.
         store: Optional MemoryStore (uses singleton if not provided).
+        embedding_provider: Optional explicit provider supplied by callers that
+            already constructed one.
 
     Returns:
         List of MemoryRetrievalResult sorted by score descending, limited to top_k.
@@ -173,29 +177,23 @@ async def retrieve_top_k_memories(
     semantic_summaries: list[SemanticMemorySummary] = []
 
     if include_episodic:
-        try:
-            episodic_records = await store.get_all_episodic_for_user(user_id, limit=200)
-        except Exception as exc:
-            logger.warning("Failed to fetch episodic memories: %s", exc)
+        episodic_records = await store.get_all_episodic_for_user(user_id, limit=200)
 
     if include_semantic:
-        try:
-            semantic_summaries = await store.get_semantic_for_user(user_id, limit=20)
-        except Exception as exc:
-            logger.warning("Failed to fetch semantic memories: %s", exc)
+        semantic_summaries = await store.get_semantic_for_user(user_id, limit=20)
 
     if not episodic_records and not semantic_summaries:
         logger.debug("No memories found for user=%s", user_id)
         return []
 
     # 2. Get query embedding
-    query_embedding: list[float] | None = None
-    try:
-        provider = get_embedding_provider()
-        embeddings = await provider.embed([query])
-        query_embedding = embeddings[0] if embeddings else None
-    except Exception as exc:
-        logger.debug("Failed to embed query for memory retrieval: %s", exc)
+    provider = embedding_provider or get_embedding_provider()
+    embeddings = await provider.embed([query])
+    if not embeddings or not embeddings[0]:
+        raise MemoryEmbeddingRuntimeError(
+            "Embedding provider returned no query embedding"
+        )
+    query_embedding = embeddings[0]
 
     # 3. Build candidate list and BM25 corpus
     # Each candidate is (doc_id, record, doc_type_label)
@@ -216,7 +214,9 @@ async def retrieve_top_k_memories(
     results: list[MemoryRetrievalResult] = []
     for idx, (doc_id, record, doc_type) in enumerate(candidates):
         # Keyword score (BM25)
-        kw_score = _bm25_score_single(query_terms, tokenized_corpus[idx], tokenized_corpus)
+        kw_score = _bm25_score_single(
+            query_terms, tokenized_corpus[idx], tokenized_corpus
+        )
 
         # Vector score (cosine similarity)
         vec_score = 0.0
@@ -243,16 +243,18 @@ async def retrieve_top_k_memories(
         if importance > 0.7:
             reasons.append("high_importance")
         if not reasons:
-            reasons.append("fallback")
+            reasons.append("low_signal_history")
 
-        results.append(MemoryRetrievalResult(
-            memory=record,
-            memory_type=doc_type,
-            score=min(combined, 1.0),
-            keyword_score=kw_norm,
-            vector_score=vec_score,
-            match_reason="+".join(reasons),
-        ))
+        results.append(
+            MemoryRetrievalResult(
+                memory=record,
+                memory_type=doc_type,
+                score=min(combined, 1.0),
+                keyword_score=kw_norm,
+                vector_score=vec_score,
+                match_reason="+".join(reasons),
+            )
+        )
 
     # 5. Sort and return top-K
     results.sort(key=lambda r: r.score, reverse=True)
@@ -262,7 +264,9 @@ async def retrieve_top_k_memories(
     if get_setting("memory.log_memory_retrieval", True):
         logger.debug(
             "Memory retrieval for user=%s: %d candidates → %d results (top score=%.3f)",
-            user_id, len(candidates), len(top_results),
+            user_id,
+            len(candidates),
+            len(top_results),
             top_results[0].score if top_results else 0.0,
         )
 

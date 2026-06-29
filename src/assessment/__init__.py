@@ -12,6 +12,7 @@ from src.assessment.types import (
     QuizAttemptResult,
     ReviewSchedule,
 )
+from src.assessment.errors import ErrorClassificationFailed
 from src.assessment.classifier import classify_error
 from src.assessment.practice_generator import generate_adaptive_practice
 from src.assessment.scheduler import SpacedRepetitionScheduler, get_due_reviews
@@ -22,6 +23,7 @@ __all__ = [
     "ErrorClassificationStrict",
     "QuizAttemptResult",
     "ReviewSchedule",
+    "ErrorClassificationFailed",
     "classify_error",
     "generate_adaptive_practice",
     "SpacedRepetitionScheduler",

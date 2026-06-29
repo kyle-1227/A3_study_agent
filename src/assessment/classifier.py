@@ -15,6 +15,7 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.assessment.errors import ErrorClassificationFailed, sanitize_assessment_error
 from src.assessment.types import (
     ErrorClassification,
     ErrorClassificationStrict,
@@ -99,35 +100,69 @@ async def classify_error(
             state={"thread_id": quiz_result.user_id},
             max_raw_chars=get_max_raw_chars(_LLM_NODE),
         )
-
-        if not result.success or result.parsed is None:
-            logger.warning("Error classification LLM returned no valid output, using default")
-            return _default_classification(quiz_result)
-
-        parsed = result.parsed
-        return ErrorClassification(
-            error_type=parsed.error_type,
-            concept_gap=parsed.concept_gap,
-            suggestion=parsed.suggestion,
-            confidence=parsed.confidence,
+    except ErrorClassificationFailed:
+        raise
+    except Exception as exc:
+        failure_stage = _failure_stage_from_exception(exc, fallback="llm_call_failed")
+        logger.error(
+            "Error classification failed topic=%s stage=%s error_type=%s error=%s",
+            quiz_result.topic or "unknown",
+            failure_stage,
+            type(exc).__name__,
+            sanitize_assessment_error(exc),
+        )
+        raise ErrorClassificationFailed(
             quiz_topic=quiz_result.topic,
-            quiz_question=quiz_result.question,
-            quiz_knowledge_points=list(quiz_result.knowledge_points),
+            knowledge_points=list(quiz_result.knowledge_points),
+            failure_stage=failure_stage,
+            original_exception_type=type(exc).__name__,
+            error_message=exc,
+        ) from exc
+
+    if not result.success or result.parsed is None:
+        failure_stage = result.failure_phase or "structured_output_invalid"
+        error_type = result.error_type or "InvalidStructuredOutput"
+        error_message = (
+            result.error_message
+            or "structured output parser returned no valid classification"
+        )
+        logger.error(
+            "Error classification produced invalid structured output topic=%s stage=%s error_type=%s error=%s",
+            quiz_result.topic or "unknown",
+            failure_stage,
+            error_type,
+            sanitize_assessment_error(error_message),
+        )
+        raise ErrorClassificationFailed(
+            quiz_topic=quiz_result.topic,
+            knowledge_points=list(quiz_result.knowledge_points),
+            failure_stage=failure_stage,
+            original_exception_type=error_type,
+            error_message=error_message,
         )
 
-    except Exception as exc:
-        logger.exception("Error classification LLM call failed: %s", exc)
-        return _default_classification(quiz_result)
+    parsed = result.parsed
+    if not isinstance(parsed, ErrorClassificationStrict):
+        raise ErrorClassificationFailed(
+            quiz_topic=quiz_result.topic,
+            knowledge_points=list(quiz_result.knowledge_points),
+            failure_stage="schema_validation_failed",
+            original_exception_type=type(parsed).__name__,
+            error_message="parsed result is not ErrorClassificationStrict",
+        )
 
-
-def _default_classification(quiz_result: QuizAttemptResult) -> ErrorClassification:
-    """Return a conservative default classification when LLM is unavailable."""
     return ErrorClassification(
-        error_type="concept",
-        concept_gap=f"需要复习 {quiz_result.topic or 'this topic'} 的相关概念",
-        suggestion=f"建议重新学习 {', '.join(quiz_result.knowledge_points) if quiz_result.knowledge_points else quiz_result.topic}",
-        confidence=0.3,
+        error_type=parsed.error_type,
+        concept_gap=parsed.concept_gap,
+        suggestion=parsed.suggestion,
+        confidence=parsed.confidence,
         quiz_topic=quiz_result.topic,
         quiz_question=quiz_result.question,
         quiz_knowledge_points=list(quiz_result.knowledge_points),
     )
+
+
+def _failure_stage_from_exception(exc: Exception, *, fallback: str) -> str:
+    result = getattr(exc, "result", None)
+    phase = getattr(result, "failure_phase", "") if result is not None else ""
+    return str(phase or getattr(exc, "failure_phase", "") or fallback)

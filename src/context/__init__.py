@@ -17,6 +17,7 @@ from src.context.context_builder import (
     build_memory_context,
     build_memory_explanation,
 )
+from src.context.errors import ContextConfigError
 from src.context.token_manager import (
     TokenBudget,
     estimate_tokens,
@@ -26,6 +27,7 @@ from src.context.token_manager import (
 __all__ = [
     "build_memory_context",
     "build_memory_explanation",
+    "ContextConfigError",
     "TokenBudget",
     "estimate_tokens",
     "fit_to_budget",

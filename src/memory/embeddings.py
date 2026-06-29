@@ -1,12 +1,10 @@
-"""
-Memory embedding providers — pluggable embedding backends for memory vector search.
+"""Memory embedding providers for vector search.
 
-Design:
-- Abstract EmbeddingProvider interface for future provider swaps
-- DeepSeekEmbeddingProvider: reuses the OpenAI-compatible embedding API pattern
-  from src/rag/indexer.py (same HTTP client, same auth, same endpoint)
-- DummyEmbeddingProvider: zero-vector fallback for keyword-only retrieval
-- Singleton factory for lazy initialization
+Production factory behavior is intentionally strict in Phase 0:
+- provider configuration must be explicit,
+- only real providers are accepted,
+- missing API keys and provider/API failures raise typed errors,
+- no synthetic or degraded fallback path is available here.
 """
 
 from __future__ import annotations
@@ -14,18 +12,16 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any
+
+from src.config import get_setting
+from src.memory.errors import (
+    MemoryEmbeddingConfigError,
+    MemoryEmbeddingRuntimeError,
+    sanitize_memory_error,
+)
 
 logger = logging.getLogger(__name__)
-
-# Constants (mirror src/rag/indexer.py defaults)
-DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")
-DEFAULT_EMBEDDING_BASE_URL = os.getenv(
-    "EMBEDDING_BASE_URL",
-    os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-)
-DEFAULT_EMBEDDING_TIMEOUT = 30.0
-DEFAULT_DUMMY_DIM = 64
 
 
 class EmbeddingProvider(ABC):
@@ -33,14 +29,7 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts.
-
-        Args:
-            texts: List of text strings to embed.
-
-        Returns:
-            List of embedding vectors, one per input text.
-        """
+        """Generate embeddings for a list of texts."""
         ...
 
     @abstractmethod
@@ -50,44 +39,51 @@ class EmbeddingProvider(ABC):
 
 
 class DeepSeekEmbeddingProvider(EmbeddingProvider):
-    """Uses the OpenAI-compatible /embeddings endpoint for memory vectorization.
-
-    Reuses the same HTTP pattern as src/rag/indexer.py's OpenAICompatibleEmbeddings,
-    but as a standalone async provider that doesn't require ChromaDB or LangChain.
-    """
+    """OpenAI-compatible DeepSeek embedding provider for memory vectorization."""
 
     def __init__(
         self,
         *,
-        model: str | None = None,
+        model: str,
+        api_key_env: str,
+        base_url: str,
+        timeout: float,
         api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float = DEFAULT_EMBEDDING_TIMEOUT,
-    ):
+    ) -> None:
         import httpx
 
-        self._model = model or DEFAULT_EMBEDDING_MODEL
-        self._base_url = (base_url or DEFAULT_EMBEDDING_BASE_URL).rstrip("/")
+        self._model = _non_empty_value(model, "memory.embedding.model")
+        self._api_key_env = _non_empty_value(
+            api_key_env, "memory.embedding.api_key_env"
+        )
+        self._base_url = _non_empty_value(base_url, "memory.embedding.base_url").rstrip(
+            "/"
+        )
         self._timeout = timeout
-
-        # Resolve API key
-        if api_key:
-            self._api_key = api_key
-        else:
-            api_key_env = os.getenv("EMBEDDING_API_KEY_ENV", "OPENROUTER_API_KEY")
-            self._api_key = os.getenv(api_key_env)
-
+        self._api_key = (
+            api_key if api_key is not None else os.getenv(self._api_key_env, "")
+        )
+        if not self._api_key:
+            raise MemoryEmbeddingConfigError(f"{self._api_key_env} is not configured")
         self._client = httpx.AsyncClient(timeout=self._timeout)
         self._dim: int | None = None
 
+    @classmethod
+    def from_settings(cls) -> "DeepSeekEmbeddingProvider":
+        """Build the provider from explicit memory embedding settings."""
+        return cls(
+            model=_required_str_setting("memory.embedding.model"),
+            base_url=_required_str_setting("memory.embedding.base_url"),
+            api_key_env=_required_str_setting("memory.embedding.api_key_env"),
+            timeout=_required_positive_float_setting(
+                "memory.embedding.timeout_seconds"
+            ),
+        )
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings via HTTP POST to /embeddings."""
+        """Generate embeddings via HTTP POST to `/embeddings`."""
         if not texts:
             return []
-        if not self._api_key:
-            logger.warning("No embedding API key configured; returning zero vectors")
-            return [[0.0] * self.embedding_dim() for _ in texts]
-
         try:
             response = await self._client.post(
                 f"{self._base_url}/embeddings",
@@ -98,93 +94,115 @@ class DeepSeekEmbeddingProvider(EmbeddingProvider):
                 json={"model": self._model, "input": texts},
             )
             response.raise_for_status()
-            data = response.json()
-
-            if data.get("error"):
-                raise RuntimeError(f"Embedding provider returned error: {data['error']}")
-
-            items = data.get("data")
-            if not isinstance(items, list) or not items:
-                raise ValueError("No embedding data received")
-
-            embeddings: list[list[float]] = []
-            for item in items:
-                embedding = item.get("embedding") if isinstance(item, dict) else None
-                if not isinstance(embedding, list):
-                    raise ValueError("Embedding response item missing embedding vector")
-                embeddings.append(embedding)
-
-            if self._dim is None and embeddings:
-                self._dim = len(embeddings[0])
-
-            return embeddings
-
         except Exception as exc:
-            logger.warning("Embedding API call failed: %s; returning zero vectors", exc)
-            return [[0.0] * self.embedding_dim() for _ in texts]
+            raise MemoryEmbeddingRuntimeError(
+                f"Embedding API call failed: {sanitize_memory_error(exc)}"
+            ) from exc
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise MemoryEmbeddingRuntimeError(
+                f"Embedding response JSON decode failed: {sanitize_memory_error(exc)}"
+            ) from exc
+
+        if isinstance(data, dict) and data.get("error"):
+            raise MemoryEmbeddingRuntimeError(
+                f"Embedding provider returned error: {sanitize_memory_error(data['error'])}"
+            )
+
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list) or len(items) != len(texts):
+            raise MemoryEmbeddingRuntimeError(
+                "Embedding response data length did not match input"
+            )
+
+        embeddings: list[list[float]] = []
+        for item in items:
+            embedding = item.get("embedding") if isinstance(item, dict) else None
+            embeddings.append(_validate_embedding_vector(embedding))
+
+        if embeddings:
+            self._dim = len(embeddings[0])
+        return embeddings
 
     def embedding_dim(self) -> int:
-        """Return cached dimension, or probe the API, or fall back to default."""
-        if self._dim is not None:
-            return self._dim
-        # Probe with a tiny text if we have an API key
-        if self._api_key:
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # We can't await in a sync method; return default
-                    return DEFAULT_DUMMY_DIM
-                embeddings = loop.run_until_complete(self.embed(["dimension probe"]))
-                if embeddings and embeddings[0]:
-                    self._dim = len(embeddings[0])
-                    return self._dim
-            except Exception:
-                pass
-        return DEFAULT_DUMMY_DIM
-
-
-class DummyEmbeddingProvider(EmbeddingProvider):
-    """Zero-vector fallback provider — enables keyword-only retrieval.
-
-    When no embedding API is available, this provider returns zero vectors
-    of a fixed dimension. Vector similarity scores will be zero, so retrieval
-    falls back entirely on BM25 keyword scoring.
-    """
-
-    def __init__(self, dim: int = DEFAULT_DUMMY_DIM):
-        self._dim = dim
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        return [[0.0] * self._dim for _ in texts]
-
-    def embedding_dim(self) -> int:
+        """Return the dimension after at least one successful embedding call."""
+        if self._dim is None:
+            raise MemoryEmbeddingRuntimeError(
+                "Embedding dimension is unavailable before a successful embedding call"
+            )
         return self._dim
 
-
-# ── Singleton ──────────────────────────────────────────────────────────────
 
 _embedding_provider: EmbeddingProvider | None = None
 
 
 def get_embedding_provider() -> EmbeddingProvider:
-    """Get or create the singleton embedding provider.
-
-    Tries DeepSeekEmbeddingProvider first; falls back to DummyEmbeddingProvider
-    if API key is missing or the provider fails to initialize.
-    """
+    """Get or create the singleton production embedding provider."""
     global _embedding_provider
-    if _embedding_provider is None:
-        try:
-            _embedding_provider = DeepSeekEmbeddingProvider()
-            logger.info("Memory embedding provider: DeepSeek (model=%s)", _embedding_provider._model)
-        except Exception as exc:
-            logger.warning("Failed to create DeepSeek embedding provider: %s; using dummy", exc)
-            _embedding_provider = DummyEmbeddingProvider()
+    if _embedding_provider is not None:
+        return _embedding_provider
+
+    provider_name = get_setting("memory.embedding_provider")
+    if provider_name is None:
+        raise MemoryEmbeddingConfigError("memory.embedding_provider is required")
+    provider_name = str(provider_name).strip().lower()
+    if provider_name != "deepseek":
+        raise MemoryEmbeddingConfigError(
+            f"Unsupported memory.embedding_provider={provider_name!r}; only 'deepseek' is allowed"
+        )
+
+    _embedding_provider = DeepSeekEmbeddingProvider.from_settings()
+    logger.info("Memory embedding provider configured: %s", provider_name)
     return _embedding_provider
 
 
 def reset_embedding_provider() -> None:
-    """Reset the singleton (useful for testing)."""
+    """Reset the singleton between caller-managed lifecycles."""
     global _embedding_provider
     _embedding_provider = None
+
+
+def _required_str_setting(key: str) -> str:
+    value = get_setting(key)
+    if value is None:
+        raise MemoryEmbeddingConfigError(f"{key} is required")
+    return _non_empty_value(value, key)
+
+
+def _required_positive_float_setting(key: str) -> float:
+    value = get_setting(key)
+    if value is None:
+        raise MemoryEmbeddingConfigError(f"{key} is required")
+    if isinstance(value, bool):
+        raise MemoryEmbeddingConfigError(f"{key} must be a positive number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MemoryEmbeddingConfigError(f"{key} must be a positive number") from exc
+    if parsed <= 0:
+        raise MemoryEmbeddingConfigError(f"{key} must be > 0")
+    return parsed
+
+
+def _non_empty_value(value: Any, key: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise MemoryEmbeddingConfigError(f"{key} must be a non-empty string")
+    return text
+
+
+def _validate_embedding_vector(value: Any) -> list[float]:
+    if not isinstance(value, list) or not value:
+        raise MemoryEmbeddingRuntimeError(
+            "Embedding response item missing embedding vector"
+        )
+    vector: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int | float):
+            raise MemoryEmbeddingRuntimeError(
+                "Embedding vector contains non-numeric values"
+            )
+        vector.append(float(item))
+    return vector
