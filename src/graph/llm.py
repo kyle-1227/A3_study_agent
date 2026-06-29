@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 import httpx
 
 from src.config import get_setting
+from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
@@ -550,6 +551,21 @@ async def invoke_plain_llm_fail_fast(
         "prompt_chars": _message_content_chars(messages or []),
         "fallback_used": False,
     }
+    configured_max_tokens = get_setting(f"llm.{llm_node}.max_tokens", get_setting(f"{llm_node}.max_tokens", None))
+    try:
+        output_reserved_tokens = int(configured_max_tokens) if configured_max_tokens is not None else None
+    except (TypeError, ValueError):
+        output_reserved_tokens = None
+    emit_context_usage_trace(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=str(provider or ""),
+        model=str(model or ""),
+        messages=messages or [],
+        state=state or {},
+        output_reserved_tokens=output_reserved_tokens,
+    )
     max_retries = get_llm_call_max_retries(node_name)
     retry_count = 0
     total_transport_retry_count = 0

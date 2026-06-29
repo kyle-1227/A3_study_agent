@@ -351,7 +351,7 @@ class TestResourceFinalPayloadArtifacts:
 
         final_state = {
             "requested_resource_type": "review_doc",
-            "requested_resource_types": ["review_doc", "mindmap", "quiz"],
+            "requested_resource_types": ["review_doc", "mindmap", "quiz", "study_plan"],
             "resource_generation_status": "success",
             "resource_bundle_artifact": {
                 "type": "resource_bundle",
@@ -361,6 +361,7 @@ class TestResourceFinalPayloadArtifacts:
                     {"resource_type": "review_doc", "status": "success"},
                     {"resource_type": "mindmap", "status": "success"},
                     {"resource_type": "quiz", "status": "success"},
+                    {"resource_type": "study_plan", "status": "success"},
                 ],
                 "errors": [],
             },
@@ -395,6 +396,17 @@ class TestResourceFinalPayloadArtifacts:
                 "markdown_url": "/artifacts/exercises/e1/python.md",
                 "docx_url": "/artifacts/exercises/e1/python.docx",
             },
+            "study_plan_artifact": {
+                "title": "Python Study Plan",
+            },
+            "study_plan_markdown": "# Python Study Plan",
+            "study_plan_document_artifact": {
+                "title": "Python Study Plan",
+                "filename": "python-plan.md",
+                "docx_filename": "python-plan.docx",
+                "markdown_url": "/artifacts/review-docs/s1/python-plan.md",
+                "docx_url": "/artifacts/review-docs/s1/python-plan.docx",
+            },
         }
 
         payload = _resource_final_payload(final_state)
@@ -403,11 +415,13 @@ class TestResourceFinalPayloadArtifacts:
         assert payload["resource_type"] == "bundle"
         assert payload["answer"] == "bundle summary"
         assert payload["resource_bundle"]["type"] == "resource_bundle"
-        assert [item["resource_type"] for item in payload["resources"]] == ["review_doc", "mindmap", "quiz"]
+        assert [item["resource_type"] for item in payload["resources"]] == ["review_doc", "mindmap", "quiz", "study_plan"]
         assert payload["errors"] == []
         assert payload["review_doc_artifacts"]
         assert payload["mindmap"]["title"] == "Python 思维导图"
         assert payload["exercise_artifact"]["title"] == "Python 练习题"
+        assert payload["study_plan"]["markdown_url"] == "/artifacts/review-docs/s1/python-plan.md"
+        assert payload["study_plan"]["markdown"] == "# Python Study Plan"
         assert "multi_resource_results" not in payload
         assert "multi_resource_summary" not in payload
 

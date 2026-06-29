@@ -7,6 +7,7 @@ import { useUser } from "@/hooks/use-user"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
+  ContextUsage,
   Message,
   ResourceGenerationStatus,
   ResourceGenerationStep,
@@ -108,6 +109,24 @@ function timestamp(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
 }
 
+function mapContextUsage(data: any): ContextUsage {
+  return {
+    node: typeof data.node === "string" ? data.node : "",
+    llmNode: typeof data.llm_node === "string" ? data.llm_node : "",
+    provider: typeof data.provider === "string" ? data.provider : "",
+    model: typeof data.model === "string" ? data.model : "",
+    promptTokens: typeof data.prompt_tokens === "number" ? data.prompt_tokens : 0,
+    outputReservedTokens: typeof data.output_reserved_tokens === "number" ? data.output_reserved_tokens : 0,
+    usedTokens: typeof data.used_tokens === "number" ? data.used_tokens : 0,
+    maxContextTokens: typeof data.max_context_tokens === "number" ? data.max_context_tokens : 0,
+    usageRatio: typeof data.usage_ratio === "number" ? data.usage_ratio : 0,
+    remainingTokens: typeof data.remaining_tokens === "number" ? data.remaining_tokens : 0,
+    estimated: Boolean(data.estimated),
+    level: typeof data.level === "string" ? data.level : "ok",
+    schemaSizeChars: typeof data.schema_size_chars === "number" ? data.schema_size_chars : undefined,
+  }
+}
+
 function getAuthHeaders(): Record<string, string> {
   if (typeof window !== "undefined") {
     const token = localStorage.getItem("demo_access_token")
@@ -201,6 +220,9 @@ export default function Home() {
   ])
   const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([])
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
+  const [canContinue, setCanContinue] = useState(false)
+  const [stopPending, setStopPending] = useState(false)
 
   // HIL state
   const [isInterrupted, setIsInterrupted] = useState(false)
@@ -222,6 +244,15 @@ export default function Home() {
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearStopTimeout = useCallback(() => {
+    if (stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current)
+      stopTimeoutRef.current = null
+    }
+  }, [])
 
   const setActiveThreadId = useCallback((threadId: string | null) => {
     threadIdRef.current = threadId
@@ -306,6 +337,9 @@ export default function Home() {
     setNodeEvents([])
     setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
+    setContextUsage(null)
+    setCanContinue(false)
+    setStopPending(false)
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
@@ -319,6 +353,9 @@ export default function Home() {
     setSelectedChatId(threadId)
     setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
     setNodeEvents([])
+    setContextUsage(null)
+    setCanContinue(false)
+    setStopPending(false)
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
@@ -343,6 +380,9 @@ export default function Home() {
     setMessages([])
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
+    setContextUsage(null)
+    setCanContinue(false)
+    setStopPending(false)
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
@@ -427,6 +467,116 @@ export default function Home() {
       setLogs((prev) => [
         ...prev,
         { type: "info", message: `[INFO] Thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
+      ])
+      return
+    }
+
+    if (data.type === "run_status") {
+      const runStatus = typeof data.run_status === "string" ? data.run_status : ""
+      const pendingInterruptType = typeof data.pending_interrupt_type === "string" ? data.pending_interrupt_type : ""
+      if (data.thread_id) setActiveThreadId(data.thread_id)
+
+      if (runStatus === "stopping") {
+        setStopPending(true)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "stopping",
+          summary: "Stop requested. Waiting for the next safe checkpoint.",
+          waitingForReview: false,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[RUN] Stop requested; waiting for safe checkpoint.", ts: timestamp() },
+        ])
+        return
+      }
+
+      if (runStatus === "stopped") {
+        clearStopTimeout()
+        setIsLoading(false)
+        setStopPending(false)
+        setCanContinue(true)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "stopped",
+          summary: "Stopped at a safe checkpoint. You can continue this run.",
+          waitingForReview: false,
+          error: undefined,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[RUN] Stopped at safe checkpoint; resume is available.", ts: timestamp() },
+        ])
+        return
+      }
+
+      if (runStatus === "continuing" || runStatus === "running") {
+        setStopPending(false)
+        setCanContinue(false)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "running",
+          summary: runStatus === "continuing" ? "Continuing from saved checkpoint." : status.summary,
+          waitingForReview: false,
+        }))
+        return
+      }
+
+      if (runStatus === "not_resumable") {
+        setIsLoading(false)
+        setCanContinue(false)
+        setStopPending(false)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "stopped",
+          summary: data.message || "This thread is not resumable from a saved stop checkpoint.",
+          waitingForReview: false,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          {
+            type: "warning",
+            message: `[RUN] Not resumable${pendingInterruptType ? ` (${pendingInterruptType})` : ""}.`,
+            ts: timestamp(),
+          },
+        ])
+        return
+      }
+
+      if (runStatus === "completed") {
+        setCanContinue(false)
+        setStopPending(false)
+        clearStopTimeout()
+        return
+      }
+    }
+
+    if (data.type === "context_usage") {
+      const usage = mapContextUsage(data)
+      setContextUsage(usage)
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        contextUsage: usage,
+      }))
+      setLogs((prev) => [
+        ...prev,
+        {
+          type: "context",
+          message: `[CONTEXT] ${usage.node || usage.llmNode}: ${Math.round(usage.usageRatio * 100)}% used, ${usage.remainingTokens} left`,
+          ts: timestamp(),
+        },
+      ])
+      return
+    }
+
+    if (data.type === "context_usage_error") {
+      setLogs((prev) => [
+        ...prev,
+        {
+          type: "warning",
+          message: `[CONTEXT] ${data.reason || "unavailable"}: ${data.warning || "context usage telemetry unavailable"}`,
+          ts: timestamp(),
+        },
       ])
       return
     }
@@ -595,6 +745,7 @@ export default function Home() {
       const reviewDoc = data.review_doc ?? null
       const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
       const exerciseArtifact = data.exercise_artifact ?? null
+      const studyPlan = data.study_plan ?? null
       const xmindUrl =
         mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
           ? `${API_BASE_URL}${mindmap.xmind_url}`
@@ -634,6 +785,14 @@ export default function Home() {
         exerciseArtifact && typeof exerciseArtifact.docx_url === "string" && exerciseArtifact.docx_url.startsWith("/")
           ? `${API_BASE_URL}${exerciseArtifact.docx_url}`
           : exerciseArtifact?.docx_url
+      const studyPlanMarkdownUrl =
+        studyPlan && typeof studyPlan.markdown_url === "string" && studyPlan.markdown_url.startsWith("/")
+          ? `${API_BASE_URL}${studyPlan.markdown_url}`
+          : studyPlan?.markdown_url
+      const studyPlanDocxUrl =
+        studyPlan && typeof studyPlan.docx_url === "string" && studyPlan.docx_url.startsWith("/")
+          ? `${API_BASE_URL}${studyPlan.docx_url}`
+          : studyPlan?.docx_url
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -671,6 +830,16 @@ export default function Home() {
                       docxUrl: exerciseDocxUrl || "",
                     }
                   : msg.exercise,
+                studyPlan: studyPlan
+                  ? {
+                      title: studyPlan.title || "Personalized Study Plan",
+                      filename: studyPlan.filename || "",
+                      markdownUrl: studyPlanMarkdownUrl || "",
+                      docxFilename: studyPlan.docx_filename || "",
+                      docxUrl: studyPlanDocxUrl || "",
+                      markdown: studyPlan.markdown || "",
+                    }
+                  : msg.studyPlan,
               }
             : msg
         )
@@ -681,7 +850,7 @@ export default function Home() {
     if (data.type === "done") {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
-        state: status.state === "error" ? "error" : "done",
+        state: status.state === "error" || status.state === "stopped" || status.state === "stopping" ? status.state : "done",
         summary: status.summary === CONTROLLED_STOP_SUMMARY ? status.summary : "个性化学习资源生成状态已更新。",
         waitingForReview: false,
       }))
@@ -717,8 +886,10 @@ export default function Home() {
           steps.push(createResourceStep(node, "running", now))
           return {
             ...resourceStatus,
-            state: "running",
-            summary: copy?.detail ?? "多智能体正在推进个性化学习资源生成。",
+            state: resourceStatus.state === "stopping" ? "stopping" : "running",
+            summary: resourceStatus.state === "stopping"
+              ? resourceStatus.summary
+              : copy?.detail ?? "多智能体正在推进个性化学习资源生成。",
             steps,
             waitingForReview: false,
           }
@@ -834,7 +1005,7 @@ export default function Home() {
         { type: "usage", message: `[USAGE] ${data.node}: 输入 ${data.input_tokens} / 输出 ${data.output_tokens}`, ts: now },
       ])
     }
-  }, [setActiveThreadId, updateAssistantResourceStatus])
+  }, [clearStopTimeout, setActiveThreadId, updateAssistantResourceStatus])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
@@ -898,6 +1069,42 @@ export default function Home() {
     return response.body
   }, [])
 
+  const refreshThreadStatus = useCallback(async (threadId: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/status`, {
+        headers: { ...getAuthHeaders() },
+      })
+      if (response.status === 404) {
+        setCanContinue(false)
+        return
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const status = await response.json()
+      const usage = status.context_usage && Object.keys(status.context_usage).length > 0
+        ? mapContextUsage(status.context_usage)
+        : null
+      setContextUsage(usage)
+      setCanContinue(Boolean(status.resume_available && status.pending_interrupt_type === "user_stop"))
+      if (status.schema_version === "legacy") {
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[RUN] Legacy checkpoint: run-control status is unknown.", ts: timestamp() },
+        ])
+      }
+    } catch (error: any) {
+      setCanContinue(false)
+      setLogs((prev) => [
+        ...prev,
+        { type: "warning", message: `[RUN] Status unavailable: ${error.message}`, ts: timestamp() },
+      ])
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady || !currentThreadId) return
+    refreshThreadStatus(currentThreadId)
+  }, [currentThreadId, refreshThreadStatus, storageReady])
+
   const handleSendMessage = useCallback(async (content: string) => {
     const threadId = threadIdRef.current
     const userMessage: Message = {
@@ -910,6 +1117,10 @@ export default function Home() {
     setMessages((prev) => [...prev, userMessage])
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
+    setContextUsage(null)
+    setCanContinue(false)
+    setStopPending(false)
+    clearStopTimeout()
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
@@ -920,6 +1131,8 @@ export default function Home() {
     console.debug("[A3_CHAT] sending", { threadId, selectedChatId, messageCount: messages.length + 1 })
 
     setIsLoading(true)
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
 
     try {
       streamHadErrorRef.current = false
@@ -927,6 +1140,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ query: content, thread_id: threadId, user_id: userId }),
+        signal: abortController.signal,
       })
 
       if (!body) return
@@ -950,14 +1164,140 @@ export default function Home() {
         },
       ])
     } catch (error: any) {
+      if (error?.name === "AbortError") {
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[RUN] SSE closed after stop request; backend will save at the next safe checkpoint if still running.", ts: timestamp() },
+        ])
+        return
+      }
       setLogs((prev) => [
         ...prev,
         { type: "error", message: `[ERROR] ${error.message}`, ts: timestamp() },
       ])
     } finally {
       setIsLoading(false)
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null
+      }
     }
-  }, [selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream])
+  }, [clearStopTimeout, selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream, userId])
+
+  const handleStopGeneration = useCallback(async () => {
+    const threadId = threadIdRef.current
+    const asstId = assistantMessageIdRef.current
+    if (!threadId) {
+      abortControllerRef.current?.abort()
+      setIsLoading(false)
+      return
+    }
+
+    setStopPending(true)
+    updateAssistantResourceStatus(asstId, (status) => ({
+      ...status,
+      state: "stopping",
+      summary: "Stop requested. Waiting for the next safe checkpoint.",
+      waitingForReview: false,
+    }))
+    setLogs((prev) => [
+      ...prev,
+      { type: "warning", message: "[RUN] Stop requested. Waiting for safe checkpoint.", ts: timestamp() },
+    ])
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ reason: "user_stop" }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      clearStopTimeout()
+      stopTimeoutRef.current = setTimeout(() => {
+        abortControllerRef.current?.abort()
+        setIsLoading(false)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "stopping",
+          summary: "Stop requested. Backend will save at the next safe checkpoint.",
+          waitingForReview: false,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          {
+            type: "warning",
+            message: "[RUN] Stop is still pending; closed frontend SSE while backend moves to a safe checkpoint.",
+            ts: timestamp(),
+          },
+        ])
+      }, 45000)
+    } catch (error: any) {
+      setStopPending(false)
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        state: "error",
+        summary: "Stop request failed.",
+        error: error.message,
+      }))
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: `[RUN] Stop request failed: ${error.message}`, ts: timestamp() },
+      ])
+    }
+  }, [clearStopTimeout, updateAssistantResourceStatus])
+
+  const handleContinueThread = useCallback(async () => {
+    const threadId = threadIdRef.current
+    if (!threadId) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: "[RUN] Missing thread_id; cannot continue.", ts: timestamp() },
+      ])
+      return
+    }
+
+    setIsLoading(true)
+    setCanContinue(false)
+    setStopPending(false)
+    clearStopTimeout()
+    streamHadErrorRef.current = false
+
+    const assistantMessageId = (Date.now() + 1).toString()
+    assistantMessageIdRef.current = assistantMessageId
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantMessageId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
+    ])
+
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+
+    try {
+      const body = await fetchWithErrorHandling(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/continue`, {
+        method: "POST",
+        headers: { ...getAuthHeaders() },
+        signal: abortController.signal,
+      })
+      if (!body) return
+      await consumeSSEStream(body)
+      setLogs((prev) => [
+        ...prev,
+        { type: streamHadErrorRef.current ? "error" : "info", message: "[RUN] Continue stream ended.", ts: timestamp() },
+      ])
+    } catch (error: any) {
+      if (error?.name !== "AbortError") {
+        setLogs((prev) => [
+          ...prev,
+          { type: "error", message: `[RUN] Continue failed: ${error.message}`, ts: timestamp() },
+        ])
+      }
+    } finally {
+      setIsLoading(false)
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null
+      }
+      refreshThreadStatus(threadId)
+    }
+  }, [clearStopTimeout, consumeSSEStream, fetchWithErrorHandling, refreshThreadStatus])
 
   const handleResume = useCallback(async (editedPlan: string) => {
     const threadId = threadIdRef.current
@@ -1131,7 +1471,11 @@ export default function Home() {
         <ChatArea
           messages={messages}
           onSendMessage={handleSendMessage}
+          onStopGeneration={handleStopGeneration}
+          onContinueThread={handleContinueThread}
           isLoading={isLoading && !isInterrupted}
+          canContinue={canContinue && !isLoading && !isInterrupted}
+          stopPending={stopPending}
         />
         {isInterrupted && (
           <PlanReview
@@ -1188,6 +1532,7 @@ export default function Home() {
         logs={logs}
         nodeEvents={nodeEvents}
         tokenUsage={tokenUsage}
+        contextUsage={contextUsage}
         isInterrupted={isInterrupted}
       />
     </div>

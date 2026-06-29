@@ -50,6 +50,7 @@ def _make_mock_graph(events=None):
     mock_graph.aget_state = AsyncMock(
         return_value=SimpleNamespace(next=(), tasks=[]),
     )
+    mock_graph.aupdate_state = AsyncMock()
     return mock_graph
 
 
@@ -58,7 +59,12 @@ def _parse_payloads(collected):
     all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
     # First payload is always thread_id; filter it and the trailing done event
     assert all_payloads[0]["type"] == "thread_id"
-    return [p for p in all_payloads[1:] if p.get("type") != "done"]
+    return [p for p in all_payloads[1:] if p.get("type") not in {"done", "run_status"}]
+
+
+def _parse_all_payloads(collected):
+    """Parse SSE lines into JSON payloads without filtering run-control events."""
+    return [json.loads(s.removeprefix("data: ").strip()) for s in collected]
 
 
 # ---------------------------------------------------------------------------

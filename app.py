@@ -32,7 +32,22 @@ from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_transient_state
 from src.profile import get_profile_manager
-from src.schemas import ChatRequest, OnboardRequest, ProfileResponse, ResumeRequest
+from src.run_control import (
+    RUN_CONTROL_FIELDS,
+    RUN_CONTROL_SCHEMA_VERSION,
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_CONTINUING,
+    RUN_STATUS_ERROR,
+    RUN_STATUS_NOT_RESUMABLE,
+    RUN_STATUS_RUNNING,
+    RUN_STATUS_STOPPED,
+    RUN_STATUS_STOPPING,
+    RUN_STATUS_UNKNOWN,
+    run_control_registry,
+    trim_context_usage_history,
+    utc_now_iso,
+)
+from src.schemas import ChatRequest, OnboardRequest, ResumeRequest, StopRequest, ThreadStatusResponse
 from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
 from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
@@ -212,6 +227,98 @@ def _state_values(state_snapshot) -> dict:
     return values if isinstance(values, dict) else {}
 
 
+def _pending_interrupt_values(state_snapshot) -> list[dict]:
+    pending: list[dict] = []
+    for task in getattr(state_snapshot, "tasks", ()) or ():
+        for interrupt_item in getattr(task, "interrupts", ()) or ():
+            value = getattr(interrupt_item, "value", None)
+            pending.append(value if isinstance(value, dict) else {"type": "plan_review", "value": value})
+    return pending
+
+
+def _pending_interrupt_type(state_snapshot) -> str:
+    for value in _pending_interrupt_values(state_snapshot):
+        value_type = str(value.get("type") or "")
+        if value_type:
+            return value_type
+    return ""
+
+
+def _has_checkpoint_state(state_snapshot) -> bool:
+    values = _state_values(state_snapshot)
+    if values:
+        return True
+    if getattr(state_snapshot, "next", None):
+        return True
+    return bool(_pending_interrupt_values(state_snapshot))
+
+
+def _missing_run_control_fields(values: dict) -> list[str]:
+    return [field for field in RUN_CONTROL_FIELDS if field not in values]
+
+
+def _thread_status_from_snapshot(thread_id: str, state_snapshot) -> ThreadStatusResponse:
+    values = _state_values(state_snapshot)
+    pending_type = _pending_interrupt_type(state_snapshot)
+    missing_fields = _missing_run_control_fields(values)
+    if missing_fields:
+        return ThreadStatusResponse(
+            thread_id=thread_id,
+            schema_version="legacy",
+            run_status=RUN_STATUS_UNKNOWN,
+            resume_available=False,
+            pending_interrupt_type=pending_type,
+            current_node=str(values.get("current_node") or ""),
+            last_completed_node=str(values.get("last_completed_node") or ""),
+            context_usage=values.get("context_usage") if isinstance(values.get("context_usage"), dict) else {},
+            context_usage_history=values.get("context_usage_history")
+            if isinstance(values.get("context_usage_history"), list)
+            else [],
+            missing_run_control_fields=missing_fields,
+            message="legacy checkpoint does not include run-control fields",
+        )
+
+    return ThreadStatusResponse(
+        thread_id=thread_id,
+        schema_version=RUN_CONTROL_SCHEMA_VERSION,
+        run_status=str(values.get("run_status") or RUN_STATUS_UNKNOWN),
+        resume_available=pending_type == "user_stop",
+        pending_interrupt_type=pending_type or str(values.get("pending_interrupt_type") or ""),
+        current_node=str(values.get("current_node") or ""),
+        last_completed_node=str(values.get("last_completed_node") or ""),
+        stopped_at=str(values.get("stopped_at") or ""),
+        stop_reason=str(values.get("stop_reason") or ""),
+        context_usage=values.get("context_usage") if isinstance(values.get("context_usage"), dict) else {},
+        context_usage_history=values.get("context_usage_history")
+        if isinstance(values.get("context_usage_history"), list)
+        else [],
+        missing_run_control_fields=[],
+    )
+
+
+async def _update_run_state(graph, config: dict, values: dict) -> None:
+    await graph.aupdate_state(config, values)
+
+
+async def _try_update_run_state(graph, config: dict, values: dict, *, state: dict | None = None) -> bool:
+    try:
+        await _update_run_state(graph, config, values)
+        return True
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "run_state_update_failed",
+            {
+                "keys": sorted(values.keys()),
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+            state=state or {},
+            env_flag="LOG_A3_TRACE",
+        )
+        return False
+
+
 def _last_ai_message_content(final_state: dict) -> str:
     for msg in reversed(final_state.get("messages") or []):
         content = getattr(msg, "content", "")
@@ -322,6 +429,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
                 "docx_filename": study_plan_document.get("docx_filename", ""),
                 "markdown_url": study_plan_document.get("markdown_url", ""),
                 "docx_url": study_plan_document.get("docx_url", ""),
+                "markdown": (
+                    final_state.get("study_plan_markdown", "")
+                    or study_plan_document.get("markdown", "")
+                ),
             }
 
         return payload
@@ -409,6 +520,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             "docx_filename": study_plan_document.get("docx_filename", ""),
             "markdown_url": study_plan_document.get("markdown_url", ""),
             "docx_url": study_plan_document.get("docx_url", ""),
+            "markdown": (
+                final_state.get("study_plan_markdown", "")
+                or study_plan_document.get("markdown", "")
+            ),
         }
 
     return payload
@@ -472,6 +587,7 @@ async def _stream_graph_events(
     input_data,
     config: dict,
     thread_id: str,
+    preserve_context_history: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Shared SSE event streaming logic for /stream and /resume.
 
@@ -482,34 +598,95 @@ async def _stream_graph_events(
     active_nodes: list[str] = []
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
+    context_usage_history: list[dict] = []
+    if preserve_context_history:
+        try:
+            existing_snapshot = await graph.aget_state(config)
+            existing_history = _state_values(existing_snapshot).get("context_usage_history")
+            if isinstance(existing_history, list):
+                context_usage_history = trim_context_usage_history(existing_history)
+        except Exception as exc:
+            emit_a3_trace(
+                logger,
+                "run_state_read_failed",
+                {
+                    "operation": "load_context_usage_history",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                state={"thread_id": thread_id, "session_id": thread_id},
+                env_flag="LOG_A3_TRACE",
+            )
 
-    def _drain_provider_retry_events() -> list[str]:
+    async def _drain_trace_events() -> list[str]:
         drained: list[str] = []
         while trace_events:
             event = trace_events.pop(0)
-            if event.get("stage") not in PROVIDER_RETRY_TRACE_STAGES:
+            stage = event.get("stage")
+            if stage in PROVIDER_RETRY_TRACE_STAGES:
+                payload = {
+                    "type": "provider_retry",
+                    "stage": event.get("stage", ""),
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "provider": event.get("provider", ""),
+                    "model": event.get("model", ""),
+                    "retry_count": event.get("retry_count", 0),
+                    "max_retries": event.get("max_retries", 0),
+                    "next_attempt": event.get("next_attempt", 0),
+                    "error_type": event.get("error_type", ""),
+                    "error_message": event.get("error_message", ""),
+                    "status_code": event.get("status_code"),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
-            payload = {
-                "type": "provider_retry",
-                "stage": event.get("stage", ""),
-                "node": event.get("node_name", ""),
-                "llm_node": event.get("llm_node", ""),
-                "provider": event.get("provider", ""),
-                "model": event.get("model", ""),
-                "retry_count": event.get("retry_count", 0),
-                "max_retries": event.get("max_retries", 0),
-                "next_attempt": event.get("next_attempt", 0),
-                "error_type": event.get("error_type", ""),
-                "error_message": event.get("error_message", ""),
-                "status_code": event.get("status_code"),
-            }
-            drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+            if stage == "context_usage":
+                payload = {
+                    "type": "context_usage",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "provider": event.get("provider", ""),
+                    "model": event.get("model", ""),
+                    "prompt_tokens": event.get("prompt_tokens", 0),
+                    "output_reserved_tokens": event.get("output_reserved_tokens", 0),
+                    "used_tokens": event.get("used_tokens", 0),
+                    "max_context_tokens": event.get("max_context_tokens", 0),
+                    "usage_ratio": event.get("usage_ratio", 0),
+                    "remaining_tokens": event.get("remaining_tokens", 0),
+                    "estimated": bool(event.get("estimated", True)),
+                    "level": event.get("level", "ok"),
+                    "schema_size_chars": event.get("schema_size_chars"),
+                }
+                context_usage_history.append(payload)
+                context_usage_history[:] = trim_context_usage_history(context_usage_history)
+                await _try_update_run_state(
+                    graph,
+                    config,
+                    {
+                        "context_usage": payload,
+                        "context_usage_history": list(context_usage_history),
+                    },
+                    state={"thread_id": thread_id, "session_id": thread_id},
+                )
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_usage_error":
+                payload = {
+                    "type": "context_usage_error",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "provider": event.get("provider", ""),
+                    "model": event.get("model", ""),
+                    "reason": event.get("reason", ""),
+                    "warning": event.get("warning", "context usage telemetry unavailable"),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
         return drained
 
     try:
         async for event in graph.astream_events(input_data, config=config, version="v2"):
-            for retry_payload in _drain_provider_retry_events():
-                yield retry_payload
+            for trace_payload in await _drain_trace_events():
+                yield trace_payload
             event_type = event["event"]
 
             # Node lifecycle events
@@ -523,6 +700,17 @@ async def _stream_graph_events(
                         node_start_times[node_name] = time.monotonic()
                         if node_name not in active_nodes:
                             active_nodes.append(node_name)
+                        await _try_update_run_state(
+                            graph,
+                            config,
+                            {
+                                "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+                                "run_status": RUN_STATUS_RUNNING,
+                                "current_node": node_name,
+                                "pending_interrupt_type": "",
+                            },
+                            state={"thread_id": thread_id, "session_id": thread_id},
+                        )
                         payload = json.dumps(
                             {"type": "node_event", "status": "start", "node": node_name},
                             ensure_ascii=False,
@@ -549,6 +737,15 @@ async def _stream_graph_events(
                                 "error": error,
                             },
                             ensure_ascii=False,
+                        )
+                        await _try_update_run_state(
+                            graph,
+                            config,
+                            {
+                                "last_completed_node": node_name,
+                                "current_node": "",
+                            },
+                            state={"thread_id": thread_id, "session_id": thread_id},
                         )
                     yield f"data: {payload}\n\n"
 
@@ -595,8 +792,8 @@ async def _stream_graph_events(
                                 ensure_ascii=False,
                             )
                             yield f"data: {review_doc_payload}\n\n"
-                    for retry_payload in _drain_provider_retry_events():
-                        yield retry_payload
+                    for trace_payload in await _drain_trace_events():
+                        yield trace_payload
 
             # Token streaming
             elif event_type == "on_chat_model_stream":
@@ -627,10 +824,23 @@ async def _stream_graph_events(
                         ensure_ascii=False,
                     )
                     yield f"data: {payload}\n\n"
+        for trace_payload in await _drain_trace_events():
+            yield trace_payload
     except Exception as e:
-        for retry_payload in _drain_provider_retry_events():
-            yield retry_payload
+        for trace_payload in await _drain_trace_events():
+            yield trace_payload
         logger.exception("Unhandled error in graph streaming")
+        await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+            },
+            state={"thread_id": thread_id, "session_id": thread_id},
+        )
+        run_control_registry.clear_stop_signal(thread_id)
         failed_node = active_nodes[-1] if active_nodes else None
         if failed_node:
             start_t = node_start_times.get(failed_node)
@@ -688,7 +898,55 @@ async def _stream_graph_events(
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
                 interrupt_value = task.interrupts[0].value
+                if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "user_stop":
+                    stopped_at = utc_now_iso()
+                    stopped_node = str(interrupt_value.get("node") or "")
+                    await _update_run_state(
+                        graph,
+                        config,
+                        {
+                            "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+                            "run_status": RUN_STATUS_STOPPED,
+                            "resume_available": True,
+                            "pending_interrupt_type": "user_stop",
+                            "stopped_at": stopped_at,
+                            "current_node": stopped_node,
+                            "stop_reason": str(interrupt_value.get("reason") or "user_stop"),
+                        },
+                    )
+                    emit_a3_trace(
+                        logger,
+                        "run_stopped_at_checkpoint",
+                        {
+                            "thread_id": thread_id,
+                            "node": stopped_node,
+                            "stopped_at": stopped_at,
+                            "resume_available": True,
+                        },
+                        state=final_state,
+                        env_flag="LOG_A3_TRACE",
+                    )
+                    payload = json.dumps(
+                        {
+                            "type": "run_status",
+                            "run_status": RUN_STATUS_STOPPED,
+                            "thread_id": thread_id,
+                            "resume_available": True,
+                            "pending_interrupt_type": "user_stop",
+                            "node": stopped_node,
+                            "stopped_at": stopped_at,
+                        },
+                        ensure_ascii=False,
+                    )
+                    yield f"data: {payload}\n\n"
+                    return
                 if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "memory_confirmation":
+                    await _try_update_run_state(
+                        graph,
+                        config,
+                        {"resume_available": False, "pending_interrupt_type": "memory_confirmation"},
+                        state=final_state,
+                    )
                     payload_data = {
                         "type": "interrupt",
                         "interrupt_type": "memory_confirmation",
@@ -699,6 +957,12 @@ async def _stream_graph_events(
                         "thread_id": thread_id,
                     }
                 else:
+                    await _try_update_run_state(
+                        graph,
+                        config,
+                        {"resume_available": False, "pending_interrupt_type": "plan_review"},
+                        state=final_state,
+                    )
                     payload_data = {
                         "type": "interrupt",
                         "interrupt_type": "plan_review",
@@ -708,6 +972,21 @@ async def _stream_graph_events(
                 payload = json.dumps(payload_data, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
                 return
+
+    await _try_update_run_state(
+        graph,
+        config,
+        {
+            "run_status": RUN_STATUS_COMPLETED,
+            "resume_available": False,
+            "pending_interrupt_type": "",
+            "current_node": "",
+            "stop_requested": False,
+        },
+        state=final_state,
+    )
+    run_control_registry.clear_stop_signal(thread_id)
+    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_COMPLETED, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
     resource_payload = _resource_final_payload(final_state)
     if resource_payload:
@@ -764,6 +1043,7 @@ async def generate_sse(
         thread_id = str(uuid.uuid4())
     request_id = str(uuid.uuid4())
     config = make_thread_config(thread_id)
+    run_control_registry.clear_stop_signal(thread_id)
 
     # Inject profile context as a SystemMessage if a user profile exists
     messages = [HumanMessage(content=query)]
@@ -788,6 +1068,7 @@ async def generate_sse(
     _emit_graph_config_trace(graph, config, state_input)
 
     yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_RUNNING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
     # Record user input as episodic memory (non-fatal, fire-and-forget)
     if user_id:
@@ -807,7 +1088,7 @@ async def generate_sse(
         except Exception:
             logger.exception("Failed to record user input episodic memory")
 
-    async for chunk in _stream_graph_events(graph, state_input, config, thread_id):
+    async for chunk in _stream_graph_events(graph, state_input, config, thread_id, preserve_context_history=False):
         yield chunk
 
     # Record the conversation turn for profile evolution (non-fatal)
@@ -839,6 +1120,19 @@ async def generate_resume_sse(
         thread_id: Session ID identifying the interrupted graph state.
     """
     config = make_thread_config(thread_id)
+    state_snapshot = await graph.aget_state(config)
+    pending_type = _pending_interrupt_type(state_snapshot)
+    if pending_type == "user_stop":
+        payload = {
+            "type": "run_status",
+            "run_status": RUN_STATUS_STOPPED,
+            "thread_id": thread_id,
+            "resume_available": True,
+            "pending_interrupt_type": "user_stop",
+            "message": "use /threads/{thread_id}/continue for user_stop interrupts",
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
 
     if memory_use_choice:
         resume_value = {"type": "memory_confirmation", "choice": memory_use_choice}
@@ -854,7 +1148,122 @@ async def generate_resume_sse(
         {"request_id": str(uuid.uuid4()), "session_id": thread_id, "thread_id": thread_id},
     )
 
-    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id):
+    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_CONTINUING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+
+    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id, preserve_context_history=True):
+        yield chunk
+
+
+async def get_thread_status_payload(graph, thread_id: str) -> ThreadStatusResponse:
+    config = make_thread_config(thread_id)
+    state_snapshot = await graph.aget_state(config)
+    if not _has_checkpoint_state(state_snapshot):
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return _thread_status_from_snapshot(thread_id, state_snapshot)
+
+
+async def request_thread_stop(graph, thread_id: str, reason: str) -> dict:
+    config = make_thread_config(thread_id)
+    signal = run_control_registry.request_stop(thread_id, reason or "user_stop")
+    values = {
+        "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+        "run_status": RUN_STATUS_STOPPING,
+        "stop_requested": True,
+        "stop_reason": signal.reason,
+        "stop_requested_at": signal.requested_at,
+        "resume_available": False,
+    }
+    await _update_run_state(graph, config, values)
+    emit_a3_trace(
+        logger,
+        "run_stop_requested",
+        {
+            "thread_id": thread_id,
+            "requested_at": signal.requested_at,
+            "reason": signal.reason,
+        },
+        state={"thread_id": thread_id, "session_id": thread_id},
+        env_flag="LOG_A3_TRACE",
+    )
+    return {
+        "ok": True,
+        "thread_id": thread_id,
+        "run_status": RUN_STATUS_STOPPING,
+        "stop_requested": True,
+        "requested_at": signal.requested_at,
+    }
+
+
+async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, None]:
+    config = make_thread_config(thread_id)
+    state_snapshot = await graph.aget_state(config)
+    if not _has_checkpoint_state(state_snapshot):
+        payload = {
+            "type": "run_status",
+            "run_status": RUN_STATUS_NOT_RESUMABLE,
+            "thread_id": thread_id,
+            "resume_available": False,
+            "message": "checkpoint_not_found",
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+
+    pending_type = _pending_interrupt_type(state_snapshot)
+    if pending_type in {"plan_review", "memory_confirmation"}:
+        payload = {
+            "type": "run_status",
+            "run_status": RUN_STATUS_NOT_RESUMABLE,
+            "thread_id": thread_id,
+            "resume_available": False,
+            "pending_interrupt_type": pending_type,
+            "message": "pending HIL interrupt must be resumed with /resume",
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+    if pending_type != "user_stop":
+        payload = {
+            "type": "run_status",
+            "run_status": RUN_STATUS_NOT_RESUMABLE,
+            "thread_id": thread_id,
+            "resume_available": False,
+            "pending_interrupt_type": pending_type,
+            "message": "no pending user_stop interrupt",
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+
+    run_control_registry.clear_stop_signal(thread_id)
+    await _update_run_state(
+        graph,
+        config,
+        {
+            "run_status": RUN_STATUS_CONTINUING,
+            "stop_requested": False,
+            "stop_reason": "",
+            "stop_requested_at": "",
+            "resume_available": False,
+            "pending_interrupt_type": "",
+        },
+    )
+    emit_a3_trace(
+        logger,
+        "run_continue_requested",
+        {
+            "thread_id": thread_id,
+            "pending_interrupt_type": "user_stop",
+        },
+        state={"thread_id": thread_id, "session_id": thread_id},
+        env_flag="LOG_A3_TRACE",
+    )
+    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_CONTINUING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+
+    resume_input = Command(resume={"type": "user_stop", "action": "continue"})
+    _emit_graph_config_trace(
+        graph,
+        config,
+        {"request_id": str(uuid.uuid4()), "session_id": thread_id, "thread_id": thread_id},
+    )
+    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id, preserve_context_history=True):
         yield chunk
 
 
@@ -876,6 +1285,24 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
             req.thread_id,
             memory_use_choice=req.memory_use_choice,
         ),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/threads/{thread_id}/stop")
+async def stop_thread_endpoint(thread_id: str, req: StopRequest, request: Request):
+    return await request_thread_stop(request.app.state.graph, thread_id, req.reason)
+
+
+@app.get("/threads/{thread_id}/status", response_model=ThreadStatusResponse)
+async def thread_status_endpoint(thread_id: str, request: Request):
+    return await get_thread_status_payload(request.app.state.graph, thread_id)
+
+
+@app.post("/threads/{thread_id}/continue")
+async def continue_thread_endpoint(thread_id: str, request: Request):
+    return StreamingResponse(
+        generate_continue_sse(request.app.state.graph, thread_id),
         media_type="text/event-stream",
     )
 

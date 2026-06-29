@@ -27,9 +27,10 @@ import "@xyflow/react/dist/style.css"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
+import type { ContextUsage } from "@/components/chat-area"
 
 export interface LogEntry {
-  type: "info" | "error" | "warning" | "perf" | "usage"
+  type: "info" | "error" | "warning" | "perf" | "usage" | "context"
   message: string
   ts: string
 }
@@ -48,6 +49,7 @@ interface RightPanelProps {
   logs: LogEntry[]
   nodeEvents: NodeEvent[]
   tokenUsage: { input: number; output: number; total: number }
+  contextUsage?: ContextUsage | null
   isInterrupted?: boolean
 }
 
@@ -184,7 +186,7 @@ const NODE_HEIGHT = 38
 
 type DagNodeState = "idle" | "running" | "done" | "error"
 
-export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: RightPanelProps) {
+export function RightPanel({ logs, nodeEvents, tokenUsage, contextUsage, isInterrupted }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [viewTab, setViewTab] = useState<"trail" | "graph">("trail")
   const [isLogsCollapsed, setIsLogsCollapsed] = useState(false)
@@ -329,6 +331,18 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                 </p>
               </div>
             )}
+
+            {contextUsage && (
+              <div className="border-t border-border bg-[var(--surface-muted)]/70 px-4 py-2 pl-12">
+                <div className="flex items-center justify-between gap-2 font-mono text-xs">
+                  <span className="text-primary">Context: {Math.round(contextUsage.usageRatio * 100)}%</span>
+                  <span className="text-muted-foreground">{contextUsage.level}</span>
+                </div>
+                <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+                  {contextUsage.usedTokens}/{contextUsage.maxContextTokens} used, {contextUsage.remainingTokens} left
+                </p>
+              </div>
+            )}
           </div>
 
           {!isLogsCollapsed && (
@@ -367,6 +381,7 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, isInterrupted }: Righ
                           log.type === "warning" && "bg-[var(--warning-soft)] text-[var(--warning)]",
                           log.type === "perf" && "bg-[var(--info-soft)] text-[var(--info)]",
                           log.type === "usage" && "bg-primary/10 text-primary",
+                          log.type === "context" && "bg-[var(--info-soft)] text-[var(--info)]",
                         )}
                       >
                         <span className="shrink-0 opacity-55" suppressHydrationWarning>{log.ts}</span>

@@ -68,6 +68,7 @@ from src.graph.study_plan import (
     study_plan_rewrite,
 )
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
+from src.run_control import wrap_interruptible_node
 
 
 def build_graph() -> StateGraph:
@@ -76,68 +77,71 @@ def build_graph() -> StateGraph:
     # Build graph
     graph = StateGraph(LearningState)
 
+    def add_interruptible_node(node_name: str, node_fn) -> None:
+        graph.add_node(node_name, wrap_interruptible_node(node_name, node_fn))
+
     # Nodes
-    graph.add_node("supervisor", supervisor_node)
+    add_interruptible_node("supervisor", supervisor_node)
 
     # SubGraph A: Academic (parallel retrieval + answer generation)
-    graph.add_node("episodic_memory_retriever", episodic_memory_retriever)
-    graph.add_node("episodic_memory_writer", episodic_memory_writer)
-    graph.add_node("academic_router", academic_router)
-    graph.add_node("memory_use_decider", memory_use_decider)
-    graph.add_node("search_query_rewriter", search_query_rewriter)
-    graph.add_node("rag_retrieve", rag_retrieve)
-    graph.add_node("web_search", web_search)
-    graph.add_node("evidence_judge", evidence_judge)
-    graph.add_node("evidence_summary_output", evidence_summary_output)
-    graph.add_node("generate_answer", generate_answer)
-    graph.add_node("evaluate_hallucination", evaluate_hallucination)
-    graph.add_node("rewrite_query", rewrite_query)
+    add_interruptible_node("episodic_memory_retriever", episodic_memory_retriever)
+    add_interruptible_node("episodic_memory_writer", episodic_memory_writer)
+    add_interruptible_node("academic_router", academic_router)
+    add_interruptible_node("memory_use_decider", memory_use_decider)
+    add_interruptible_node("search_query_rewriter", search_query_rewriter)
+    add_interruptible_node("rag_retrieve", rag_retrieve)
+    add_interruptible_node("web_search", web_search)
+    add_interruptible_node("evidence_judge", evidence_judge)
+    add_interruptible_node("evidence_summary_output", evidence_summary_output)
+    add_interruptible_node("generate_answer", generate_answer)
+    add_interruptible_node("evaluate_hallucination", evaluate_hallucination)
+    add_interruptible_node("rewrite_query", rewrite_query)
 
     # Dynamic curriculum + recommendation + assessment
-    graph.add_node("curriculum_planner", curriculum_planner)
-    graph.add_node("assessment_result_handler", assessment_result_handler)
-    graph.add_node("adaptive_practice_responder", adaptive_practice_responder)
-    graph.add_node("recommendation_provider", recommendation_provider)
+    add_interruptible_node("curriculum_planner", curriculum_planner)
+    add_interruptible_node("assessment_result_handler", assessment_result_handler)
+    add_interruptible_node("adaptive_practice_responder", adaptive_practice_responder)
+    add_interruptible_node("recommendation_provider", recommendation_provider)
 
     # Emotional support
-    graph.add_node("emotional_response", emotional_response)
+    add_interruptible_node("emotional_response", emotional_response)
 
     # Mindmap resource generation
-    graph.add_node("mindmap_planner", mindmap_planner)
-    graph.add_node("mindmap_agent", mindmap_agent)
-    graph.add_node("mindmap_reviewer", mindmap_reviewer)
-    graph.add_node("mindmap_rewrite", mindmap_rewrite)
-    graph.add_node("mindmap_output", mindmap_output)
+    add_interruptible_node("mindmap_planner", mindmap_planner)
+    add_interruptible_node("mindmap_agent", mindmap_agent)
+    add_interruptible_node("mindmap_reviewer", mindmap_reviewer)
+    add_interruptible_node("mindmap_rewrite", mindmap_rewrite)
+    add_interruptible_node("mindmap_output", mindmap_output)
 
     # Exercise resource generation
-    graph.add_node("exercise_planner", exercise_planner)
-    graph.add_node("exercise_agent", exercise_agent)
-    graph.add_node("exercise_reviewer", exercise_reviewer)
-    graph.add_node("exercise_rewrite", exercise_rewrite)
-    graph.add_node("exercise_output", exercise_output)
+    add_interruptible_node("exercise_planner", exercise_planner)
+    add_interruptible_node("exercise_agent", exercise_agent)
+    add_interruptible_node("exercise_reviewer", exercise_reviewer)
+    add_interruptible_node("exercise_rewrite", exercise_rewrite)
+    add_interruptible_node("exercise_output", exercise_output)
 
     # Review document resource generation
-    graph.add_node("review_doc_planner", review_doc_planner)
-    graph.add_node("review_doc_agent", review_doc_agent)
-    graph.add_node("review_doc_reviewer", review_doc_reviewer)
-    graph.add_node("review_doc_rewrite", review_doc_rewrite)
-    graph.add_node("review_doc_output", review_doc_output)
+    add_interruptible_node("review_doc_planner", review_doc_planner)
+    add_interruptible_node("review_doc_agent", review_doc_agent)
+    add_interruptible_node("review_doc_reviewer", review_doc_reviewer)
+    add_interruptible_node("review_doc_rewrite", review_doc_rewrite)
+    add_interruptible_node("review_doc_output", review_doc_output)
 
     # Study plan resource generation
-    graph.add_node("resource_orchestrator", resource_orchestrator)
-    graph.add_node("resource_worker", resource_worker)
-    graph.add_node("resource_bundle_output", resource_bundle_output)
-    graph.add_node("study_plan_emotional_intel", study_plan_emotional_intel)
-    graph.add_node("study_plan_planner", study_plan_planner)
-    graph.add_node("study_plan_agent", study_plan_agent)
-    graph.add_node("study_plan_reviewer_academic", study_plan_reviewer_academic)
-    graph.add_node("study_plan_reviewer_emotional", study_plan_reviewer_emotional)
-    graph.add_node("study_plan_consensus", study_plan_consensus)
-    graph.add_node("study_plan_rewrite", study_plan_rewrite)
-    graph.add_node("study_plan_output", study_plan_output)
+    add_interruptible_node("resource_orchestrator", resource_orchestrator)
+    add_interruptible_node("resource_worker", resource_worker)
+    add_interruptible_node("resource_bundle_output", resource_bundle_output)
+    add_interruptible_node("study_plan_emotional_intel", study_plan_emotional_intel)
+    add_interruptible_node("study_plan_planner", study_plan_planner)
+    add_interruptible_node("study_plan_agent", study_plan_agent)
+    add_interruptible_node("study_plan_reviewer_academic", study_plan_reviewer_academic)
+    add_interruptible_node("study_plan_reviewer_emotional", study_plan_reviewer_emotional)
+    add_interruptible_node("study_plan_consensus", study_plan_consensus)
+    add_interruptible_node("study_plan_rewrite", study_plan_rewrite)
+    add_interruptible_node("study_plan_output", study_plan_output)
 
     # Unknown / off-topic
-    graph.add_node("handle_unknown", handle_unknown)
+    add_interruptible_node("handle_unknown", handle_unknown)
 
     # Edges
     graph.set_entry_point("supervisor")

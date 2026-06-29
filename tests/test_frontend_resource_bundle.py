@@ -20,6 +20,7 @@ def _simulate_resource_final_merge(message: dict, data: dict) -> dict:
     review_doc = data.get("review_doc") or None
     review_doc_artifacts = data.get("review_doc_artifacts") if isinstance(data.get("review_doc_artifacts"), list) else []
     exercise_artifact = data.get("exercise_artifact") or None
+    study_plan = data.get("study_plan") or None
 
     review_docs = [
         {
@@ -63,6 +64,15 @@ def _simulate_resource_final_merge(message: dict, data: dict) -> dict:
             "docxFilename": exercise_artifact.get("docx_filename", ""),
             "docxUrl": _absolute_url(exercise_artifact.get("docx_url")),
         }
+    if study_plan:
+        merged["studyPlan"] = {
+            "title": study_plan.get("title", "Personalized Study Plan"),
+            "filename": study_plan.get("filename", ""),
+            "markdownUrl": _absolute_url(study_plan.get("markdown_url")),
+            "docxFilename": study_plan.get("docx_filename", ""),
+            "docxUrl": _absolute_url(study_plan.get("docx_url")),
+            "markdown": study_plan.get("markdown", ""),
+        }
     return merged
 
 
@@ -73,6 +83,7 @@ def test_page_resource_final_parser_uses_field_presence_not_resource_type():
     assert "const reviewDoc = data.review_doc ?? null" in page_source
     assert "Array.isArray(data.review_doc_artifacts)" in page_source
     assert "const exerciseArtifact = data.exercise_artifact ?? null" in page_source
+    assert "const studyPlan = data.study_plan ?? null" in page_source
     assert 'data.resource_type === "mindmap" ? data.mindmap : null' not in page_source
     assert 'data.resource_type === "review_doc" ? data.review_doc : null' not in page_source
     assert 'data.resource_type === "quiz" ? data.exercise_artifact : null' not in page_source
@@ -116,6 +127,14 @@ def test_simulated_resource_bundle_final_attaches_all_resource_cards():
             "markdown_url": "/artifacts/exercises/e1/python.md",
             "docx_url": "/artifacts/exercises/e1/python.docx",
         },
+        "study_plan": {
+            "title": "Python Study Plan",
+            "filename": "python-plan.md",
+            "docx_filename": "python-plan.docx",
+            "markdown_url": "/artifacts/review-docs/s1/python-plan.md",
+            "docx_url": "/artifacts/review-docs/s1/python-plan.docx",
+            "markdown": "# Python Study Plan",
+        },
     }
 
     merged = _simulate_resource_final_merge(message, data)
@@ -127,3 +146,6 @@ def test_simulated_resource_bundle_final_attaches_all_resource_cards():
     assert merged["mindmap"]["xmindUrl"] == "http://localhost:8000/artifacts/mindmaps/m1/python.xmind"
     assert merged["exercise"]["title"] == "Python 练习题"
     assert merged["exercise"]["docxUrl"] == "http://localhost:8000/artifacts/exercises/e1/python.docx"
+    assert merged["studyPlan"]["title"] == "Python Study Plan"
+    assert merged["studyPlan"]["markdownUrl"] == "http://localhost:8000/artifacts/review-docs/s1/python-plan.md"
+    assert merged["studyPlan"]["markdown"] == "# Python Study Plan"

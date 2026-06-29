@@ -11,6 +11,12 @@ Initial governance report created on 2026-06-20. This is a lightweight text-scan
 
 ## Observed Legacy Risk Areas
 
+### 2026-06-28 Run Control implementation note
+
+- Added `context_budget.model_limits` in `config/settings.yaml` for context telemetry.
+- No provider/model/base_url/api_key literal was added to graph business nodes.
+- Missing or unknown model context windows are surfaced as telemetry warnings instead of code-level hardcoded defaults.
+
 ### `src/graph/llm.py`
 
 - Contains `ChatOpenAI` provider construction.

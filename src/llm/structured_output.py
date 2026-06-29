@@ -47,6 +47,7 @@ from src.llm.schema_manifest import (
     manifest_summary,
     render_manifest_text,
 )
+from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
@@ -1673,6 +1674,21 @@ async def _invoke_one_mode(
     metrics.extra_debug.update(contract_debug)
     if reask_context is not None:
         metrics.extra_debug.update(reask_context.to_debug())
+    try:
+        output_reserved_tokens = int(_setting(llm_node, "max_tokens", None))
+    except (TypeError, ValueError):
+        output_reserved_tokens = None
+    emit_context_usage_trace(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=_provider(llm_node),
+        model=_model(llm_node),
+        messages=messages,
+        state=state or {},
+        output_reserved_tokens=output_reserved_tokens,
+        schema_size_chars=_safe_schema_size_chars(schema),
+    )
 
     # ── constrained_decoding (reserved) ──
     if mode == "constrained_decoding":

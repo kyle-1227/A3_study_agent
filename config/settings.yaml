@@ -88,6 +88,13 @@ checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
+context_budget:
+  enabled: true
+  warn_ratio: 0.70
+  critical_ratio: 0.85
+  model_limits:
+    deepseek-v4-pro: 128000
+
 web_search:
   provider: tavily                       # Web Research executor provider
   timeout_seconds: 120                   # Timeout per web research task

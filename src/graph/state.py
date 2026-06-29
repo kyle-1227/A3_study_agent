@@ -173,6 +173,20 @@ def initial_request_reset_transient_state() -> dict:
         "adaptive_tasks": [],
         "recommendations": [],
         "review_schedule": [],
+        # run control
+        "schema_version": "run_control_v1",
+        "run_status": "running",
+        "stop_requested": False,
+        "stop_reason": "",
+        "stop_requested_at": "",
+        "current_node": "",
+        "last_completed_node": "",
+        "resume_available": False,
+        "stopped_at": "",
+        "pending_interrupt_type": "",
+        # context window telemetry
+        "context_usage": {},
+        "context_usage_history": [],
     }
 
 
@@ -217,6 +231,18 @@ class LearningState(TypedDict):
     request_id: str                                                      # Per-request trace identifier
     session_id: str                                                      # Session identifier for trace grouping
     thread_id: str                                                       # LangGraph thread identifier
+    schema_version: str                                                  # Run-control state schema version
+    run_status: str                                                      # running / stopping / stopped / completed / error
+    stop_requested: bool                                                 # Whether user requested safe stop
+    stop_reason: str                                                     # User-visible safe-stop reason
+    stop_requested_at: str                                               # UTC timestamp for stop request
+    current_node: str                                                    # Current LangGraph node, for status UI
+    last_completed_node: str                                             # Last completed LangGraph node, for status UI
+    resume_available: bool                                               # True only when a real checkpoint interrupt can continue
+    stopped_at: str                                                      # UTC timestamp for saved stop checkpoint
+    pending_interrupt_type: str                                          # user_stop / plan_review / memory_confirmation
+    context_usage: dict                                                  # Most recent LLM context window usage
+    context_usage_history: list[dict]                                    # Current request_id bounded usage history
     intent: Literal["academic", "emotional", "unknown"]    # User intent
     subject: str                                                        # The topic being discussed
     subject_candidates: list[str]                                       # Ordered available-subject candidates

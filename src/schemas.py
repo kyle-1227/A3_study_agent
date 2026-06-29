@@ -24,6 +24,30 @@ class ResumeRequest(BaseModel):
     memory_use_choice: Literal["use", "ignore"] | None = None
 
 
+class StopRequest(BaseModel):
+    """Request a safe stop at the next LangGraph node boundary."""
+
+    reason: str = Field(default="user_stop", max_length=512)
+
+
+class ThreadStatusResponse(BaseModel):
+    """Run-control status for a LangGraph thread checkpoint."""
+
+    thread_id: str
+    schema_version: Literal["run_control_v1", "legacy"]
+    run_status: str
+    resume_available: bool
+    pending_interrupt_type: str = ""
+    current_node: str = ""
+    last_completed_node: str = ""
+    stopped_at: str = ""
+    stop_reason: str = ""
+    context_usage: dict[str, Any] = Field(default_factory=dict)
+    context_usage_history: list[dict[str, Any]] = Field(default_factory=list)
+    missing_run_control_fields: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
 class OnboardRequest(BaseModel):
     """Onboarding wizard data submitted on first login.
 

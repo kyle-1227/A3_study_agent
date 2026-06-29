@@ -19,6 +19,7 @@ import {
   Map,
   Mic,
   PauseCircle,
+  PlayCircle,
   Plus,
   Send,
   SlidersHorizontal,
@@ -39,9 +40,26 @@ export interface Message {
   reviewDoc?: ReviewDocResult
   reviewDocs?: ReviewDocResult[]
   exercise?: ExerciseResult
+  studyPlan?: StudyPlanResult
 }
 
-export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review"
+export interface ContextUsage {
+  node: string
+  llmNode: string
+  provider: string
+  model: string
+  promptTokens: number
+  outputReservedTokens: number
+  usedTokens: number
+  maxContextTokens: number
+  usageRatio: number
+  remainingTokens: number
+  estimated: boolean
+  level: "ok" | "warning" | "critical" | string
+  schemaSizeChars?: number
+}
+
+export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review" | "stopping" | "stopped"
 export type ResourceGenerationStepState = "running" | "done" | "error"
 
 export interface ResourceGenerationStep {
@@ -60,6 +78,7 @@ export interface ResourceGenerationStatus {
   summary: string
   steps: ResourceGenerationStep[]
   tokenUsage: { input: number; output: number; total: number }
+  contextUsage?: ContextUsage | null
   error?: string
   waitingForReview?: boolean
 }
@@ -94,13 +113,34 @@ export interface ExerciseResult {
   docxFilename?: string
 }
 
+export interface StudyPlanResult {
+  title: string
+  markdownUrl?: string
+  docxUrl?: string
+  filename?: string
+  docxFilename?: string
+  markdown?: string
+}
+
 interface ChatAreaProps {
   messages: Message[]
   onSendMessage: (content: string) => void
+  onStopGeneration?: () => void
+  onContinueThread?: () => void
   isLoading?: boolean
+  canContinue?: boolean
+  stopPending?: boolean
 }
 
-export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) {
+export function ChatArea({
+  messages,
+  onSendMessage,
+  onStopGeneration,
+  onContinueThread,
+  isLoading,
+  canContinue,
+  stopPending,
+}: ChatAreaProps) {
   const [input, setInput] = useState("")
   const [isToolsOpen, setIsToolsOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -270,13 +310,20 @@ export function ChatArea({ messages, onSendMessage, isLoading }: ChatAreaProps) 
                 <Mic className="h-5 w-5" />
               </Button>
               <Button
-                type="submit"
+                type={isLoading || canContinue ? "button" : "submit"}
                 size="icon"
-                disabled={!input.trim() || isLoading}
+                onClick={isLoading ? onStopGeneration : canContinue ? onContinueThread : undefined}
+                disabled={isLoading ? stopPending : canContinue ? false : !input.trim()}
                 className="a3-button-primary h-9 w-9 rounded-full disabled:cursor-not-allowed disabled:opacity-50"
-                title="发送"
+                title={isLoading ? "Stop at safe checkpoint" : canContinue ? "Continue from checkpoint" : "Send"}
               >
-                <Send className="h-4 w-4" />
+                {isLoading ? (
+                  <PauseCircle className="h-4 w-4" />
+                ) : canContinue ? (
+                  <PlayCircle className="h-4 w-4" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
               </Button>
             </div>
           </div>
@@ -370,6 +417,12 @@ function MessageBubble({ message }: { message: Message }) {
                 )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
+            {message.studyPlan && (
+              <StudyPlanDownloadCard
+                studyPlan={message.studyPlan}
+                markdownText={message.studyPlan.markdown || message.content}
+              />
+            )}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
@@ -429,6 +482,33 @@ function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseRe
           {exercise.docxUrl && <DownloadButton href={exercise.docxUrl} label="下载 .docx" />}
           <SmallButton
             onClick={() => openReviewDocPrintPage(exercise.title || "练习题", markdownText)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StudyPlanDownloadCard({ studyPlan, markdownText }: { studyPlan: StudyPlanResult; markdownText: string }) {
+  const printableMarkdown = studyPlan.markdown || markdownText
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <GraduationCap className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-primary">学习计划文档</p>
+            <p className="truncate text-xs text-muted-foreground">{studyPlan.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {studyPlan.markdownUrl && <DownloadButton href={studyPlan.markdownUrl} label="下载 .md" />}
+          {studyPlan.docxUrl && <DownloadButton href={studyPlan.docxUrl} label="下载 .docx" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(studyPlan.title || "学习计划", printableMarkdown)}
             label="导出 PDF"
             icon={<FileText className="h-3.5 w-3.5" />}
           />
@@ -635,6 +715,21 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
             <p className="text-xs text-muted-foreground">正在建立学习画像与资源生成任务队列。</p>
           )}
 
+          {status.contextUsage && (
+            <div className="rounded-md border border-border bg-card px-2 py-1.5 text-[11px] text-muted-foreground">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-primary">Context window</span>
+                <span>{Math.round(status.contextUsage.usageRatio * 100)}%</span>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                <span>used {status.contextUsage.usedTokens}</span>
+                <span>max {status.contextUsage.maxContextTokens}</span>
+                <span>remaining {status.contextUsage.remainingTokens}</span>
+                {status.contextUsage.estimated && <span>estimated</span>}
+              </div>
+            </div>
+          )}
+
           {(status.tokenUsage.total > 0 || status.error) && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-[11px] text-muted-foreground">
               {status.tokenUsage.total > 0 && (
@@ -687,6 +782,7 @@ function StatusIcon({ state }: { state: ResourceGenerationState }) {
   const className = "h-4 w-4 mt-0.5 shrink-0"
   if (state === "done") return <CheckCircle2 className={cn(className, "text-[var(--success)]")} />
   if (state === "error") return <CircleAlert className={cn(className, "text-[var(--danger)]")} />
+  if (state === "stopped") return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
   if (state === "waiting_review") return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
   return <Loader2 className={cn(className, "animate-spin text-primary")} />
 }
