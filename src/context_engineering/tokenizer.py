@@ -16,38 +16,34 @@ _TOKENIZER_MODE = "estimated_mixed"
 
 def count_text_tokens(text: str) -> TokenCount:
     """Estimate text tokens with explicit estimated metadata."""
-    mode, estimated = _tokenizer_settings()
-    if mode != _TOKENIZER_MODE:
-        raise ContextConfigError(
-            "tokenizer_mode_unsupported",
-            f"context_engineering.tokenizer.mode must be {_TOKENIZER_MODE}",
-        )
-    if estimated is not True:
-        raise ContextConfigError(
-            "tokenizer_estimated_invalid",
-            "context_engineering.tokenizer.estimated must be true for estimated_mixed",
-        )
-    if not text:
-        return TokenCount(value=0, estimated=True, method=mode)
-
-    cjk_chars = 0
-    other_chars = 0
-    for char in text:
-        if _is_cjk_char(char):
-            cjk_chars += 1
-        else:
-            other_chars += 1
-    value = math.ceil(cjk_chars / 1.5) + math.ceil(other_chars / 3.5)
-    return TokenCount(value=max(value, 1), estimated=True, method=mode)
+    mode = _validated_estimated_mixed_mode()
+    return TokenCount(
+        value=_estimate_mixed_token_value(text),
+        estimated=True,
+        method=mode,
+    )
 
 
 def count_messages_tokens(messages: list[Any]) -> TokenCount:
     """Estimate tokens for a list of message-like objects."""
-    mode, _estimated = _tokenizer_settings()
+    mode = _validated_estimated_mixed_mode()
     total = 0
     for message in messages or []:
-        total += count_text_tokens(message_content_to_text(message)).value
+        total += _estimate_mixed_token_value(message_content_to_text(message))
     return TokenCount(value=total, estimated=True, method=mode)
+
+
+def estimate_text_tokens_mixed(text: str) -> int:
+    """Pure estimated_mixed token estimate without config validation."""
+    return _estimate_mixed_token_value(text)
+
+
+def estimate_messages_tokens_mixed(messages: list[Any]) -> int:
+    """Pure estimated_mixed message estimate without config validation."""
+    total = 0
+    for message in messages or []:
+        total += _estimate_mixed_token_value(message_content_to_text(message))
+    return total
 
 
 def count_schema_chars(schema: type[BaseModel]) -> int:
@@ -122,6 +118,36 @@ def _tokenizer_settings() -> tuple[str, bool]:
             "context_engineering.tokenizer.estimated is required",
         )
     return mode.strip(), estimated
+
+
+def _validated_estimated_mixed_mode() -> str:
+    mode, estimated = _tokenizer_settings()
+    if mode != _TOKENIZER_MODE:
+        raise ContextConfigError(
+            "tokenizer_mode_unsupported",
+            f"context_engineering.tokenizer.mode must be {_TOKENIZER_MODE}",
+        )
+    if estimated is not True:
+        raise ContextConfigError(
+            "tokenizer_estimated_invalid",
+            "context_engineering.tokenizer.estimated must be true for estimated_mixed",
+        )
+    return mode
+
+
+def _estimate_mixed_token_value(text: str) -> int:
+    if not text:
+        return 0
+
+    cjk_chars = 0
+    other_chars = 0
+    for char in text:
+        if _is_cjk_char(char):
+            cjk_chars += 1
+        else:
+            other_chars += 1
+    value = math.ceil(cjk_chars / 1.5) + math.ceil(other_chars / 3.5)
+    return max(value, 1)
 
 
 def _is_cjk_char(char: str) -> bool:

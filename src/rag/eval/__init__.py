@@ -22,6 +22,10 @@ from src.rag.eval.policy_optimizer import (
     SubjectPolicyThresholds,
     optimize_splitter_policy,
 )
+from src.rag.eval.vector_policy_validator import (
+    RetrievalPolicyValidationConfig,
+    validate_retrieval_policies,
+)
 
 __all__ = [
     "ChunkEvaluationConfig",
@@ -30,6 +34,7 @@ __all__ = [
     "ChunkPolicyCandidate",
     "SplitterPolicyOptimizerConfig",
     "SubjectPolicyThresholds",
+    "RetrievalPolicyValidationConfig",
     "chunk_hash",
     "compare_modes",
     "duplicate_flags",
@@ -38,4 +43,5 @@ __all__ = [
     "generate_candidates",
     "optimize_chunking",
     "optimize_splitter_policy",
+    "validate_retrieval_policies",
 ]

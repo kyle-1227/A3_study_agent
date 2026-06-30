@@ -36,10 +36,37 @@ _ALLOWED_ERROR_KEYS = {
     "warning",
 }
 
+_ALLOWED_BREAKDOWN_KEYS = {
+    "input_estimated_tokens",
+    "reserved_output_tokens",
+    "schema_size_chars",
+}
+
 
 def build_context_usage_event(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a sanitized context usage trace payload."""
-    return {key: payload[key] for key in _ALLOWED_USAGE_KEYS if key in payload}
+    event = {
+        key: payload[key]
+        for key in _ALLOWED_USAGE_KEYS
+        if key in payload and key != "breakdown"
+    }
+    if "breakdown" in payload:
+        event["breakdown"] = _safe_breakdown(payload.get("breakdown"))
+    return event
+
+
+def _safe_breakdown(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, int] = {}
+    for key, item in value.items():
+        if (
+            key in _ALLOWED_BREAKDOWN_KEYS
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+        ):
+            safe[key] = item
+    return safe
 
 
 def build_context_usage_error_event(

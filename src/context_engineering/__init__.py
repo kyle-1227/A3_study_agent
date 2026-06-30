@@ -18,6 +18,8 @@ from src.context_engineering.tokenizer import (
     count_messages_tokens,
     count_schema_chars,
     count_text_tokens,
+    estimate_messages_tokens_mixed,
+    estimate_text_tokens_mixed,
     message_content_to_text,
 )
 from src.context_engineering.trace import (
@@ -43,6 +45,8 @@ __all__ = [
     "count_text_tokens",
     "emit_context_usage",
     "emit_context_usage_error",
+    "estimate_messages_tokens_mixed",
+    "estimate_text_tokens_mixed",
     "get_context_engineering_config",
     "get_model_context_limit",
     "message_content_to_text",
