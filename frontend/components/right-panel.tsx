@@ -27,7 +27,7 @@ import "@xyflow/react/dist/style.css"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import type { ContextUsage } from "@/components/chat-area"
+import type { ContextUsage, ContextUsageError } from "@/components/chat-area"
 
 export interface LogEntry {
   type: "info" | "error" | "warning" | "perf" | "usage" | "context"
@@ -50,6 +50,7 @@ interface RightPanelProps {
   nodeEvents: NodeEvent[]
   tokenUsage: { input: number; output: number; total: number }
   contextUsage?: ContextUsage | null
+  contextUsageError?: ContextUsageError | null
   isInterrupted?: boolean
 }
 
@@ -186,7 +187,14 @@ const NODE_HEIGHT = 38
 
 type DagNodeState = "idle" | "running" | "done" | "error"
 
-export function RightPanel({ logs, nodeEvents, tokenUsage, contextUsage, isInterrupted }: RightPanelProps) {
+export function RightPanel({
+  logs,
+  nodeEvents,
+  tokenUsage,
+  contextUsage,
+  contextUsageError,
+  isInterrupted,
+}: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [viewTab, setViewTab] = useState<"trail" | "graph">("trail")
   const [isLogsCollapsed, setIsLogsCollapsed] = useState(false)
@@ -332,15 +340,64 @@ export function RightPanel({ logs, nodeEvents, tokenUsage, contextUsage, isInter
               </div>
             )}
 
-            {contextUsage && (
-              <div className="border-t border-border bg-[var(--surface-muted)]/70 px-4 py-2 pl-12">
-                <div className="flex items-center justify-between gap-2 font-mono text-xs">
-                  <span className="text-primary">Context: {Math.round(contextUsage.usageRatio * 100)}%</span>
-                  <span className="text-muted-foreground">{contextUsage.level}</span>
-                </div>
-                <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                  {contextUsage.usedTokens}/{contextUsage.maxContextTokens} used, {contextUsage.remainingTokens} left
-                </p>
+            {(contextUsage || contextUsageError) && (
+              <div className="border-t border-border bg-[var(--surface-muted)]/70 px-4 py-3 pl-12 font-mono text-[11px]">
+                {contextUsageError ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold text-[var(--warning)]">Context Window unavailable</span>
+                      <span className="text-muted-foreground">{contextUsageError.model || "unknown model"}</span>
+                    </div>
+                    <p className="text-muted-foreground">reason: {contextUsageError.reason}</p>
+                    <p className="text-muted-foreground">warning: {contextUsageError.warning}</p>
+                    {(contextUsageError.node || contextUsageError.llmNode) && (
+                      <p className="text-muted-foreground">
+                        node: {contextUsageError.node || "unknown"} / llm node: {contextUsageError.llmNode || "unknown"}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  contextUsage && (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-semibold text-primary">Context Window</span>
+                        <span className="text-muted-foreground">
+                          {Math.round(contextUsage.usedRatio * 100)}% / {contextUsage.warningLevel}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                        <span>node</span>
+                        <span className="text-right text-foreground">{contextUsage.node || "unknown"}</span>
+                        <span>llm node</span>
+                        <span className="text-right text-foreground">{contextUsage.llmNode || "unknown"}</span>
+                        <span>provider</span>
+                        <span className="text-right text-foreground">{contextUsage.provider || "unknown"}</span>
+                        <span>model</span>
+                        <span className="text-right text-foreground">{contextUsage.model || "unknown"}</span>
+                        <span>input estimated</span>
+                        <span className="text-right text-foreground">{contextUsage.inputEstimatedTokens}</span>
+                        <span>reserved output</span>
+                        <span className="text-right text-foreground">{contextUsage.reservedOutputTokens}</span>
+                        <span>used / max</span>
+                        <span className="text-right text-foreground">
+                          {contextUsage.usedTokens} / {contextUsage.maxContextTokens}
+                        </span>
+                        <span>available</span>
+                        <span className="text-right text-foreground">{contextUsage.availableTokens}</span>
+                        <span>estimated</span>
+                        <span className="text-right text-foreground">{contextUsage.estimated ? "true" : "false"}</span>
+                        <span>tokenizer mode</span>
+                        <span className="text-right text-foreground">{contextUsage.tokenizerMode || "unknown"}</span>
+                        {contextUsage.schemaSizeChars !== undefined && (
+                          <>
+                            <span>schema size</span>
+                            <span className="text-right text-foreground">{contextUsage.schemaSizeChars}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )
+                )}
               </div>
             )}
           </div>

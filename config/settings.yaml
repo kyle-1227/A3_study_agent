@@ -97,6 +97,20 @@ context_budget:
   # Phase 1 should introduce context_engineering.model_limits explicitly.
   model_limits: {}
 
+context_engineering:
+  enabled: true
+  strict: true
+  tokenizer:
+    mode: estimated_mixed
+    estimated: true
+  model_limits:
+    deepseek-v4-pro: 1000000
+  thresholds:
+    warning_ratio: 0.70
+    critical_ratio: 0.85
+    compact_ratio: 0.90
+  default_reserved_output_tokens: 16000
+
 web_search:
   provider: tavily                       # Web Research executor provider
   timeout_seconds: 120                   # Timeout per web research task

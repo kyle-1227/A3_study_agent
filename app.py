@@ -647,15 +647,18 @@ async def _stream_graph_events(
                     "llm_node": event.get("llm_node", ""),
                     "provider": event.get("provider", ""),
                     "model": event.get("model", ""),
-                    "prompt_tokens": event.get("prompt_tokens", 0),
-                    "output_reserved_tokens": event.get("output_reserved_tokens", 0),
+                    "input_estimated_tokens": event.get("input_estimated_tokens", 0),
+                    "reserved_output_tokens": event.get("reserved_output_tokens", 0),
                     "used_tokens": event.get("used_tokens", 0),
                     "max_context_tokens": event.get("max_context_tokens", 0),
-                    "usage_ratio": event.get("usage_ratio", 0),
-                    "remaining_tokens": event.get("remaining_tokens", 0),
+                    "available_tokens": event.get("available_tokens", 0),
+                    "used_ratio": event.get("used_ratio", 0),
+                    "warning_level": event.get("warning_level", "ok"),
                     "estimated": bool(event.get("estimated", True)),
-                    "level": event.get("level", "ok"),
+                    "tokenizer_mode": event.get("tokenizer_mode", ""),
+                    "message_count": event.get("message_count", 0),
                     "schema_size_chars": event.get("schema_size_chars"),
+                    "breakdown": event.get("breakdown") if isinstance(event.get("breakdown"), dict) else {},
                 }
                 context_usage_history.append(payload)
                 context_usage_history[:] = trim_context_usage_history(context_usage_history)

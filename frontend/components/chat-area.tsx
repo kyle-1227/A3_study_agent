@@ -48,15 +48,26 @@ export interface ContextUsage {
   llmNode: string
   provider: string
   model: string
-  promptTokens: number
-  outputReservedTokens: number
+  inputEstimatedTokens: number
+  reservedOutputTokens: number
   usedTokens: number
   maxContextTokens: number
-  usageRatio: number
-  remainingTokens: number
+  availableTokens: number
+  usedRatio: number
+  warningLevel: "ok" | "warning" | "critical" | "overflow" | string
   estimated: boolean
-  level: "ok" | "warning" | "critical" | string
+  tokenizerMode: string
+  messageCount: number
   schemaSizeChars?: number
+}
+
+export interface ContextUsageError {
+  node: string
+  llmNode: string
+  provider: string
+  model: string
+  reason: string
+  warning: string
 }
 
 export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review" | "stopping" | "stopped"
@@ -719,12 +730,12 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
             <div className="rounded-md border border-border bg-card px-2 py-1.5 text-[11px] text-muted-foreground">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-medium text-primary">Context window</span>
-                <span>{Math.round(status.contextUsage.usageRatio * 100)}%</span>
+                <span>{Math.round(status.contextUsage.usedRatio * 100)}%</span>
               </div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
                 <span>used {status.contextUsage.usedTokens}</span>
                 <span>max {status.contextUsage.maxContextTokens}</span>
-                <span>remaining {status.contextUsage.remainingTokens}</span>
+                <span>available {status.contextUsage.availableTokens}</span>
                 {status.contextUsage.estimated && <span>estimated</span>}
               </div>
             </div>

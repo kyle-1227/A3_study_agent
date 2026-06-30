@@ -8,6 +8,7 @@ import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
   ContextUsage,
+  ContextUsageError,
   Message,
   ResourceGenerationStatus,
   ResourceGenerationStep,
@@ -109,21 +110,48 @@ function timestamp(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
 }
 
+function numberField(data: any, key: string, legacyKey?: string): number {
+  if (typeof data[key] === "number") return data[key]
+  if (legacyKey && typeof data[legacyKey] === "number") return data[legacyKey]
+  return 0
+}
+
 function mapContextUsage(data: any): ContextUsage {
   return {
     node: typeof data.node === "string" ? data.node : "",
     llmNode: typeof data.llm_node === "string" ? data.llm_node : "",
     provider: typeof data.provider === "string" ? data.provider : "",
     model: typeof data.model === "string" ? data.model : "",
-    promptTokens: typeof data.prompt_tokens === "number" ? data.prompt_tokens : 0,
-    outputReservedTokens: typeof data.output_reserved_tokens === "number" ? data.output_reserved_tokens : 0,
-    usedTokens: typeof data.used_tokens === "number" ? data.used_tokens : 0,
-    maxContextTokens: typeof data.max_context_tokens === "number" ? data.max_context_tokens : 0,
-    usageRatio: typeof data.usage_ratio === "number" ? data.usage_ratio : 0,
-    remainingTokens: typeof data.remaining_tokens === "number" ? data.remaining_tokens : 0,
+    inputEstimatedTokens: numberField(data, "input_estimated_tokens", "prompt_tokens"),
+    reservedOutputTokens: numberField(data, "reserved_output_tokens", "output_reserved_tokens"),
+    usedTokens: numberField(data, "used_tokens"),
+    maxContextTokens: numberField(data, "max_context_tokens"),
+    availableTokens: numberField(data, "available_tokens", "remaining_tokens"),
+    usedRatio: numberField(data, "used_ratio", "usage_ratio"),
+    warningLevel:
+      typeof data.warning_level === "string"
+        ? data.warning_level
+        : typeof data.level === "string"
+          ? data.level
+          : "ok",
     estimated: Boolean(data.estimated),
-    level: typeof data.level === "string" ? data.level : "ok",
+    tokenizerMode: typeof data.tokenizer_mode === "string" ? data.tokenizer_mode : "",
+    messageCount: numberField(data, "message_count"),
     schemaSizeChars: typeof data.schema_size_chars === "number" ? data.schema_size_chars : undefined,
+  }
+}
+
+function mapContextUsageError(data: any): ContextUsageError {
+  return {
+    node: typeof data.node === "string" ? data.node : "",
+    llmNode: typeof data.llm_node === "string" ? data.llm_node : "",
+    provider: typeof data.provider === "string" ? data.provider : "",
+    model: typeof data.model === "string" ? data.model : "",
+    reason: typeof data.reason === "string" ? data.reason : "context_usage_unavailable",
+    warning:
+      typeof data.warning === "string"
+        ? data.warning
+        : "context usage telemetry unavailable",
   }
 }
 
@@ -221,6 +249,7 @@ export default function Home() {
   const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([])
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
+  const [contextUsageError, setContextUsageError] = useState<ContextUsageError | null>(null)
   const [canContinue, setCanContinue] = useState(false)
   const [stopPending, setStopPending] = useState(false)
 
@@ -338,6 +367,7 @@ export default function Home() {
     setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsage(null)
+    setContextUsageError(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -354,6 +384,7 @@ export default function Home() {
     setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
     setNodeEvents([])
     setContextUsage(null)
+    setContextUsageError(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -381,6 +412,7 @@ export default function Home() {
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsage(null)
+    setContextUsageError(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -554,6 +586,7 @@ export default function Home() {
     if (data.type === "context_usage") {
       const usage = mapContextUsage(data)
       setContextUsage(usage)
+      setContextUsageError(null)
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         contextUsage: usage,
@@ -562,7 +595,7 @@ export default function Home() {
         ...prev,
         {
           type: "context",
-          message: `[CONTEXT] ${usage.node || usage.llmNode}: ${Math.round(usage.usageRatio * 100)}% used, ${usage.remainingTokens} left`,
+          message: `[CONTEXT] ${usage.node || usage.llmNode}: ${Math.round(usage.usedRatio * 100)}% used, ${usage.availableTokens} available`,
           ts: timestamp(),
         },
       ])
@@ -570,11 +603,14 @@ export default function Home() {
     }
 
     if (data.type === "context_usage_error") {
+      const usageError = mapContextUsageError(data)
+      setContextUsage(null)
+      setContextUsageError(usageError)
       setLogs((prev) => [
         ...prev,
         {
           type: "warning",
-          message: `[CONTEXT] ${data.reason || "unavailable"}: ${data.warning || "context usage telemetry unavailable"}`,
+          message: `[CONTEXT] ${usageError.reason}: ${usageError.warning}`,
           ts: timestamp(),
         },
       ])
@@ -1084,6 +1120,7 @@ export default function Home() {
         ? mapContextUsage(status.context_usage)
         : null
       setContextUsage(usage)
+      if (usage) setContextUsageError(null)
       setCanContinue(Boolean(status.resume_available && status.pending_interrupt_type === "user_stop"))
       if (status.schema_version === "legacy") {
         setLogs((prev) => [
@@ -1118,6 +1155,7 @@ export default function Home() {
     setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsage(null)
+    setContextUsageError(null)
     setCanContinue(false)
     setStopPending(false)
     clearStopTimeout()
@@ -1533,6 +1571,7 @@ export default function Home() {
         nodeEvents={nodeEvents}
         tokenUsage={tokenUsage}
         contextUsage={contextUsage}
+        contextUsageError={contextUsageError}
         isInterrupted={isInterrupted}
       />
     </div>

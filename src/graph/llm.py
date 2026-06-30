@@ -551,11 +551,6 @@ async def invoke_plain_llm_fail_fast(
         "prompt_chars": _message_content_chars(messages or []),
         "fallback_used": False,
     }
-    configured_max_tokens = get_setting(f"llm.{llm_node}.max_tokens", get_setting(f"{llm_node}.max_tokens", None))
-    try:
-        output_reserved_tokens = int(configured_max_tokens) if configured_max_tokens is not None else None
-    except (TypeError, ValueError):
-        output_reserved_tokens = None
     emit_context_usage_trace(
         logger,
         node_name=node_name,
@@ -564,7 +559,6 @@ async def invoke_plain_llm_fail_fast(
         model=str(model or ""),
         messages=messages or [],
         state=state or {},
-        output_reserved_tokens=output_reserved_tokens,
     )
     max_retries = get_llm_call_max_retries(node_name)
     retry_count = 0

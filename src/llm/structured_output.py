@@ -47,6 +47,7 @@ from src.llm.schema_manifest import (
     manifest_summary,
     render_manifest_text,
 )
+from src.context_engineering.tokenizer import count_schema_chars
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
 
@@ -441,11 +442,8 @@ def _compute_prompt_chars(messages: list) -> int:
 
 
 def _safe_schema_size_chars(schema: type[BaseModel]) -> int:
-    """Return JSON Schema size for diagnostics. Never raise."""
-    try:
-        return len(json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str))
-    except Exception:
-        return 0
+    """Return JSON Schema size for diagnostics via Context Engineering."""
+    return count_schema_chars(schema)
 
 
 _DEEPSEEK_SAFE_SCHEMA_KEYS = {
@@ -1674,10 +1672,6 @@ async def _invoke_one_mode(
     metrics.extra_debug.update(contract_debug)
     if reask_context is not None:
         metrics.extra_debug.update(reask_context.to_debug())
-    try:
-        output_reserved_tokens = int(_setting(llm_node, "max_tokens", None))
-    except (TypeError, ValueError):
-        output_reserved_tokens = None
     emit_context_usage_trace(
         logger,
         node_name=node_name,
@@ -1686,7 +1680,6 @@ async def _invoke_one_mode(
         model=_model(llm_node),
         messages=messages,
         state=state or {},
-        output_reserved_tokens=output_reserved_tokens,
         schema_size_chars=_safe_schema_size_chars(schema),
     )
 

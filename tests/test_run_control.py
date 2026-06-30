@@ -93,36 +93,37 @@ async def test_stop_gate_checks_before_original_node(monkeypatch):
     assert calls == ["interrupt:user_stop:guarded_node", "node"]
 
 
-def test_context_budget_missing_returns_error_event(monkeypatch):
+def test_context_engineering_missing_config_fails_fast(monkeypatch):
+    import src.context_engineering.budget as budget
+    import src.observability.context_usage as context_usage
+    from src.context_engineering.schema import ContextConfigError
+
+    monkeypatch.setattr(budget, "get_setting", lambda key, default=None: default)
+
+    with pytest.raises(ContextConfigError, match="context_engineering_missing"):
+        context_usage.build_context_usage_payload(
+            node_name="node",
+            llm_node="llm",
+            provider="provider",
+            model="model",
+            messages=[],
+        )
+
+
+def test_context_engineering_non_strict_unknown_model_returns_error_event(monkeypatch):
+    import src.context_engineering.budget as budget
     import src.observability.context_usage as context_usage
 
-    monkeypatch.setattr(context_usage, "get_setting", lambda key: None)
+    def fake_get_setting(key, default=None):
+        if key == "context_engineering":
+            return {
+                "enabled": True,
+                "strict": False,
+                "model_limits": {"known-model": 1000},
+            }
+        return default
 
-    stage, payload = context_usage.build_context_usage_payload(
-        node_name="node",
-        llm_node="llm",
-        provider="provider",
-        model="model",
-        messages=[],
-    )
-
-    assert stage == "context_usage_error"
-    assert payload["reason"] == "context_budget_missing"
-
-
-def test_context_budget_unknown_model_returns_error_event(monkeypatch):
-    import src.observability.context_usage as context_usage
-
-    monkeypatch.setattr(
-        context_usage,
-        "get_setting",
-        lambda key: {
-            "enabled": True,
-            "warn_ratio": 0.7,
-            "critical_ratio": 0.85,
-            "model_limits": {"known-model": 1000},
-        },
-    )
+    monkeypatch.setattr(budget, "get_setting", fake_get_setting)
 
     stage, payload = context_usage.build_context_usage_payload(
         node_name="node",
@@ -287,14 +288,20 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
                 "llm_node": "study_plan",
                 "provider": "deepseek_official",
                 "model": "synthetic-model",
-                "prompt_tokens": 100,
-                "output_reserved_tokens": 20,
+                "input_estimated_tokens": 100,
+                "reserved_output_tokens": 20,
                 "used_tokens": 120,
                 "max_context_tokens": 64000,
-                "usage_ratio": 0.001,
-                "remaining_tokens": 63880,
+                "available_tokens": 63880,
+                "used_ratio": 0.001,
+                "warning_level": "ok",
                 "estimated": True,
-                "level": "ok",
+                "tokenizer_mode": "estimated_mixed",
+                "message_count": 2,
+                "breakdown": {
+                    "input_estimated_tokens": 100,
+                    "reserved_output_tokens": 20,
+                },
             },
             state={"request_id": "r1", "thread_id": "thread-1"},
         )

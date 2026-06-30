@@ -131,16 +131,28 @@ async def test_resume_keeps_basic_stream_path():
     assert payloads[-1] == {"type": "done"}
 
 
-def test_deepseek_model_window_is_unknown_after_phase0_config_cleanup():
-    from src.config import clear_cache
+def test_unknown_model_window_emits_error_when_context_engineering_is_non_strict(
+    monkeypatch,
+):
+    import src.context_engineering.budget as budget
     from src.observability.context_usage import build_context_usage_payload
 
-    clear_cache()
+    def fake_get_setting(key, default=None):
+        if key == "context_engineering":
+            return {
+                "enabled": True,
+                "strict": False,
+                "model_limits": {"deepseek-v4-pro": 1000000},
+            }
+        return default
+
+    monkeypatch.setattr(budget, "get_setting", fake_get_setting)
+
     stage, payload = build_context_usage_payload(
         node_name="study_plan_agent",
         llm_node="study_plan",
         provider="deepseek_official",
-        model="deepseek-v4-pro",
+        model="unknown-model",
         messages=[],
     )
 
