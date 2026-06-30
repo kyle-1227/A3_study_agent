@@ -166,15 +166,23 @@ python scripts/build_index.py
 
 #### 启动服务
 
-```bash
-# 终端 1：后端
-uvicorn app:app --reload --port 8000
+后端和前端需要分别打开两个终端运行。
 
-# 终端 2：前端
+**终端 1：后端**
+
+```bash
+uvicorn app:app --reload --port 8000
+```
+
+**终端 2：前端**
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
+
+注意：`pytest tests/test_security.py -q` 是后端测试命令，不要放在前端启动终端里。
 
 ## 项目结构
 
@@ -200,12 +208,26 @@ A3_study_agent/
 
 ## 测试
 
+后端测试：
+
 ```bash
 python -m pytest tests/test_config.py tests/test_app.py tests/test_rag.py tests/test_tracing.py -v
+python -m pytest tests/test_security.py -q
+```
 
-# 如果环境允许：
+如果环境允许，可以运行完整后端测试：
+
+```bash
 python -m pytest -q
-cd frontend && npm run build
+```
+
+前端检查：
+
+```bash
+cd frontend
+npm run lint
+.\node_modules\.bin\tsc.cmd --noEmit
+npm run build
 ```
 
 ## License

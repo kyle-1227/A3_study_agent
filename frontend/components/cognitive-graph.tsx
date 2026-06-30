@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import {
-  ReactFlow, Node, Edge, Background, Controls,
+  ReactFlow, Background, Controls,
   useNodesState, useEdgesState, MarkerType,
 } from "@xyflow/react";
+import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -64,8 +65,8 @@ function cogToFlowEdge(e: CogEdge): Edge {
 export default function CognitiveGraph({ userId, subject = "" }: { userId: string; subject?: string }) {
   const [data, setData] = useState<CogGraph | null>(null);
   const [loading, setLoading] = useState(true);
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   useEffect(() => {
     const params = new URLSearchParams({ subject });
