@@ -59,6 +59,33 @@ PROVIDER_RETRY_TRACE_STAGES = {
     "provider_transport_error",
     "final_failure_after_retries",
 }
+CONTEXT_TOP_ITEM_FIELDS = {
+    "id",
+    "source_type",
+    "title",
+    "token_estimate",
+    "priority",
+    "scope",
+    "lifetime",
+    "disclosure_level",
+}
+
+
+def _safe_context_top_items(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    safe_items: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        safe_items.append(
+            {
+                key: item[key]
+                for key in CONTEXT_TOP_ITEM_FIELDS
+                if key in item
+            }
+        )
+    return safe_items
 
 
 def _graph_checkpointer_type(graph) -> str:
@@ -682,6 +709,34 @@ async def _stream_graph_events(
                     "model": event.get("model", ""),
                     "reason": event.get("reason", ""),
                     "warning": event.get("warning", "context usage telemetry unavailable"),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_items_collected":
+                payload = {
+                    "type": "context_items_collected",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "provider_count": event.get("provider_count", 0),
+                    "item_count": event.get("item_count", 0),
+                    "source_counts": event.get("source_counts")
+                    if isinstance(event.get("source_counts"), dict)
+                    else {},
+                    "total_estimated_tokens": event.get("total_estimated_tokens", 0),
+                    "top_items": _safe_context_top_items(event.get("top_items")),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_provider_error":
+                payload = {
+                    "type": "context_provider_error",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "provider": event.get("provider", ""),
+                    "source_type": event.get("source_type", ""),
+                    "provider_stage": event.get("provider_stage", ""),
+                    "error_type": event.get("error_type", ""),
+                    "error_reason": event.get("error_reason", ""),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
         return drained

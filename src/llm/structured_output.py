@@ -47,6 +47,7 @@ from src.llm.schema_manifest import (
     manifest_summary,
     render_manifest_text,
 )
+from src.context_engineering.providers import emit_context_items_shadow
 from src.context_engineering.tokenizer import count_schema_chars
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
@@ -1681,6 +1682,13 @@ async def _invoke_one_mode(
         messages=messages,
         state=state or {},
         schema_size_chars=_safe_schema_size_chars(schema),
+    )
+    emit_context_items_shadow(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        messages=messages,
+        state=state or {},
     )
 
     # ── constrained_decoding (reserved) ──

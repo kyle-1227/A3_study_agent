@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from src.context_engineering.budget import build_context_usage_payload
+from src.context_engineering.schema import ContextItem, ContextProviderError
 from src.observability.a3_trace import emit_a3_trace
 
 _ALLOWED_USAGE_KEYS = {
@@ -40,6 +41,17 @@ _ALLOWED_BREAKDOWN_KEYS = {
     "input_estimated_tokens",
     "reserved_output_tokens",
     "schema_size_chars",
+}
+
+_ALLOWED_TOP_ITEM_KEYS = {
+    "id",
+    "source_type",
+    "title",
+    "token_estimate",
+    "priority",
+    "scope",
+    "lifetime",
+    "disclosure_level",
 }
 
 
@@ -89,6 +101,56 @@ def build_context_usage_error_event(
     }
 
 
+def build_context_items_collected_event(
+    *,
+    node_name: str,
+    llm_node: str,
+    provider_count: int,
+    items: list[ContextItem],
+    trace_top_items: int,
+) -> dict[str, Any]:
+    """Return a safe context item collection summary."""
+    source_counts: dict[str, int] = {}
+    total_estimated_tokens = 0
+    for item in items:
+        source_counts[item.source_type] = source_counts.get(item.source_type, 0) + 1
+        total_estimated_tokens += item.token_estimate
+    return {
+        "node_name": node_name,
+        "llm_node": llm_node,
+        "provider_count": provider_count,
+        "item_count": len(items),
+        "source_counts": source_counts,
+        "total_estimated_tokens": total_estimated_tokens,
+        "top_items": [
+            _safe_top_item(item) for item in items[: max(trace_top_items, 0)]
+        ],
+    }
+
+
+def build_context_provider_error_event(
+    *,
+    node_name: str,
+    llm_node: str,
+    error: ContextProviderError,
+) -> dict[str, Any]:
+    """Return a safe provider error summary."""
+    return {
+        "node_name": node_name,
+        "llm_node": llm_node,
+        "provider": error.provider,
+        "source_type": error.source_type,
+        "provider_stage": error.stage,
+        "error_type": error.original_exception_type or type(error).__name__,
+        "error_reason": error.sanitized_message,
+    }
+
+
+def _safe_top_item(item: ContextItem) -> dict[str, Any]:
+    raw = item.model_dump()
+    return {key: raw[key] for key in _ALLOWED_TOP_ITEM_KEYS if key in raw}
+
+
 def emit_context_usage(
     logger: logging.Logger,
     *,
@@ -127,6 +189,54 @@ def emit_context_usage(
         env_flag="LOG_A3_TRACE",
     )
     return stage, safe_payload
+
+
+def emit_context_items_collected(
+    logger: logging.Logger,
+    *,
+    node_name: str,
+    llm_node: str,
+    provider_count: int,
+    items: list[ContextItem],
+    trace_top_items: int,
+    state: dict | None,
+) -> None:
+    """Emit a safe context_items_collected event."""
+    emit_a3_trace(
+        logger,
+        "context_items_collected",
+        build_context_items_collected_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            provider_count=provider_count,
+            items=items,
+            trace_top_items=trace_top_items,
+        ),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def emit_context_provider_error(
+    logger: logging.Logger,
+    *,
+    error: ContextProviderError,
+    node_name: str,
+    llm_node: str,
+    state: dict | None,
+) -> None:
+    """Emit a safe context_provider_error event."""
+    emit_a3_trace(
+        logger,
+        "context_provider_error",
+        build_context_provider_error_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            error=error,
+        ),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
 
 
 def emit_context_usage_error(

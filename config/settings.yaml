@@ -110,6 +110,22 @@ context_engineering:
     critical_ratio: 0.85
     compact_ratio: 0.90
   default_reserved_output_tokens: 16000
+  providers:
+    enabled: true
+    shadow_mode: true
+    strict: false
+    enabled_sources:
+      - message
+      - memory
+      - evidence
+      - profile
+      - rules
+      - artifact
+      - trajectory
+      - curriculum
+    max_items_per_provider: 10
+    max_content_chars_per_item: 4000
+    trace_top_items: 10
 
 web_search:
   provider: tavily                       # Web Research executor provider
