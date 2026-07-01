@@ -144,6 +144,23 @@ context_engineering:
       - artifact
       - trajectory
       - curriculum
+    apply:
+      enabled: false
+      apply_enabled_nodes: []
+      fallback_on_error: true
+      allow_structured_output: false
+      role: system
+      position: after_system
+      exclude_message_source: true
+      max_injected_context_tokens: 80000
+      injectable_sources:
+        - rules
+        - evidence
+        - memory
+        - profile
+        - artifact
+        - trajectory
+        - curriculum
 
 web_search:
   provider: tavily                       # Web Research executor provider

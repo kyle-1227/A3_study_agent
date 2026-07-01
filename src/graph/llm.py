@@ -19,7 +19,17 @@ from langchain_openai import ChatOpenAI
 import httpx
 
 from src.config import get_setting
-from src.context_engineering.packing import emit_context_packing_shadow
+from src.context_engineering.packing import (
+    ContextApplyError,
+    apply_node_enabled,
+    build_applied_messages,
+    emit_context_applied,
+    emit_context_apply_error,
+    emit_context_apply_plan,
+    emit_context_packing_shadow,
+    filter_injectable_items,
+    get_context_injection_policy,
+)
 from src.context_engineering.providers import emit_context_items_shadow
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
@@ -543,45 +553,155 @@ async def invoke_plain_llm_fail_fast(
 ) -> str:
     """Invoke a plain-text LLM call with diagnostics and no implicit fallback."""
     llm = get_node_llm(llm_node)
-    model = get_setting(f"llm.{llm_node}.model", get_setting(f"{llm_node}.model", getattr(llm, "model_name", "")))
-    provider = get_setting(f"llm.{llm_node}.provider", get_setting(f"{llm_node}.provider", ""))
+    model = get_setting(
+        f"llm.{llm_node}.model",
+        get_setting(f"{llm_node}.model", getattr(llm, "model_name", "")),
+    )
+    provider = get_setting(
+        f"llm.{llm_node}.provider",
+        get_setting(f"{llm_node}.provider", ""),
+    )
     if temperature is None:
-        temperature = get_setting(f"llm.{llm_node}.temperature", get_setting(f"{llm_node}.temperature", 0.7))
-    max_chars = int(max_raw_chars or get_setting(f"llm_outputs.{node_name}.max_raw_chars", 12000) or 12000)
+        temperature = get_setting(
+            f"llm.{llm_node}.temperature",
+            get_setting(f"{llm_node}.temperature", 0.7),
+        )
+    max_chars = int(
+        max_raw_chars
+        or get_setting(f"llm_outputs.{node_name}.max_raw_chars", 12000)
+        or 12000
+    )
     started = time.perf_counter()
+    original_messages = messages or []
+    state_payload = state or {}
+    messages_for_llm = original_messages
+    context_apply_applied = False
+    context_apply_fallback_used = False
+    try:
+        apply_policy = get_context_injection_policy(
+            node_name=node_name,
+            llm_node=llm_node,
+        )
+        should_apply = apply_node_enabled(apply_policy, node_name=node_name)
+    except ContextApplyError as exc:
+        exc.fallback_used = True
+        apply_policy = None
+        should_apply = False
+        context_apply_fallback_used = True
+        emit_context_apply_error(logger, error=exc, state=state_payload)
+
+    if not should_apply:
+        emit_context_usage_trace(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            messages=messages_for_llm,
+            state=state_payload,
+        )
+        context_items = emit_context_items_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=original_messages,
+            state=state_payload,
+        )
+        emit_context_packing_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            items=context_items,
+            state=state_payload,
+        )
+    else:
+        assert apply_policy is not None
+        context_items = emit_context_items_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=original_messages,
+            state=state_payload,
+        )
+        packed = emit_context_packing_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            items=context_items,
+            state=state_payload,
+        )
+        try:
+            if packed is None:
+                raise ContextApplyError(
+                    reason="packed_context_missing",
+                    warning="context packing did not produce a PackedContext",
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    fallback_used=apply_policy.fallback_on_error,
+                )
+            injectable_items, skipped_items = filter_injectable_items(
+                packed=packed,
+                policy=apply_policy,
+            )
+            emit_context_apply_plan(
+                logger,
+                node_name=node_name,
+                llm_node=llm_node,
+                policy=apply_policy,
+                original_message_count=len(original_messages),
+                selected_item_count=len(packed.selected_items),
+                injectable_item_count=len(injectable_items),
+                skipped_item_count=len(skipped_items),
+                state=state_payload,
+            )
+            apply_result = build_applied_messages(
+                node_name=node_name,
+                llm_node=llm_node,
+                original_messages=original_messages,
+                packed=packed,
+                policy=apply_policy,
+            )
+            emit_context_applied(
+                logger,
+                node_name=node_name,
+                llm_node=llm_node,
+                policy=apply_policy,
+                result=apply_result,
+                state=state_payload,
+            )
+            if apply_result.applied:
+                messages_for_llm = apply_result.final_messages
+            context_apply_applied = apply_result.applied
+            context_apply_fallback_used = apply_result.fallback_used
+        except ContextApplyError as exc:
+            exc.fallback_used = apply_policy.fallback_on_error
+            emit_context_apply_error(logger, error=exc, state=state_payload)
+            if not apply_policy.fallback_on_error:
+                raise
+            messages_for_llm = original_messages
+            context_apply_fallback_used = True
+        emit_context_usage_trace(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            messages=messages_for_llm,
+            state=state_payload,
+        )
+
     base_payload = {
         "node_name": node_name,
         "llm_node": llm_node,
         "provider": provider,
         "model": model,
         "temperature": temperature,
-        "message_count": len(messages or []),
-        "prompt_chars": _message_content_chars(messages or []),
+        "message_count": len(messages_for_llm),
+        "prompt_chars": _message_content_chars(messages_for_llm),
         "fallback_used": False,
+        "context_apply_applied": context_apply_applied,
+        "context_apply_fallback_used": context_apply_fallback_used,
     }
-    emit_context_usage_trace(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        provider=str(provider or ""),
-        model=str(model or ""),
-        messages=messages or [],
-        state=state or {},
-    )
-    context_items = emit_context_items_shadow(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        messages=messages or [],
-        state=state or {},
-    )
-    emit_context_packing_shadow(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        items=context_items,
-        state=state or {},
-    )
     max_retries = get_llm_call_max_retries(node_name)
     retry_count = 0
     total_transport_retry_count = 0
@@ -589,12 +709,12 @@ async def invoke_plain_llm_fail_fast(
     while True:
         try:
             result, transport_retry_count = await invoke_with_provider_transport_retry(
-                lambda: llm.ainvoke(messages),
+                lambda: llm.ainvoke(messages_for_llm),
                 node_name=node_name,
                 llm_node=llm_node,
                 provider=provider,
                 model=model,
-                state=state or {},
+                state=state_payload,
             )
             total_transport_retry_count += transport_retry_count
             raw = str(getattr(result, "content", result) or "")
@@ -617,7 +737,7 @@ async def invoke_plain_llm_fail_fast(
                     "retry_count": retry_count,
                     "max_retries": max_retries,
                 },
-                state=state or {},
+                state=state_payload,
                 env_flag="LOG_A3_TRACE",
             )
             return raw.strip()
@@ -640,7 +760,7 @@ async def invoke_plain_llm_fail_fast(
                         "error_message": str(exc)[:max_chars],
                         "provider_transport_retry_count": total_transport_retry_count,
                     },
-                    state=state or {},
+                    state=state_payload,
                     env_flag="LOG_A3_TRACE",
                 )
                 continue
@@ -657,12 +777,15 @@ async def invoke_plain_llm_fail_fast(
                     "raw_output": "",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc)[:max_chars],
-                    "provider_error_body": _provider_error_body(exc, max_chars=max_chars),
+                    "provider_error_body": _provider_error_body(
+                        exc,
+                        max_chars=max_chars,
+                    ),
                     "provider_transport_retry_count": total_transport_retry_count,
                     "retry_count": retry_count,
                     "max_retries": max_retries,
                 },
-                state=state or {},
+                state=state_payload,
                 env_flag="LOG_A3_TRACE",
             )
             raise

@@ -955,6 +955,58 @@ async def _stream_graph_events(
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
+            if stage == "context_apply_plan":
+                payload = {
+                    "type": "context_apply_plan",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "apply_enabled": bool(event.get("apply_enabled", False)),
+                    "original_message_count": event.get("original_message_count", 0),
+                    "selected_item_count": event.get("selected_item_count", 0),
+                    "injectable_item_count": event.get("injectable_item_count", 0),
+                    "skipped_item_count": event.get("skipped_item_count", 0),
+                    "injection_role": event.get("injection_role", ""),
+                    "injection_position": event.get("injection_position", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_applied":
+                payload = {
+                    "type": "context_applied",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "applied": bool(event.get("applied", False)),
+                    "fallback_used": bool(event.get("fallback_used", False)),
+                    "original_message_count": event.get("original_message_count", 0),
+                    "final_message_count": event.get("final_message_count", 0),
+                    "injected_items_count": event.get("injected_items_count", 0),
+                    "skipped_items_count": event.get("skipped_items_count", 0),
+                    "injected_context_tokens": event.get(
+                        "injected_context_tokens", 0
+                    ),
+                    "injection_role": event.get("injection_role", ""),
+                    "injection_position": event.get("injection_position", ""),
+                    "warnings": [
+                        sanitize_error_message(warning)
+                        for warning in event.get("warnings", [])
+                    ]
+                    if isinstance(event.get("warnings"), list)
+                    else [],
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_apply_error":
+                payload = {
+                    "type": "context_apply_error",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "reason": event.get("reason", ""),
+                    "warning": sanitize_error_message(event.get("warning", "")),
+                    "fallback_used": bool(event.get("fallback_used", False)),
+                    "error_type": event.get("error_type", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
         return drained
 
     try:
