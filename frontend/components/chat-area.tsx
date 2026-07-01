@@ -40,6 +40,9 @@ export interface Message {
   reviewDoc?: ReviewDocResult
   reviewDocs?: ReviewDocResult[]
   exercise?: ExerciseResult
+  codePractice?: CodePracticeResult
+  videoScript?: VideoScriptResult
+  videoAnimation?: VideoAnimationResult
   studyPlan?: StudyPlanResult
 }
 
@@ -122,6 +125,46 @@ export interface ExerciseResult {
   docxUrl?: string
   filename?: string
   docxFilename?: string
+}
+
+export interface CodePracticeResult {
+  title: string
+  markdownUrl?: string
+  docxUrl?: string
+  pythonUrl?: string
+  markdown?: string
+  filename?: string
+  docxFilename?: string
+  pythonFilename?: string
+}
+
+export interface VideoScriptResult {
+  title: string
+  markdownUrl?: string
+  docxUrl?: string
+  srtUrl?: string
+  markdown?: string
+  srt?: string
+  filename?: string
+  docxFilename?: string
+  srtFilename?: string
+}
+
+export interface VideoAnimationResult {
+  title: string
+  htmlUrl?: string
+  mp4Url?: string
+  srtUrl?: string
+  jsonUrl?: string
+  durationSeconds?: number
+  fullDurationSeconds?: number
+  renderDurationSeconds?: number
+  renderMode?: string
+  renderSuccess?: boolean
+  mp4Available?: boolean
+  isPreviewVideo?: boolean
+  videoValidForTeaching?: boolean
+  renderLog?: string
 }
 
 export interface StudyPlanResult {
@@ -428,6 +471,19 @@ function MessageBubble({ message }: { message: Message }) {
                 )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
             {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
+            {message.codePractice && (
+              <CodePracticeCard
+                codePractice={message.codePractice}
+                markdownText={message.codePractice.markdown || message.content}
+              />
+            )}
+            {message.videoScript && (
+              <VideoScriptCard
+                videoScript={message.videoScript}
+                markdownText={message.videoScript.markdown || message.content}
+              />
+            )}
+            {message.videoAnimation && <VideoAnimationCard videoAnimation={message.videoAnimation} />}
             {message.studyPlan && (
               <StudyPlanDownloadCard
                 studyPlan={message.studyPlan}
@@ -479,13 +535,13 @@ function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult
 
 function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseResult; markdownText: string }) {
   return (
-    <div className="rounded-lg border border-[#C8D6C9] bg-[#F8FAF6] overflow-hidden">
+    <div className="overflow-hidden rounded-lg border border-[#C8D6C9] bg-[#F8FAF6]">
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <GraduationCap className="h-4 w-4 text-[#3D5A40] shrink-0" />
+        <div className="flex min-w-0 items-center gap-2">
+          <GraduationCap className="h-4 w-4 shrink-0 text-[#3D5A40]" />
           <div className="min-w-0">
-            <p className="font-semibold text-[#3D5A40] truncate">练习题资源</p>
-            <p className="text-xs text-muted-foreground truncate">{exercise.title}</p>
+            <p className="truncate font-semibold text-[#3D5A40]">练习题资源</p>
+            <p className="truncate text-xs text-muted-foreground">{exercise.title}</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-1">
@@ -493,6 +549,40 @@ function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseRe
           {exercise.docxUrl && <DownloadButton href={exercise.docxUrl} label="下载 .docx" />}
           <SmallButton
             onClick={() => openReviewDocPrintPage(exercise.title || "练习题", markdownText)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CodePracticeCard({
+  codePractice,
+  markdownText,
+}: {
+  codePractice: CodePracticeResult
+  markdownText: string
+}) {
+  const printableMarkdown = codePractice.markdown || markdownText
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <FileText className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-primary">代码实操案例</p>
+            <p className="truncate text-xs text-muted-foreground">{codePractice.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {codePractice.markdownUrl && <DownloadButton href={codePractice.markdownUrl} label="下载 .md" />}
+          {codePractice.docxUrl && <DownloadButton href={codePractice.docxUrl} label="下载 .docx" />}
+          {codePractice.pythonUrl && <DownloadButton href={codePractice.pythonUrl} label="下载 .py" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(codePractice.title || "代码实操案例", printableMarkdown)}
             label="导出 PDF"
             icon={<FileText className="h-3.5 w-3.5" />}
           />
@@ -524,6 +614,92 @@ function StudyPlanDownloadCard({ studyPlan, markdownText }: { studyPlan: StudyPl
             icon={<FileText className="h-3.5 w-3.5" />}
           />
         </div>
+      </div>
+    </div>
+  )
+}
+
+function VideoScriptCard({
+  videoScript,
+  markdownText,
+}: {
+  videoScript: VideoScriptResult
+  markdownText: string
+}) {
+  const printableMarkdown = videoScript.markdown || markdownText
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <FileText className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="truncate font-semibold text-primary">教学视频 / 动画脚本</p>
+            <p className="truncate text-xs text-muted-foreground">{videoScript.title}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {videoScript.markdownUrl && <DownloadButton href={videoScript.markdownUrl} label="下载 .md" />}
+          {videoScript.docxUrl && <DownloadButton href={videoScript.docxUrl} label="下载 .docx" />}
+          {videoScript.srtUrl && <DownloadButton href={videoScript.srtUrl} label="下载字幕 .srt" />}
+          <SmallButton
+            onClick={() => openReviewDocPrintPage(videoScript.title || "教学视频 / 动画脚本", printableMarkdown)}
+            label="导出 PDF"
+            icon={<FileText className="h-3.5 w-3.5" />}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function VideoAnimationCard({ videoAnimation }: { videoAnimation: VideoAnimationResult }) {
+  const durationText =
+    typeof videoAnimation.durationSeconds === "number" && videoAnimation.durationSeconds > 0
+      ? `${Math.round(videoAnimation.durationSeconds)} 秒`
+      : "HTML / MP4 / SRT / JSON"
+  const hasMp4 =
+    videoAnimation.renderSuccess === true && videoAnimation.mp4Available === true && Boolean(videoAnimation.mp4Url)
+  const showRenderWarning = videoAnimation.renderSuccess === false || videoAnimation.mp4Available === false
+  const showPreviewNotice = videoAnimation.isPreviewVideo === true
+  const showTeachingNotice = videoAnimation.videoValidForTeaching === true
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]">
+      <div className="space-y-2 px-3 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <Image className="h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0">
+              <p className="truncate font-semibold text-primary">教学动画 / MP4 视频</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {videoAnimation.title} · {durationText}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {videoAnimation.htmlUrl && <PreviewButton href={videoAnimation.htmlUrl} label="预览动画 .html" />}
+            {hasMp4 && videoAnimation.mp4Url && <DownloadButton href={videoAnimation.mp4Url} label="下载 .mp4" />}
+            {videoAnimation.srtUrl && <DownloadButton href={videoAnimation.srtUrl} label="下载字幕 .srt" />}
+            {videoAnimation.jsonUrl && <DownloadButton href={videoAnimation.jsonUrl} label="下载动画结构 .json" />}
+          </div>
+        </div>
+        {showRenderWarning && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800">
+            <p>MP4 渲染失败，但 HTML 动画预览、JSON 动画结构和 SRT 字幕已生成。请检查 ffmpeg / Playwright 环境。</p>
+            {videoAnimation.renderLog && <p className="mt-1 truncate text-amber-700">{videoAnimation.renderLog}</p>}
+          </div>
+        )}
+        {showPreviewNotice && (
+          <div className="rounded-md border border-sky-200 bg-sky-50 px-2.5 py-2 text-xs text-sky-800">
+            这是 5 秒测试渲染视频，仅用于验证 MP4 渲染链路，不是最终教学视频。
+          </div>
+        )}
+        {showTeachingNotice && (
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs text-emerald-800">
+            正式教学动画视频。
+          </div>
+        )}
       </div>
     </div>
   )
@@ -654,6 +830,20 @@ function DownloadButton({ href, label }: { href: string; label: string }) {
       className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-card px-2 text-xs text-primary hover:bg-accent"
     >
       <Download className="h-3.5 w-3.5" />
+      {label}
+    </a>
+  )
+}
+
+function PreviewButton({ href, label }: { href: string; label: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-card px-2 text-xs text-primary hover:bg-accent"
+    >
+      <FileText className="h-3.5 w-3.5" />
       {label}
     </a>
   )

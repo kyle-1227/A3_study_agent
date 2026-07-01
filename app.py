@@ -1,6 +1,9 @@
-﻿"""A3 Study Agent - AI-powered university learning resource generation system."""
+"""A3 Study Agent - AI-powered university learning resource generation system."""
 
 from __future__ import annotations
+
+# ruff: noqa: E402
+# The application loads .env before importing project modules that read settings at import time.
 
 import json
 import logging
@@ -11,6 +14,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -32,7 +36,11 @@ from src.database.checkpointer import (
 from src.config import get_setting
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
-from src.graph.state import CONTEXT_CLEAR, MEMORY_CLEAR, initial_request_reset_transient_state
+from src.graph.state import (
+    CONTEXT_CLEAR,
+    MEMORY_CLEAR,
+    initial_request_reset_transient_state,
+)
 from src.profile import get_profile_manager
 from src.run_control import (
     RUN_CONTROL_FIELDS,
@@ -49,10 +57,26 @@ from src.run_control import (
     trim_context_usage_history,
     utc_now_iso,
 )
-from src.schemas import ChatRequest, OnboardRequest, ResumeRequest, StopRequest, ThreadStatusResponse
-from src.observability.a3_trace import emit_a3_trace, reset_trace_event_sink, set_trace_event_sink
-from src.tools.document_tool import get_exercise_artifact_dir, get_review_doc_artifact_dir
+from src.schemas import (
+    ChatRequest,
+    OnboardRequest,
+    ResumeRequest,
+    StopRequest,
+    ThreadStatusResponse,
+)
+from src.observability.a3_trace import (
+    emit_a3_trace,
+    reset_trace_event_sink,
+    set_trace_event_sink,
+)
+from src.tools.document_tool import (
+    get_code_practice_artifact_dir,
+    get_exercise_artifact_dir,
+    get_review_doc_artifact_dir,
+    get_video_script_artifact_dir,
+)
 from src.tools.mindmap_tool import get_mindmap_artifact_dir
+from src.tools.video_animation_tool import get_video_animation_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
@@ -90,11 +114,7 @@ def _safe_context_top_items(value: object) -> list[dict]:
         if not isinstance(item, dict):
             continue
         safe_items.append(
-            {
-                key: item[key]
-                for key in CONTEXT_TOP_ITEM_FIELDS
-                if key in item
-            }
+            {key: item[key] for key in CONTEXT_TOP_ITEM_FIELDS if key in item}
         )
     return safe_items
 
@@ -185,7 +205,9 @@ async def lifespan(app: FastAPI):
             checkpointer = MemorySaver()
             ckp_type = "memory"
             if db_uri and checkpointer_type() == "postgres":
-                logger.warning("DB_URI is set but PostgreSQL checkpointer was unavailable; using MemorySaver")
+                logger.warning(
+                    "DB_URI is set but PostgreSQL checkpointer was unavailable; using MemorySaver"
+                )
         else:
             logger.warning("LangGraph checkpointer disabled by configuration")
             ckp_type = "disabled"
@@ -209,7 +231,11 @@ FastAPIInstrumentor.instrument_app(app)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
+    allow_origins=[
+        o.strip()
+        for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+        if o.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -225,6 +251,9 @@ TEXT_EMIT_NODES = {
     "mindmap_output",
     "exercise_output",
     "review_doc_output",
+    "code_practice_output",
+    "video_script_output",
+    "video_animation_output",
     "study_plan_output",
     "resource_bundle_output",
     "adaptive_practice_responder",
@@ -264,6 +293,21 @@ GRAPH_NODES = {
     "review_doc_reviewer",
     "review_doc_rewrite",
     "review_doc_output",
+    "code_practice_planner",
+    "code_practice_agent",
+    "code_practice_reviewer",
+    "code_practice_rewrite",
+    "code_practice_output",
+    "video_script_planner",
+    "video_script_agent",
+    "video_script_reviewer",
+    "video_script_rewrite",
+    "video_script_output",
+    "video_animation_planner",
+    "video_animation_agent",
+    "video_animation_reviewer",
+    "video_animation_rewrite",
+    "video_animation_output",
     "curriculum_planner",
     "assessment_result_handler",
     "adaptive_practice_responder",
@@ -291,7 +335,11 @@ def _pending_interrupt_values(state_snapshot) -> list[dict]:
     for task in getattr(state_snapshot, "tasks", ()) or ():
         for interrupt_item in getattr(task, "interrupts", ()) or ():
             value = getattr(interrupt_item, "value", None)
-            pending.append(value if isinstance(value, dict) else {"type": "plan_review", "value": value})
+            pending.append(
+                value
+                if isinstance(value, dict)
+                else {"type": "plan_review", "value": value}
+            )
     return pending
 
 
@@ -316,7 +364,9 @@ def _missing_run_control_fields(values: dict) -> list[str]:
     return [field for field in RUN_CONTROL_FIELDS if field not in values]
 
 
-def _thread_status_from_snapshot(thread_id: str, state_snapshot) -> ThreadStatusResponse:
+def _thread_status_from_snapshot(
+    thread_id: str, state_snapshot
+) -> ThreadStatusResponse:
     values = _state_values(state_snapshot)
     pending_type = _pending_interrupt_type(state_snapshot)
     missing_fields = _missing_run_control_fields(values)
@@ -329,7 +379,9 @@ def _thread_status_from_snapshot(thread_id: str, state_snapshot) -> ThreadStatus
             pending_interrupt_type=pending_type,
             current_node=str(values.get("current_node") or ""),
             last_completed_node=str(values.get("last_completed_node") or ""),
-            context_usage=values.get("context_usage") if isinstance(values.get("context_usage"), dict) else {},
+            context_usage=values.get("context_usage")
+            if isinstance(values.get("context_usage"), dict)
+            else {},
             context_usage_history=values.get("context_usage_history")
             if isinstance(values.get("context_usage_history"), list)
             else [],
@@ -342,12 +394,15 @@ def _thread_status_from_snapshot(thread_id: str, state_snapshot) -> ThreadStatus
         schema_version=RUN_CONTROL_SCHEMA_VERSION,
         run_status=str(values.get("run_status") or RUN_STATUS_UNKNOWN),
         resume_available=pending_type == "user_stop",
-        pending_interrupt_type=pending_type or str(values.get("pending_interrupt_type") or ""),
+        pending_interrupt_type=pending_type
+        or str(values.get("pending_interrupt_type") or ""),
         current_node=str(values.get("current_node") or ""),
         last_completed_node=str(values.get("last_completed_node") or ""),
         stopped_at=str(values.get("stopped_at") or ""),
         stop_reason=str(values.get("stop_reason") or ""),
-        context_usage=values.get("context_usage") if isinstance(values.get("context_usage"), dict) else {},
+        context_usage=values.get("context_usage")
+        if isinstance(values.get("context_usage"), dict)
+        else {},
         context_usage_history=values.get("context_usage_history")
         if isinstance(values.get("context_usage_history"), list)
         else [],
@@ -359,7 +414,9 @@ async def _update_run_state(graph, config: dict, values: dict) -> None:
     await graph.aupdate_state(config, values)
 
 
-async def _try_update_run_state(graph, config: dict, values: dict, *, state: dict | None = None) -> bool:
+async def _try_update_run_state(
+    graph, config: dict, values: dict, *, state: dict | None = None
+) -> bool:
     try:
         await _update_run_state(graph, config, values)
         return True
@@ -387,13 +444,37 @@ def _last_ai_message_content(final_state: dict) -> str:
 
 
 def _resource_final_payload(final_state: dict) -> dict | None:
-    if final_state.get("evidence_controlled_stop") is True or final_state.get("final_response_type") == "evidence_summary":
-        answer = _last_ai_message_content(final_state) or str(final_state.get("plan") or "")
+    has_generated_resource_artifact = any(
+        bool(final_state.get(key))
+        for key in (
+            "mindmap_artifact",
+            "mindmap_tree",
+            "exercise_artifact",
+            "exercise_items",
+            "review_doc_artifact",
+            "review_doc_artifacts",
+            "code_practice_artifact",
+            "video_script_artifact",
+            "video_animation_artifact",
+            "study_plan_artifact",
+            "study_plan_document_artifact",
+            "resource_bundle_artifact",
+        )
+    )
+    if (
+        final_state.get("evidence_controlled_stop") is True
+        or final_state.get("final_response_type") == "evidence_summary"
+    ) and not has_generated_resource_artifact:
+        answer = _last_ai_message_content(final_state) or str(
+            final_state.get("plan") or ""
+        )
         return {
             "type": "resource_final",
             "resource_type": "evidence_summary",
             "controlled_stop": True,
-            "controlled_stop_reason": final_state.get("evidence_controlled_stop_reason", ""),
+            "controlled_stop_reason": final_state.get(
+                "evidence_controlled_stop_reason", ""
+            ),
             "answer": answer,
         }
 
@@ -401,13 +482,10 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     requested_resource_types = list(final_state.get("requested_resource_types") or [])
     bundle_resources = list(bundle_artifact.get("resources") or [])
     bundle_errors = list(bundle_artifact.get("errors") or [])
-    is_resource_bundle_payload = (
-        bool(bundle_artifact)
-        and (
-            len(requested_resource_types) > 1
-            or len(bundle_resources) > 1
-            or bundle_artifact.get("status") in {"partial_success", "failed"}
-        )
+    is_resource_bundle_payload = bool(bundle_artifact) and (
+        len(requested_resource_types) > 1
+        or len(bundle_resources) > 1
+        or bundle_artifact.get("status") in {"partial_success", "failed"}
     )
     mindmap_artifact = final_state.get("mindmap_artifact") or {}
     mindmap_tree = final_state.get("mindmap_tree") or {}
@@ -415,11 +493,16 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     exercise_artifact = final_state.get("exercise_artifact") or {}
     review_doc_artifact = final_state.get("review_doc_artifact") or {}
     review_doc_artifacts = final_state.get("review_doc_artifacts") or []
+    code_practice_artifact = final_state.get("code_practice_artifact") or {}
+    video_script_artifact = final_state.get("video_script_artifact") or {}
+    video_animation_artifact = final_state.get("video_animation_artifact") or {}
     study_plan_artifact = final_state.get("study_plan_artifact") or {}
     study_plan_document = final_state.get("study_plan_document_artifact") or {}
 
     if is_resource_bundle_payload:
-        answer = _last_ai_message_content(final_state) or str(bundle_artifact.get("message") or "")
+        answer = _last_ai_message_content(final_state) or str(
+            bundle_artifact.get("message") or ""
+        )
         payload: dict = {
             "type": "resource_final",
             "resource_type": "bundle",
@@ -480,6 +563,13 @@ def _resource_final_payload(final_state: dict) -> dict | None:
                 for artifact in review_doc_artifacts
             ]
 
+        if code_practice_artifact:
+            payload["code_practice_artifact"] = code_practice_artifact
+        if video_script_artifact:
+            payload["video_script_artifact"] = video_script_artifact
+        if video_animation_artifact:
+            payload["video_animation_artifact"] = video_animation_artifact
+
         if study_plan_artifact or study_plan_document:
             payload["study_plan"] = {
                 "title": study_plan_artifact.get("title")
@@ -498,13 +588,28 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     resource_type = str(final_state.get("requested_resource_type") or "")
 
-    if resource_type not in {"mindmap", "quiz", "review_doc", "study_plan"}:
+    if resource_type not in {
+        "mindmap",
+        "quiz",
+        "review_doc",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+        "bundle",
+    }:
         if mindmap_artifact or mindmap_tree:
             resource_type = "mindmap"
         elif exercise_items or exercise_artifact:
             resource_type = "quiz"
         elif review_doc_artifact or review_doc_artifacts:
             resource_type = "review_doc"
+        elif code_practice_artifact:
+            resource_type = "code_practice"
+        elif video_script_artifact:
+            resource_type = "video_script"
+        elif video_animation_artifact:
+            resource_type = "video_animation"
         elif study_plan_artifact or study_plan_document:
             resource_type = "study_plan"
         else:
@@ -520,7 +625,14 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     include_mindmap = resource_type == "mindmap" and (mindmap_artifact or mindmap_tree)
     include_quiz = resource_type == "quiz" and (exercise_items or exercise_artifact)
     include_review_doc = resource_type == "review_doc" and review_doc_artifact
-    include_review_doc_artifacts = resource_type == "review_doc" and review_doc_artifacts
+    include_review_doc_artifacts = (
+        resource_type == "review_doc" and review_doc_artifacts
+    )
+    include_code_practice = resource_type == "code_practice" and code_practice_artifact
+    include_video_script = resource_type == "video_script" and video_script_artifact
+    include_video_animation = (
+        resource_type == "video_animation" and video_animation_artifact
+    )
 
     if include_mindmap:
         payload["mindmap"] = {
@@ -533,14 +645,17 @@ def _resource_final_payload(final_state: dict) -> dict | None:
 
     if include_quiz:
         if (
-            not answer
-            or (resource_type == "quiz" and len(answer.strip()) < 40)
+            not answer or (resource_type == "quiz" and len(answer.strip()) < 40)
         ) and exercise_items:
             title = str(exercise_artifact.get("title") or "Leveled exercises")
             answer = _render_exercise_markdown(
                 title,
                 exercise_items,
-                review_reason=str(exercise_artifact.get("review_reason") or final_state.get("exercise_review_reason") or ""),
+                review_reason=str(
+                    exercise_artifact.get("review_reason")
+                    or final_state.get("exercise_review_reason")
+                    or ""
+                ),
                 quality_warning=bool(exercise_artifact.get("quality_warning")),
             )
             payload["answer"] = answer
@@ -572,9 +687,17 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             for artifact in review_doc_artifacts
         ]
 
+    if include_code_practice:
+        payload["code_practice_artifact"] = code_practice_artifact
+    if include_video_script:
+        payload["video_script_artifact"] = video_script_artifact
+    if include_video_animation:
+        payload["video_animation_artifact"] = video_animation_artifact
+
     if resource_type == "study_plan" and (study_plan_artifact or study_plan_document):
         payload["study_plan"] = {
-            "title": study_plan_artifact.get("title") or study_plan_document.get("title", "Personalized Study Plan"),
+            "title": study_plan_artifact.get("title")
+            or study_plan_document.get("title", "Personalized Study Plan"),
             "filename": study_plan_document.get("filename", ""),
             "docx_filename": study_plan_document.get("docx_filename", ""),
             "markdown_url": study_plan_document.get("markdown_url", ""),
@@ -640,7 +763,6 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
     return {"ok": True, "thread_id": thread_id, "cleared_fields": cleared_fields}
 
 
-
 async def _stream_graph_events(
     graph,
     input_data,
@@ -661,7 +783,9 @@ async def _stream_graph_events(
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
-            existing_history = _state_values(existing_snapshot).get("context_usage_history")
+            existing_history = _state_values(existing_snapshot).get(
+                "context_usage_history"
+            )
             if isinstance(existing_history, list):
                 context_usage_history = trim_context_usage_history(existing_history)
         except Exception as exc:
@@ -717,10 +841,14 @@ async def _stream_graph_events(
                     "tokenizer_mode": event.get("tokenizer_mode", ""),
                     "message_count": event.get("message_count", 0),
                     "schema_size_chars": event.get("schema_size_chars"),
-                    "breakdown": event.get("breakdown") if isinstance(event.get("breakdown"), dict) else {},
+                    "breakdown": event.get("breakdown")
+                    if isinstance(event.get("breakdown"), dict)
+                    else {},
                 }
                 context_usage_history.append(payload)
-                context_usage_history[:] = trim_context_usage_history(context_usage_history)
+                context_usage_history[:] = trim_context_usage_history(
+                    context_usage_history
+                )
                 await _try_update_run_state(
                     graph,
                     config,
@@ -740,7 +868,9 @@ async def _stream_graph_events(
                     "provider": event.get("provider", ""),
                     "model": event.get("model", ""),
                     "reason": event.get("reason", ""),
-                    "warning": event.get("warning", "context usage telemetry unavailable"),
+                    "warning": event.get(
+                        "warning", "context usage telemetry unavailable"
+                    ),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
@@ -828,7 +958,9 @@ async def _stream_graph_events(
         return drained
 
     try:
-        async for event in graph.astream_events(input_data, config=config, version="v2"):
+        async for event in graph.astream_events(
+            input_data, config=config, version="v2"
+        ):
             for trace_payload in await _drain_trace_events():
                 yield trace_payload
             event_type = event["event"]
@@ -856,7 +988,11 @@ async def _stream_graph_events(
                             state={"thread_id": thread_id, "session_id": thread_id},
                         )
                         payload = json.dumps(
-                            {"type": "node_event", "status": "start", "node": node_name},
+                            {
+                                "type": "node_event",
+                                "status": "start",
+                                "node": node_name,
+                            },
                             ensure_ascii=False,
                         )
                     else:
@@ -900,7 +1036,11 @@ async def _stream_graph_events(
                             for msg in output.get("messages", []):
                                 if hasattr(msg, "content") and msg.content:
                                     text_payload = json.dumps(
-                                        {"type": "text", "content": msg.content, "node": node_name},
+                                        {
+                                            "type": "text",
+                                            "content": msg.content,
+                                            "node": node_name,
+                                        },
                                         ensure_ascii=False,
                                     )
                                     yield f"data: {text_payload}\n\n"
@@ -920,9 +1060,14 @@ async def _stream_graph_events(
                             )
                             yield f"data: {mindmap_payload}\n\n"
 
-                    if event_type == "on_chain_end" and node_name == "review_doc_output":
+                    if (
+                        event_type == "on_chain_end"
+                        and node_name == "review_doc_output"
+                    ):
                         output = event.get("data", {}).get("output")
-                        if isinstance(output, dict) and output.get("review_doc_artifact"):
+                        if isinstance(output, dict) and output.get(
+                            "review_doc_artifact"
+                        ):
                             artifact = output["review_doc_artifact"]
                             review_doc_payload = json.dumps(
                                 {
@@ -988,7 +1133,11 @@ async def _stream_graph_events(
         failed_node = active_nodes[-1] if active_nodes else None
         if failed_node:
             start_t = node_start_times.get(failed_node)
-            duration_ms = round((time.monotonic() - start_t) * 1000) if start_t is not None else None
+            duration_ms = (
+                round((time.monotonic() - start_t) * 1000)
+                if start_t is not None
+                else None
+            )
             node_payload = json.dumps(
                 {
                     "type": "node_event",
@@ -1002,7 +1151,12 @@ async def _stream_graph_events(
             )
             yield f"data: {node_payload}\n\n"
         error_payload = json.dumps(
-            {"type": "error", "message": str(e), "failed_node": failed_node, "active_nodes": active_nodes},
+            {
+                "type": "error",
+                "message": str(e),
+                "failed_node": failed_node,
+                "active_nodes": active_nodes,
+            },
             ensure_ascii=False,
         )
         yield f"data: {error_payload}\n\n"
@@ -1030,7 +1184,9 @@ async def _stream_graph_events(
             "has_exercise_items": bool(final_state.get("exercise_items")),
             "has_review_doc_artifact": bool(final_state.get("review_doc_artifact")),
             "has_review_doc_artifacts": bool(final_state.get("review_doc_artifacts")),
-            "review_doc_artifacts_count": len(final_state.get("review_doc_artifacts") or []),
+            "review_doc_artifacts_count": len(
+                final_state.get("review_doc_artifacts") or []
+            ),
             "exercise_items_count": len(final_state.get("exercise_items") or []),
             "requested_resource_type": final_state.get("requested_resource_type", ""),
         },
@@ -1042,7 +1198,10 @@ async def _stream_graph_events(
         for task in state_snapshot.tasks:
             if hasattr(task, "interrupts") and task.interrupts:
                 interrupt_value = task.interrupts[0].value
-                if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "user_stop":
+                if (
+                    isinstance(interrupt_value, dict)
+                    and interrupt_value.get("type") == "user_stop"
+                ):
                     stopped_at = utc_now_iso()
                     stopped_node = str(interrupt_value.get("node") or "")
                     await _update_run_state(
@@ -1055,7 +1214,9 @@ async def _stream_graph_events(
                             "pending_interrupt_type": "user_stop",
                             "stopped_at": stopped_at,
                             "current_node": stopped_node,
-                            "stop_reason": str(interrupt_value.get("reason") or "user_stop"),
+                            "stop_reason": str(
+                                interrupt_value.get("reason") or "user_stop"
+                            ),
                         },
                     )
                     emit_a3_trace(
@@ -1084,11 +1245,17 @@ async def _stream_graph_events(
                     )
                     yield f"data: {payload}\n\n"
                     return
-                if isinstance(interrupt_value, dict) and interrupt_value.get("type") == "memory_confirmation":
+                if (
+                    isinstance(interrupt_value, dict)
+                    and interrupt_value.get("type") == "memory_confirmation"
+                ):
                     await _try_update_run_state(
                         graph,
                         config,
-                        {"resume_available": False, "pending_interrupt_type": "memory_confirmation"},
+                        {
+                            "resume_available": False,
+                            "pending_interrupt_type": "memory_confirmation",
+                        },
                         state=final_state,
                     )
                     payload_data = {
@@ -1096,7 +1263,9 @@ async def _stream_graph_events(
                         "interrupt_type": "memory_confirmation",
                         "question": interrupt_value.get("question", ""),
                         "reason": interrupt_value.get("reason", ""),
-                        "selected_memory_count": interrupt_value.get("selected_memory_count", 0),
+                        "selected_memory_count": interrupt_value.get(
+                            "selected_memory_count", 0
+                        ),
                         "options": interrupt_value.get("options", []),
                         "thread_id": thread_id,
                     }
@@ -1104,7 +1273,10 @@ async def _stream_graph_events(
                     await _try_update_run_state(
                         graph,
                         config,
-                        {"resume_available": False, "pending_interrupt_type": "plan_review"},
+                        {
+                            "resume_available": False,
+                            "pending_interrupt_type": "plan_review",
+                        },
                         state=final_state,
                     )
                     payload_data = {
@@ -1145,9 +1317,27 @@ async def _stream_graph_events(
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
                 "has_exercise": bool(resource_payload.get("exercise_artifact")),
-                "review_doc_artifacts_count": len(resource_payload.get("review_doc_artifacts") or []),
-                "has_review_doc_artifacts": bool(resource_payload.get("review_doc_artifacts")),
-                "exercise_items_count": len(resource_payload.get("exercise_items") or []),
+                "has_code_practice": bool(
+                    resource_payload.get("code_practice_artifact")
+                ),
+                "has_video_script": bool(resource_payload.get("video_script_artifact")),
+                "has_video_animation": bool(
+                    resource_payload.get("video_animation_artifact")
+                ),
+                "video_animation_render_success": bool(
+                    (resource_payload.get("video_animation_artifact") or {}).get(
+                        "render_success"
+                    )
+                ),
+                "review_doc_artifacts_count": len(
+                    resource_payload.get("review_doc_artifacts") or []
+                ),
+                "has_review_doc_artifacts": bool(
+                    resource_payload.get("review_doc_artifacts")
+                ),
+                "exercise_items_count": len(
+                    resource_payload.get("exercise_items") or []
+                ),
                 "controlled_stop": bool(resource_payload.get("controlled_stop")),
             },
             state=final_state,
@@ -1197,7 +1387,11 @@ async def generate_sse(
             profile_ctx = await manager.build_profile_context(user_id)
             if profile_ctx:
                 messages.insert(0, SystemMessage(content=profile_ctx))
-                logger.info("Injected profile context user=%s (%d chars)", user_id, len(profile_ctx))
+                logger.info(
+                    "Injected profile context user=%s (%d chars)",
+                    user_id,
+                    len(profile_ctx),
+                )
         except Exception:
             logger.exception("Failed to load profile context user=%s", user_id)
 
@@ -1217,7 +1411,11 @@ async def generate_sse(
     # Record user input as episodic memory (non-fatal, fire-and-forget)
     if user_id:
         try:
-            from src.memory.episodic import compute_importance_for_user_query, write_episodic_memory
+            from src.memory.episodic import (
+                compute_importance_for_user_query,
+                write_episodic_memory,
+            )
+
             importance, mem_type, content = compute_importance_for_user_query(
                 query=query,
                 subject="",
@@ -1232,7 +1430,9 @@ async def generate_sse(
         except Exception:
             logger.exception("Failed to record user input episodic memory")
 
-    async for chunk in _stream_graph_events(graph, state_input, config, thread_id, preserve_context_history=False):
+    async for chunk in _stream_graph_events(
+        graph, state_input, config, thread_id, preserve_context_history=False
+    ):
         yield chunk
 
     # Record the conversation turn for profile evolution (non-fatal)
@@ -1289,12 +1489,18 @@ async def generate_resume_sse(
     _emit_graph_config_trace(
         graph,
         config,
-        {"request_id": str(uuid.uuid4()), "session_id": thread_id, "thread_id": thread_id},
+        {
+            "request_id": str(uuid.uuid4()),
+            "session_id": thread_id,
+            "thread_id": thread_id,
+        },
     )
 
     yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_CONTINUING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
-    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id, preserve_context_history=True):
+    async for chunk in _stream_graph_events(
+        graph, resume_input, config, thread_id, preserve_context_history=True
+    ):
         yield chunk
 
 
@@ -1405,16 +1611,27 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
     _emit_graph_config_trace(
         graph,
         config,
-        {"request_id": str(uuid.uuid4()), "session_id": thread_id, "thread_id": thread_id},
+        {
+            "request_id": str(uuid.uuid4()),
+            "session_id": thread_id,
+            "thread_id": thread_id,
+        },
     )
-    async for chunk in _stream_graph_events(graph, resume_input, config, thread_id, preserve_context_history=True):
+    async for chunk in _stream_graph_events(
+        graph, resume_input, config, thread_id, preserve_context_history=True
+    ):
         yield chunk
 
 
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
     return StreamingResponse(
-        generate_sse(chat.query, request.app.state.graph, thread_id=chat.thread_id, user_id=chat.user_id),
+        generate_sse(
+            chat.query,
+            request.app.state.graph,
+            thread_id=chat.thread_id,
+            user_id=chat.user_id,
+        ),
         media_type="text/event-stream",
     )
 
@@ -1484,7 +1701,10 @@ async def download_review_doc_artifact(artifact_id: str, filename: str):
     except ValueError:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {".md", ".docx"}:
+    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {
+        ".md",
+        ".docx",
+    }:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     media_type = (
@@ -1509,7 +1729,10 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
     except ValueError:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {".md", ".docx"}:
+    if not artifact_path.is_file() or artifact_path.suffix.lower() not in {
+        ".md",
+        ".docx",
+    }:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     media_type = (
@@ -1522,6 +1745,87 @@ async def download_exercise_artifact(artifact_id: str, filename: str):
         artifact_path,
         media_type=media_type,
         filename=filename,
+    )
+
+
+@app.get("/artifacts/code-practice/{artifact_id}/{filename}")
+async def download_code_practice_artifact(artifact_id: str, filename: str):
+    root = get_code_practice_artifact_dir()
+    artifact_path = (root / artifact_id / filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".md", ".docx", ".py"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".md": "text/markdown; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".py": "text/x-python",
+    }[suffix]
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+@app.get("/artifacts/video-scripts/{artifact_id}/{filename}")
+async def download_video_script_artifact(artifact_id: str, filename: str):
+    root = get_video_script_artifact_dir()
+    decoded_filename = unquote(filename)
+    artifact_path = (root / artifact_id / decoded_filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".md", ".docx", ".srt"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".md": "text/markdown; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".srt": "application/x-subrip; charset=utf-8",
+    }[suffix]
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=decoded_filename,
+    )
+
+
+@app.get("/artifacts/video-animations/{artifact_id}/{filename}")
+async def download_video_animation_artifact(artifact_id: str, filename: str):
+    root = get_video_animation_artifact_dir()
+    decoded_filename = unquote(filename)
+    artifact_path = (root / artifact_id / decoded_filename).resolve()
+    try:
+        artifact_path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    suffix = artifact_path.suffix.lower()
+    if not artifact_path.is_file() or suffix not in {".html", ".json", ".srt", ".mp4"}:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    media_type = {
+        ".html": "text/html; charset=utf-8",
+        ".json": "application/json",
+        ".srt": "application/x-subrip; charset=utf-8",
+        ".mp4": "video/mp4",
+    }[suffix]
+
+    return FileResponse(
+        artifact_path,
+        media_type=media_type,
+        filename=decoded_filename,
     )
 
 
@@ -1572,19 +1876,23 @@ async def onboard_endpoint(req: OnboardRequest):
     # Record observations about the onboarding
     obs_list: list[AgentObservation] = []
     if req.grade:
-        obs_list.append(AgentObservation(
-            content=f"鐢ㄦ埛鑷堪骞寸骇: {req.grade}",
-            category="general",
-            importance=0.8,
-            created_at=now,
-        ))
+        obs_list.append(
+            AgentObservation(
+                content=f"鐢ㄦ埛鑷堪骞寸骇: {req.grade}",
+                category="general",
+                importance=0.8,
+                created_at=now,
+            )
+        )
     if req.subjects:
-        obs_list.append(AgentObservation(
-            content=f"用户首次选择 {len(req.subjects)} 个学习方向: {', '.join(req.subjects)}",
-            category="general",
-            importance=0.8,
-            created_at=now,
-        ))
+        obs_list.append(
+            AgentObservation(
+                content=f"用户首次选择 {len(req.subjects)} 个学习方向: {', '.join(req.subjects)}",
+                category="general",
+                importance=0.8,
+                created_at=now,
+            )
+        )
 
     profile = UserProfile(
         user_id=req.user_id,
@@ -1605,7 +1913,10 @@ async def onboard_endpoint(req: OnboardRequest):
     await manager.store.save(profile)
     logger.info(
         "Onboarding 鐢诲儚宸插垱寤?user=%s nickname=%s subjects=%d goals=%d",
-        req.user_id, req.nickname, len(skills), len(goals),
+        req.user_id,
+        req.nickname,
+        len(skills),
+        len(goals),
     )
 
     return {
@@ -1657,7 +1968,10 @@ async def analytics_dashboard(user_id: str, subject: str = "", days: int = 30):
     manager = get_profile_manager()
     profile = await manager.get_profile(user_id)
     data = await get_dashboard_data(
-        user_id=user_id, profile=profile, subject=subject, days=days,
+        user_id=user_id,
+        profile=profile,
+        subject=subject,
+        days=days,
     )
     return data.model_dump()
 
@@ -1680,7 +1994,9 @@ async def analytics_cognitive_graph(user_id: str, subject: str = ""):
     manager = get_profile_manager()
     profile = await manager.get_profile(user_id)
     data = await build_cognitive_graph(
-        user_id=user_id, profile=profile, subject=subject,
+        user_id=user_id,
+        profile=profile,
+        subject=subject,
     )
     return data.model_dump()
 
@@ -1692,10 +2008,11 @@ async def analytics_decisions(user_id: str, limit: int = 20, node: str = ""):
 
     node_name = node if node else None
     data = await get_decision_traces(
-        user_id=user_id, limit=limit, node_name=node_name,
+        user_id=user_id,
+        limit=limit,
+        node_name=node_name,
     )
     return data.model_dump()
-
 
 
 if __name__ == "__main__":

@@ -148,6 +148,29 @@ def initial_request_reset_transient_state() -> dict:
         "review_doc_review_reason": "",
         "review_doc_revision_notes": "",
         "review_doc_round": 0,
+        "code_practice_outline": "",
+        "code_practice_markdown": "",
+        "code_practice_artifact": {},
+        "code_practice_review_verdict": "",
+        "code_practice_review_reason": "",
+        "code_practice_revision_notes": "",
+        "code_practice_round": 0,
+        "video_script_outline": "",
+        "video_script_markdown": "",
+        "video_script_srt": "",
+        "video_script_artifact": {},
+        "video_script_review_verdict": "",
+        "video_script_review_reason": "",
+        "video_script_revision_notes": "",
+        "video_script_round": 0,
+        "video_animation_spec": {},
+        "video_animation_html": "",
+        "video_animation_artifact": {},
+        "video_animation_review_verdict": "",
+        "video_animation_review_reason": "",
+        "video_animation_revision_notes": "",
+        "video_animation_round": 0,
+        "video_animation_render_log": "",
         "study_plan_emotional_intel": "",
         "study_plan_emotional_profile": {},
         "study_plan_outline": "",
@@ -281,6 +304,29 @@ class LearningState(TypedDict):
     review_doc_review_reason: str                                       # Review document reviewer reasoning
     review_doc_revision_notes: str                                      # Feedback for review_doc_agent regeneration
     review_doc_round: int                                               # Review document generation/review round
+    code_practice_outline: str                                           # Planner-produced code practice case blueprint
+    code_practice_markdown: str                                          # Reviewed Markdown code practice case draft
+    code_practice_artifact: dict                                         # Generated code practice content and artifact metadata
+    code_practice_review_verdict: str                                    # "approve" / "reject"
+    code_practice_review_reason: str                                     # Code practice reviewer reasoning
+    code_practice_revision_notes: str                                    # Feedback for code_practice_agent regeneration
+    code_practice_round: int                                             # Code practice generation/review round
+    video_script_outline: str                                            # Planner-produced teaching video / animation script blueprint
+    video_script_markdown: str                                           # Reviewed Markdown teaching video / animation script draft
+    video_script_srt: str                                                # Generated subtitle/caption text in SRT format
+    video_script_artifact: dict                                          # Generated video script content and artifact metadata
+    video_script_review_verdict: str                                     # "approve" / "reject"
+    video_script_review_reason: str                                      # Video script reviewer reasoning
+    video_script_revision_notes: str                                     # Feedback for video_script_agent regeneration
+    video_script_round: int                                              # Video script generation/review round
+    video_animation_spec: dict                                           # Structured animation/MP4 generation specification
+    video_animation_html: str                                            # Generated animation HTML source for rendering
+    video_animation_artifact: dict                                       # Generated animation/MP4 artifact metadata
+    video_animation_review_verdict: str                                  # "approve" / "reject"
+    video_animation_review_reason: str                                   # Video animation reviewer reasoning
+    video_animation_revision_notes: str                                  # Feedback for video_animation regeneration
+    video_animation_round: int                                           # Video animation generation/review round
+    video_animation_render_log: str                                      # Renderer log or failure details for animation export
     study_plan_emotional_intel: str                                     # Study-plan learner workload/emotional summary
     study_plan_emotional_profile: dict                                  # Structured emotional/workload profile
     study_plan_outline: str                                             # Planner-produced study-plan outline

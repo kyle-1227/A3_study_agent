@@ -105,8 +105,12 @@ export default function GrowthChart({ userId, subject = "", days = 30 }: {
           <LineChart data={merged}>
             <CartesianGrid strokeDasharray="3 3" opacity={0.4} />
             <XAxis dataKey="date" fontSize={11} />
-            <YAxis domain={[0, 1]} tickFormatter={v => `${(Number(v) * 100).toFixed(0)}%`} fontSize={11} />
-            <Tooltip formatter={(v: number) => `${(v * 100).toFixed(0)}%`} />
+            <YAxis
+              domain={[0, 1]}
+              tickFormatter={(v: number | string) => `${(Number(v) * 100).toFixed(0)}%`}
+              fontSize={11}
+            />
+            <Tooltip formatter={(v) => `${(Number(v ?? 0) * 100).toFixed(0)}%`} />
             <Legend />
             {displaySeries.map((s, i) => (
               <Line

@@ -10,6 +10,8 @@ from pathlib import Path
 DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parents[2] / "artifacts"
 DEFAULT_REVIEW_DOC_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "review_docs"
 DEFAULT_EXERCISE_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "exercises"
+DEFAULT_CODE_PRACTICE_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "code-practice"
+DEFAULT_VIDEO_SCRIPT_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "video-scripts"
 
 _ARTIFACT_KIND_CONFIG = {
     "review_docs": {
@@ -24,12 +26,26 @@ _ARTIFACT_KIND_CONFIG = {
         "url_prefix": "/artifacts/exercises",
         "filename_default": "exercises",
     },
+    "code_practice": {
+        "env_var": "CODE_PRACTICE_ARTIFACT_DIR",
+        "default_dir": DEFAULT_CODE_PRACTICE_ARTIFACT_DIR,
+        "url_prefix": "/artifacts/code-practice",
+        "filename_default": "code-practice",
+    },
+    "video_script": {
+        "env_var": "VIDEO_SCRIPT_ARTIFACT_DIR",
+        "default_dir": DEFAULT_VIDEO_SCRIPT_ARTIFACT_DIR,
+        "url_prefix": "/artifacts/video-scripts",
+        "filename_default": "video-script",
+    },
 }
 
 
 def get_review_doc_artifact_dir() -> Path:
     """Return the directory used for generated Markdown review documents."""
-    root = Path(os.getenv("REVIEW_DOC_ARTIFACT_DIR", str(DEFAULT_REVIEW_DOC_ARTIFACT_DIR)))
+    root = Path(
+        os.getenv("REVIEW_DOC_ARTIFACT_DIR", str(DEFAULT_REVIEW_DOC_ARTIFACT_DIR))
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -37,6 +53,24 @@ def get_review_doc_artifact_dir() -> Path:
 def get_exercise_artifact_dir() -> Path:
     """Return the directory used for generated exercise documents."""
     root = Path(os.getenv("EXERCISE_ARTIFACT_DIR", str(DEFAULT_EXERCISE_ARTIFACT_DIR)))
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def get_code_practice_artifact_dir() -> Path:
+    """Return the directory used for generated code-practice documents."""
+    root = Path(
+        os.getenv("CODE_PRACTICE_ARTIFACT_DIR", str(DEFAULT_CODE_PRACTICE_ARTIFACT_DIR))
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def get_video_script_artifact_dir() -> Path:
+    """Return the directory used for generated teaching video script documents."""
+    root = Path(
+        os.getenv("VIDEO_SCRIPT_ARTIFACT_DIR", str(DEFAULT_VIDEO_SCRIPT_ARTIFACT_DIR))
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -56,14 +90,40 @@ def _safe_filename_stem(value: str, default: str = "review-doc") -> str:
     return cleaned or default
 
 
+def _extract_first_python_code_block(markdown_text: str) -> str:
+    match = re.search(
+        r"(?s)```(?:python|py)\s*\n(?P<code>.+?)```",
+        markdown_text or "",
+    )
+    return match.group("code").strip() + "\n" if match else ""
+
+
+def _extract_srt_section(markdown_text: str) -> str:
+    text = str(markdown_text or "")
+    match = re.search(
+        r"(?smi)^##\s*(?:[一二三四五六七八九十0-9]+[、.．]\s*)?字幕\s*SRT\s*\n(?P<srt>.*?)(?=^##\s+|\Z)",
+        text,
+    )
+    if not match:
+        return ""
+    srt = match.group("srt").strip()
+    srt = re.sub(r"(?m)^```(?:srt|text)?\s*$", "", srt).strip()
+    srt = re.sub(r"(?m)^```\s*$", "", srt).strip()
+    return srt
+
+
 def _is_table_row(line: str) -> bool:
     stripped = line.strip()
-    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+    return (
+        stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+    )
 
 
 def _is_table_separator(line: str) -> bool:
     cells = _parse_table_row(line)
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells
+    )
 
 
 def _parse_table_row(line: str) -> list[str]:
@@ -123,7 +183,9 @@ def _write_docx_artifact(markdown_text: str, title: str, file_path: Path) -> Non
 
         bullet = re.match(r"^\s*[-*]\s+(.+)$", line)
         if bullet:
-            document.add_paragraph(_clean_inline_markdown(bullet.group(1)), style="List Bullet")
+            document.add_paragraph(
+                _clean_inline_markdown(bullet.group(1)), style="List Bullet"
+            )
             index += 1
             continue
 
@@ -170,3 +232,66 @@ def create_document_artifact(
 def create_markdown_artifact(markdown_text: str, title: str) -> dict:
     """Save review-doc Markdown text as .md and .docx artifacts."""
     return create_document_artifact(markdown_text, title, artifact_kind="review_docs")
+
+
+def create_code_practice_artifact(
+    markdown_text: str,
+    title: str,
+    python_code: str | None = None,
+) -> dict:
+    """Save code-practice Markdown as .md/.docx plus an extracted .py file."""
+    artifact = create_document_artifact(
+        markdown_text=markdown_text,
+        title=title,
+        artifact_kind="code_practice",
+    )
+    code = str(python_code or "").strip()
+    if not code:
+        code = _extract_first_python_code_block(markdown_text).strip()
+    if not code:
+        code = 'print("请在 Markdown 文档中查看代码实操内容")'
+
+    artifact_id = str(artifact["artifact_id"])
+    python_filename = Path(str(artifact["filename"])).with_suffix(".py").name
+    artifact_dir = get_code_practice_artifact_dir() / artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / python_filename).write_text(code.rstrip() + "\n", encoding="utf-8")
+
+    return {
+        **artifact,
+        "python_filename": python_filename,
+        "python_url": f"/artifacts/code-practice/{artifact_id}/{python_filename}",
+        "markdown": markdown_text,
+    }
+
+
+def create_video_script_artifact(
+    markdown_text: str,
+    title: str,
+    srt_text: str | None = None,
+) -> dict:
+    """Save a teaching video script as .md/.docx plus an extracted .srt file."""
+    artifact = create_document_artifact(
+        markdown_text=markdown_text,
+        title=title,
+        artifact_kind="video_script",
+    )
+    srt = str(srt_text or "").strip()
+    if not srt:
+        srt = _extract_srt_section(markdown_text)
+    if not srt:
+        srt = "1\n00:00:00,000 --> 00:00:05,000\n请查看 Markdown 视频脚本文档。"
+
+    artifact_id = str(artifact["artifact_id"])
+    srt_filename = Path(str(artifact["filename"])).with_suffix(".srt").name
+    artifact_dir = get_video_script_artifact_dir() / artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / srt_filename).write_text(srt.rstrip() + "\n", encoding="utf-8")
+
+    return {
+        **artifact,
+        "srt_filename": srt_filename,
+        "srt_url": f"/artifacts/video-scripts/{artifact_id}/{srt_filename}",
+        "markdown": markdown_text,
+        "srt": srt,
+    }

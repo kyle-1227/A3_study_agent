@@ -15,6 +15,14 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
+from src.graph.code_practice import (
+    code_practice_agent,
+    code_practice_output,
+    code_practice_planner,
+    code_practice_reviewer,
+    code_practice_rewrite,
+    should_rewrite_code_practice,
+)
 from src.graph.exercises import (
     exercise_agent,
     exercise_output,
@@ -51,13 +59,37 @@ from src.graph.study_plan import (
     study_plan_reviewer_emotional,
     study_plan_rewrite,
 )
+from src.graph.video_animation import (
+    should_rewrite_video_animation,
+    video_animation_agent,
+    video_animation_output,
+    video_animation_planner,
+    video_animation_reviewer,
+    video_animation_rewrite,
+)
+from src.graph.video_script import (
+    should_rewrite_video_script,
+    video_script_agent,
+    video_script_output,
+    video_script_planner,
+    video_script_reviewer,
+    video_script_rewrite,
+)
 from src.observability.a3_trace import emit_a3_trace
 from src.tools.search_tool import sanitize_error_message
 from src.tracing import traced_node
 
 logger = logging.getLogger(__name__)
 
-RESOURCE_TYPE_ORDER = ("mindmap", "quiz", "review_doc", "study_plan")
+RESOURCE_TYPE_ORDER = (
+    "review_doc",
+    "mindmap",
+    "quiz",
+    "code_practice",
+    "video_script",
+    "video_animation",
+    "study_plan",
+)
 SUPPORTED_RESOURCE_TYPES = frozenset(RESOURCE_TYPE_ORDER)
 RESOURCE_ALIASES = {
     "exercise": "quiz",
@@ -72,6 +104,12 @@ RESOURCE_ALIASES = {
     "roadmap": "study_plan",
     "mind_map": "mindmap",
     "xmind": "mindmap",
+    "code": "code_practice",
+    "coding_practice": "code_practice",
+    "video": "video_animation",
+    "animation": "video_animation",
+    "video_animation": "video_animation",
+    "video_script": "video_script",
 }
 
 RESOURCE_OUTPUT_STATE_KEYS: dict[str, tuple[str, ...]] = {
@@ -118,6 +156,35 @@ RESOURCE_OUTPUT_STATE_KEYS: dict[str, tuple[str, ...]] = {
         "study_plan_consensus",
         "study_plan_revision_notes",
         "study_plan_document_artifact",
+    ),
+    "code_practice": (
+        "code_practice_outline",
+        "code_practice_markdown",
+        "code_practice_artifact",
+        "code_practice_review_verdict",
+        "code_practice_review_reason",
+        "code_practice_revision_notes",
+        "code_practice_round",
+    ),
+    "video_script": (
+        "video_script_outline",
+        "video_script_markdown",
+        "video_script_srt",
+        "video_script_artifact",
+        "video_script_review_verdict",
+        "video_script_review_reason",
+        "video_script_revision_notes",
+        "video_script_round",
+    ),
+    "video_animation": (
+        "video_animation_spec",
+        "video_animation_html",
+        "video_animation_artifact",
+        "video_animation_review_verdict",
+        "video_animation_review_reason",
+        "video_animation_revision_notes",
+        "video_animation_round",
+        "video_animation_render_log",
     ),
 }
 
@@ -298,10 +365,46 @@ async def _run_study_plan_resource(local_state: dict) -> str:
         _merge_node_output(local_state, await study_plan_rewrite(local_state))
 
 
+async def _run_code_practice_resource(local_state: dict) -> str:
+    _merge_node_output(local_state, await code_practice_planner(local_state))
+    _merge_node_output(local_state, await code_practice_agent(local_state))
+    _merge_node_output(local_state, await code_practice_reviewer(local_state))
+    while should_rewrite_code_practice(local_state) == "rewrite":
+        _merge_node_output(local_state, await code_practice_rewrite(local_state))
+        _merge_node_output(local_state, await code_practice_agent(local_state))
+        _merge_node_output(local_state, await code_practice_reviewer(local_state))
+    return _merge_node_output(local_state, await code_practice_output(local_state))
+
+
+async def _run_video_script_resource(local_state: dict) -> str:
+    _merge_node_output(local_state, await video_script_planner(local_state))
+    _merge_node_output(local_state, await video_script_agent(local_state))
+    _merge_node_output(local_state, await video_script_reviewer(local_state))
+    while should_rewrite_video_script(local_state) == "rewrite":
+        _merge_node_output(local_state, await video_script_rewrite(local_state))
+        _merge_node_output(local_state, await video_script_agent(local_state))
+        _merge_node_output(local_state, await video_script_reviewer(local_state))
+    return _merge_node_output(local_state, await video_script_output(local_state))
+
+
+async def _run_video_animation_resource(local_state: dict) -> str:
+    _merge_node_output(local_state, await video_animation_planner(local_state))
+    _merge_node_output(local_state, await video_animation_agent(local_state))
+    _merge_node_output(local_state, await video_animation_reviewer(local_state))
+    while should_rewrite_video_animation(local_state) == "rewrite":
+        _merge_node_output(local_state, await video_animation_rewrite(local_state))
+        _merge_node_output(local_state, await video_animation_agent(local_state))
+        _merge_node_output(local_state, await video_animation_reviewer(local_state))
+    return _merge_node_output(local_state, await video_animation_output(local_state))
+
+
 RESOURCE_RUNNERS = {
     "mindmap": _run_mindmap_resource,
     "quiz": _run_quiz_resource,
     "review_doc": _run_review_doc_resource,
+    "code_practice": _run_code_practice_resource,
+    "video_script": _run_video_script_resource,
+    "video_animation": _run_video_animation_resource,
     "study_plan": _run_study_plan_resource,
 }
 
@@ -325,29 +428,49 @@ def _primary_artifact(resource_type: str, local_state: dict) -> dict:
         artifact = dict(local_state.get("study_plan_artifact") or {})
         document = dict(local_state.get("study_plan_document_artifact") or {})
         return {**artifact, "document": document}
+    if resource_type == "code_practice":
+        return dict(local_state.get("code_practice_artifact") or {})
+    if resource_type == "video_script":
+        return dict(local_state.get("video_script_artifact") or {})
+    if resource_type == "video_animation":
+        return dict(local_state.get("video_animation_artifact") or {})
     return {}
 
 
 def _resource_title(resource_type: str, artifact: dict, local_state: dict) -> str:
     if resource_type == "mindmap":
-        return str(artifact.get("title") or (local_state.get("mindmap_tree") or {}).get("title") or "Mindmap")
+        return str(
+            artifact.get("title")
+            or (local_state.get("mindmap_tree") or {}).get("title")
+            or "Mindmap"
+        )
     if resource_type == "quiz":
         return str(artifact.get("title") or "Leveled exercises")
     if resource_type == "review_doc":
         return str(artifact.get("title") or "Review document")
     if resource_type == "study_plan":
         return str(artifact.get("title") or "Personalized Study Plan")
+    if resource_type == "code_practice":
+        return str(artifact.get("title") or "Code practice")
+    if resource_type == "video_script":
+        return str(artifact.get("title") or "Teaching video script")
+    if resource_type == "video_animation":
+        return str(artifact.get("title") or "Teaching animation")
     return resource_type
 
 
-def _success_result(resource_type: str, local_state: dict, message_content: str, elapsed_ms: int) -> dict:
+def _success_result(
+    resource_type: str, local_state: dict, message_content: str, elapsed_ms: int
+) -> dict:
     artifact = _primary_artifact(resource_type, local_state)
     return {
         "resource_type": resource_type,
         "status": "success",
         "title": _resource_title(resource_type, artifact, local_state),
         "artifact": artifact,
-        "artifacts": list(local_state.get("review_doc_artifacts") or []) if resource_type == "review_doc" else [],
+        "artifacts": list(local_state.get("review_doc_artifacts") or [])
+        if resource_type == "review_doc"
+        else [],
         "state_updates": _state_updates_for_resource(resource_type, local_state),
         "message_content": message_content,
         "message_preview": message_content[:500],
@@ -450,6 +573,9 @@ def _resource_display_name(resource_type: str) -> str:
         "review_doc": "复习资料",
         "mindmap": "思维导图",
         "quiz": "练习题",
+        "code_practice": "代码实操案例",
+        "video_script": "教学视频 / 动画脚本",
+        "video_animation": "教学动画 / MP4 视频",
         "study_plan": "学习计划",
     }.get(resource_type, resource_type)
 
@@ -459,7 +585,15 @@ def _yes_no(value: bool) -> str:
 
 
 def _bundle_display_order(result: dict) -> int:
-    order = {"review_doc": 0, "mindmap": 1, "quiz": 2, "study_plan": 3}
+    order = {
+        "review_doc": 0,
+        "mindmap": 1,
+        "quiz": 2,
+        "code_practice": 3,
+        "video_script": 4,
+        "video_animation": 5,
+        "study_plan": 6,
+    }
     return order.get(str(result.get("resource_type") or ""), len(order))
 
 
@@ -494,6 +628,30 @@ def _compose_resource_section(result: dict) -> list[str]:
                 f"- 题目数量：{metrics.get('item_count', 0)}",
             ]
         )
+    elif resource_type == "code_practice":
+        lines.extend(
+            [
+                "已生成 Markdown / Word / Python 源码版本。",
+                f"- 标题：{title}",
+                f"- 包含 Python 源码：{_yes_no(bool(metrics.get('has_python')))}",
+            ]
+        )
+    elif resource_type == "video_script":
+        lines.extend(
+            [
+                "已生成 Markdown / Word / SRT 字幕版本。",
+                f"- 标题：{title}",
+                f"- SRT 字符数：{metrics.get('srt_chars', 0)}",
+            ]
+        )
+    elif resource_type == "video_animation":
+        lines.extend(
+            [
+                "已生成 HTML 预览 / MP4 / SRT / JSON 版本。",
+                f"- 标题：{title}",
+                f"- MP4 渲染成功：{_yes_no(bool(metrics.get('render_success')))}",
+            ]
+        )
     elif resource_type == "study_plan":
         lines.extend(
             [
@@ -507,7 +665,9 @@ def _compose_resource_section(result: dict) -> list[str]:
     return lines
 
 
-def _compose_bundle_message(status: str, successes: list[dict], failures: list[dict]) -> str:
+def _compose_bundle_message(
+    status: str, successes: list[dict], failures: list[dict]
+) -> str:
     if len(successes) == 1 and not failures:
         content = str(successes[0].get("message_content") or "").strip()
         if content:
@@ -530,7 +690,11 @@ def _compose_bundle_message(status: str, successes: list[dict], failures: list[d
         lines.extend(["## 未完成", ""])
         for result in sorted(failures, key=_bundle_display_order):
             resource_type = result.get("resource_type") or "unknown"
-            reason = result.get("error_message_sanitized") or result.get("error_type") or "unknown error"
+            reason = (
+                result.get("error_message_sanitized")
+                or result.get("error_type")
+                or "unknown error"
+            )
             lines.append(f"- {resource_type}: {reason}")
         lines.append("")
 
@@ -544,16 +708,28 @@ def _compose_bundle_message(status: str, successes: list[dict], failures: list[d
 
 def _resource_metrics(result: dict) -> dict:
     resource_type = result.get("resource_type")
-    artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
-    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
-    state_updates = result.get("state_updates") if isinstance(result.get("state_updates"), dict) else {}
+    artifact = (
+        result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+    )
+    artifacts = (
+        result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+    )
+    state_updates = (
+        result.get("state_updates")
+        if isinstance(result.get("state_updates"), dict)
+        else {}
+    )
 
     if resource_type == "review_doc":
-        markdown = state_updates.get("review_doc_markdown") or artifact.get("markdown") or ""
+        markdown = (
+            state_updates.get("review_doc_markdown") or artifact.get("markdown") or ""
+        )
         return {
             "artifact_count": len(artifacts) or (1 if artifact else 0),
             "markdown_chars": len(str(markdown)),
-            "has_markdown": bool(artifact.get("markdown_url") or artifact.get("markdown")),
+            "has_markdown": bool(
+                artifact.get("markdown_url") or artifact.get("markdown")
+            ),
             "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
         }
 
@@ -572,16 +748,72 @@ def _resource_metrics(result: dict) -> dict:
             exercise_items = []
         return {
             "item_count": len(exercise_items),
-            "has_markdown": bool(artifact.get("markdown_url") or artifact.get("markdown")),
+            "has_markdown": bool(
+                artifact.get("markdown_url") or artifact.get("markdown")
+            ),
             "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
             "has_pdf": bool(artifact.get("pdf_url") or artifact.get("pdf_filename")),
         }
 
-    if resource_type == "study_plan":
-        document = artifact.get("document") if isinstance(artifact.get("document"), dict) else {}
-        markdown = state_updates.get("study_plan_markdown") or document.get("markdown") or artifact.get("markdown") or ""
+    if resource_type == "code_practice":
+        markdown = (
+            state_updates.get("code_practice_markdown")
+            or artifact.get("markdown")
+            or ""
+        )
         return {
-            "has_markdown": bool(document.get("markdown_url") or document.get("markdown") or markdown),
+            "markdown_chars": len(str(markdown)),
+            "has_markdown": bool(artifact.get("markdown_url") or markdown),
+            "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
+            "has_python": bool(
+                artifact.get("python_url") or artifact.get("python_filename")
+            ),
+        }
+
+    if resource_type == "video_script":
+        markdown = (
+            state_updates.get("video_script_markdown") or artifact.get("markdown") or ""
+        )
+        srt = state_updates.get("video_script_srt") or artifact.get("srt") or ""
+        return {
+            "markdown_chars": len(str(markdown)),
+            "srt_chars": len(str(srt)),
+            "has_markdown": bool(artifact.get("markdown_url") or markdown),
+            "has_docx": bool(artifact.get("docx_url") or artifact.get("docx_filename")),
+            "has_srt": bool(
+                artifact.get("srt_url") or artifact.get("srt_filename") or srt
+            ),
+        }
+
+    if resource_type == "video_animation":
+        return {
+            "duration_seconds": artifact.get("duration_seconds", 0),
+            "render_success": bool(artifact.get("render_success")),
+            "mp4_available": bool(
+                artifact.get("mp4_available") or artifact.get("mp4_url")
+            ),
+            "has_html": bool(artifact.get("html_url") or artifact.get("html_filename")),
+            "has_json": bool(artifact.get("json_url") or artifact.get("json_filename")),
+            "has_srt": bool(artifact.get("srt_url") or artifact.get("srt_filename")),
+            "has_mp4": bool(artifact.get("mp4_url") and artifact.get("render_success")),
+        }
+
+    if resource_type == "study_plan":
+        document = (
+            artifact.get("document")
+            if isinstance(artifact.get("document"), dict)
+            else {}
+        )
+        markdown = (
+            state_updates.get("study_plan_markdown")
+            or document.get("markdown")
+            or artifact.get("markdown")
+            or ""
+        )
+        return {
+            "has_markdown": bool(
+                document.get("markdown_url") or document.get("markdown") or markdown
+            ),
             "has_docx": bool(document.get("docx_url") or document.get("docx_filename")),
             "has_document": bool(document),
         }

@@ -8,7 +8,7 @@ Uses structured output (Pydantic) instead of manual JSON parsing.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from src.config import get_setting, load_prompt
 from src.graph.resource_generation import (
     SUPPORTED_RESOURCE_TYPES,
-    normalize_requested_resource_types,
+    normalize_requested_resource_types as _normalize_supported_requested_resource_types,
 )
 from src.graph.state import LearningState
 from src.llm.structured_output import (
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 class SupervisorOutput(BaseModel):
     """Structured output for supervisor intent classification."""
+
     intent: Literal["academic", "emotional", "unknown"]
     keywords: list[str]
     confidence: float
@@ -44,7 +45,63 @@ class SupervisorOutput(BaseModel):
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = SUPPORTED_RESOURCE_TYPES
+_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES) | {
+    "code_practice",
+    "video_script",
+    "video_animation",
+}
+
+_SUPERVISOR_RESOURCE_ALIASES = {
+    "code_case": "code_practice",
+    "project_case": "code_practice",
+    "coding_practice": "code_practice",
+    "code practice": "code_practice",
+    "hands-on project": "code_practice",
+    "hands_on project": "code_practice",
+    "hands_on_project": "code_practice",
+    "animation script": "video_script",
+    "video script": "video_script",
+    "storyboard": "video_script",
+    "narration script": "video_script",
+    "video animation": "video_animation",
+    "animation video": "video_animation",
+    "animation_video": "video_animation",
+    "mp4": "video_animation",
+    "mp4 video": "video_animation",
+    "mp4_video": "video_animation",
+    "render video": "video_animation",
+    "render_video": "video_animation",
+}
+
+
+def _normalize_supervisor_resource_type(value: Any) -> str:
+    """Normalize resource aliases known at supervisor time."""
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return ""
+    text = _SUPERVISOR_RESOURCE_ALIASES.get(text, text)
+    if text in {"code_practice", "video_script", "video_animation"}:
+        return text
+    supported = _normalize_supported_requested_resource_types(text)
+    return supported[0] if supported else ""
+
+
+def normalize_requested_resource_types(*values: Any) -> list[str]:
+    """Return ordered, deduplicated resource types accepted by the supervisor."""
+    normalized: list[str] = []
+
+    def add_one(item: Any) -> None:
+        resource_type = _normalize_supervisor_resource_type(item)
+        if resource_type and resource_type not in normalized:
+            normalized.append(resource_type)
+
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add_one(item)
+        else:
+            add_one(value)
+    return normalized
 
 
 def _sanitize_valid_intents() -> set[str]:
@@ -102,13 +159,17 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
     )
     raw_resource_values = [
         str(item or "").strip()
-        for item in [parsed.requested_resource_type, *(parsed.requested_resource_types or [])]
+        for item in [
+            parsed.requested_resource_type,
+            *(parsed.requested_resource_types or []),
+        ]
         if str(item or "").strip()
     ]
     invalid_resources = [
         item
         for item in raw_resource_values
-        if item not in _VALID_RESOURCE_TYPES and not normalize_requested_resource_types(item)
+        if item not in _VALID_RESOURCE_TYPES
+        and not normalize_requested_resource_types(item)
     ]
     if invalid_resources:
         return f"invalid requested_resource_types: {invalid_resources}"
@@ -147,7 +208,9 @@ async def supervisor_node(state: LearningState) -> dict:
     )
 
     temperature = get_setting("supervisor.temperature", 0.0)
-    model_name = get_setting("llm.supervisor.model", get_setting("supervisor.model", ""))
+    model_name = get_setting(
+        "llm.supervisor.model", get_setting("supervisor.model", "")
+    )
     with traced_llm_call(
         model_name=model_name,
         node_name="supervisor",
@@ -178,19 +241,30 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    # Use LLM resource requests first, then add deterministic detections for
-    # explicit multi-resource phrasing the model may have collapsed to one type.
-    requested_resource_types = normalize_requested_resource_types(
-        result.requested_resource_types,
-        result.requested_resource_type,
-        _detect_requested_resource_types(user_text),
+    # Deterministic detections are intentionally authoritative for explicit
+    # resource phrasing. The LLM may over-broaden "代码实操案例" into review_doc,
+    # which would route a single code-practice request into a parallel bundle.
+    deterministic_resource_types = _detect_requested_resource_types(user_text)
+    requested_resource_types = (
+        deterministic_resource_types
+        if deterministic_resource_types
+        else normalize_requested_resource_types(
+            result.requested_resource_types,
+            result.requested_resource_type,
+        )
     )
-    requested_resource_type = requested_resource_types[0] if requested_resource_types else ""
+    requested_resource_type = (
+        requested_resource_types[0] if requested_resource_types else ""
+    )
     is_parallel_resource_request = len(requested_resource_types) > 1
+    if requested_resource_types and intent in {"emotional", "unknown"}:
+        intent = "academic"
 
     # academic intent with resource type stays academic
     # emotional/unknown with resource type was already blocked by validation
-    needs_mindmap = requested_resource_type == "mindmap" or "mindmap" in requested_resource_types
+    needs_mindmap = (
+        requested_resource_type == "mindmap" or "mindmap" in requested_resource_types
+    )
 
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
@@ -221,11 +295,14 @@ async def supervisor_node(state: LearningState) -> dict:
         "keypoints": keypoints,
         "requested_resource_type": requested_resource_type,
         "requested_resource_types": requested_resource_types,
+        "is_parallel_resource_request": is_parallel_resource_request,
         "needs_mindmap": needs_mindmap,
     }
 
 
-def _filter_subject_candidates(candidates: list[str], available_subjects: set[str]) -> list[str]:
+def _filter_subject_candidates(
+    candidates: list[str], available_subjects: set[str]
+) -> list[str]:
     """Keep normalized subject candidates that exist in the current course catalog."""
     filtered: list[str] = []
     for candidate in candidates or []:
@@ -239,13 +316,15 @@ def _filter_subject_candidates(candidates: list[str], available_subjects: set[st
 async def handle_unknown(state: LearningState) -> dict:
     """Handle off-topic queries with a friendly redirect message."""
     return {
-        "messages": [AIMessage(
-            content=(
-                "抱歉，这个问题超出了我的辅导范围。我是你的高校学习助手，"
-                "可以帮你探索专业方向、解答课程知识、制定学习路径、生成学习资源，"
-                "或者聊聊学习中的困惑。请问有什么需要帮助的吗？"
-            ),
-        )],
+        "messages": [
+            AIMessage(
+                content=(
+                    "抱歉，这个问题超出了我的辅导范围。我是你的高校学习助手，"
+                    "可以帮你探索专业方向、解答课程知识、制定学习路径、生成学习资源，"
+                    "或者聊聊学习中的困惑。请问有什么需要帮助的吗？"
+                ),
+            )
+        ],
     }
 
 
@@ -346,20 +425,170 @@ _RESOURCE_TYPE_MARKERS_FOR_DETECTION: tuple[tuple[str, tuple[str, ...]], ...] = 
     ),
     ("mindmap", ("思维导图", "脑图", "知识图谱", "mindmap", "xmind")),
     ("quiz", ("练习题", "习题", "题库", "测试题", "测验", "quiz", "exercises")),
+    (
+        "code_practice",
+        (
+            "代码实操",
+            "代码案例",
+            "实操案例",
+            "编程实战",
+            "项目实战",
+            "项目案例",
+            "完整代码",
+            "可运行代码",
+            "代码练习",
+            "coding practice",
+            "code practice",
+            "hands-on project",
+        ),
+    ),
+    (
+        "video_animation",
+        (
+            "教学动画",
+            "动画视频",
+            "mp4",
+            "真实视频",
+            "生成视频",
+            "教学视频 mp4",
+            "动画演示",
+            "可播放动画",
+            "video animation",
+            "animation video",
+            "mp4 video",
+            "render video",
+        ),
+    ),
+    (
+        "video_script",
+        (
+            "视频脚本",
+            "动画脚本",
+            "分镜脚本",
+            "旁白文案",
+            "字幕脚本",
+            "视频分镜",
+            "animation script",
+            "video script",
+            "storyboard",
+            "narration script",
+        ),
+    ),
     ("study_plan", ("学习计划", "学习路径", "学习路线", "roadmap")),
 )
 
 _RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
+    (
+        "mindmap",
+        (
+            "思维导图",
+            "知识图谱",
+            "脑图",
+            "结构图",
+            "mindmap",
+            "mind map",
+            "markmap",
+            "xmind",
+        ),
+    ),
     ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目")),
     ("ppt", ("ppt", "幻灯片", "演示文稿", "课件")),
-    ("code_case", ("代码案例", "代码实操", "实操案例", "编程案例", "示例代码", "demo")),
-    ("project_case", ("项目案例", "实践项目", "项目实战", "课程项目", "实验项目")),
-    ("video_script", ("视频脚本", "动画脚本", "讲解视频", "教学视频", "分镜")),
-    ("review_doc", ("复习资料", "复习文档", "学习文档", "学习材料", "考试讲义", "复习讲义", "知识整理", "知识点整理", "章节复习", "期末复习")),
-    ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
+    (
+        "code_practice",
+        (
+            "代码实操",
+            "代码案例",
+            "实操案例",
+            "编程实战",
+            "项目实战",
+            "项目案例",
+            "完整代码",
+            "可运行代码",
+            "代码练习",
+            "coding practice",
+            "code practice",
+            "hands-on project",
+        ),
+    ),
+    (
+        "video_animation",
+        (
+            "教学动画",
+            "动画视频",
+            "MP4",
+            "真实视频",
+            "生成视频",
+            "教学视频 MP4",
+            "动画演示",
+            "可播放动画",
+            "video animation",
+            "animation video",
+            "mp4 video",
+            "render video",
+        ),
+    ),
+    (
+        "video_script",
+        (
+            "视频脚本",
+            "动画脚本",
+            "分镜脚本",
+            "旁白文案",
+            "字幕脚本",
+            "视频分镜",
+            "animation script",
+            "video script",
+            "storyboard",
+            "narration script",
+        ),
+    ),
+    (
+        "review_doc",
+        (
+            "复习资料",
+            "复习文档",
+            "学习文档",
+            "学习材料",
+            "考试讲义",
+            "复习讲义",
+            "知识整理",
+            "知识点整理",
+            "章节复习",
+            "期末复习",
+        ),
+    ),
+    (
+        "study_plan",
+        (
+            "学习计划",
+            "学习路径",
+            "学习路线",
+            "入门路线",
+            "怎么学习",
+            "如何学习",
+            "怎么安排",
+            "学习规划",
+            "学习方案",
+            "study plan",
+            "learning path",
+            "roadmap",
+        ),
+    ),
     ("reading", ("拓展阅读", "阅读材料", "参考资料", "文献清单", "资料清单")),
-    ("volunteer", ("志愿填报", "高考志愿", "填报志愿", "志愿", "择校", "选专业", "分数线", "院校推荐", "专业推荐")),
+    (
+        "volunteer",
+        (
+            "志愿填报",
+            "高考志愿",
+            "填报志愿",
+            "志愿",
+            "择校",
+            "选专业",
+            "分数线",
+            "院校推荐",
+            "专业推荐",
+        ),
+    ),
     ("other", ("讲义", "学习资源", "资源清单", "知识卡片")),
 )
 
@@ -391,6 +620,20 @@ _READABLE_RESOURCE_ACTION_MARKERS = (
     "give me",
 )
 
+_CODE_PRACTICE_ACTION_MARKERS = (
+    "生成",
+    "给我",
+    "帮我做",
+    "帮我生成",
+    "创建",
+    "输出",
+    "制作",
+    "generate",
+    "give me",
+    "create",
+    "make",
+)
+
 _READABLE_WEAK_REQUEST_MARKERS = (
     "帮我",
     "给我",
@@ -417,31 +660,155 @@ _READABLE_EXPLANATION_MARKERS = (
 )
 
 _READABLE_RESOURCE_TYPE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("mindmap", ("思维导图", "知识图谱", "脑图", "结构图", "mindmap", "mind map", "markmap", "xmind")),
-    ("quiz", ("练习题", "分层练习", "题库", "习题", "测验", "测试题", "题目", "quiz", "exercise", "practice questions")),
-    ("review_doc", ("复习资料", "复习文档", "学习资料", "学习文档", "学习材料", "课程资料", "考试讲义", "复习讲义", "讲义", "笔记", "知识整理", "知识点整理", "章节复习", "期末复习", "考前复习", "review doc", "review document")),
-    ("study_plan", ("学习计划", "学习路径", "学习路线", "入门路线", "怎么学习", "如何学习", "怎么安排", "学习规划", "学习方案", "study plan", "learning path", "roadmap")),
+    (
+        "mindmap",
+        (
+            "思维导图",
+            "知识图谱",
+            "脑图",
+            "结构图",
+            "mindmap",
+            "mind map",
+            "markmap",
+            "xmind",
+        ),
+    ),
+    (
+        "quiz",
+        (
+            "练习题",
+            "分层练习",
+            "题库",
+            "习题",
+            "测验",
+            "测试题",
+            "题目",
+            "quiz",
+            "exercise",
+            "practice questions",
+        ),
+    ),
+    (
+        "code_practice",
+        (
+            "代码实操",
+            "代码案例",
+            "实操案例",
+            "编程实战",
+            "项目实战",
+            "项目案例",
+            "完整代码",
+            "可运行代码",
+            "代码练习",
+            "coding practice",
+            "code practice",
+            "hands-on project",
+        ),
+    ),
+    (
+        "video_animation",
+        (
+            "教学动画",
+            "动画视频",
+            "mp4",
+            "真实视频",
+            "生成视频",
+            "教学视频 mp4",
+            "动画演示",
+            "可播放动画",
+            "video animation",
+            "animation video",
+            "mp4 video",
+            "render video",
+        ),
+    ),
+    (
+        "video_script",
+        (
+            "视频脚本",
+            "动画脚本",
+            "分镜脚本",
+            "旁白文案",
+            "字幕脚本",
+            "视频分镜",
+            "animation script",
+            "video script",
+            "storyboard",
+            "narration script",
+        ),
+    ),
+    (
+        "review_doc",
+        (
+            "复习资料",
+            "复习文档",
+            "学习资料",
+            "课程讲解文档",
+            "讲义",
+            "知识点整理",
+            "复习笔记",
+            "课程文档",
+            "review doc",
+            "review document",
+        ),
+    ),
+    (
+        "study_plan",
+        (
+            "学习计划",
+            "学习路径",
+            "学习路线",
+            "入门路线",
+            "怎么学习",
+            "如何学习",
+            "怎么安排",
+            "学习规划",
+            "学习方案",
+            "study plan",
+            "learning path",
+            "roadmap",
+        ),
+    ),
 )
 
 
 def _detect_requested_resource_types(text: str) -> list[str]:
     """Deterministically identify explicit single or multi-resource requests."""
     lowered = str(text or "").lower()
-    asks_explanation = any(marker.lower() in lowered for marker in _READABLE_EXPLANATION_MARKERS)
-    has_action = any(marker.lower() in lowered for marker in _READABLE_RESOURCE_ACTION_MARKERS)
-    has_weak_request = any(marker.lower() in lowered for marker in _READABLE_WEAK_REQUEST_MARKERS)
+    asks_explanation = any(
+        marker.lower() in lowered for marker in _READABLE_EXPLANATION_MARKERS
+    )
+    has_action = any(
+        marker.lower() in lowered for marker in _READABLE_RESOURCE_ACTION_MARKERS
+    )
+    has_weak_request = any(
+        marker.lower() in lowered for marker in _READABLE_WEAK_REQUEST_MARKERS
+    )
+    has_code_practice_action = any(
+        marker.lower() in lowered for marker in _CODE_PRACTICE_ACTION_MARKERS
+    )
 
     detected: list[tuple[int, str]] = []
     for resource_type, markers in _READABLE_RESOURCE_TYPE_MARKERS:
-        positions = [lowered.find(marker.lower()) for marker in markers if marker.lower() in lowered]
+        positions = [
+            lowered.find(marker.lower())
+            for marker in markers
+            if marker.lower() in lowered
+        ]
         if positions:
+            if resource_type == "code_practice" and not has_code_practice_action:
+                continue
             detected.append((min(positions), resource_type))
 
     if not detected:
         return []
 
     has_study_plan = any(resource_type == "study_plan" for _, resource_type in detected)
-    if not has_study_plan and not has_action and (not has_weak_request or asks_explanation):
+    if (
+        not has_study_plan
+        and not has_action
+        and (not has_weak_request or asks_explanation)
+    ):
         return []
     if asks_explanation and not has_action and not has_weak_request:
         return []
