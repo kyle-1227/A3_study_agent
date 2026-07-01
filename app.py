@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 
+from src.context_engineering.schema import sanitize_error_message
+
 load_dotenv(Path(__file__).parent / ".env")
 
 from src.database.checkpointer import (
@@ -69,6 +71,15 @@ CONTEXT_TOP_ITEM_FIELDS = {
     "lifetime",
     "disclosure_level",
 }
+PACKING_PREVIEW_FIELDS = {
+    "id",
+    "source_type",
+    "title",
+    "token_estimate",
+    "priority",
+    "can_drop",
+    "reason",
+}
 
 
 def _safe_context_top_items(value: object) -> list[dict]:
@@ -85,6 +96,27 @@ def _safe_context_top_items(value: object) -> list[dict]:
                 if key in item
             }
         )
+    return safe_items
+
+
+def _safe_packing_preview_items(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    safe_items: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        safe_item = {
+            key: item[key]
+            for key in PACKING_PREVIEW_FIELDS
+            if key in item
+        }
+        if "title" in safe_item:
+            safe_item["title"] = sanitize_error_message(
+                safe_item["title"],
+                max_chars=120,
+            )
+        safe_items.append(safe_item)
     return safe_items
 
 
@@ -739,6 +771,60 @@ async def _stream_graph_events(
                     "error_reason": event.get("error_reason", ""),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_packing_plan":
+                payload = {
+                    "type": "context_packing_plan",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "candidate_count": event.get("candidate_count", 0),
+                    "source_counts": event.get("source_counts")
+                    if isinstance(event.get("source_counts"), dict)
+                    else {},
+                    "max_context_block_tokens": event.get("max_context_block_tokens", 0),
+                    "strategy": event.get("strategy", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_packed":
+                payload = {
+                    "type": "context_packed",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "strategy": event.get("strategy", ""),
+                    "selected_count": event.get("selected_count", 0),
+                    "dropped_count": event.get("dropped_count", 0),
+                    "selected_tokens": event.get("selected_tokens", 0),
+                    "dropped_tokens": event.get("dropped_tokens", 0),
+                    "required_tokens": event.get("required_tokens", 0),
+                    "optional_tokens": event.get("optional_tokens", 0),
+                    "remaining_tokens": event.get("remaining_tokens", 0),
+                    "overflow": bool(event.get("overflow", False)),
+                    "selected_items_preview": _safe_packing_preview_items(
+                        event.get("selected_items_preview")
+                    ),
+                    "dropped_items_preview": _safe_packing_preview_items(
+                        event.get("dropped_items_preview")
+                    ),
+                    "warnings": event.get("warnings")
+                    if isinstance(event.get("warnings"), list)
+                    else [],
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_packing_error":
+                payload = {
+                    "type": "context_packing_error",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "reason": event.get("reason", ""),
+                    "warning": event.get("warning", ""),
+                    "selected_tokens": event.get("selected_tokens"),
+                    "budget_tokens": event.get("budget_tokens"),
+                    "error_type": event.get("error_type", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
         return drained
 
     try:

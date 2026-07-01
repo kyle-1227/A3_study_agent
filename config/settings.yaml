@@ -126,6 +126,24 @@ context_engineering:
     max_items_per_provider: 10
     max_content_chars_per_item: 4000
     trace_top_items: 10
+  packer:
+    enabled: true
+    shadow_mode: true
+    apply_to_llm: false
+    strategy: priority_budget
+    max_context_block_tokens: 120000
+    trace_selected_items: 10
+    trace_dropped_items: 10
+    enabled_nodes: []
+    enabled_sources:
+      - message
+      - rules
+      - evidence
+      - memory
+      - profile
+      - artifact
+      - trajectory
+      - curriculum
 
 web_search:
   provider: tavily                       # Web Research executor provider

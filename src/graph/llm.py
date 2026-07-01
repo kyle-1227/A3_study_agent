@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 import httpx
 
 from src.config import get_setting
+from src.context_engineering.packing import emit_context_packing_shadow
 from src.context_engineering.providers import emit_context_items_shadow
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
@@ -561,11 +562,18 @@ async def invoke_plain_llm_fail_fast(
         messages=messages or [],
         state=state or {},
     )
-    emit_context_items_shadow(
+    context_items = emit_context_items_shadow(
         logger,
         node_name=node_name,
         llm_node=llm_node,
         messages=messages or [],
+        state=state or {},
+    )
+    emit_context_packing_shadow(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        items=context_items,
         state=state or {},
     )
     max_retries = get_llm_call_max_retries(node_name)

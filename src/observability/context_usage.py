@@ -6,18 +6,21 @@ import logging
 from typing import Any
 
 from src.context_engineering.budget import build_context_usage_payload as _build_payload
-from src.context_engineering.tokenizer import count_messages_tokens, count_text_tokens
+from src.context_engineering.tokenizer import (
+    estimate_messages_tokens_mixed,
+    estimate_text_tokens_mixed,
+)
 from src.context_engineering.trace import emit_context_usage
 
 
 def estimate_tokens_from_text(text: str) -> int:
     """Compatibility wrapper for legacy callers."""
-    return count_text_tokens(text).value
+    return estimate_text_tokens_mixed(text)
 
 
 def estimate_messages_tokens(messages: list[Any]) -> int:
     """Compatibility wrapper for legacy callers."""
-    return count_messages_tokens(messages).value
+    return estimate_messages_tokens_mixed(messages)
 
 
 def build_context_usage_payload(

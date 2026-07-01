@@ -7,11 +7,11 @@ from pathlib import Path
 import yaml
 
 
-def test_phase2_does_not_introduce_context_packer_or_final_selection():
+def test_phase2_providers_do_not_depend_on_context_packer_or_final_selection():
     offenders = []
-    for path in Path("src/context_engineering").rglob("*.py"):
+    for path in Path("src/context_engineering/providers").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if "ContextPacker" in text or "context_packer" in text:
+        if "context_engineering.packing" in text or "pack_context_items" in text:
             offenders.append(str(path))
 
     assert offenders == []

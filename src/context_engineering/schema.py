@@ -13,6 +13,8 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+"),
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^;\n]+"),
     re.compile(r"(?i)(x-api-key\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(db[_-]?uri\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(database[_-]?url\s*[:=]\s*)[^\s,;]+"),
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
     re.compile(r"nvapi-[A-Za-z0-9_-]+"),

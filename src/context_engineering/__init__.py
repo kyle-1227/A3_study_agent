@@ -7,6 +7,13 @@ from src.context_engineering.budget import (
     get_context_engineering_config,
     get_model_context_limit,
 )
+from src.context_engineering.packing import (
+    ContextPackingError,
+    PackedContext,
+    PackingDecision,
+    emit_context_packing_shadow,
+    pack_context_items,
+)
 from src.context_engineering.schema import (
     ContextBudget,
     ContextConfigError,
@@ -39,9 +46,12 @@ __all__ = [
     "ContextBudget",
     "ContextConfigError",
     "ContextItem",
+    "ContextPackingError",
     "ContextProviderError",
     "ContextUsageError",
     "ContextUsageReport",
+    "PackedContext",
+    "PackingDecision",
     "TokenCount",
     "build_context_items_collected_event",
     "build_context_provider_error_event",
@@ -54,6 +64,7 @@ __all__ = [
     "count_schema_chars",
     "count_text_tokens",
     "emit_context_items_collected",
+    "emit_context_packing_shadow",
     "emit_context_provider_error",
     "emit_context_usage",
     "emit_context_usage_error",
@@ -62,4 +73,5 @@ __all__ = [
     "get_context_engineering_config",
     "get_model_context_limit",
     "message_content_to_text",
+    "pack_context_items",
 ]
