@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QuizAttemptResult(BaseModel):
@@ -23,7 +23,9 @@ class QuizAttemptResult(BaseModel):
     correct_answer: str = ""
     is_correct: bool = False
     knowledge_points: list[str] = Field(default_factory=list)
-    difficulty_level: Literal["basic", "intermediate", "application", "self_check"] = "basic"
+    difficulty_level: Literal["basic", "intermediate", "application", "self_check"] = (
+        "basic"
+    )
     attempt_number: int = Field(default=1, ge=1)
     time_spent_seconds: float = Field(default=0.0, ge=0.0)
 
@@ -34,21 +36,20 @@ class ErrorClassificationStrict(BaseModel):
     The LLM analyzes a failed quiz attempt and classifies the root cause.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     error_type: Literal["concept", "logic", "implementation"] = Field(
-        default="concept",
         description="concept=doesn't understand the idea, logic=wrong reasoning, implementation=syntax/detail error",
     )
     concept_gap: str = Field(
-        default="",
         max_length=200,
         description="The specific concept or knowledge gap that caused the error",
     )
     suggestion: str = Field(
-        default="",
         max_length=300,
         description="Brief suggestion for how to address this error",
     )
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class ErrorClassification(BaseModel):
@@ -84,7 +85,9 @@ class ReviewSchedule(BaseModel):
     knowledge_point: str
     subject: str
     topic: str = ""
-    intervals: list[int] = Field(default_factory=list, description="Days between reviews")
+    intervals: list[int] = Field(
+        default_factory=list, description="Days between reviews"
+    )
     current_interval_index: int = Field(default=0, ge=0)
     next_review_at: str = ""  # ISO timestamp
     review_count: int = Field(default=0, ge=0)

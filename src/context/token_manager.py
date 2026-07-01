@@ -13,47 +13,67 @@ and English text (~3.5 chars/token), this is accurate enough for budget manageme
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from src.config import get_setting
+from src.context.errors import ContextConfigError
+
+
+_TOKEN_BUDGET_FIELDS = (
+    "system_prompt",
+    "user_profile",
+    "episodic_memories",
+    "semantic_summary",
+    "current_task",
+    "rag_evidence",
+    "conversation_summary",
+    "total_budget",
+    "buffer",
+)
 
 
 class TokenBudget(BaseModel):
-    """Per-component token allocations for context assembly.
+    """Legacy memory-level character allocations for context assembly.
 
     All values are approximate character counts (not actual LLM tokens).
     Characters are used because Chinese and English have different token ratios,
     and we want a simple, fast budget without a tokenizer dependency.
 
-    The total_budget should not exceed the model's context window minus a safety
-    buffer. For deepseek-v4-pro with 128k context, the default 4096 char budget
-    is very conservative (actual model limit is much higher).
+    This is a legacy memory-only budget. It is not the model's maximum context
+    window and must not be used as an agent-wide Context Engineering budget.
+    Model windows should be configured explicitly in the Phase 1
+    context_engineering.model_limits work.
     """
 
-    system_prompt: int = Field(default=500, ge=0)
-    user_profile: int = Field(default=300, ge=0)
-    episodic_memories: int = Field(default=800, ge=0)
-    semantic_summary: int = Field(default=400, ge=0)
-    current_task: int = Field(default=500, ge=0)
-    rag_evidence: int = Field(default=1500, ge=0)
-    conversation_summary: int = Field(default=200, ge=0)
-    total_budget: int = Field(default=4096, ge=0)
-    buffer: int = Field(default=96, ge=0)
+    system_prompt: int = Field(ge=0)
+    user_profile: int = Field(ge=0)
+    episodic_memories: int = Field(ge=0)
+    semantic_summary: int = Field(ge=0)
+    current_task: int = Field(ge=0)
+    rag_evidence: int = Field(ge=0)
+    conversation_summary: int = Field(ge=0)
+    total_budget: int = Field(gt=0)
+    buffer: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_budget_relationships(self) -> "TokenBudget":
+        if self.buffer > self.total_budget:
+            raise ValueError("memory.token_budget.buffer must not exceed total_budget")
+        return self
 
     @classmethod
     def from_settings(cls) -> "TokenBudget":
         """Load budget from settings.yaml memory.token_budget section."""
-        return cls(
-            system_prompt=int(get_setting("memory.token_budget.system_prompt", 500)),
-            user_profile=int(get_setting("memory.token_budget.user_profile", 300)),
-            episodic_memories=int(get_setting("memory.token_budget.episodic_memories", 800)),
-            semantic_summary=int(get_setting("memory.token_budget.semantic_summary", 400)),
-            current_task=int(get_setting("memory.token_budget.current_task", 500)),
-            rag_evidence=int(get_setting("memory.token_budget.rag_evidence", 1500)),
-            conversation_summary=int(get_setting("memory.token_budget.conversation_summary", 200)),
-            total_budget=int(get_setting("memory.token_budget.total_budget", 4096)),
-            buffer=int(get_setting("memory.token_budget.buffer", 96)),
-        )
+        values = {
+            field_name: _required_non_negative_int(f"memory.token_budget.{field_name}")
+            for field_name in _TOKEN_BUDGET_FIELDS
+        }
+        try:
+            return cls(**values)
+        except ValidationError as exc:
+            raise ContextConfigError(
+                f"Invalid memory.token_budget config: {exc}"
+            ) from exc
 
     @property
     def available(self) -> int:
@@ -94,9 +114,9 @@ def estimate_tokens(text: str) -> int:
     other_chars = 0
 
     for c in text:
-        if '一' <= c <= '鿿' or '㐀' <= c <= '䶿':
+        if "一" <= c <= "鿿" or "㐀" <= c <= "䶿":
             chinese_chars += 1
-        elif '　' <= c <= '〿':
+        elif "　" <= c <= "〿":
             # CJK punctuation — closer to Chinese ratio
             chinese_chars += 1
         else:
@@ -184,3 +204,14 @@ def fit_to_budget_soft(text: str, max_chars: int) -> str:
             return truncated[:last] + "..."
 
     return truncated[: max_chars - 3] + "..."
+
+
+def _required_non_negative_int(key: str) -> int:
+    value = get_setting(key)
+    if value is None:
+        raise ContextConfigError(f"{key} is required")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ContextConfigError(f"{key} must be a non-negative integer")
+    if value < 0:
+        raise ContextConfigError(f"{key} must be a non-negative integer")
+    return value

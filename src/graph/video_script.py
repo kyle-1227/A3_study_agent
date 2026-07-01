@@ -77,7 +77,9 @@ def _video_script_model_name() -> str:
         "llm.video_script.model",
         get_setting("video_script.model", None),
     )
-    return str(configured_model or os.getenv("DEEPSEEK_MODEL") or VIDEO_SCRIPT_DEFAULT_MODEL)
+    return str(
+        configured_model or os.getenv("DEEPSEEK_MODEL") or VIDEO_SCRIPT_DEFAULT_MODEL
+    )
 
 
 def validate_video_script_verdict(parsed: BaseModel) -> str:
@@ -98,8 +100,14 @@ def _last_human_query(state: LearningState) -> str:
 
 
 def _format_keypoints(state: LearningState) -> str:
-    values = [str(item).strip() for item in state.get("keypoints", []) if str(item).strip()]
-    expanded = [str(item).strip() for item in state.get("expanded_keypoints", []) if str(item).strip()]
+    values = [
+        str(item).strip() for item in state.get("keypoints", []) if str(item).strip()
+    ]
+    expanded = [
+        str(item).strip()
+        for item in state.get("expanded_keypoints", [])
+        if str(item).strip()
+    ]
     merged = values + [item for item in expanded if item not in values]
     return ", ".join(merged) or "No explicit keypoints."
 
@@ -109,8 +117,15 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:900]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:900]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -170,14 +185,25 @@ def _topic_terms(state: dict) -> list[str]:
         if value:
             values.append(value)
     values.extend(str(item) for item in state.get("keypoints", []) if str(item).strip())
-    values.extend(str(item) for item in state.get("expanded_keypoints", []) if str(item).strip())
+    values.extend(
+        str(item) for item in state.get("expanded_keypoints", []) if str(item).strip()
+    )
 
     joined = " ".join(values).lower()
     terms: list[str] = []
     for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_+#.-]{1,}", joined):
         if term not in {"video", "script", "animation", "python"} and term not in terms:
             terms.append(term)
-    for phrase in ("面向对象", "类", "对象", "函数", "数据结构", "机器学习", "大数据", "计算机科学"):
+    for phrase in (
+        "面向对象",
+        "类",
+        "对象",
+        "函数",
+        "数据结构",
+        "机器学习",
+        "大数据",
+        "计算机科学",
+    ):
         if phrase in joined and phrase not in terms:
             terms.append(phrase)
     return terms
@@ -403,7 +429,9 @@ def _fallback_video_script_outline(state: LearningState, reason: str = "") -> st
 
 
 def _create_video_script_artifact(markdown: str, title: str, srt: str) -> dict:
-    return create_video_script_artifact(markdown_text=markdown, title=title, srt_text=srt)
+    return create_video_script_artifact(
+        markdown_text=markdown, title=title, srt_text=srt
+    )
 
 
 @traced_node
@@ -415,7 +443,9 @@ async def video_script_planner(state: LearningState) -> dict:
             node_name="video_script_planner",
             llm_node="video_script",
             messages=[
-                SystemMessage(content="You are a university teaching-video planner. Return a concrete blueprint only."),
+                SystemMessage(
+                    content="You are a university teaching-video planner. Return a concrete blueprint only."
+                ),
                 HumanMessage(content=_planner_prompt(state, query, context)),
             ],
             state=state,
@@ -425,7 +455,9 @@ async def video_script_planner(state: LearningState) -> dict:
         logger.warning("video_script_planner fallback used: %s", exc)
         outline = _fallback_video_script_outline(state, f"{type(exc).__name__}: {exc}")
     if not outline.strip():
-        outline = _fallback_video_script_outline(state, "planner produced empty outline")
+        outline = _fallback_video_script_outline(
+            state, "planner produced empty outline"
+        )
 
     emit_a3_trace(
         logger,
@@ -460,7 +492,10 @@ async def video_script_agent(state: LearningState) -> dict:
     round_no = int(state.get("video_script_round", 0) or 0) + 1
     fallback_used = False
     fallback_reason = ""
-    if state.get("degraded_generation") is True and state.get("evidence_judge_state") == "insufficient":
+    if (
+        state.get("degraded_generation") is True
+        and state.get("evidence_judge_state") == "insufficient"
+    ):
         fallback_used = True
         fallback_reason = str(
             state.get("degraded_reason")
@@ -473,7 +508,9 @@ async def video_script_agent(state: LearningState) -> dict:
                 node_name="video_script_agent",
                 llm_node="video_script",
                 messages=[
-                    SystemMessage(content="You are a teaching-video and animation script writer. Return Markdown only."),
+                    SystemMessage(
+                        content="You are a teaching-video and animation script writer. Return Markdown only."
+                    ),
                     HumanMessage(content=_agent_prompt(state, outline)),
                 ],
                 state=state,
@@ -483,7 +520,9 @@ async def video_script_agent(state: LearningState) -> dict:
             fallback_used = True
             fallback_reason = f"{type(exc).__name__}: {exc}"
             logger.warning("video_script_agent fallback used: %s", fallback_reason)
-            markdown = _fallback_video_script_markdown(state, "模型生成视频脚本失败，系统使用 fallback 结构生成资源。")
+            markdown = _fallback_video_script_markdown(
+                state, "模型生成视频脚本失败，系统使用 fallback 结构生成资源。"
+            )
     if not markdown.strip():
         fallback_used = True
         fallback_reason = "video_script_agent produced empty markdown"
@@ -518,7 +557,9 @@ async def video_script_reviewer(state: LearningState) -> dict:
     markdown = state.get("video_script_markdown", "")
     local_check = _local_check_video_script(markdown, state)
 
-    def trace_payload(verdict: str, reason: str, *, llm_fallback_used: bool = False) -> dict:
+    def trace_payload(
+        verdict: str, reason: str, *, llm_fallback_used: bool = False
+    ) -> dict:
         return {
             "local_check_passed": bool(local_check.get("passed")),
             "missing_sections": local_check.get("missing_sections", []),
@@ -552,13 +593,17 @@ async def video_script_reviewer(state: LearningState) -> dict:
 
     model_name = _video_script_model_name()
     try:
-        with traced_llm_call(model_name=model_name, node_name="video_script_reviewer", temperature=0.0):
+        with traced_llm_call(
+            model_name=model_name, node_name="video_script_reviewer", temperature=0.0
+        ):
             structured_result = await invoke_structured_llm(
                 node_name="video_script_reviewer",
                 llm_node="video_script",
                 schema=VideoScriptReviewVerdict,
                 messages=[
-                    SystemMessage(content="You are a strict teaching-video script reviewer. Return only JSON."),
+                    SystemMessage(
+                        content="You are a strict teaching-video script reviewer. Return only JSON."
+                    ),
                     HumanMessage(
                         content=(
                             "Review this Markdown teaching-video / animation script for teaching quality.\n"
@@ -578,7 +623,9 @@ async def video_script_reviewer(state: LearningState) -> dict:
             )
         result = structured_result.parsed
         if not isinstance(result, VideoScriptReviewVerdict):
-            raise TypeError("video_script_reviewer parsed result is not VideoScriptReviewVerdict")
+            raise TypeError(
+                "video_script_reviewer parsed result is not VideoScriptReviewVerdict"
+            )
         verdict = result.verdict
         reason = result.reason.strip()
         emit_a3_trace(
@@ -629,7 +676,9 @@ async def video_script_rewrite(state: LearningState) -> dict:
 async def video_script_output(state: LearningState) -> dict:
     markdown = state.get("video_script_markdown", "")
     if not markdown.strip():
-        markdown = _fallback_video_script_markdown(state, "output received empty markdown")
+        markdown = _fallback_video_script_markdown(
+            state, "output received empty markdown"
+        )
     local_check = _local_check_video_script(markdown, state)
     if not local_check["passed"]:
         markdown = _fallback_video_script_markdown(

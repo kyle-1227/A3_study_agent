@@ -7,19 +7,19 @@ from pathlib import Path
 from typing import Optional
 
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from src.rag.chunking.splitter_factory import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    chunk_policy_version_for_mode,
+    get_splitter_mode,
+    split_documents_by_mode,
+)
 from src.rag.cleaning import clean_document_text
 from src.rag.ids import enrich_chunk_metadata, enrich_source_metadata
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
-
-_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-    length_function=len,
-)
+CHUNK_SIZE = DEFAULT_CHUNK_SIZE
+CHUNK_OVERLAP = DEFAULT_CHUNK_OVERLAP
 
 
 def _guess_year(filename: str) -> Optional[str]:
@@ -54,6 +54,9 @@ def load_documents(
     subject: str,
     doc_type: str = "exam",
     splitter=None,
+    splitter_mode: str | None = None,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
 ) -> list[Document]:
     """Load all supported files under *data_dir* and split into chunks.
 
@@ -64,10 +67,27 @@ def load_documents(
     ----------
     splitter : optional
         A text splitter with a ``create_documents(texts, metadatas)`` method.
-        When *None* (default), the built-in ``RecursiveCharacterTextSplitter``
-        is used.  Pass a ``SectionAwareSplitter`` for exam papers.
+        When *None* (default), documents are split through the configured
+        splitter factory. The default mode is recursive; setting
+        ``RAG_SPLITTER_MODE=structure`` enables structure-aware section
+        splitting.
+    splitter_mode : optional
+        Explicit splitter mode for tooling such as evaluation harnesses. When
+        omitted, the splitter factory reads the environment/default mode.
     """
-    active_splitter = splitter if splitter is not None else _splitter
+    if splitter is not None and splitter_mode is not None:
+        raise ValueError("splitter and splitter_mode cannot be used together")
+
+    active_splitter_mode = (
+        (splitter_mode if splitter_mode is not None else get_splitter_mode())
+        if splitter is None
+        else None
+    )
+    chunk_policy_version = (
+        chunk_policy_version_for_mode(active_splitter_mode)
+        if active_splitter_mode is not None
+        else None
+    )
 
     data_dir = Path(data_dir)
     if not data_dir.is_dir():
@@ -105,15 +125,28 @@ def load_documents(
             subject=subject,
         )
 
-        chunks = active_splitter.create_documents(
-            texts=[cleaned_text],
-            metadatas=[metadata],
-        )
+        if splitter is not None:
+            chunks = splitter.create_documents(
+                texts=[cleaned_text],
+                metadatas=[metadata],
+            )
+        else:
+            chunks = split_documents_by_mode(
+                [Document(page_content=cleaned_text, metadata=metadata)],
+                mode=active_splitter_mode,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
         documents.extend(
             enrich_chunk_metadata(
                 chunk,
                 doc_id=str(metadata["doc_id"]),
                 chunk_index=chunk_index,
+                **(
+                    {"chunk_policy_version": chunk_policy_version}
+                    if chunk_policy_version is not None
+                    else {}
+                ),
             )
             for chunk_index, chunk in enumerate(chunks)
         )

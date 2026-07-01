@@ -69,9 +69,6 @@ def initial_request_reset_transient_state() -> dict:
         "keypoints": [],
         "requested_resource_type": "",
         "requested_resource_types": [],
-        "multi_resource_mode": False,
-        "multi_resource_results": [],
-        "multi_resource_summary": "",
         "needs_mindmap": False,
         # memory use policy for current query rewrite
         "memory_use_policy": "unset",
@@ -199,6 +196,20 @@ def initial_request_reset_transient_state() -> dict:
         "adaptive_tasks": [],
         "recommendations": [],
         "review_schedule": [],
+        # run control
+        "schema_version": "run_control_v1",
+        "run_status": "running",
+        "stop_requested": False,
+        "stop_reason": "",
+        "stop_requested_at": "",
+        "current_node": "",
+        "last_completed_node": "",
+        "resume_available": False,
+        "stopped_at": "",
+        "pending_interrupt_type": "",
+        # context window telemetry
+        "context_usage": {},
+        "context_usage_history": [],
     }
 
 
@@ -243,15 +254,24 @@ class LearningState(TypedDict):
     request_id: str                                                      # Per-request trace identifier
     session_id: str                                                      # Session identifier for trace grouping
     thread_id: str                                                       # LangGraph thread identifier
+    schema_version: str                                                  # Run-control state schema version
+    run_status: str                                                      # running / stopping / stopped / completed / error
+    stop_requested: bool                                                 # Whether user requested safe stop
+    stop_reason: str                                                     # User-visible safe-stop reason
+    stop_requested_at: str                                               # UTC timestamp for stop request
+    current_node: str                                                    # Current LangGraph node, for status UI
+    last_completed_node: str                                             # Last completed LangGraph node, for status UI
+    resume_available: bool                                               # True only when a real checkpoint interrupt can continue
+    stopped_at: str                                                      # UTC timestamp for saved stop checkpoint
+    pending_interrupt_type: str                                          # user_stop / plan_review / memory_confirmation
+    context_usage: dict                                                  # Most recent LLM context window usage
+    context_usage_history: list[dict]                                    # Current request_id bounded usage history
     intent: Literal["academic", "emotional", "unknown"]    # User intent
     subject: str                                                        # The topic being discussed
     subject_candidates: list[str]                                       # Ordered available-subject candidates
     keypoints: list[str]                                                # Key points
     requested_resource_type: str                                        # Requested resource type, e.g. mindmap
     requested_resource_types: list[str]                                  # Ordered resource types requested for parallel generation
-    multi_resource_mode: bool                                            # Whether multiple resources were requested
-    multi_resource_results: list[dict]                                   # Per-resource generation result metadata
-    multi_resource_summary: str                                          # Summary of multi-resource generation output
     needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
     memory_use_policy: Literal["use", "ignore", "ask_user", "unset"]    # Whether query rewrite may use selected memory
     memory_use_reason: str                                              # Reason for the memory use policy

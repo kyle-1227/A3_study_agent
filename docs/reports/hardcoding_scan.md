@@ -11,6 +11,18 @@ Initial governance report created on 2026-06-20. This is a lightweight text-scan
 
 ## Observed Legacy Risk Areas
 
+### 2026-06-29 Context Engineering Phase 0
+
+- Removed the incorrect `context_budget.model_limits.deepseek-v4-pro` window value from `config/settings.yaml`.
+- Did not add a replacement hardcoded model window; current context usage telemetry should surface unknown windows explicitly.
+- Phase 0 hardcoding findings and deferred items are recorded in `docs/reports/context_engineering_phase0_audit.md`.
+
+### 2026-06-28 Run Control implementation note
+
+- Added `context_budget.model_limits` in `config/settings.yaml` for context telemetry.
+- No provider/model/base_url/api_key literal was added to graph business nodes.
+- Missing or unknown model context windows are surfaced as telemetry warnings instead of code-level hardcoded defaults.
+
 ### `src/graph/llm.py`
 
 - Contains `ChatOpenAI` provider construction.

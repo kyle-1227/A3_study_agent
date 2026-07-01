@@ -47,6 +47,9 @@ from src.llm.schema_manifest import (
     manifest_summary,
     render_manifest_text,
 )
+from src.context_engineering.providers import emit_context_items_shadow
+from src.context_engineering.tokenizer import count_schema_chars
+from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
@@ -444,11 +447,8 @@ def _compute_prompt_chars(messages: list) -> int:
 
 
 def _safe_schema_size_chars(schema: type[BaseModel]) -> int:
-    """Return JSON Schema size for diagnostics. Never raise."""
-    try:
-        return len(json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str))
-    except Exception:
-        return 0
+    """Return JSON Schema size for diagnostics via Context Engineering."""
+    return count_schema_chars(schema)
 
 
 _DEEPSEEK_SAFE_SCHEMA_KEYS = {
@@ -1677,6 +1677,23 @@ async def _invoke_one_mode(
     metrics.extra_debug.update(contract_debug)
     if reask_context is not None:
         metrics.extra_debug.update(reask_context.to_debug())
+    emit_context_usage_trace(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=_provider(llm_node),
+        model=_model(llm_node),
+        messages=messages,
+        state=state or {},
+        schema_size_chars=_safe_schema_size_chars(schema),
+    )
+    emit_context_items_shadow(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        messages=messages,
+        state=state or {},
+    )
 
     # ── constrained_decoding (reserved) ──
     if mode == "constrained_decoding":

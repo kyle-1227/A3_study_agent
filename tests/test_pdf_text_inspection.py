@@ -110,3 +110,42 @@ def test_inspect_pdf_tree_skips_bad_pdf_without_traceback(local_tmp_path, monkey
     assert payload["skipped"][0]["source_relpath"].endswith("data/python/bad.pdf")
     assert "RuntimeError: broken pdf" == payload["skipped"][0]["error"]
     assert "traceback line" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_inspect_pdf_tree_can_exclude_needs_ocr(local_tmp_path, monkeypatch):
+    data_dir = local_tmp_path / "data"
+    formal_dir = data_dir / "python"
+    quarantined_dir = data_dir / "_needs_ocr" / "python"
+    formal_dir.mkdir(parents=True)
+    quarantined_dir.mkdir(parents=True)
+    formal_pdf = formal_dir / "formal.pdf"
+    quarantined_pdf = quarantined_dir / "quarantined.pdf"
+    formal_pdf.write_bytes(b"%PDF formal")
+    quarantined_pdf.write_bytes(b"%PDF quarantined")
+
+    def fake_inspect_pdf_file(path, *, subject, project_root):
+        pdf_path = Path(path)
+        return inspect_pdf_page_texts(
+            ["useful text"],
+            subject=subject,
+            source_file=pdf_path.name,
+            source_relpath=pdf_path.relative_to(project_root).as_posix(),
+            file_size=100,
+        )
+
+    monkeypatch.setattr(pdf_inspection, "inspect_pdf_file", fake_inspect_pdf_file)
+
+    default_report = inspect_pdf_tree(data_dir, project_root=local_tmp_path)
+    filtered_report = inspect_pdf_tree(
+        data_dir,
+        project_root=local_tmp_path,
+        exclude_needs_ocr=True,
+    )
+
+    default_relpaths = {item.source_relpath for item in default_report.inspections}
+    filtered_relpaths = {item.source_relpath for item in filtered_report.inspections}
+
+    assert default_report.pdf_count == 2
+    assert "data/_needs_ocr/python/quarantined.pdf" in default_relpaths
+    assert filtered_report.pdf_count == 1
+    assert filtered_relpaths == {"data/python/formal.pdf"}

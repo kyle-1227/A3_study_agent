@@ -14,6 +14,12 @@ class DemoStructuredOutput(BaseModel):
     count: int
 
 
+@pytest.fixture(autouse=True)
+def _configured_context_usage_model(monkeypatch):
+    monkeypatch.setattr(so, "_provider", lambda _node: "deepseek_official")
+    monkeypatch.setattr(so, "_model", lambda _node: "deepseek-v4-pro")
+
+
 @pytest.mark.asyncio
 async def test_structured_llm_retries_parse_and_validation_then_succeeds(monkeypatch):
     mock_llm = MagicMock()

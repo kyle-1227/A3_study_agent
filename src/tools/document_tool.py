@@ -43,7 +43,9 @@ _ARTIFACT_KIND_CONFIG = {
 
 def get_review_doc_artifact_dir() -> Path:
     """Return the directory used for generated Markdown review documents."""
-    root = Path(os.getenv("REVIEW_DOC_ARTIFACT_DIR", str(DEFAULT_REVIEW_DOC_ARTIFACT_DIR)))
+    root = Path(
+        os.getenv("REVIEW_DOC_ARTIFACT_DIR", str(DEFAULT_REVIEW_DOC_ARTIFACT_DIR))
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -57,14 +59,18 @@ def get_exercise_artifact_dir() -> Path:
 
 def get_code_practice_artifact_dir() -> Path:
     """Return the directory used for generated code-practice documents."""
-    root = Path(os.getenv("CODE_PRACTICE_ARTIFACT_DIR", str(DEFAULT_CODE_PRACTICE_ARTIFACT_DIR)))
+    root = Path(
+        os.getenv("CODE_PRACTICE_ARTIFACT_DIR", str(DEFAULT_CODE_PRACTICE_ARTIFACT_DIR))
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
 
 def get_video_script_artifact_dir() -> Path:
     """Return the directory used for generated teaching video script documents."""
-    root = Path(os.getenv("VIDEO_SCRIPT_ARTIFACT_DIR", str(DEFAULT_VIDEO_SCRIPT_ARTIFACT_DIR)))
+    root = Path(
+        os.getenv("VIDEO_SCRIPT_ARTIFACT_DIR", str(DEFAULT_VIDEO_SCRIPT_ARTIFACT_DIR))
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -108,12 +114,16 @@ def _extract_srt_section(markdown_text: str) -> str:
 
 def _is_table_row(line: str) -> bool:
     stripped = line.strip()
-    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+    return (
+        stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+    )
 
 
 def _is_table_separator(line: str) -> bool:
     cells = _parse_table_row(line)
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells
+    )
 
 
 def _parse_table_row(line: str) -> list[str]:
@@ -173,7 +183,9 @@ def _write_docx_artifact(markdown_text: str, title: str, file_path: Path) -> Non
 
         bullet = re.match(r"^\s*[-*]\s+(.+)$", line)
         if bullet:
-            document.add_paragraph(_clean_inline_markdown(bullet.group(1)), style="List Bullet")
+            document.add_paragraph(
+                _clean_inline_markdown(bullet.group(1)), style="List Bullet"
+            )
             index += 1
             continue
 
@@ -268,11 +280,7 @@ def create_video_script_artifact(
     if not srt:
         srt = _extract_srt_section(markdown_text)
     if not srt:
-        srt = (
-            "1\n"
-            "00:00:00,000 --> 00:00:05,000\n"
-            "请查看 Markdown 视频脚本文档。"
-        )
+        srt = "1\n00:00:00,000 --> 00:00:05,000\n请查看 Markdown 视频脚本文档。"
 
     artifact_id = str(artifact["artifact_id"])
     srt_filename = Path(str(artifact["filename"])).with_suffix(".srt").name

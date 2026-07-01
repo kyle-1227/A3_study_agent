@@ -12,7 +12,7 @@ from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
 def _state_with_candidates() -> dict:
     return {
         "messages": [HumanMessage(content="帮我生成一份 Python 的复习资料、思维导图和练习题")],
-        "requested_resource_type": "multi_resource",
+        "requested_resource_type": "review_doc",
         "requested_resource_types": ["review_doc", "mindmap", "quiz"],
         "learning_goal": "Python learning resources",
         "local_evidence_candidates": [
@@ -79,7 +79,6 @@ async def test_evidence_judge_falls_back_on_business_validation_error(monkeypatc
         )
         raise StructuredOutputError(result)
 
-    monkeypatch.setattr(academic, "_build_evidence_judge_messages", lambda **kwargs: [])
     monkeypatch.setattr(academic, "invoke_structured_llm", fake_invoke_structured_llm)
 
     result = await academic.evidence_judge(_state_with_candidates())
@@ -104,7 +103,7 @@ async def test_evidence_judge_falls_back_when_judged_evidence_is_empty(monkeypat
             success=True,
             parsed=EvidenceJudgeOutput(
                 overall_evidence_state="insufficient",
-                need_more_web_search=True,
+                need_more_web_research=True,
                 judged_evidence=[],
                 coverage_gaps=[],
                 decision_summary="The model omitted judged_evidence.",
@@ -117,7 +116,6 @@ async def test_evidence_judge_falls_back_when_judged_evidence_is_empty(monkeypat
             output_mode="native_json_schema_pydantic",
         )
 
-    monkeypatch.setattr(academic, "_build_evidence_judge_messages", lambda **kwargs: [])
     monkeypatch.setattr(academic, "invoke_structured_llm", fake_invoke_structured_llm)
 
     result = await academic.evidence_judge(_state_with_candidates())
@@ -125,6 +123,6 @@ async def test_evidence_judge_falls_back_when_judged_evidence_is_empty(monkeypat
     judge_output = result["evidence_judge_output"]
     assert result["evidence_judge_failed"] is True
     assert result["evidence_judge_state"] == "partially_sufficient"
-    assert judge_output["need_more_web_search"] is False
+    assert judge_output["need_more_web_research"] is False
     assert len(judge_output["judged_evidence"]) == 2
     assert len(result["context"]) == 2

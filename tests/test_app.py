@@ -131,7 +131,7 @@ class TestInputValidation:
         req = ResumeRequest(thread_id="t-1", memory_use_choice="use")
         assert req.memory_use_choice == "use"
 
-class TestResourceFinalPayload:
+class TestResourceFinalPayloadCore:
     """Verify final resource payload shaping."""
 
     def test_evidence_controlled_stop_is_evidence_summary_payload(self):
@@ -180,6 +180,30 @@ class TestResourceFinalPayload:
         assert payload["resource_generation_status"] == "partial_success"
         assert payload["resources"] == [{"resource_type": "mindmap", "title": "Mock Map"}]
         assert payload["errors"][0]["resource_type"] == "quiz"
+
+    def test_resource_bundle_payload_uses_bundle_message_when_last_message_missing(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "mindmap",
+                "requested_resource_types": ["mindmap", "quiz"],
+                "resource_generation_status": "success",
+                "resource_bundle_artifact": {
+                    "type": "resource_bundle",
+                    "status": "success",
+                    "message": "# 已生成多类学习资源",
+                    "resources": [{"resource_type": "mindmap", "title": "Mock Map"}],
+                    "errors": [],
+                },
+                "messages": [],
+            }
+        )
+
+        assert payload is not None
+        assert payload["resource_type"] == "bundle"
+        assert payload["answer"] == "# 已生成多类学习资源"
+        assert "multi_resource_summary" not in payload
 
 
 class TestDevMemoryClear:
@@ -309,7 +333,7 @@ class TestMindmapArtifacts:
         assert response.status_code == 404
 
 
-class TestResourceFinalPayload:
+class TestResourceFinalPayloadArtifacts:
     def test_plain_answer_without_artifacts_has_no_resource_payload(self):
         from app import _resource_final_payload
 
@@ -326,8 +350,22 @@ class TestResourceFinalPayload:
         from app import _resource_final_payload
 
         final_state = {
-            "requested_resource_type": "multi_resource",
-            "messages": [SimpleNamespace(content="# 已生成多类学习资源")],
+            "requested_resource_type": "review_doc",
+            "requested_resource_types": ["review_doc", "mindmap", "quiz", "study_plan"],
+            "resource_generation_status": "success",
+            "resource_bundle_artifact": {
+                "type": "resource_bundle",
+                "status": "success",
+                "message": "bundle summary",
+                "resources": [
+                    {"resource_type": "review_doc", "status": "success"},
+                    {"resource_type": "mindmap", "status": "success"},
+                    {"resource_type": "quiz", "status": "success"},
+                    {"resource_type": "study_plan", "status": "success"},
+                ],
+                "errors": [],
+            },
+            "messages": [SimpleNamespace(content="bundle summary")],
             "review_doc_artifact": {
                 "title": "Python 复习资料",
                 "filename": "python.md",
@@ -358,23 +396,34 @@ class TestResourceFinalPayload:
                 "markdown_url": "/artifacts/exercises/e1/python.md",
                 "docx_url": "/artifacts/exercises/e1/python.docx",
             },
-            "multi_resource_results": [
-                {"resource_type": "review_doc", "status": "completed"},
-                {"resource_type": "mindmap", "status": "completed"},
-                {"resource_type": "quiz", "status": "completed"},
-            ],
-            "multi_resource_summary": "# 已生成多类学习资源",
+            "study_plan_artifact": {
+                "title": "Python Study Plan",
+            },
+            "study_plan_markdown": "# Python Study Plan",
+            "study_plan_document_artifact": {
+                "title": "Python Study Plan",
+                "filename": "python-plan.md",
+                "docx_filename": "python-plan.docx",
+                "markdown_url": "/artifacts/review-docs/s1/python-plan.md",
+                "docx_url": "/artifacts/review-docs/s1/python-plan.docx",
+            },
         }
 
         payload = _resource_final_payload(final_state)
 
         assert payload is not None
-        assert payload["resource_type"] == "multi_resource"
-        assert payload["answer"] == "# 已生成多类学习资源"
+        assert payload["resource_type"] == "bundle"
+        assert payload["answer"] == "bundle summary"
+        assert payload["resource_bundle"]["type"] == "resource_bundle"
+        assert [item["resource_type"] for item in payload["resources"]] == ["review_doc", "mindmap", "quiz", "study_plan"]
+        assert payload["errors"] == []
         assert payload["review_doc_artifacts"]
         assert payload["mindmap"]["title"] == "Python 思维导图"
         assert payload["exercise_artifact"]["title"] == "Python 练习题"
-        assert payload["multi_resource_results"][0]["resource_type"] == "review_doc"
+        assert payload["study_plan"]["markdown_url"] == "/artifacts/review-docs/s1/python-plan.md"
+        assert payload["study_plan"]["markdown"] == "# Python Study Plan"
+        assert "multi_resource_results" not in payload
+        assert "multi_resource_summary" not in payload
 
     def test_single_resource_payloads_still_work(self):
         from app import _resource_final_payload

@@ -22,10 +22,20 @@ def main() -> None:
     parser.add_argument(
         "--data-dir", default=str(DATA_DIR), help="Data directory to scan."
     )
+    parser.add_argument(
+        "--exclude-needs-ocr",
+        action="store_true",
+        help="Skip data/_needs_ocr when scanning the default data tree.",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
-    report = inspect_pdf_tree(data_dir, subject=args.subject, project_root=PROJECT_ROOT)
+    report = inspect_pdf_tree(
+        data_dir,
+        subject=args.subject,
+        project_root=PROJECT_ROOT,
+        exclude_needs_ocr=args.exclude_needs_ocr,
+    )
     payload = {
         "report_path": str(REPORT_PATH),
         **report.to_dict(),

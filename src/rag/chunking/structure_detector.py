@@ -1,7 +1,7 @@
 """Standalone document section detection.
 
-This module detects structural headings only. It is not integrated into
-``load_documents`` and does not write Chroma metadata in this phase.
+This module detects structural headings and is used by the optional
+structure-aware splitter when RAG_SPLITTER_MODE=structure.
 """
 
 from __future__ import annotations

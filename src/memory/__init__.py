@@ -32,11 +32,11 @@ from src.memory.storage import (
 )
 from src.memory.embeddings import (
     DeepSeekEmbeddingProvider,
-    DummyEmbeddingProvider,
     EmbeddingProvider,
     get_embedding_provider,
     reset_embedding_provider,
 )
+from src.memory.errors import MemoryEmbeddingConfigError, MemoryEmbeddingRuntimeError
 
 __all__ = [
     # Schema
@@ -51,8 +51,9 @@ __all__ = [
     "create_memory_store",
     # Embeddings
     "DeepSeekEmbeddingProvider",
-    "DummyEmbeddingProvider",
     "EmbeddingProvider",
     "get_embedding_provider",
     "reset_embedding_provider",
+    "MemoryEmbeddingConfigError",
+    "MemoryEmbeddingRuntimeError",
 ]

@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from src.config import get_setting
+from src.memory.errors import MemoryEmbeddingRuntimeError
 from src.memory.schema import EpisodicMemoryRecord
 from src.memory.storage import MemoryStore, create_memory_store
 from src.memory.embeddings import get_embedding_provider
@@ -85,23 +86,25 @@ async def write_episodic_memory(
         metadata=metadata or {},
     )
 
-    # Generate embedding for content
-    try:
-        provider = get_embedding_provider()
-        embeddings = await provider.embed([content])
-        if embeddings and embeddings[0]:
-            record.embedding = embeddings[0]
-    except Exception as exc:
-        logger.debug("Failed to embed episodic memory content: %s", exc)
+    # Generate embedding for content. Empty input is not valid for persisted memory.
+    provider = get_embedding_provider()
+    embeddings = await provider.embed([content])
+    if not embeddings or not embeddings[0]:
+        raise MemoryEmbeddingRuntimeError(
+            "Embedding provider returned no episodic memory embedding"
+        )
+    record.embedding = embeddings[0]
 
     # Persist
     try:
         await store.save_episodic(record)
         logger.debug(
             "Wrote episodic memory id=%s type=%s importance=%.2f",
-            record.memory_id, memory_type, importance,
+            record.memory_id,
+            memory_type,
+            importance,
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to persist episodic memory id=%s", record.memory_id)
         fail_fast = get_setting("memory.fail_fast_memory_write", False)
         if fail_fast:
@@ -185,8 +188,6 @@ def compute_importance_for_user_query(
     Returns:
         Tuple of (importance, memory_type, content_description).
     """
-    query_lower = query.lower().strip()
-
     # Resource requests are notable
     if resource_types:
         types_str = "+".join(resource_types)

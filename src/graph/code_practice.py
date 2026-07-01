@@ -21,7 +21,10 @@ from src.llm.structured_output import (
     invoke_structured_llm,
 )
 from src.observability.a3_trace import emit_a3_trace
-from src.tools.document_tool import create_document_artifact, get_code_practice_artifact_dir
+from src.tools.document_tool import (
+    create_document_artifact,
+    get_code_practice_artifact_dir,
+)
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
@@ -56,9 +59,35 @@ REQUIRED_CODE_PRACTICE_SECTION_NAMES = {
     "self_check": "自测问题",
 }
 
-RUN_INSTRUCTION_MARKERS = ("运行", "执行", "命令", "终端", "命令行", "保存为", "python ", "python3 ", ".py")
-EXPECTED_OUTPUT_MARKERS = ("预期输出", "输出结果", "示例输出", "应输出", "打印", "print")
-ERROR_DEBUGGING_MARKERS = ("错误", "报错", "排查", "调试", "检查", "syntaxerror", "traceback", "exception")
+RUN_INSTRUCTION_MARKERS = (
+    "运行",
+    "执行",
+    "命令",
+    "终端",
+    "命令行",
+    "保存为",
+    "python ",
+    "python3 ",
+    ".py",
+)
+EXPECTED_OUTPUT_MARKERS = (
+    "预期输出",
+    "输出结果",
+    "示例输出",
+    "应输出",
+    "打印",
+    "print",
+)
+ERROR_DEBUGGING_MARKERS = (
+    "错误",
+    "报错",
+    "排查",
+    "调试",
+    "检查",
+    "syntaxerror",
+    "traceback",
+    "exception",
+)
 EXTENSION_TASK_MARKERS = (
     "拓展",
     "扩展",
@@ -101,8 +130,14 @@ def _last_human_query(state: LearningState) -> str:
 
 
 def _format_keypoints(state: LearningState) -> str:
-    values = [str(item).strip() for item in state.get("keypoints", []) if str(item).strip()]
-    expanded = [str(item).strip() for item in state.get("expanded_keypoints", []) if str(item).strip()]
+    values = [
+        str(item).strip() for item in state.get("keypoints", []) if str(item).strip()
+    ]
+    expanded = [
+        str(item).strip()
+        for item in state.get("expanded_keypoints", [])
+        if str(item).strip()
+    ]
     merged = values + [item for item in expanded if item not in values]
     return ", ".join(merged) or "No explicit keypoints."
 
@@ -112,8 +147,15 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:900]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:900]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -182,7 +224,9 @@ def _topic_terms(state: dict) -> list[str]:
             values.append(value)
     values.append(_last_human_query(state))
     values.extend(str(item) for item in state.get("keypoints", []) if str(item).strip())
-    values.extend(str(item) for item in state.get("expanded_keypoints", []) if str(item).strip())
+    values.extend(
+        str(item) for item in state.get("expanded_keypoints", []) if str(item).strip()
+    )
 
     stopwords = {
         "帮我",
@@ -202,7 +246,16 @@ def _topic_terms(state: dict) -> list[str]:
     for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_+#.-]{1,}", joined):
         if term not in terms:
             terms.append(term)
-    for phrase in ("面向对象", "函数", "类", "爬虫", "数据分析", "机器学习", "文件操作", "异常处理"):
+    for phrase in (
+        "面向对象",
+        "函数",
+        "类",
+        "爬虫",
+        "数据分析",
+        "机器学习",
+        "文件操作",
+        "异常处理",
+    ):
         if phrase in joined and phrase not in terms:
             terms.append(phrase)
     return [term for term in terms if term not in stopwords]
@@ -243,13 +296,17 @@ def _local_check_code_practice(markdown: str, state: dict) -> dict:
     has_code_block = bool(code)
     has_enough_code = len(code_lines) >= 15
     has_function_or_class = _has_function_or_class(code)
-    has_run_instruction = bool(run_body) and _contains_any(run_body, RUN_INSTRUCTION_MARKERS)
+    has_run_instruction = bool(run_body) and _contains_any(
+        run_body, RUN_INSTRUCTION_MARKERS
+    )
     has_expected_output = bool(output_body)
     has_error_debugging = bool(troubleshooting_body) and _contains_any(
         troubleshooting_body,
         ERROR_DEBUGGING_MARKERS,
     )
-    has_extension_tasks = bool(extension_body) and _contains_any(extension_body, EXTENSION_TASK_MARKERS)
+    has_extension_tasks = bool(extension_body) and _contains_any(
+        extension_body, EXTENSION_TASK_MARKERS
+    )
     topic_relevant = _is_topic_relevant(text, code, state)
 
     failed_reasons: list[str] = []
@@ -356,7 +413,9 @@ def _agent_prompt(state: LearningState, outline: str) -> str:
     )
 
 
-def _fallback_code_practice_markdown(state: LearningState, outline: str, reason: str) -> str:
+def _fallback_code_practice_markdown(
+    state: LearningState, outline: str, reason: str
+) -> str:
     query = _last_human_query(state)
     title = "Python 面向对象代码实操案例"
     if "银行" in query or "账户" in query:
@@ -487,7 +546,9 @@ async def code_practice_planner(state: LearningState) -> dict:
         node_name="code_practice_planner",
         llm_node="code_practice",
         messages=[
-            SystemMessage(content="You are a university course code-practice planner. Return a concrete blueprint only."),
+            SystemMessage(
+                content="You are a university course code-practice planner. Return a concrete blueprint only."
+            ),
             HumanMessage(content=_planner_prompt(state, query, context)),
         ],
         state=state,
@@ -515,7 +576,10 @@ async def code_practice_agent(state: LearningState) -> dict:
     round_no = int(state.get("code_practice_round", 0) or 0) + 1
     fallback_used = False
     fallback_reason = ""
-    if state.get("degraded_generation") is True and state.get("evidence_judge_state") == "insufficient":
+    if (
+        state.get("degraded_generation") is True
+        and state.get("evidence_judge_state") == "insufficient"
+    ):
         fallback_used = True
         fallback_reason = str(
             state.get("degraded_reason")
@@ -528,7 +592,9 @@ async def code_practice_agent(state: LearningState) -> dict:
                 node_name="code_practice_agent",
                 llm_node="code_practice",
                 messages=[
-                    SystemMessage(content="You are a code-practice case writer. Return Markdown only."),
+                    SystemMessage(
+                        content="You are a code-practice case writer. Return Markdown only."
+                    ),
                     HumanMessage(content=_agent_prompt(state, outline)),
                 ],
                 state=state,
@@ -573,7 +639,9 @@ async def code_practice_reviewer(state: LearningState) -> dict:
     markdown = state.get("code_practice_markdown", "")
     local_check = _local_check_code_practice(markdown, state)
 
-    def trace_payload(verdict: str, reason: str, *, llm_fallback_used: bool = False) -> dict:
+    def trace_payload(
+        verdict: str, reason: str, *, llm_fallback_used: bool = False
+    ) -> dict:
         return {
             "local_check_passed": bool(local_check.get("passed")),
             "missing_sections": local_check.get("missing_sections", []),
@@ -607,15 +675,21 @@ async def code_practice_reviewer(state: LearningState) -> dict:
             "code_practice_local_check": local_check,
         }
 
-    model_name = get_setting("llm.code_practice.model", get_setting("code_practice.model", ""))
+    model_name = get_setting(
+        "llm.code_practice.model", get_setting("code_practice.model", "")
+    )
     try:
-        with traced_llm_call(model_name=model_name, node_name="code_practice_reviewer", temperature=0.0):
+        with traced_llm_call(
+            model_name=model_name, node_name="code_practice_reviewer", temperature=0.0
+        ):
             structured_result = await invoke_structured_llm(
                 node_name="code_practice_reviewer",
                 llm_node="code_practice",
                 schema=CodePracticeReviewVerdict,
                 messages=[
-                    SystemMessage(content="You are a strict code-practice teaching-quality reviewer. Return only JSON."),
+                    SystemMessage(
+                        content="You are a strict code-practice teaching-quality reviewer. Return only JSON."
+                    ),
                     HumanMessage(
                         content=(
                             "Review the teaching quality of this Markdown code-practice case.\n"
@@ -637,7 +711,9 @@ async def code_practice_reviewer(state: LearningState) -> dict:
             )
         result = structured_result.parsed
         if not isinstance(result, CodePracticeReviewVerdict):
-            raise TypeError("code_practice_reviewer parsed result is not CodePracticeReviewVerdict")
+            raise TypeError(
+                "code_practice_reviewer parsed result is not CodePracticeReviewVerdict"
+            )
         verdict = "approve" if result.verdict == "approve" else "revise"
         reason = result.reason.strip()
         emit_a3_trace(
@@ -704,7 +780,9 @@ async def code_practice_output(state: LearningState) -> dict:
     python_filename = Path(document_artifact["filename"]).with_suffix(".py").name
     python_url = ""
     if python_code:
-        artifact_dir = get_code_practice_artifact_dir() / str(document_artifact["artifact_id"])
+        artifact_dir = get_code_practice_artifact_dir() / str(
+            document_artifact["artifact_id"]
+        )
         artifact_dir.mkdir(parents=True, exist_ok=True)
         python_path = artifact_dir / python_filename
         python_path.write_text(python_code, encoding="utf-8")

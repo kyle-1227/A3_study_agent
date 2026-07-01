@@ -11,6 +11,18 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ## Observed Legacy Risk Areas
 
+### 2026-06-29 Context Engineering Phase 0
+
+- Phase 0 target fallback cleanup and deferred findings are recorded in `docs/reports/context_engineering_phase0_audit.md`.
+- Removed production fake-success paths for assessment classification and memory embeddings/retrieval.
+- Deferred non-target legacy fallback areas remain report-only pending separate specs.
+
+### 2026-06-28 Run Control implementation note
+
+- Run Control touched `src/graph/llm.py` and `src/llm/structured_output.py` only to emit context-window telemetry.
+- Existing provider/model fallback/default paths in those files were observed as legacy risk and were not removed or extended.
+- Context usage telemetry reports `context_usage_error` when budget configuration or model windows are missing, rather than fabricating fallback window data.
+
 ### `src/graph/llm.py`
 
 - Module docstring and helpers describe resilient fallback/failover behavior.
