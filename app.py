@@ -126,11 +126,7 @@ def _safe_packing_preview_items(value: object) -> list[dict]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        safe_item = {
-            key: item[key]
-            for key in PACKING_PREVIEW_FIELDS
-            if key in item
-        }
+        safe_item = {key: item[key] for key in PACKING_PREVIEW_FIELDS if key in item}
         if "title" in safe_item:
             safe_item["title"] = sanitize_error_message(
                 safe_item["title"],
@@ -138,6 +134,23 @@ def _safe_packing_preview_items(value: object) -> list[dict]:
             )
         safe_items.append(safe_item)
     return safe_items
+
+
+def _safe_int_dict(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict = {}
+    for key, item in value.items():
+        if isinstance(item, bool) or not isinstance(item, int):
+            continue
+        safe[sanitize_error_message(key, max_chars=80)] = item
+    return safe
+
+
+def _safe_warning_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [sanitize_error_message(warning) for warning in value]
 
 
 def _graph_checkpointer_type(graph) -> str:
@@ -911,7 +924,9 @@ async def _stream_graph_events(
                     "source_counts": event.get("source_counts")
                     if isinstance(event.get("source_counts"), dict)
                     else {},
-                    "max_context_block_tokens": event.get("max_context_block_tokens", 0),
+                    "max_context_block_tokens": event.get(
+                        "max_context_block_tokens", 0
+                    ),
                     "strategy": event.get("strategy", ""),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
@@ -970,6 +985,42 @@ async def _stream_graph_events(
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
+            if stage == "context_apply_selection":
+                payload = {
+                    "type": "context_apply_selection",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "skip_reason": sanitize_error_message(
+                        event.get("skip_reason", ""),
+                        max_chars=120,
+                    ),
+                    "single_resource_result": sanitize_error_message(
+                        event.get("single_resource_result", ""),
+                        max_chars=120,
+                    ),
+                    "selected_item_count": event.get("selected_item_count", 0),
+                    "injectable_item_count": event.get("injectable_item_count", 0),
+                    "skipped_item_count": event.get("skipped_item_count", 0),
+                    "quality_filtered_count": event.get("quality_filtered_count", 0),
+                    "budget_dropped_count": event.get("budget_dropped_count", 0),
+                    "final_injected_count": event.get("final_injected_count", 0),
+                    "injected_context_tokens": event.get("injected_context_tokens", 0),
+                    "original_estimated_tokens": event.get(
+                        "original_estimated_tokens", 0
+                    ),
+                    "final_estimated_tokens": event.get("final_estimated_tokens", 0),
+                    "token_delta": event.get("token_delta", 0),
+                    "source_counts_before": _safe_int_dict(
+                        event.get("source_counts_before")
+                    ),
+                    "source_counts_after": _safe_int_dict(
+                        event.get("source_counts_after")
+                    ),
+                    "drop_reasons": _safe_int_dict(event.get("drop_reasons")),
+                    "warnings": _safe_warning_list(event.get("warnings")),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
             if stage == "context_applied":
                 payload = {
                     "type": "context_applied",
@@ -981,17 +1032,21 @@ async def _stream_graph_events(
                     "final_message_count": event.get("final_message_count", 0),
                     "injected_items_count": event.get("injected_items_count", 0),
                     "skipped_items_count": event.get("skipped_items_count", 0),
-                    "injected_context_tokens": event.get(
-                        "injected_context_tokens", 0
+                    "injected_context_tokens": event.get("injected_context_tokens", 0),
+                    "budget_dropped_count": event.get("budget_dropped_count", 0),
+                    "final_injected_count": event.get("final_injected_count", 0),
+                    "original_estimated_tokens": event.get(
+                        "original_estimated_tokens", 0
                     ),
+                    "final_estimated_tokens": event.get("final_estimated_tokens", 0),
+                    "token_delta": event.get("token_delta", 0),
+                    "source_counts_after": _safe_int_dict(
+                        event.get("source_counts_after")
+                    ),
+                    "drop_reasons": _safe_int_dict(event.get("drop_reasons")),
                     "injection_role": event.get("injection_role", ""),
                     "injection_position": event.get("injection_position", ""),
-                    "warnings": [
-                        sanitize_error_message(warning)
-                        for warning in event.get("warnings", [])
-                    ]
-                    if isinstance(event.get("warnings"), list)
-                    else [],
+                    "warnings": _safe_warning_list(event.get("warnings")),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
@@ -1004,6 +1059,40 @@ async def _stream_graph_events(
                     "warning": sanitize_error_message(event.get("warning", "")),
                     "fallback_used": bool(event.get("fallback_used", False)),
                     "error_type": event.get("error_type", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_importance_scored":
+                payload = {
+                    "type": "context_importance_scored",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "source_counts": _safe_int_dict(event.get("source_counts")),
+                    "score_buckets": _safe_int_dict(event.get("score_buckets")),
+                    "reason_code_counts": _safe_int_dict(
+                        event.get("reason_code_counts")
+                    ),
+                    "candidate_count": event.get("candidate_count", 0),
+                    "scored_count": event.get("scored_count", 0),
+                    "kept_count": event.get("kept_count", 0),
+                    "dropped_count": event.get("dropped_count", 0),
+                    "fallback_to_rule_based": bool(
+                        event.get("fallback_to_rule_based", False)
+                    ),
+                    "scoring_elapsed_ms": event.get("scoring_elapsed_ms", 0),
+                    "disabled_reason": sanitize_error_message(
+                        event.get("disabled_reason", ""),
+                        max_chars=160,
+                    ),
+                    "error_reason": sanitize_error_message(
+                        event.get("error_reason", ""),
+                        max_chars=160,
+                    ),
+                    "error_type": sanitize_error_message(
+                        event.get("error_type", ""),
+                        max_chars=120,
+                    ),
+                    "warnings": _safe_warning_list(event.get("warnings")),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue

@@ -161,6 +161,62 @@ context_engineering:
         - artifact
         - trajectory
         - curriculum
+      route_rollout:
+        enabled: false
+        route_name: single_resource_generation
+        apply_enabled_nodes:
+          - review_doc_planner
+          - review_doc_agent
+          - code_practice_planner
+          - code_practice_agent
+          - exercise_planner
+          - mindmap_planner
+          - study_plan_planner
+          - video_script_planner
+          - video_script_agent
+          - video_animation_planner
+          - video_animation_agent
+        require_single_resource_request: true
+        sample_rate: 1.0
+        min_injectable_items: 1
+      quality:
+        min_priority: 0
+        min_relevance_score: null
+        max_items_total: 8
+        max_items_per_source:
+          rules: 2
+          evidence: 4
+          memory: 3
+          profile: 1
+          artifact: 2
+          trajectory: 2
+          curriculum: 2
+      budget:
+        graceful_degradation_enabled: true
+        drop_order:
+          - priority_asc
+          - relevance_asc
+          - confidence_asc
+          - recency_asc
+          - token_estimate_desc
+          - id_asc
+        fallback_if_empty_after_drop: true
+      format:
+        group_by_source: true
+        include_untrusted_context_warning: true
+        include_section_headers: true
+        max_content_chars_per_item: 4000
+      importance_scoring:
+        enabled: false
+        shadow_mode: true
+        mode: shadow
+        llm_node: academic
+        max_items_to_score: 8
+        max_content_preview_chars: 600
+        timeout_seconds: 8
+        fallback_to_rule_based: true
+        emit_shadow_telemetry: true
+        min_shadow_score_for_analysis: 0.5
 
 web_search:
   provider: tavily                       # Web Research executor provider

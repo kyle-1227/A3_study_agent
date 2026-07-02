@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.context_engineering.packing.apply import (
+    ApplyBudgetPolicy,
+    ApplyFormatPolicy,
+    ApplyQualityPolicy,
     ContextApplyError,
     ContextInjectionPolicy,
+    ImportanceScoringPolicy,
+    RouteRolloutPolicy,
 )
 from src.context_engineering.packing.packer import pack_context_items
 from src.context_engineering.schema import ContextItem
@@ -32,6 +37,43 @@ def _policy(
         exclude_message_source=True,
         max_injected_context_tokens=max_tokens,
         injectable_sources=("memory", "evidence", "rules"),
+        route_rollout=RouteRolloutPolicy(
+            enabled=True,
+            route_name="single_resource_generation",
+            apply_enabled_nodes=nodes,
+            require_single_resource_request=True,
+            sample_rate=1.0,
+            min_injectable_items=1,
+        ),
+        quality=ApplyQualityPolicy(
+            min_priority=0,
+            min_relevance_score=None,
+            max_items_total=8,
+            max_items_per_source={},
+        ),
+        budget=ApplyBudgetPolicy(
+            graceful_degradation_enabled=False,
+            drop_order=("priority_asc", "token_estimate_desc", "id_asc"),
+            fallback_if_empty_after_drop=fallback_on_error,
+        ),
+        format=ApplyFormatPolicy(
+            group_by_source=True,
+            include_untrusted_context_warning=True,
+            include_section_headers=True,
+            max_content_chars_per_item=4000,
+        ),
+        importance_scoring=ImportanceScoringPolicy(
+            enabled=False,
+            shadow_mode=True,
+            mode="shadow",
+            llm_node="",
+            max_items_to_score=0,
+            max_content_preview_chars=0,
+            timeout_seconds=0.0,
+            fallback_to_rule_based=True,
+            emit_shadow_telemetry=False,
+            min_shadow_score_for_analysis=0.0,
+        ),
     )
 
 
@@ -93,7 +135,6 @@ async def test_apply_disabled_keeps_phase3a_order_and_original_messages(monkeypa
         "get_context_injection_policy",
         lambda **_: _policy(enabled=False),
     )
-    monkeypatch.setattr(llm_module, "apply_node_enabled", lambda policy, **_: False)
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(
         llm_module,
@@ -163,6 +204,73 @@ async def test_apply_enabled_but_node_miss_uses_original_messages(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_route_rollout_disabled_keeps_original_messages_and_emits_selection(
+    monkeypatch,
+):
+    from src.graph import llm as llm_module
+    from src.graph.llm import invoke_plain_llm_fail_fast
+
+    messages = [{"role": "user", "content": "question"}]
+    selections: list[str] = []
+    mock_llm = _mock_llm()
+    policy = _policy()
+    policy = policy.__class__(
+        **{
+            **policy.__dict__,
+            "route_rollout": policy.route_rollout.__class__(
+                enabled=False,
+                route_name="single_resource_generation",
+                apply_enabled_nodes=("plain_node",),
+                require_single_resource_request=True,
+                sample_rate=1.0,
+                min_injectable_items=1,
+            ),
+        }
+    )
+
+    monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
+    monkeypatch.setattr(
+        llm_module,
+        "get_context_injection_policy",
+        lambda **_: policy,
+    )
+    monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
+    monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
+    monkeypatch.setattr(
+        llm_module,
+        "emit_context_apply_selection",
+        lambda _logger, *, selection, **_kwargs: selections.append(
+            selection.skip_reason
+        ),
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "emit_context_items_shadow",
+        lambda *_, **__: [_item()],
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "emit_context_packing_shadow",
+        lambda *_, **__: _packed(),
+    )
+
+    result = await invoke_plain_llm_fail_fast(
+        node_name="plain_node",
+        llm_node="llm",
+        messages=messages,
+        state={
+            "request_id": "r1",
+            "thread_id": "t1",
+            "requested_resource_types": ["review_doc"],
+        },
+    )
+
+    assert result == "answer"
+    assert selections == ["route_rollout_disabled"]
+    mock_llm.ainvoke.assert_awaited_once_with(messages)
+
+
+@pytest.mark.anyio
 async def test_apply_enabled_node_uses_final_messages_and_context_usage(monkeypatch):
     from src.graph import llm as llm_module
     from src.graph.llm import invoke_plain_llm_fail_fast
@@ -198,7 +306,11 @@ async def test_apply_enabled_node_uses_final_messages_and_context_usage(monkeypa
         node_name="plain_node",
         llm_node="llm",
         messages=messages,
-        state={"request_id": "r1", "thread_id": "t1"},
+        state={
+            "request_id": "r1",
+            "thread_id": "t1",
+            "requested_resource_types": ["review_doc"],
+        },
     )
 
     assert result == "answer"
@@ -254,7 +366,11 @@ async def test_apply_error_with_fallback_uses_original_messages_and_usage(monkey
         node_name="plain_node",
         llm_node="llm",
         messages=messages,
-        state={"request_id": "r1", "thread_id": "t1"},
+        state={
+            "request_id": "r1",
+            "thread_id": "t1",
+            "requested_resource_types": ["review_doc"],
+        },
     )
 
     assert result == "answer"
@@ -312,10 +428,14 @@ async def test_apply_error_without_fallback_raises_before_llm_and_emits_safe_err
             node_name="plain_node",
             llm_node="llm",
             messages=messages,
-            state={"request_id": "r1", "thread_id": "t1"},
+            state={
+                "request_id": "r1",
+                "thread_id": "t1",
+                "requested_resource_types": ["review_doc"],
+            },
         )
 
-    assert exc_info.value.reason == "injected_context_over_budget"
+    assert exc_info.value.reason == "context_apply_budget_fit_failed"
     mock_llm.ainvoke.assert_not_awaited()
     assert len(apply_errors) == 1
     serialized_error = repr(
@@ -370,7 +490,11 @@ async def test_apply_retry_uses_same_final_messages_object(monkeypatch):
         node_name="plain_node",
         llm_node="llm",
         messages=messages,
-        state={"request_id": "r1", "thread_id": "t1"},
+        state={
+            "request_id": "r1",
+            "thread_id": "t1",
+            "requested_resource_types": ["review_doc"],
+        },
     )
 
     assert result == "answer"

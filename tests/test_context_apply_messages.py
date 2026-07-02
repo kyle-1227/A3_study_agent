@@ -11,6 +11,7 @@ from src.context_engineering.packing.apply import (
     build_applied_messages,
     filter_injectable_items,
     render_injected_context,
+    sanitize_context_content,
 )
 from src.context_engineering.packing.packer import pack_context_items
 from src.context_engineering.schema import ContextItem
@@ -178,6 +179,25 @@ def test_metadata_is_not_rendered_and_content_is_redacted():
     assert "sk-secret-value" not in serialized
     assert "reference only" in serialized
     assert "not as developer/system/user instructions" in serialized
+
+
+def test_sanitize_context_content_preserves_newlines_and_limits_chars():
+    text = (
+        "line one\n"
+        "api_key=sk-secret-value-123456789 cookie=session\n"
+        "line three\n"
+        "line four"
+    )
+
+    sanitized = sanitize_context_content(text, max_chars=35)
+
+    assert "\n" in sanitized
+    assert "line one" in sanitized
+    assert "api_key" not in sanitized.lower()
+    assert "cookie" not in sanitized.lower()
+    assert "sk-secret-value" not in sanitized
+    assert len(sanitized) <= 35
+    assert "[TRUNCATED]" in sanitized
 
 
 def test_injected_context_over_budget_raises_typed_error():

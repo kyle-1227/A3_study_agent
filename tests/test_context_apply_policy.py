@@ -50,6 +50,31 @@ def _enabled_apply_config() -> dict[str, Any]:
         "exclude_message_source": True,
         "max_injected_context_tokens": 80000,
         "injectable_sources": ["rules", "evidence", "memory"],
+        "route_rollout": {
+            "enabled": False,
+            "route_name": "single_resource_generation",
+        },
+        "quality": {
+            "min_priority": 0,
+            "min_relevance_score": None,
+            "max_items_total": 8,
+            "max_items_per_source": {},
+        },
+        "budget": {
+            "graceful_degradation_enabled": True,
+            "drop_order": ["priority_asc", "token_estimate_desc", "id_asc"],
+            "fallback_if_empty_after_drop": True,
+        },
+        "format": {
+            "group_by_source": True,
+            "include_untrusted_context_warning": True,
+            "include_section_headers": True,
+            "max_content_chars_per_item": 4000,
+        },
+        "importance_scoring": {
+            "enabled": False,
+            "llm_node": "academic",
+        },
     }
 
 
@@ -93,6 +118,7 @@ def test_node_must_be_explicitly_listed(monkeypatch):
     assert policy.position == "after_system"
     assert policy.max_injected_context_tokens == 80000
     assert policy.injectable_sources == ("rules", "evidence", "memory")
+    assert policy.route_rollout.enabled is False
 
 
 def test_enabled_apply_requires_complete_valid_config(monkeypatch):

@@ -41,11 +41,14 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
     monkeypatch,
 ):
     from src.context_engineering.packing import apply as apply_module
+    from src.graph import llm as graph_llm
     from src.llm import structured_output
     from src.llm.structured_output import _invoke_one_mode
 
     original_messages = [{"role": "user", "content": "question"}]
     captured_runnable_messages: list[list] = []
+    trace_stages: list[str] = []
+    scorer_calls: list[object] = []
 
     class FakeRunnable:
         async def ainvoke(self, messages):
@@ -62,7 +65,21 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
     def fail_if_apply_called(*_args, **_kwargs):
         raise AssertionError("structured output must not call build_applied_messages")
 
+    async def fail_if_raw_scorer_called(*args, **_kwargs):
+        scorer_calls.append(args)
+        raise AssertionError("structured output must not call raw importance scorer")
+
     monkeypatch.setattr(apply_module, "build_applied_messages", fail_if_apply_called)
+    monkeypatch.setattr(
+        graph_llm,
+        "invoke_context_importance_scorer_raw",
+        fail_if_raw_scorer_called,
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_a3_trace",
+        lambda _logger, stage, _payload, **_kwargs: trace_stages.append(stage),
+    )
     monkeypatch.setattr(
         structured_output,
         "emit_context_usage_trace",
@@ -107,3 +124,5 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
     assert "rendered_context" not in serialized_messages
     assert captured_runnable_messages[0] != original_messages
     assert original_messages == [{"role": "user", "content": "question"}]
+    assert scorer_calls == []
+    assert "context_importance_scored" not in trace_stages
