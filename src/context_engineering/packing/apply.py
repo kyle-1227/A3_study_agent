@@ -106,6 +106,7 @@ class ApplyFormatPolicy:
     include_untrusted_context_warning: bool
     include_section_headers: bool
     max_content_chars_per_item: int
+    source_order: tuple[ContextSourceType, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ class ContextInjectionPolicy:
             include_untrusted_context_warning=True,
             include_section_headers=True,
             max_content_chars_per_item=4000,
+            source_order=(),
         )
     )
     importance_scoring: ImportanceScoringPolicy = field(
@@ -186,6 +188,15 @@ class ContextInjectionPolicy:
         )
     )
 
+    def __post_init__(self) -> None:
+        if self.format.source_order:
+            return
+        object.__setattr__(
+            self,
+            "format",
+            replace(self.format, source_order=self.injectable_sources),
+        )
+
 
 @dataclass(frozen=True)
 class ContextApplySelection:
@@ -200,9 +211,6 @@ class ContextApplySelection:
     budget_dropped_count: int
     final_injected_count: int
     injected_context_tokens: int
-    original_estimated_tokens: int
-    final_estimated_tokens: int
-    token_delta: int
     source_counts_before: dict[str, int]
     source_counts_after: dict[str, int]
     drop_reasons: dict[str, int]
@@ -302,6 +310,20 @@ def get_context_injection_policy(
             disabled_reason="context_importance_scorer_node_conflicts_with_apply_nodes",
         )
 
+    injectable_sources = _required_sources(
+        apply_config,
+        node_name=node_name,
+        llm_node=llm_node,
+    )
+    format_policy = replace(
+        _required_format_policy(
+            apply_config,
+            node_name=node_name,
+            llm_node=llm_node,
+        ),
+        source_order=injectable_sources,
+    )
+
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=apply_enabled_nodes,
@@ -335,11 +357,7 @@ def get_context_injection_policy(
             node_name=node_name,
             llm_node=llm_node,
         ),
-        injectable_sources=_required_sources(
-            apply_config,
-            node_name=node_name,
-            llm_node=llm_node,
-        ),
+        injectable_sources=injectable_sources,
         route_rollout=route_rollout,
         quality=_required_quality_policy(
             apply_config,
@@ -351,11 +369,7 @@ def get_context_injection_policy(
             node_name=node_name,
             llm_node=llm_node,
         ),
-        format=_required_format_policy(
-            apply_config,
-            node_name=node_name,
-            llm_node=llm_node,
-        ),
+        format=format_policy,
         importance_scoring=importance_scoring,
     )
 
@@ -445,9 +459,6 @@ def make_context_apply_skip_selection(
         budget_dropped_count=0,
         final_injected_count=0,
         injected_context_tokens=0,
-        original_estimated_tokens=0,
-        final_estimated_tokens=0,
-        token_delta=0,
         source_counts_before={},
         source_counts_after={},
         drop_reasons={},
@@ -467,26 +478,6 @@ def with_context_apply_selection_warnings(
         if warning and warning not in merged:
             merged.append(warning)
     return replace(selection, warnings=merged)
-
-
-def with_context_apply_selection_message_stats(
-    selection: ContextApplySelection,
-    original_messages: list[Any],
-) -> ContextApplySelection:
-    """Return selection with original/final estimated token telemetry."""
-    original_estimated_tokens = estimate_messages_tokens_mixed(original_messages)
-    if selection.rendered_context:
-        final_estimated_tokens = original_estimated_tokens + estimate_text_tokens_mixed(
-            selection.rendered_context
-        )
-    else:
-        final_estimated_tokens = original_estimated_tokens
-    return replace(
-        selection,
-        original_estimated_tokens=original_estimated_tokens,
-        final_estimated_tokens=final_estimated_tokens,
-        token_delta=final_estimated_tokens - original_estimated_tokens,
-    )
 
 
 def prepare_context_apply_selection(
@@ -513,9 +504,6 @@ def prepare_context_apply_selection(
             budget_dropped_count=0,
             final_injected_count=0,
             injected_context_tokens=0,
-            original_estimated_tokens=0,
-            final_estimated_tokens=0,
-            token_delta=0,
             source_counts_before=source_counts_before,
             source_counts_after={},
             drop_reasons={},
@@ -537,9 +525,6 @@ def prepare_context_apply_selection(
             budget_dropped_count=0,
             final_injected_count=0,
             injected_context_tokens=0,
-            original_estimated_tokens=0,
-            final_estimated_tokens=0,
-            token_delta=0,
             source_counts_before=source_counts_before,
             source_counts_after={},
             drop_reasons={},
@@ -565,9 +550,6 @@ def prepare_context_apply_selection(
             budget_dropped_count=budget_dropped,
             final_injected_count=0,
             injected_context_tokens=0,
-            original_estimated_tokens=0,
-            final_estimated_tokens=0,
-            token_delta=0,
             source_counts_before=source_counts_before,
             source_counts_after={},
             drop_reasons=drop_reasons,
@@ -584,9 +566,6 @@ def prepare_context_apply_selection(
         budget_dropped_count=budget_dropped,
         final_injected_count=len(final_items),
         injected_context_tokens=injected_tokens,
-        original_estimated_tokens=0,
-        final_estimated_tokens=0,
-        token_delta=injected_tokens,
         source_counts_before=source_counts_before,
         source_counts_after=_source_counts(final_items),
         drop_reasons=drop_reasons,
@@ -1259,6 +1238,7 @@ def _required_format_policy(
             node_name=node_name,
             llm_node=llm_node,
         ),
+        source_order=(),
     )
 
 
@@ -1630,30 +1610,54 @@ def _render_context_block(
         include_untrusted_context_warning=True,
         include_section_headers=False,
         max_content_chars_per_item=4000,
+        source_order=(),
     )
     parts: list[str] = []
     if policy.include_untrusted_context_warning:
         parts.append(_INJECTED_CONTEXT_HEADER)
     else:
         parts.append("<INJECTED_CONTEXT>")
-    current_source = ""
-    for item in items:
-        source = str(item.source_type)
-        if (
-            policy.group_by_source
-            and policy.include_section_headers
-            and source != current_source
-        ):
+    if policy.group_by_source and policy.include_section_headers:
+        grouped_items: dict[str, list[ContextItem]] = {}
+        first_seen_sources: list[str] = []
+        for item in items:
+            source = str(item.source_type)
+            if source not in grouped_items:
+                grouped_items[source] = []
+                first_seen_sources.append(source)
+            grouped_items[source].append(item)
+
+        ordered_sources: list[str] = []
+        for source in policy.source_order:
+            source_text = str(source)
+            if source_text in grouped_items and source_text not in ordered_sources:
+                ordered_sources.append(source_text)
+        for source in first_seen_sources:
+            if source not in ordered_sources:
+                ordered_sources.append(source)
+
+        for source in ordered_sources:
+            source_items = grouped_items.get(source, [])
+            if not source_items:
+                continue
             parts.append(f"## Source: {sanitize_error_message(source, max_chars=60)}")
-            current_source = source
-        title = sanitize_error_message(item.title or item.id, max_chars=120)
-        content = sanitize_context_content(
-            item.content,
-            max_chars=policy.max_content_chars_per_item,
-        )
-        parts.append(f"[{source}] {title}\n{content}")
+            for item in source_items:
+                parts.append(_render_context_item(item, policy=policy))
+    else:
+        for item in items:
+            parts.append(_render_context_item(item, policy=policy))
     parts.append(_INJECTED_CONTEXT_FOOTER)
     return "\n\n".join(parts)
+
+
+def _render_context_item(item: ContextItem, *, policy: ApplyFormatPolicy) -> str:
+    source = str(item.source_type)
+    title = sanitize_error_message(item.title or item.id, max_chars=120)
+    content = sanitize_context_content(
+        item.content,
+        max_chars=policy.max_content_chars_per_item,
+    )
+    return f"[{source}] {title}\n{content}"
 
 
 def _source_counts(items: list[ContextItem]) -> dict[str, int]:

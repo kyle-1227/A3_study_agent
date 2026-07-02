@@ -1005,11 +1005,6 @@ async def _stream_graph_events(
                     "budget_dropped_count": event.get("budget_dropped_count", 0),
                     "final_injected_count": event.get("final_injected_count", 0),
                     "injected_context_tokens": event.get("injected_context_tokens", 0),
-                    "original_estimated_tokens": event.get(
-                        "original_estimated_tokens", 0
-                    ),
-                    "final_estimated_tokens": event.get("final_estimated_tokens", 0),
-                    "token_delta": event.get("token_delta", 0),
                     "source_counts_before": _safe_int_dict(
                         event.get("source_counts_before")
                     ),

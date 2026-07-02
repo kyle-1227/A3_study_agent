@@ -132,9 +132,6 @@ def test_context_apply_selection_event_is_safe_and_aggregate_only():
             budget_dropped_count=1,
             final_injected_count=1,
             injected_context_tokens=20,
-            original_estimated_tokens=100,
-            final_estimated_tokens=125,
-            token_delta=25,
             source_counts_before={"memory": 2},
             source_counts_after={"memory": 1},
             drop_reasons={"over_budget": 1},
@@ -145,9 +142,9 @@ def test_context_apply_selection_event_is_safe_and_aggregate_only():
     serialized = repr(event).lower()
     assert event["budget_dropped_count"] == 1
     assert event["final_injected_count"] == 1
-    assert event["original_estimated_tokens"] == 100
-    assert event["final_estimated_tokens"] == 125
-    assert event["token_delta"] == 25
+    assert "original_estimated_tokens" not in event
+    assert "final_estimated_tokens" not in event
+    assert "token_delta" not in event
     assert "api_key" not in serialized
     assert "cookie" not in serialized
     assert "sk-secret" not in serialized
@@ -316,6 +313,17 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
     serialized = repr(apply_payloads).lower()
     assert len(apply_payloads) == 4
     assert apply_payloads[0]["injected_context_tokens"] == 10
+    assert apply_payloads[0]["original_estimated_tokens"] == 100
+    assert apply_payloads[0]["final_estimated_tokens"] == 112
+    assert apply_payloads[0]["token_delta"] == 12
+    selection_payload = next(
+        payload
+        for payload in apply_payloads
+        if payload.get("type") == "context_apply_selection"
+    )
+    assert "original_estimated_tokens" not in selection_payload
+    assert "final_estimated_tokens" not in selection_payload
+    assert "token_delta" not in selection_payload
     for payload in apply_payloads:
         assert "injected_context" not in payload
         assert "final_messages" not in payload

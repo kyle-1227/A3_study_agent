@@ -21,7 +21,6 @@ from src.context_engineering.packing.apply import (
     prepare_context_apply_selection,
     render_injected_context,
     sanitize_context_content,
-    with_context_apply_selection_message_stats,
     with_context_apply_selection_warnings,
 )
 from src.context_engineering.packing.apply_trace import (
@@ -128,6 +127,5 @@ __all__ = [
     "render_injected_context",
     "render_selected_context",
     "sanitize_context_content",
-    "with_context_apply_selection_message_stats",
     "with_context_apply_selection_warnings",
 ]

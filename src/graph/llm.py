@@ -39,7 +39,6 @@ from src.context_engineering.packing import (
     make_context_apply_skip_selection,
     parse_importance_scorer_output,
     prepare_context_apply_selection,
-    with_context_apply_selection_message_stats,
     with_context_apply_selection_warnings,
 )
 from src.context_engineering.providers import emit_context_items_shadow
@@ -575,7 +574,16 @@ async def invoke_context_importance_scorer_raw(
     scorer_messages: list[dict[str, str]],
     timeout_seconds: float,
 ) -> ContextImportanceScores:
-    """Invoke the raw shadow scorer without context apply or trace side effects."""
+    """Invoke the raw shadow scorer without context apply or trace side effects.
+
+    Phase 3B-2A keeps importance scoring shadow-only: scorer failures are reported
+    through safe context_importance_scored telemetry by the caller and do not affect
+    the main LLM path, so this raw call intentionally uses direct ainvoke + timeout
+    without provider transport retry. If a later non-shadow mode is introduced,
+    it must use a pure transport retry wrapper while still avoiding
+    invoke_plain_llm_fail_fast(), context usage/items/packing/apply, and state or
+    memory writes.
+    """
     if timeout_seconds <= 0:
         raise ContextImportanceError(
             reason="context_importance_policy_invalid",
@@ -692,10 +700,6 @@ async def invoke_plain_llm_fail_fast(
                 single_resource_result=single_resource_result,
                 warnings=route_warnings,
             )
-            selection = with_context_apply_selection_message_stats(
-                selection,
-                original_messages,
-            )
             emit_context_apply_selection(
                 logger,
                 node_name=node_name,
@@ -753,10 +757,6 @@ async def invoke_plain_llm_fail_fast(
                 selection = with_context_apply_selection_warnings(
                     selection,
                     route_warnings,
-                )
-                selection = with_context_apply_selection_message_stats(
-                    selection,
-                    original_messages,
                 )
                 emit_context_apply_selection(
                     logger,

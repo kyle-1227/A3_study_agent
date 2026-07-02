@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
+import tokenize
 
 from src.context_engineering.packing.apply import (
     ContextApplyResult,
@@ -25,6 +27,15 @@ GRAPH_LLM_SOURCE = ROOT / "src" / "graph" / "llm.py"
 
 def _source(path: Path) -> str:
     return path.read_text(encoding="utf-8").lower()
+
+
+def _executable_source(text: str) -> str:
+    tokens: list[str] = []
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type in {tokenize.COMMENT, tokenize.STRING}:
+            continue
+        tokens.append(token.string)
+    return "".join(tokens).lower()
 
 
 def _policy() -> ContextInjectionPolicy:
@@ -126,9 +137,6 @@ def test_trace_builders_do_not_output_forbidden_payload_keys():
             budget_dropped_count=0,
             final_injected_count=1,
             injected_context_tokens=20,
-            original_estimated_tokens=100,
-            final_estimated_tokens=125,
-            token_delta=25,
             source_counts_before={"memory": 1},
             source_counts_after={"memory": 1},
             drop_reasons={},
@@ -195,6 +203,7 @@ def test_graph_raw_scorer_bypasses_plain_llm_apply_path():
         "async def invoke_plain_llm_fail_fast",
         1,
     )[0]
+    raw_code = _executable_source(raw_body)
 
     forbidden = (
         "invoke_plain_llm_fail_fast(",
@@ -205,4 +214,4 @@ def test_graph_raw_scorer_bypasses_plain_llm_apply_path():
         "plain_llm_output",
     )
     for token in forbidden:
-        assert token not in raw_body
+        assert token not in raw_code

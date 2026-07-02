@@ -10,6 +10,7 @@ from src.context_engineering.packing.apply import (
     ImportanceScoringPolicy,
     RouteRolloutPolicy,
     prepare_context_apply_selection,
+    render_injected_context,
 )
 from src.context_engineering.packing.packer import pack_context_items
 from src.context_engineering.schema import ContextItem
@@ -19,6 +20,7 @@ def _policy(
     *,
     max_tokens: int = 10000,
     min_priority: int = 0,
+    min_relevance_score: float | None = None,
     max_items_total: int = 8,
 ) -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
@@ -41,7 +43,7 @@ def _policy(
         ),
         quality=ApplyQualityPolicy(
             min_priority=min_priority,
-            min_relevance_score=None,
+            min_relevance_score=min_relevance_score,
             max_items_total=max_items_total,
             max_items_per_source={},
         ),
@@ -159,6 +161,91 @@ def test_quality_caps_apply_after_deterministic_sort():
     assert selection.final_injected_count == 1
     assert selection.final_items[0].id == "c-relevance"
     assert selection.quality_filtered_count == 2
+
+
+def test_min_relevance_score_none_does_not_filter_missing_relevance():
+    item = _item("missing-relevance", relevance_score=None)
+
+    selection = prepare_context_apply_selection(
+        packed=_packed([item]),
+        policy=_policy(min_relevance_score=None),
+        node_name="review_doc_agent",
+        llm_node="review_doc",
+    )
+
+    assert selection.skip_reason == ""
+    assert selection.final_items[0].id == "missing-relevance"
+    assert selection.quality_filtered_count == 0
+
+
+def test_min_relevance_score_filters_missing_and_low_relevance():
+    missing = _item("missing-relevance", relevance_score=None, priority=90)
+    low = _item("low-relevance", relevance_score=0.49, priority=80)
+    high = _item("high-relevance", relevance_score=0.5, priority=70)
+
+    zero_threshold = prepare_context_apply_selection(
+        packed=_packed([missing, high]),
+        policy=_policy(min_relevance_score=0.0),
+        node_name="review_doc_agent",
+        llm_node="review_doc",
+    )
+    strict_threshold = prepare_context_apply_selection(
+        packed=_packed([missing, low, high]),
+        policy=_policy(min_relevance_score=0.5),
+        node_name="review_doc_agent",
+        llm_node="review_doc",
+    )
+
+    assert [item.id for item in zero_threshold.final_items] == ["high-relevance"]
+    assert zero_threshold.quality_filtered_count == 1
+    assert [item.id for item in strict_threshold.final_items] == ["high-relevance"]
+    assert strict_threshold.quality_filtered_count == 2
+
+
+def test_group_by_source_renders_one_section_per_source_in_config_order():
+    policy = _policy()
+    items = [
+        _item("memory-1", source_type="memory", content="memory one"),
+        _item(
+            "evidence-1",
+            source_type="evidence",
+            content="evidence one api_key=sk-secret-value-123456",
+        ),
+        _item("memory-2", source_type="memory", content="memory two"),
+        _item("evidence-2", source_type="evidence", content="evidence two"),
+        _item("rules-1", source_type="rules", content="rules one"),
+    ]
+    items[0].metadata["secret"] = "must not render"
+
+    rendered, _tokens = render_injected_context(
+        items=items,
+        max_tokens=10000,
+        node_name="review_doc_agent",
+        llm_node="review_doc",
+        format_policy=policy.format,
+    )
+
+    assert rendered.count("## Source: memory") == 1
+    assert rendered.count("## Source: evidence") == 1
+    assert rendered.count("## Source: rules") == 1
+    assert rendered.index("## Source: memory") < rendered.index("## Source: evidence")
+    assert rendered.index("## Source: evidence") < rendered.index("## Source: rules")
+
+    memory_section = rendered.split("## Source: memory", 1)[1].split(
+        "## Source: evidence",
+        1,
+    )[0]
+    evidence_section = rendered.split("## Source: evidence", 1)[1].split(
+        "## Source: rules",
+        1,
+    )[0]
+    assert "memory-1" in memory_section
+    assert "memory-2" in memory_section
+    assert "evidence-1" in evidence_section
+    assert "evidence-2" in evidence_section
+    assert "must not render" not in rendered
+    assert "api_key" not in rendered.lower()
+    assert "sk-secret-value" not in rendered
 
 
 def test_budget_graceful_degradation_drops_whole_items_and_reports_stats():

@@ -31,8 +31,18 @@ async def test_raw_scorer_does_not_call_plain_llm_or_emit_plain_usage(monkeypatc
     async def fail_plain(*_args, **_kwargs):
         raise AssertionError("raw scorer must not call invoke_plain_llm_fail_fast")
 
+    async def fail_transport_retry(*_args, **_kwargs):
+        raise AssertionError(
+            "Phase 3B-2A shadow scorer must not require transport retry"
+        )
+
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(llm_module, "invoke_plain_llm_fail_fast", fail_plain)
+    monkeypatch.setattr(
+        llm_module,
+        "invoke_with_provider_transport_retry",
+        fail_transport_retry,
+    )
     monkeypatch.setattr(
         llm_module,
         "emit_a3_trace",
