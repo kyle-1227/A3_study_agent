@@ -1,4 +1,4 @@
-﻿"""Unit tests for SSE node lifecycle events in generate_sse.
+"""Unit tests for SSE node lifecycle events in generate_sse.
 
 Tests cover: node start/end events, token streaming coexistence,
 sub-chain filtering, internal node filtering, and event ordering.
@@ -24,6 +24,7 @@ from src.observability.a3_trace import emit_a3_trace
 # ---------------------------------------------------------------------------
 # Helper: reusable async iterator from a list
 # ---------------------------------------------------------------------------
+
 
 class AsyncIteratorMock:
     """Create an async iterator from a list of items."""
@@ -71,6 +72,7 @@ def _parse_all_payloads(collected):
 # Helpers: build mock events matching astream_events v2 format
 # ---------------------------------------------------------------------------
 
+
 def _node_start(node_name: str) -> dict:
     """Build an on_chain_start event for a graph node."""
     return {
@@ -116,6 +118,7 @@ def _token_event(node_name: str, content: str) -> dict:
 # TestSSENodeLifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestSSENodeLifecycle:
     """Tests that generate_sse emits node lifecycle events."""
 
@@ -132,7 +135,11 @@ class TestSSENodeLifecycle:
 
         payloads = _parse_payloads(collected)
         assert len(payloads) == 1
-        assert payloads[0] == {"type": "node_event", "status": "start", "node": "supervisor"}
+        assert payloads[0] == {
+            "type": "node_event",
+            "status": "start",
+            "node": "supervisor",
+        }
 
     @pytest.mark.anyio
     async def test_yields_node_end_event(self):
@@ -198,6 +205,7 @@ class TestSSENodeLifecycle:
 # TestSSETokenStreamingPreserved
 # ---------------------------------------------------------------------------
 
+
 class TestSSETokenStreamingPreserved:
     """Ensure the original token streaming logic is not broken."""
 
@@ -249,6 +257,7 @@ class TestSSETokenStreamingPreserved:
 # TestSSEMixedEventOrdering
 # ---------------------------------------------------------------------------
 
+
 class TestSSEMixedEventOrdering:
     """Tests correct ordering when lifecycle and token events are interleaved."""
 
@@ -278,15 +287,27 @@ class TestSSEMixedEventOrdering:
         # Sub-chain event dropped -> 8 graph events
         assert len(payloads) == 8
 
-        assert payloads[0] == {"type": "node_event", "status": "start", "node": "supervisor"}
+        assert payloads[0] == {
+            "type": "node_event",
+            "status": "start",
+            "node": "supervisor",
+        }
         assert payloads[1]["type"] == "node_event"
         assert payloads[1]["status"] == "end"
         assert payloads[1]["node"] == "supervisor"
-        assert payloads[2] == {"type": "node_event", "status": "start", "node": "rag_retrieve"}
+        assert payloads[2] == {
+            "type": "node_event",
+            "status": "start",
+            "node": "rag_retrieve",
+        }
         assert payloads[3]["type"] == "node_event"
         assert payloads[3]["status"] == "end"
         assert payloads[3]["node"] == "rag_retrieve"
-        assert payloads[4] == {"type": "node_event", "status": "start", "node": "generate_answer"}
+        assert payloads[4] == {
+            "type": "node_event",
+            "status": "start",
+            "node": "generate_answer",
+        }
         assert payloads[5] == {"type": "token", "content": "The"}
         assert payloads[6] == {"type": "token", "content": " answer"}
         assert payloads[7]["type"] == "node_event"
@@ -321,6 +342,7 @@ class TestSSEMixedEventOrdering:
 # ---------------------------------------------------------------------------
 # TestSSEAllGraphNodes
 # ---------------------------------------------------------------------------
+
 
 class TestSSEAllGraphNodes:
     """Ensure every known graph node can produce lifecycle events."""
@@ -364,6 +386,7 @@ class TestSSEAllGraphNodes:
         "emotional_response",
         "handle_unknown",
     ]
+
     @pytest.mark.anyio
     @pytest.mark.parametrize("node_name", ALL_NODES)
     async def test_each_node_emits_start(self, node_name):
@@ -405,6 +428,7 @@ class TestSSEAllGraphNodes:
 # TestSSENodeTiming
 # ---------------------------------------------------------------------------
 
+
 class TestSSENodeTiming:
     """Tests that node end events include duration_ms."""
 
@@ -413,7 +437,9 @@ class TestSSENodeTiming:
         """A start+end pair should produce a non-negative duration_ms."""
         from app import generate_sse
 
-        mock_graph = _make_mock_graph([_node_start("supervisor"), _node_end("supervisor")])
+        mock_graph = _make_mock_graph(
+            [_node_start("supervisor"), _node_end("supervisor")]
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -442,6 +468,7 @@ class TestSSENodeTiming:
 # TestSSEErrorCapture
 # ---------------------------------------------------------------------------
 
+
 class TestSSEErrorCapture:
     """Tests that node end events capture errors."""
 
@@ -450,7 +477,9 @@ class TestSSEErrorCapture:
         """Normal end -> error is null."""
         from app import generate_sse
 
-        mock_graph = _make_mock_graph([_node_start("supervisor"), _node_end("supervisor")])
+        mock_graph = _make_mock_graph(
+            [_node_start("supervisor"), _node_end("supervisor")]
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -499,14 +528,20 @@ class TestSSEErrorCapture:
 
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(return_value=RaisingIterator())
-        mock_graph.aget_state = AsyncMock(return_value=SimpleNamespace(next=(), tasks=[]))
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[])
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
             collected.append(sse)
 
         payloads = _parse_payloads(collected)
-        assert payloads[0] == {"type": "node_event", "status": "start", "node": "evidence_judge"}
+        assert payloads[0] == {
+            "type": "node_event",
+            "status": "start",
+            "node": "evidence_judge",
+        }
         assert payloads[1]["type"] == "node_event"
         assert payloads[1]["status"] == "end"
         assert payloads[1]["node"] == "evidence_judge"
@@ -521,7 +556,10 @@ class TestSSEErrorCapture:
 # TestSSEUsageEvents
 # ---------------------------------------------------------------------------
 
-def _chat_model_end(node_name: str, input_tokens: int, output_tokens: int, total_tokens: int) -> dict:
+
+def _chat_model_end(
+    node_name: str, input_tokens: int, output_tokens: int, total_tokens: int
+) -> dict:
     """Build an on_chat_model_end event with usage_metadata."""
     output = SimpleNamespace(
         usage_metadata={
@@ -557,7 +595,9 @@ class TestSSEUsageEvents:
         """on_chat_model_end with usage_metadata -> usage SSE event."""
         from app import generate_sse
 
-        mock_graph = _make_mock_graph([_chat_model_end("generate_answer", 100, 50, 150)])
+        mock_graph = _make_mock_graph(
+            [_chat_model_end("generate_answer", 100, 50, 150)]
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -613,6 +653,7 @@ class TestSSEUsageEvents:
 # TestSSETextEvent - "text" SSE event for non-streaming nodes (AC-02)
 # ---------------------------------------------------------------------------
 
+
 class TestSSETextEvent:
     """Tests that TEXT_EMIT_NODES produce a 'text' SSE event on chain end."""
 
@@ -626,7 +667,9 @@ class TestSSETextEvent:
             "event": "on_chain_end",
             "name": "study_plan_output",
             "metadata": {"langgraph_node": "study_plan_output"},
-            "data": {"output": {"messages": [AIMessage(content="## Final Study Plan")]}},
+            "data": {
+                "output": {"messages": [AIMessage(content="## Final Study Plan")]}
+            },
         }
         mock_graph = _make_mock_graph([_node_start("study_plan_output"), end_event])
 
@@ -650,7 +693,13 @@ class TestSSETextEvent:
             "event": "on_chain_end",
             "name": "handle_unknown",
             "metadata": {"langgraph_node": "handle_unknown"},
-            "data": {"output": {"messages": [AIMessage(content="I could not understand the request.")]}},
+            "data": {
+                "output": {
+                    "messages": [
+                        AIMessage(content="I could not understand the request.")
+                    ]
+                }
+            },
         }
         mock_graph = _make_mock_graph([_node_start("handle_unknown"), end_event])
 
@@ -673,9 +722,13 @@ class TestSSETextEvent:
             "event": "on_chain_end",
             "name": "resource_bundle_output",
             "metadata": {"langgraph_node": "resource_bundle_output"},
-            "data": {"output": {"messages": [AIMessage(content="## 学习资源生成结果")]}},
+            "data": {
+                "output": {"messages": [AIMessage(content="## 学习资源生成结果")]}
+            },
         }
-        mock_graph = _make_mock_graph([_node_start("resource_bundle_output"), end_event])
+        mock_graph = _make_mock_graph(
+            [_node_start("resource_bundle_output"), end_event]
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -685,6 +738,102 @@ class TestSSETextEvent:
         text_events = [p for p in all_payloads if p.get("type") == "text"]
         assert len(text_events) == 1
         assert text_events[0]["node"] == "resource_bundle_output"
+
+    @pytest.mark.anyio
+    async def test_resource_bundle_final_uses_terminal_output_when_snapshot_is_stale(
+        self,
+    ):
+        """A stale checkpoint must not drop current successful resource downloads."""
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        resource_output = {
+            "resource_generation_status": "partial_success",
+            "resource_bundle_artifact": {
+                "type": "resource_bundle",
+                "status": "partial_success",
+                "message": "# 已生成多类学习资源",
+                "resources": [
+                    {"resource_type": "mindmap", "status": "success"},
+                    {"resource_type": "quiz", "status": "success"},
+                    {"resource_type": "video_script", "status": "success"},
+                ],
+                "errors": [
+                    {
+                        "resource_type": "review_doc",
+                        "status": "failed",
+                        "error_type": "TimeoutError",
+                    }
+                ],
+            },
+            "mindmap_artifact": {
+                "title": "机器学习复习思维导图",
+                "tree": {"title": "机器学习", "children": []},
+                "xmind_url": "/artifacts/mindmaps/m1/map.xmind",
+            },
+            "mindmap_tree": {"title": "机器学习", "children": []},
+            "exercise_items": [{"question": "Q1"}],
+            "exercise_artifact": {
+                "title": "机器学习练习题",
+                "markdown_url": "/artifacts/exercises/e1/quiz.md",
+                "docx_url": "/artifacts/exercises/e1/quiz.docx",
+            },
+            "video_script_artifact": {
+                "title": "10分钟理解 Python 类与对象",
+                "markdown_url": "/artifacts/video-scripts/v1/script.md",
+                "docx_url": "/artifacts/video-scripts/v1/script.docx",
+                "srt_url": "/artifacts/video-scripts/v1/script.srt",
+            },
+            "messages": [AIMessage(content="# 已生成多类学习资源")],
+        }
+        end_event = {
+            "event": "on_chain_end",
+            "name": "resource_bundle_output",
+            "metadata": {"langgraph_node": "resource_bundle_output"},
+            "data": {"output": resource_output},
+        }
+        mock_graph = _make_mock_graph(
+            [_node_start("resource_bundle_output"), end_event]
+        )
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "requested_resource_type": "code_practice",
+                    "code_practice_artifact": {
+                        "title": "stale code practice",
+                        "markdown_url": "/artifacts/code-practice/old.md",
+                    },
+                    "messages": [AIMessage(content="stale checkpoint")],
+                },
+            ),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
+
+        assert len(resource_events) == 1
+        payload = resource_events[0]
+        assert payload["resource_type"] == "bundle"
+        assert payload["resource_generation_status"] == "partial_success"
+        assert payload["answer"] == "# 已生成多类学习资源"
+        assert payload["mindmap"]["xmind_url"] == "/artifacts/mindmaps/m1/map.xmind"
+        assert (
+            payload["exercise_artifact"]["markdown_url"]
+            == "/artifacts/exercises/e1/quiz.md"
+        )
+        assert (
+            payload["video_script_artifact"]["srt_url"]
+            == "/artifacts/video-scripts/v1/script.srt"
+        )
+        assert payload["errors"][0]["resource_type"] == "review_doc"
+        assert "review_doc" not in payload
+        assert "code_practice_artifact" not in payload
 
     @pytest.mark.anyio
     async def test_no_text_event_for_non_text_emit_node(self):
@@ -817,16 +966,20 @@ class TestSSEProviderRetryEvents:
             collected.append(sse)
 
         payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
-        retry_events = [payload for payload in payloads if payload.get("type") == "provider_retry"]
+        retry_events = [
+            payload for payload in payloads if payload.get("type") == "provider_retry"
+        ]
         assert len(retry_events) == 1
         assert retry_events[0]["stage"] == "provider_transport_retry_attempt"
         assert retry_events[0]["node"] == "evidence_judge"
         assert retry_events[0]["retry_count"] == 1
         assert retry_events[0]["max_retries"] == 2
 
+
 # ---------------------------------------------------------------------------
 # TestSSEDoneEvent - "done" SSE event at stream completion (BUG-09)
 # ---------------------------------------------------------------------------
+
 
 class TestSSEDoneEvent:
     """Tests that the last SSE event after normal completion is 'done'."""
@@ -836,7 +989,9 @@ class TestSSEDoneEvent:
         """After normal stream completion, the last event should be 'done'."""
         from app import generate_sse
 
-        mock_graph = _make_mock_graph([_node_start("supervisor"), _node_end("supervisor")])
+        mock_graph = _make_mock_graph(
+            [_node_start("supervisor"), _node_end("supervisor")]
+        )
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -913,4 +1068,3 @@ class TestSSEDoneEvent:
             }
         ]
         assert not [p for p in all_payloads if p.get("type") == "done"]
-

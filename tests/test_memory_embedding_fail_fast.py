@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from src.memory.embeddings import (
-    DeepSeekEmbeddingProvider,
     get_embedding_provider,
+    OpenAICompatibleMemoryEmbeddingProvider,
     reset_embedding_provider,
 )
 from src.memory.errors import MemoryEmbeddingConfigError, MemoryEmbeddingRuntimeError
@@ -64,25 +64,49 @@ def test_missing_api_key_fails_when_provider_is_constructed(monkeypatch):
     import src.memory.embeddings as embeddings
 
     reset_embedding_provider()
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(
         embeddings,
         "get_setting",
         _settings(
             {
-                "memory.embedding_provider": "deepseek",
-                "memory.embedding.model": "deepseek-v4-pro",
-                "memory.embedding.base_url": "https://api.deepseek.com",
-                "memory.embedding.api_key_env": "DEEPSEEK_API_KEY",
+                "memory.embedding_provider": "openrouter",
+                "memory.embedding.model": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+                "memory.embedding.base_url": "https://openrouter.ai/api/v1",
+                "memory.embedding.api_key_env": "OPENROUTER_API_KEY",
                 "memory.embedding.timeout_seconds": 30,
             }
         ),
     )
 
     with pytest.raises(
-        MemoryEmbeddingConfigError, match="DEEPSEEK_API_KEY is not configured"
+        MemoryEmbeddingConfigError, match="OPENROUTER_API_KEY is not configured"
     ):
         get_embedding_provider()
+
+
+def test_openrouter_provider_config_constructs_with_explicit_settings(monkeypatch):
+    import src.memory.embeddings as embeddings
+
+    reset_embedding_provider()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setattr(
+        embeddings,
+        "get_setting",
+        _settings(
+            {
+                "memory.embedding_provider": "openrouter",
+                "memory.embedding.model": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+                "memory.embedding.base_url": "https://openrouter.ai/api/v1",
+                "memory.embedding.api_key_env": "OPENROUTER_API_KEY",
+                "memory.embedding.timeout_seconds": 30,
+            }
+        ),
+    )
+
+    provider = get_embedding_provider()
+
+    assert isinstance(provider, OpenAICompatibleMemoryEmbeddingProvider)
 
 
 @pytest.mark.anyio
@@ -91,10 +115,10 @@ async def test_embedding_api_exception_fails_fast():
         async def post(self, *args, **kwargs):
             raise RuntimeError("network failed api_key=sk-secret-value")
 
-    provider = DeepSeekEmbeddingProvider(
-        model="deepseek-v4-pro",
-        base_url="https://api.deepseek.com",
-        api_key_env="DEEPSEEK_API_KEY",
+    provider = OpenAICompatibleMemoryEmbeddingProvider(
+        model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
         timeout=30.0,
         api_key="test-key",
     )

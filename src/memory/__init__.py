@@ -12,7 +12,7 @@ Usage::
 
     from src.memory import (
         create_memory_store, SQLiteMemoryStore,
-        get_embedding_provider, DeepSeekEmbeddingProvider,
+        get_embedding_provider, OpenAICompatibleMemoryEmbeddingProvider,
         write_episodic_memory, retrieve_top_k_memories,
         consolidate_episodic_to_semantic, maybe_consolidate, apply_forgetting,
     )
@@ -31,8 +31,8 @@ from src.memory.storage import (
     create_memory_store,
 )
 from src.memory.embeddings import (
-    DeepSeekEmbeddingProvider,
     EmbeddingProvider,
+    OpenAICompatibleMemoryEmbeddingProvider,
     get_embedding_provider,
     reset_embedding_provider,
 )
@@ -50,8 +50,8 @@ __all__ = [
     "SQLiteMemoryStore",
     "create_memory_store",
     # Embeddings
-    "DeepSeekEmbeddingProvider",
     "EmbeddingProvider",
+    "OpenAICompatibleMemoryEmbeddingProvider",
     "get_embedding_provider",
     "reset_embedding_provider",
     "MemoryEmbeddingConfigError",

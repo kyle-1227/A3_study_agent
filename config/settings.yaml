@@ -145,8 +145,10 @@ context_engineering:
       - trajectory
       - curriculum
     apply:
-      enabled: false
-      apply_enabled_nodes: []
+      enabled: true
+      apply_enabled_nodes:
+        - review_doc_planner
+        - review_doc_agent
       fallback_on_error: true
       allow_structured_output: false
       role: system
@@ -162,20 +164,11 @@ context_engineering:
         - trajectory
         - curriculum
       route_rollout:
-        enabled: false
+        enabled: true
         route_name: single_resource_generation
         apply_enabled_nodes:
           - review_doc_planner
           - review_doc_agent
-          - code_practice_planner
-          - code_practice_agent
-          - exercise_planner
-          - mindmap_planner
-          - study_plan_planner
-          - video_script_planner
-          - video_script_agent
-          - video_animation_planner
-          - video_animation_agent
         require_single_resource_request: true
         sample_rate: 1.0
         min_injectable_items: 1
@@ -207,13 +200,13 @@ context_engineering:
         include_section_headers: true
         max_content_chars_per_item: 4000
       importance_scoring:
-        enabled: false
+        enabled: true
         shadow_mode: true
         mode: shadow
         llm_node: academic
-        max_items_to_score: 8
+        max_items_to_score: 5
         max_content_preview_chars: 600
-        timeout_seconds: 8
+        timeout_seconds: 40
         fallback_to_rule_based: true
         emit_shadow_telemetry: true
         min_shadow_score_for_analysis: 0.5
@@ -668,11 +661,11 @@ memory:
   backend: "sqlite"
 
   # Embedding. Production config only supports real providers.
-  embedding_provider: "deepseek"
+  embedding_provider: "openrouter"
   embedding:
-    model: "deepseek-v4-pro"
-    base_url: "https://api.deepseek.com"
-    api_key_env: "DEEPSEEK_API_KEY"
+    model: "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
     timeout_seconds: 30
 
   # Retrieval

@@ -38,8 +38,8 @@ class EmbeddingProvider(ABC):
         ...
 
 
-class DeepSeekEmbeddingProvider(EmbeddingProvider):
-    """OpenAI-compatible DeepSeek embedding provider for memory vectorization."""
+class OpenAICompatibleMemoryEmbeddingProvider(EmbeddingProvider):
+    """OpenAI-compatible embedding provider for memory vectorization."""
 
     def __init__(
         self,
@@ -69,7 +69,7 @@ class DeepSeekEmbeddingProvider(EmbeddingProvider):
         self._dim: int | None = None
 
     @classmethod
-    def from_settings(cls) -> "DeepSeekEmbeddingProvider":
+    def from_settings(cls) -> "OpenAICompatibleMemoryEmbeddingProvider":
         """Build the provider from explicit memory embedding settings."""
         return cls(
             model=_required_str_setting("memory.embedding.model"),
@@ -148,12 +148,12 @@ def get_embedding_provider() -> EmbeddingProvider:
     if provider_name is None:
         raise MemoryEmbeddingConfigError("memory.embedding_provider is required")
     provider_name = str(provider_name).strip().lower()
-    if provider_name != "deepseek":
+    if provider_name != "openrouter":
         raise MemoryEmbeddingConfigError(
-            f"Unsupported memory.embedding_provider={provider_name!r}; only 'deepseek' is allowed"
+            f"Unsupported memory.embedding_provider={provider_name!r}; only 'openrouter' is allowed"
         )
 
-    _embedding_provider = DeepSeekEmbeddingProvider.from_settings()
+    _embedding_provider = OpenAICompatibleMemoryEmbeddingProvider.from_settings()
     logger.info("Memory embedding provider configured: %s", provider_name)
     return _embedding_provider
 

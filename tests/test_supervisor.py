@@ -52,7 +52,10 @@ class TestSupervisorNode:
         )
 
         state = {"messages": [HumanMessage(content="How do Python functions work?")]}
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python", "math"]):
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["python", "math"],
+        ):
             result = await supervisor_node(state)
 
         assert result["intent"] == "academic"
@@ -77,11 +80,16 @@ class TestSupervisorNode:
             "thread_id": "thread-1",
         }
 
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["python"],
+        ):
             with caplog.at_level("WARNING"):
                 await supervisor_node(state)
 
-        record = next(r for r in caplog.records if r.getMessage().startswith("A3_TRACE "))
+        record = next(
+            r for r in caplog.records if r.getMessage().startswith("A3_TRACE ")
+        )
         payload = json.loads(record.getMessage().removeprefix("A3_TRACE "))
         assert payload["stage"] == "supervisor"
         assert payload["request_id"] == "req-1"
@@ -91,7 +99,9 @@ class TestSupervisorNode:
     async def test_academic_with_study_plan_resource_type(self, mock_invoke):
         """academic intent with requested_resource_type=study_plan stays academic."""
         mock_invoke.return_value = _result(
-            intent="academic", keywords=["learning plan"], confidence=0.9,
+            intent="academic",
+            keywords=["learning plan"],
+            confidence=0.9,
             requested_resource_type="study_plan",
         )
 
@@ -104,7 +114,9 @@ class TestSupervisorNode:
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_emotional_intent(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="emotional", keywords=[], confidence=0.85)
+        mock_invoke.return_value = _result(
+            intent="emotional", keywords=[], confidence=0.85
+        )
 
         state = {"messages": [HumanMessage(content="I feel overwhelmed by coursework")]}
         result = await supervisor_node(state)
@@ -113,7 +125,9 @@ class TestSupervisorNode:
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_unknown_intent(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="unknown", keywords=[], confidence=0.3)
+        mock_invoke.return_value = _result(
+            intent="unknown", keywords=[], confidence=0.3
+        )
 
         state = {"messages": [HumanMessage(content="What is the weather today?")]}
         result = await supervisor_node(state)
@@ -129,8 +143,15 @@ class TestSupervisorNode:
             subject_candidates=["python", "math"],
         )
 
-        state = {"messages": [HumanMessage(content="Python function parameters and return values")]}
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["math", "python"]):
+        state = {
+            "messages": [
+                HumanMessage(content="Python function parameters and return values")
+            ]
+        }
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["math", "python"],
+        ):
             result = await supervisor_node(state)
 
         assert result["subject"] == "python"
@@ -164,8 +185,13 @@ class TestSupervisorNode:
             subject_candidates=["law", "python"],
         )
 
-        state = {"messages": [HumanMessage(content="What are contract law requirements?")]}
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
+        state = {
+            "messages": [HumanMessage(content="What are contract law requirements?")]
+        }
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["python"],
+        ):
             result = await supervisor_node(state)
 
         assert result["subject"] == "python"
@@ -179,8 +205,13 @@ class TestSupervisorNode:
             subject_candidates=["law"],
         )
 
-        state = {"messages": [HumanMessage(content="What are contract law requirements?")]}
-        with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["python"]):
+        state = {
+            "messages": [HumanMessage(content="What are contract law requirements?")]
+        }
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["python"],
+        ):
             result = await supervisor_node(state)
 
         assert result["subject"] == "other"
@@ -188,9 +219,18 @@ class TestSupervisorNode:
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_study_plan_request_sets_resource_type(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="academic", keywords=["machine learning"])
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["machine learning"],
+            requested_resource_type="study_plan",
+            requested_resource_types=["study_plan"],
+        )
 
-        state = {"messages": [HumanMessage(content="Please create a machine learning study plan")]}
+        state = {
+            "messages": [
+                HumanMessage(content="Please create a machine learning study plan")
+            ]
+        }
         result = await supervisor_node(state)
 
         assert result["intent"] == "academic"
@@ -199,9 +239,18 @@ class TestSupervisorNode:
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_mindmap_request_sets_route_flag(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="academic", keywords=["data structures"])
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["data structures"],
+            requested_resource_type="mindmap",
+            requested_resource_types=["mindmap"],
+        )
 
-        state = {"messages": [HumanMessage(content="Please create a data structures mindmap")]}
+        state = {
+            "messages": [
+                HumanMessage(content="Please create a data structures mindmap")
+            ]
+        }
         result = await supervisor_node(state)
 
         assert result["needs_mindmap"] is True
@@ -209,14 +258,58 @@ class TestSupervisorNode:
         assert result["requested_resource_types"] == ["mindmap"]
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
-    async def test_multi_resource_request_sets_ordered_resource_types(self, mock_invoke):
-        mock_invoke.return_value = _result(intent="academic", keywords=["big data"])
+    async def test_multi_resource_request_sets_ordered_resource_types(
+        self, mock_invoke
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["big data"],
+            requested_resource_type="review_doc",
+            requested_resource_types=["review_doc", "quiz"],
+        )
 
-        state = {"messages": [HumanMessage(content="请帮我生成一份大数据复习文档和练习题")]}
+        state = {
+            "messages": [HumanMessage(content="请帮我生成一份大数据复习文档和练习题")]
+        }
         result = await supervisor_node(state)
 
         assert result["requested_resource_type"] == "review_doc"
         assert result["requested_resource_types"] == ["review_doc", "quiz"]
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_single_review_doc_with_excluded_resources_stays_single(
+        self, mock_invoke
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["overfitting", "regularization", "cross-validation"],
+            confidence=0.98,
+            subject_candidates=["machine_learning"],
+            requested_resource_type="review_doc",
+            requested_resource_types=["review_doc"],
+        )
+
+        state = {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "请只生成一个 review_doc 复习文档资源，主题是机器学习中的过拟合、"
+                        "欠拟合、正则化与交叉验证。不要生成思维导图、练习题、"
+                        "代码题或视频脚本。最终输出 Markdown 复习文档。"
+                    )
+                )
+            ]
+        }
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["machine_learning"],
+        ):
+            result = await supervisor_node(state)
+
+        assert result["requested_resource_type"] == "review_doc"
+        assert result["requested_resource_types"] == ["review_doc"]
+        assert result["is_parallel_resource_request"] is False
+        assert result["needs_mindmap"] is False
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_plain_mindmap_question_does_not_route_to_mindmap(self, mock_invoke):
@@ -235,33 +328,63 @@ class TestSupervisorNode:
             ("给我一份 Python 复习资料", "review_doc", ["review_doc"]),
             ("帮我生成 Python 思维导图", "mindmap", ["mindmap"]),
             ("给我一份 Python 练习题", "quiz", ["quiz"]),
-            ("帮我生成一份 Python 的复习资料和思维导图", "review_doc", ["review_doc", "mindmap"]),
-            ("帮我生成一份 Python 的复习资料和练习题", "review_doc", ["review_doc", "quiz"]),
-            ("帮我生成一份 Python 的复习资料、思维导图和练习题", "review_doc", ["review_doc", "mindmap", "quiz"]),
+            (
+                "帮我生成一份 Python 的复习资料和思维导图",
+                "review_doc",
+                ["review_doc", "mindmap"],
+            ),
+            (
+                "帮我生成一份 Python 的复习资料和练习题",
+                "review_doc",
+                ["review_doc", "quiz"],
+            ),
+            (
+                "帮我生成一份 Python 的复习资料、思维导图和练习题",
+                "review_doc",
+                ["review_doc", "mindmap", "quiz"],
+            ),
         ],
     )
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
-    async def test_resource_type_detection_outputs_list(self, mock_invoke, query, expected_type, expected_types):
-        mock_invoke.return_value = _result(intent="academic", keywords=["Python"])
+    async def test_structured_resource_types_output_list(
+        self, mock_invoke, query, expected_type, expected_types
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["Python"],
+            requested_resource_type=expected_type,
+            requested_resource_types=expected_types,
+        )
 
         result = await supervisor_node({"messages": [HumanMessage(content=query)]})
 
         assert result["requested_resource_type"] == expected_type
         assert result["requested_resource_types"] == expected_types
-        assert (len(result["requested_resource_types"]) > 1) is (len(expected_types) > 1)
+        assert (len(result["requested_resource_types"]) > 1) is (
+            len(expected_types) > 1
+        )
         assert result["requested_resource_type"] != "multi_resource"
 
 
 class TestResourceTypeDetection:
     def test_detects_explicit_mindmap_generation(self):
-        assert _detect_requested_resource_type("Please create a machine learning mindmap") == "mindmap"
+        assert (
+            _detect_requested_resource_type("Please create a machine learning mindmap")
+            == "mindmap"
+        )
 
     def test_does_not_detect_mindmap_explanation_question(self):
         assert _detect_requested_resource_type("What is a mindmap?") == ""
 
     def test_detects_study_plan_requests(self):
-        assert _detect_requested_resource_type("Please create a Python study plan") == "study_plan"
-        assert _detect_requested_resource_type("Give me a machine learning roadmap") == "study_plan"
+        assert (
+            _detect_requested_resource_type("Please create a Python study plan")
+            == "study_plan"
+        )
+        assert (
+            _detect_requested_resource_type("Give me a machine learning roadmap")
+            == "study_plan"
+        )
 
     @pytest.mark.parametrize(
         ("query", "expected"),
@@ -272,14 +395,19 @@ class TestResourceTypeDetection:
             ("给我一份 Python 练习题", ["quiz"]),
             ("帮我生成一份 Python 的复习资料和思维导图", ["review_doc", "mindmap"]),
             ("帮我生成一份 Python 的复习资料和练习题", ["review_doc", "quiz"]),
-            ("帮我生成一份 Python 的复习资料、思维导图和练习题", ["review_doc", "mindmap", "quiz"]),
+            (
+                "帮我生成一份 Python 的复习资料、思维导图和练习题",
+                ["review_doc", "mindmap", "quiz"],
+            ),
         ],
     )
     def test_detects_requested_resource_types(self, query, expected):
         assert _detect_requested_resource_types(query) == expected
 
     def test_detects_multiple_resource_types_in_order(self):
-        assert _detect_requested_resource_types("请帮我生成机器学习思维导图和练习题") == ["mindmap", "quiz"]
+        assert _detect_requested_resource_types(
+            "请帮我生成机器学习思维导图和练习题"
+        ) == ["mindmap", "quiz"]
 
     def test_does_not_detect_resource_list_for_explanation_question(self):
         assert _detect_requested_resource_types("什么是思维导图？") == []

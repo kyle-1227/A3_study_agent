@@ -241,17 +241,9 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     subject = subject_candidates[0] if subject_candidates else "other"
 
-    # Deterministic detections are intentionally authoritative for explicit
-    # resource phrasing. The LLM may over-broaden "代码实操案例" into review_doc,
-    # which would route a single code-practice request into a parallel bundle.
-    deterministic_resource_types = _detect_requested_resource_types(user_text)
-    requested_resource_types = (
-        deterministic_resource_types
-        if deterministic_resource_types
-        else normalize_requested_resource_types(
-            result.requested_resource_types,
-            result.requested_resource_type,
-        )
+    requested_resource_types = normalize_requested_resource_types(
+        result.requested_resource_types,
+        result.requested_resource_type,
     )
     requested_resource_type = (
         requested_resource_types[0] if requested_resource_types else ""

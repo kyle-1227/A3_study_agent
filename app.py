@@ -793,6 +793,7 @@ async def _stream_graph_events(
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
     context_usage_history: list[dict] = []
+    terminal_resource_output: dict | None = None
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
@@ -1143,6 +1144,13 @@ async def _stream_graph_events(
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and output.get("error"):
                             error = str(output["error"])
+                        if (
+                            node_name == "resource_bundle_output"
+                            and isinstance(output, dict)
+                            and isinstance(output.get("resource_bundle_artifact"), dict)
+                            and output.get("resource_bundle_artifact")
+                        ):
+                            terminal_resource_output = output
 
                         payload = json.dumps(
                             {
@@ -1441,6 +1449,10 @@ async def _stream_graph_events(
     yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_COMPLETED, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
 
     resource_payload = _resource_final_payload(final_state)
+    if terminal_resource_output:
+        terminal_resource_payload = _resource_final_payload(terminal_resource_output)
+        if terminal_resource_payload:
+            resource_payload = terminal_resource_payload
     if resource_payload:
         # TEMP A3_TRACE: remove after resource final payload validation.
         emit_a3_trace(
