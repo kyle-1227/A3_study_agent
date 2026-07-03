@@ -358,6 +358,7 @@ context_engineering:
             - mindmap_output
             - code_practice_output
             - video_script_output
+            - video_animation_output
             - study_plan_output
             - resource_bundle_output
       node_policies:

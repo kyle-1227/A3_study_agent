@@ -531,6 +531,14 @@ def test_settings_resolve_expected_default_tiers():
         ).mode
         == "disabled"
     )
+    assert (
+        resolve_context_policy(
+            node_name="video_animation_output",
+            llm_node="video_animation",
+            state={},
+        ).mode
+        == "disabled"
+    )
 
 
 def test_invalid_mode_raises_context_apply_error(monkeypatch):
@@ -660,6 +668,73 @@ def test_require_user_match_does_not_use_thread_or_session_aliases():
 
     assert [item.id for item in result.kept_items] == ["user-kept"]
     assert result.source_drop_reasons["user_mismatch"] == 1
+
+
+def test_task_match_does_not_use_top_level_requested_resource_type_for_multi_resource():
+    policies = {
+        "memory": SourceBudgetPolicy(
+            source_type="memory",
+            require_task_match=True,
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [_item("review-memory", metadata={"task_id": "review_doc"})],
+        injectable_sources=("memory",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={
+            "requested_resource_type": "review_doc",
+            "requested_resource_types": ["review_doc", "quiz"],
+        },
+    )
+
+    assert result.kept_items == []
+    assert result.source_drop_reasons["task_mismatch"] == 1
+
+
+def test_task_match_prefers_resource_task_over_multi_resource_top_level_state():
+    policies = {
+        "memory": SourceBudgetPolicy(
+            source_type="memory",
+            require_task_match=True,
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [
+            _item("review-memory", metadata={"task_id": "review_doc"}),
+            _item("quiz-memory", metadata={"task_id": "quiz"}),
+        ],
+        injectable_sources=("memory",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={
+            "resource_task": {"resource_type": "quiz"},
+            "requested_resource_type": "review_doc",
+            "requested_resource_types": ["review_doc", "quiz"],
+        },
+    )
+
+    assert [item.id for item in result.kept_items] == ["quiz-memory"]
+    assert result.source_drop_reasons["task_mismatch"] == 1
+
+
+def test_task_match_allows_single_requested_resource_type():
+    policies = {
+        "memory": SourceBudgetPolicy(
+            source_type="memory",
+            require_task_match=True,
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [_item("review-memory", metadata={"requested_resource_type": "review_doc"})],
+        injectable_sources=("memory",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={"requested_resource_types": ["review_doc"]},
+    )
+
+    assert [item.id for item in result.kept_items] == ["review-memory"]
+    assert result.source_drop_reasons == {}
 
 
 def test_evidence_without_relevance_score_is_not_injectable():

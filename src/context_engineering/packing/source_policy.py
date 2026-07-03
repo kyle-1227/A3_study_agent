@@ -262,21 +262,34 @@ def _state_match_values(state: dict | None) -> dict[str, str]:
     if not isinstance(state, dict):
         return {"user": "", "subject": "", "task": ""}
     resource_task = state.get("resource_task")
-    resource_type = ""
     subject = _first_value_from_mapping(state, _SUBJECT_ALIASES)
     if isinstance(resource_task, dict):
-        resource_type = str(resource_task.get("resource_type") or "").strip()
         subject = subject or str(resource_task.get("subject") or "").strip()
-    task = (
-        str(state.get("requested_resource_type") or "").strip()
-        or resource_type
-        or _first_value_from_mapping(state, _TASK_ALIASES)
-    )
     return {
         "user": _first_value_from_mapping(state, _USER_ALIASES),
         "subject": subject,
-        "task": task,
+        "task": _state_task_match_value(state),
     }
+
+
+def _state_task_match_value(state: dict[str, Any]) -> str:
+    resource_task = state.get("resource_task")
+    if isinstance(resource_task, dict):
+        resource_type = str(resource_task.get("resource_type") or "").strip()
+        if resource_type:
+            return resource_type
+    requested_resource_types = _string_list(state.get("requested_resource_types"))
+    if len(requested_resource_types) > 1:
+        return ""
+    requested_resource_type = str(state.get("requested_resource_type") or "").strip()
+    if requested_resource_type and (
+        not requested_resource_types
+        or requested_resource_types == [requested_resource_type]
+    ):
+        return requested_resource_type
+    if len(requested_resource_types) == 1:
+        return requested_resource_types[0]
+    return _first_value_from_mapping(state, ("task_id", "resource_type", "task_type"))
 
 
 def _metadata_match_value(item: ContextItem, key: str) -> str:
@@ -289,6 +302,12 @@ def _metadata_match_value(item: ContextItem, key: str) -> str:
     if values:
         return values[0]
     return ""
+
+
+def _string_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item or "").strip() for item in value if str(item or "").strip())
 
 
 def get_metadata_values(item: ContextItem, aliases: tuple[str, ...]) -> tuple[str, ...]:
