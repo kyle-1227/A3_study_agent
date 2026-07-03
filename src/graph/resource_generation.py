@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage
@@ -315,87 +315,314 @@ def _merge_node_output(local_state: dict, output: dict | None) -> str:
     return message_content
 
 
+async def _run_resource_subnode(
+    local_state: dict,
+    *,
+    resource_type: str,
+    subnode: str,
+    func: Callable[[dict], Awaitable[dict | None]],
+) -> dict | None:
+    start = time.perf_counter()
+    emit_a3_trace(
+        logger,
+        "resource_subnode.start",
+        {
+            "resource_type": resource_type,
+            "subnode": subnode,
+            "elapsed_ms": 0,
+            "status": "start",
+            "error_type": "",
+        },
+        state=local_state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
+    try:
+        output = await func(local_state)
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "resource_subnode.end",
+            {
+                "resource_type": resource_type,
+                "subnode": subnode,
+                "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            },
+            state=local_state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        raise
+    emit_a3_trace(
+        logger,
+        "resource_subnode.end",
+        {
+            "resource_type": resource_type,
+            "subnode": subnode,
+            "elapsed_ms": int((time.perf_counter() - start) * 1000),
+            "status": "success",
+            "error_type": "",
+        },
+        state=local_state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
+    return output
+
+
+async def _merge_resource_subnode(
+    local_state: dict,
+    *,
+    resource_type: str,
+    subnode: str,
+    func: Callable[[dict], Awaitable[dict | None]],
+) -> str:
+    return _merge_node_output(
+        local_state,
+        await _run_resource_subnode(
+            local_state,
+            resource_type=resource_type,
+            subnode=subnode,
+            func=func,
+        ),
+    )
+
+
+async def _merge_resource_sequence(
+    local_state: dict,
+    *,
+    resource_type: str,
+    steps: tuple[tuple[str, Callable[[dict], Awaitable[dict | None]]], ...],
+) -> str:
+    message_content = ""
+    for subnode, func in steps:
+        message_content = await _merge_resource_subnode(
+            local_state,
+            resource_type=resource_type,
+            subnode=subnode,
+            func=func,
+        )
+    return message_content
+
+
 async def _run_mindmap_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await mindmap_planner(local_state))
-    _merge_node_output(local_state, await mindmap_agent(local_state))
-    _merge_node_output(local_state, await mindmap_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="mindmap",
+        steps=(
+            ("mindmap_planner", mindmap_planner),
+            ("mindmap_agent", mindmap_agent),
+            ("mindmap_reviewer", mindmap_reviewer),
+        ),
+    )
     while should_rewrite_mindmap(local_state) == "rewrite":
-        _merge_node_output(local_state, await mindmap_rewrite(local_state))
-        _merge_node_output(local_state, await mindmap_agent(local_state))
-        _merge_node_output(local_state, await mindmap_reviewer(local_state))
-    return _merge_node_output(local_state, await mindmap_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="mindmap",
+            steps=(
+                ("mindmap_rewrite", mindmap_rewrite),
+                ("mindmap_agent", mindmap_agent),
+                ("mindmap_reviewer", mindmap_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="mindmap",
+        subnode="mindmap_output",
+        func=mindmap_output,
+    )
 
 
 async def _run_quiz_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await exercise_planner(local_state))
-    _merge_node_output(local_state, await exercise_agent(local_state))
-    _merge_node_output(local_state, await exercise_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="quiz",
+        steps=(
+            ("exercise_planner", exercise_planner),
+            ("exercise_agent", exercise_agent),
+            ("exercise_reviewer", exercise_reviewer),
+        ),
+    )
     while should_rewrite_exercise(local_state) == "rewrite":
-        _merge_node_output(local_state, await exercise_rewrite(local_state))
-        _merge_node_output(local_state, await exercise_agent(local_state))
-        _merge_node_output(local_state, await exercise_reviewer(local_state))
-    return _merge_node_output(local_state, await exercise_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="quiz",
+            steps=(
+                ("exercise_rewrite", exercise_rewrite),
+                ("exercise_agent", exercise_agent),
+                ("exercise_reviewer", exercise_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="quiz",
+        subnode="exercise_output",
+        func=exercise_output,
+    )
 
 
 async def _run_review_doc_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await review_doc_planner(local_state))
-    _merge_node_output(local_state, await review_doc_agent(local_state))
-    _merge_node_output(local_state, await review_doc_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="review_doc",
+        steps=(
+            ("review_doc_planner", review_doc_planner),
+            ("review_doc_agent", review_doc_agent),
+            ("review_doc_reviewer", review_doc_reviewer),
+        ),
+    )
     while should_rewrite_review_doc(local_state) == "rewrite":
-        _merge_node_output(local_state, await review_doc_rewrite(local_state))
-        _merge_node_output(local_state, await review_doc_agent(local_state))
-        _merge_node_output(local_state, await review_doc_reviewer(local_state))
-    return _merge_node_output(local_state, await review_doc_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="review_doc",
+            steps=(
+                ("review_doc_rewrite", review_doc_rewrite),
+                ("review_doc_agent", review_doc_agent),
+                ("review_doc_reviewer", review_doc_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="review_doc",
+        subnode="review_doc_output",
+        func=review_doc_output,
+    )
 
 
 async def _run_study_plan_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await study_plan_emotional_intel(local_state))
-    _merge_node_output(local_state, await study_plan_planner(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="study_plan",
+        steps=(
+            ("study_plan_emotional_intel", study_plan_emotional_intel),
+            ("study_plan_planner", study_plan_planner),
+        ),
+    )
     while True:
-        _merge_node_output(local_state, await study_plan_agent(local_state))
+        await _merge_resource_subnode(
+            local_state,
+            resource_type="study_plan",
+            subnode="study_plan_agent",
+            func=study_plan_agent,
+        )
         academic_update, emotional_update = await asyncio.gather(
-            study_plan_reviewer_academic(local_state),
-            study_plan_reviewer_emotional(local_state),
+            _run_resource_subnode(
+                local_state,
+                resource_type="study_plan",
+                subnode="study_plan_reviewer_academic",
+                func=study_plan_reviewer_academic,
+            ),
+            _run_resource_subnode(
+                local_state,
+                resource_type="study_plan",
+                subnode="study_plan_reviewer_emotional",
+                func=study_plan_reviewer_emotional,
+            ),
         )
         _merge_node_output(local_state, academic_update)
         _merge_node_output(local_state, emotional_update)
-        _merge_node_output(local_state, await study_plan_consensus(local_state))
+        await _merge_resource_subnode(
+            local_state,
+            resource_type="study_plan",
+            subnode="study_plan_consensus",
+            func=study_plan_consensus,
+        )
         if route_after_study_plan_consensus(local_state) == "output":
-            return _merge_node_output(local_state, await study_plan_output(local_state))
-        _merge_node_output(local_state, await study_plan_rewrite(local_state))
+            return await _merge_resource_subnode(
+                local_state,
+                resource_type="study_plan",
+                subnode="study_plan_output",
+                func=study_plan_output,
+            )
+        await _merge_resource_subnode(
+            local_state,
+            resource_type="study_plan",
+            subnode="study_plan_rewrite",
+            func=study_plan_rewrite,
+        )
 
 
 async def _run_code_practice_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await code_practice_planner(local_state))
-    _merge_node_output(local_state, await code_practice_agent(local_state))
-    _merge_node_output(local_state, await code_practice_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="code_practice",
+        steps=(
+            ("code_practice_planner", code_practice_planner),
+            ("code_practice_agent", code_practice_agent),
+            ("code_practice_reviewer", code_practice_reviewer),
+        ),
+    )
     while should_rewrite_code_practice(local_state) == "rewrite":
-        _merge_node_output(local_state, await code_practice_rewrite(local_state))
-        _merge_node_output(local_state, await code_practice_agent(local_state))
-        _merge_node_output(local_state, await code_practice_reviewer(local_state))
-    return _merge_node_output(local_state, await code_practice_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="code_practice",
+            steps=(
+                ("code_practice_rewrite", code_practice_rewrite),
+                ("code_practice_agent", code_practice_agent),
+                ("code_practice_reviewer", code_practice_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="code_practice",
+        subnode="code_practice_output",
+        func=code_practice_output,
+    )
 
 
 async def _run_video_script_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await video_script_planner(local_state))
-    _merge_node_output(local_state, await video_script_agent(local_state))
-    _merge_node_output(local_state, await video_script_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="video_script",
+        steps=(
+            ("video_script_planner", video_script_planner),
+            ("video_script_agent", video_script_agent),
+            ("video_script_reviewer", video_script_reviewer),
+        ),
+    )
     while should_rewrite_video_script(local_state) == "rewrite":
-        _merge_node_output(local_state, await video_script_rewrite(local_state))
-        _merge_node_output(local_state, await video_script_agent(local_state))
-        _merge_node_output(local_state, await video_script_reviewer(local_state))
-    return _merge_node_output(local_state, await video_script_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="video_script",
+            steps=(
+                ("video_script_rewrite", video_script_rewrite),
+                ("video_script_agent", video_script_agent),
+                ("video_script_reviewer", video_script_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="video_script",
+        subnode="video_script_output",
+        func=video_script_output,
+    )
 
 
 async def _run_video_animation_resource(local_state: dict) -> str:
-    _merge_node_output(local_state, await video_animation_planner(local_state))
-    _merge_node_output(local_state, await video_animation_agent(local_state))
-    _merge_node_output(local_state, await video_animation_reviewer(local_state))
+    await _merge_resource_sequence(
+        local_state,
+        resource_type="video_animation",
+        steps=(
+            ("video_animation_planner", video_animation_planner),
+            ("video_animation_agent", video_animation_agent),
+            ("video_animation_reviewer", video_animation_reviewer),
+        ),
+    )
     while should_rewrite_video_animation(local_state) == "rewrite":
-        _merge_node_output(local_state, await video_animation_rewrite(local_state))
-        _merge_node_output(local_state, await video_animation_agent(local_state))
-        _merge_node_output(local_state, await video_animation_reviewer(local_state))
-    return _merge_node_output(local_state, await video_animation_output(local_state))
+        await _merge_resource_sequence(
+            local_state,
+            resource_type="video_animation",
+            steps=(
+                ("video_animation_rewrite", video_animation_rewrite),
+                ("video_animation_agent", video_animation_agent),
+                ("video_animation_reviewer", video_animation_reviewer),
+            ),
+        )
+    return await _merge_resource_subnode(
+        local_state,
+        resource_type="video_animation",
+        subnode="video_animation_output",
+        func=video_animation_output,
+    )
 
 
 RESOURCE_RUNNERS = {
@@ -707,6 +934,7 @@ def _compose_bundle_message(
         lines.append("部分资源已生成，失败的资源可以稍后单独重试。")
 
     return "\n".join(lines).strip()
+
 
 def _resource_metrics(result: dict) -> dict:
     resource_type = result.get("resource_type")

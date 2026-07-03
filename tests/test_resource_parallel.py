@@ -16,10 +16,13 @@ from src.graph.resource_generation import (
     resource_worker,
 )
 from src.graph.state import resource_branch_results_reducer
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 
 
 def test_normalize_requested_resource_types_dedupes_and_aliases():
-    assert normalize_requested_resource_types(["mindmap", "exercise"], "quiz", "roadmap") == [
+    assert normalize_requested_resource_types(
+        ["mindmap", "exercise"], "quiz", "roadmap"
+    ) == [
         "mindmap",
         "quiz",
         "study_plan",
@@ -28,12 +31,18 @@ def test_normalize_requested_resource_types_dedupes_and_aliases():
 
 def test_resource_branch_results_reducer_merges_by_resource_type():
     existing = [{"resource_type": "quiz", "status": "failed"}]
-    update = [{"resource_type": "quiz", "status": "success"}, {"resource_type": "mindmap", "status": "success"}]
+    update = [
+        {"resource_type": "quiz", "status": "success"},
+        {"resource_type": "mindmap", "status": "success"},
+    ]
 
     merged = resource_branch_results_reducer(existing, update)
 
     assert [item["resource_type"] for item in merged] == ["mindmap", "quiz"]
-    assert next(item for item in merged if item["resource_type"] == "quiz")["status"] == "success"
+    assert (
+        next(item for item in merged if item["resource_type"] == "quiz")["status"]
+        == "success"
+    )
 
 
 async def test_resource_orchestrator_plans_dynamic_worker_tasks():
@@ -49,7 +58,11 @@ async def test_resource_orchestrator_plans_dynamic_worker_tasks():
     assert result["requested_resource_types"] == ["mindmap", "quiz"]
     assert result["resource_generation_status"] == "running"
     assert result["resource_generation_plan"]["tasks"] == [
-        {"task_id": "resource:mindmap", "resource_type": "mindmap", "status": "pending"},
+        {
+            "task_id": "resource:mindmap",
+            "resource_type": "mindmap",
+            "status": "pending",
+        },
         {"task_id": "resource:quiz", "resource_type": "quiz", "status": "pending"},
     ]
 
@@ -68,10 +81,15 @@ def test_dispatch_resource_workers_returns_send_packets():
 
     assert all(isinstance(send, Send) for send in sends)
     assert [send.node for send in sends] == ["resource_worker", "resource_worker"]
-    assert [send.arg["resource_task"]["resource_type"] for send in sends] == ["mindmap", "quiz"]
+    assert [send.arg["resource_task"]["resource_type"] for send in sends] == [
+        "mindmap",
+        "quiz",
+    ]
 
 
-async def test_resource_worker_success_uses_runner_without_writing_messages(monkeypatch):
+async def test_resource_worker_success_uses_runner_without_writing_messages(
+    monkeypatch,
+):
     async def fake_quiz_runner(local_state):
         local_state["exercise_items"] = [{"question": "Q", "answer": "A"}]
         local_state["exercise_artifact"] = {"title": "Mock Quiz"}
@@ -90,8 +108,65 @@ async def test_resource_worker_success_uses_runner_without_writing_messages(monk
     assert branch["resource_type"] == "quiz"
     assert branch["status"] == "success"
     assert branch["artifact"]["title"] == "Mock Quiz"
-    assert branch["state_updates"]["exercise_items"] == [{"question": "Q", "answer": "A"}]
+    assert branch["state_updates"]["exercise_items"] == [
+        {"question": "Q", "answer": "A"}
+    ]
     assert "messages" not in result
+
+
+async def test_resource_worker_emits_safe_internal_subnode_traces(monkeypatch):
+    async def fake_node(local_state):
+        local_state["exercise_items"] = [{"question": "Q", "answer": "A"}]
+        local_state["exercise_artifact"] = {"title": "Mock Quiz"}
+        return {}
+
+    async def fake_output(_local_state):
+        return {"messages": [AIMessage(content="## Mock Quiz")]}
+
+    monkeypatch.setattr(rg, "exercise_planner", fake_node)
+    monkeypatch.setattr(rg, "exercise_agent", fake_node)
+    monkeypatch.setattr(rg, "exercise_reviewer", fake_node)
+    monkeypatch.setattr(rg, "exercise_output", fake_output)
+    monkeypatch.setattr(rg, "should_rewrite_exercise", lambda _state: "output")
+
+    trace_events: list[dict] = []
+    sink_token = set_trace_event_sink(trace_events)
+    try:
+        result = await resource_worker(
+            {
+                "messages": [HumanMessage(content="make a quiz")],
+                "resource_task": {"task_id": "resource:quiz", "resource_type": "quiz"},
+                "request_id": "req-1",
+            }
+        )
+    finally:
+        reset_trace_event_sink(sink_token)
+
+    assert result["resource_branch_results"][0]["status"] == "success"
+    subnode_events = [
+        event
+        for event in trace_events
+        if str(event.get("stage", "")).startswith("resource_subnode.")
+    ]
+    assert [event["stage"] for event in subnode_events] == [
+        "resource_subnode.start",
+        "resource_subnode.end",
+        "resource_subnode.start",
+        "resource_subnode.end",
+        "resource_subnode.start",
+        "resource_subnode.end",
+        "resource_subnode.start",
+        "resource_subnode.end",
+    ]
+    assert {event["subnode"] for event in subnode_events} == {
+        "exercise_planner",
+        "exercise_agent",
+        "exercise_reviewer",
+        "exercise_output",
+    }
+    assert all(event["resource_type"] == "quiz" for event in subnode_events)
+    assert all("messages" not in event for event in subnode_events)
+    assert all("content" not in event for event in subnode_events)
 
 
 async def test_resource_worker_failure_is_captured(monkeypatch):
@@ -124,10 +199,18 @@ async def test_resource_bundle_output_partial_success_sets_artifacts_and_message
                     "resource_type": "mindmap",
                     "status": "success",
                     "title": "Mock Map",
-                    "artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}, "xmind_url": "/m.xmind"},
+                    "artifact": {
+                        "title": "Mock Map",
+                        "tree": {"title": "Mock Map"},
+                        "xmind_url": "/m.xmind",
+                    },
                     "artifacts": [],
                     "state_updates": {
-                        "mindmap_artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}, "xmind_url": "/m.xmind"},
+                        "mindmap_artifact": {
+                            "title": "Mock Map",
+                            "tree": {"title": "Mock Map"},
+                            "xmind_url": "/m.xmind",
+                        },
                         "mindmap_tree": {"title": "Mock Map"},
                     },
                     "message_content": "Generated mindmap: Mock Map",
@@ -227,7 +310,9 @@ def test_resource_summary_includes_mindmap_metrics_and_safe_node_count():
     assert summary["metrics"]["node_count"] == 4
     assert summary["metrics"]["has_xmind"] is True
     assert rg._count_mindmap_nodes(None) == 0
-    assert rg._count_mindmap_nodes([{"title": "A"}, {"children": [{"title": "B"}]}]) == 3
+    assert (
+        rg._count_mindmap_nodes([{"title": "A"}, {"children": [{"title": "B"}]}]) == 3
+    )
     assert rg._count_mindmap_nodes("not a tree") == 0
 
 
@@ -238,7 +323,9 @@ def test_resource_summary_includes_quiz_metrics():
             "status": "success",
             "title": "Quiz",
             "artifact": {"markdown_url": "/q.md", "docx_filename": "q.docx"},
-            "state_updates": {"exercise_items": [{"question": "Q1"}, {"question": "Q2"}]},
+            "state_updates": {
+                "exercise_items": [{"question": "Q1"}, {"question": "Q2"}]
+            },
         }
     )
 
@@ -264,12 +351,18 @@ def test_resource_summary_includes_study_plan_metrics_without_fixed_shape():
             "state_updates": {"study_plan_markdown": "# Plan"},
         }
     )
-    empty_summary = rg._resource_summary({"resource_type": "study_plan", "artifact": {}, "state_updates": {}})
+    empty_summary = rg._resource_summary(
+        {"resource_type": "study_plan", "artifact": {}, "state_updates": {}}
+    )
 
     assert summary["metrics"]["has_document"] is True
     assert summary["metrics"]["has_markdown"] is True
     assert summary["metrics"]["has_docx"] is True
-    assert empty_summary["metrics"] == {"has_markdown": False, "has_docx": False, "has_document": False}
+    assert empty_summary["metrics"] == {
+        "has_markdown": False,
+        "has_docx": False,
+        "has_document": False,
+    }
 
 
 async def test_resource_bundle_output_stores_message_on_bundle_artifact():
@@ -314,7 +407,13 @@ async def test_resource_bundle_output_stores_message_on_bundle_artifact():
 def test_compose_bundle_message_single_success_preserves_resource_message():
     message = rg._compose_bundle_message(
         "success",
-        [{"resource_type": "quiz", "status": "success", "message_content": "single quiz message"}],
+        [
+            {
+                "resource_type": "quiz",
+                "status": "success",
+                "message_content": "single quiz message",
+            }
+        ],
         [],
     )
 

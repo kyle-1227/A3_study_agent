@@ -273,7 +273,7 @@ def _state_match_values(state: dict | None) -> dict[str, str]:
         or _first_value_from_mapping(state, _TASK_ALIASES)
     )
     return {
-        "user": _first_value_from_mapping(state, (*_USER_ALIASES, *_THREAD_ALIASES)),
+        "user": _first_value_from_mapping(state, _USER_ALIASES),
         "subject": subject,
         "task": task,
     }
@@ -281,7 +281,7 @@ def _state_match_values(state: dict | None) -> dict[str, str]:
 
 def _metadata_match_value(item: ContextItem, key: str) -> str:
     candidates = {
-        "user": (*_USER_ALIASES, *_THREAD_ALIASES),
+        "user": _USER_ALIASES,
         "subject": _SUBJECT_ALIASES,
         "task": _TASK_ALIASES,
     }[key]

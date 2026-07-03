@@ -242,7 +242,34 @@ context_engineering:
           require_task_match: true
           allowed_purposes:
             - artifact_reference
-      resource_type_policies: {}
+      resource_type_policies:
+        review_doc:
+          max_items_total: 8
+          source_overrides:
+            evidence:
+              max_items: 4
+            curriculum:
+              max_items: 2
+            rules:
+              max_items: 2
+        quiz:
+          max_items_total: 8
+          source_overrides:
+            trajectory:
+              max_items: 3
+            memory:
+              max_items: 2
+            evidence:
+              max_items: 3
+        code_practice:
+          max_items_total: 8
+          source_overrides:
+            artifact:
+              max_items: 3
+            evidence:
+              max_items: 3
+            profile:
+              max_items: 1
       node_groups:
         router_nodes:
           mode: observe_only
@@ -257,6 +284,15 @@ context_engineering:
         planner_nodes:
           mode: active
           risk_tier: 2
+          nodes:
+            - review_doc_planner
+            - exercise_planner
+            - mindmap_planner
+            - code_practice_planner
+            - video_script_planner
+            - video_animation_planner
+            - study_plan_planner
+            - curriculum_planner
           max_injected_context_tokens: 1500
           max_items_total: 5
           injectable_sources:
@@ -271,6 +307,16 @@ context_engineering:
         agent_nodes:
           mode: active
           risk_tier: 1
+          nodes:
+            - review_doc_agent
+            - exercise_agent
+            - mindmap_agent
+            - code_practice_agent
+            - video_script_agent
+            - video_animation_agent
+            - study_plan_agent
+            - adaptive_practice_responder
+            - recommendation_provider
           max_injected_context_tokens: 3000
           max_items_total: 8
           injectable_sources:
@@ -284,6 +330,16 @@ context_engineering:
         reviewer_nodes:
           mode: active
           risk_tier: 3
+          nodes:
+            - review_doc_reviewer
+            - exercise_reviewer
+            - mindmap_reviewer
+            - code_practice_reviewer
+            - video_script_reviewer
+            - video_animation_reviewer
+            - study_plan_reviewer_academic
+            - study_plan_reviewer_emotional
+            - study_plan_consensus
           max_injected_context_tokens: 1200
           max_items_total: 4
           injectable_sources:

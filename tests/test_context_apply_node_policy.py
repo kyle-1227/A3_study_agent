@@ -22,6 +22,7 @@ from src.context_engineering.packing.apply import (
 from src.context_engineering.packing.node_policy import (
     ResolvedContextPolicy,
     SourceBudgetPolicy,
+    build_context_policy_summary,
     resolve_context_policy,
 )
 from src.context_engineering.packing.packer import pack_context_items
@@ -298,6 +299,30 @@ def test_node_policy_schema_configured_semantics():
     assert not node_policy_module._node_policy_schema_configured({})
 
 
+def test_context_policy_summary_distinguishes_legacy_and_node_schema():
+    legacy_summary = build_context_policy_summary(_legacy_apply_config())
+
+    assert legacy_summary["node_policy_schema_configured"] is False
+    assert legacy_summary["legacy_global_enabled"] is True
+    assert legacy_summary["legacy_mode_enabled"] is True
+
+    node_config = _legacy_apply_config()
+    node_config["default_policy"] = {
+        "mode": "observe_only",
+        "risk_tier": 0,
+        "max_injected_context_tokens": 1000,
+        "max_items_total": 2,
+        "min_injectable_items": 1,
+        "injectable_sources": ["rules"],
+    }
+    node_summary = build_context_policy_summary(node_config)
+
+    assert node_summary["node_policy_schema_configured"] is True
+    assert node_summary["legacy_global_enabled"] is True
+    assert node_summary["legacy_mode_enabled"] is False
+    assert node_summary["default_policy_mode"] == "observe_only"
+
+
 def test_resource_type_policy_resolves_from_resource_task_state(monkeypatch):
     config = _legacy_apply_config()
     config.update(
@@ -405,7 +430,10 @@ def test_multi_requested_resource_types_without_resource_task_do_not_match_polic
     resolved = resolve_context_policy(
         node_name="resource_node",
         llm_node="llm",
-        state={"requested_resource_types": ["quiz", "review_doc"]},
+        state={
+            "requested_resource_type": "quiz",
+            "requested_resource_types": ["quiz", "review_doc"],
+        },
     )
 
     assert resolved.policy_source == "default_policy"
@@ -456,16 +484,49 @@ def test_settings_resolve_expected_default_tiers():
     assert planner.injection_policy.max_injected_context_tokens == 1500
     assert planner.source_policies["evidence"].max_items == 2
     assert planner.source_policies["rules"].min_priority == 30
+    assert (
+        resolve_context_policy(
+            node_name="exercise_planner",
+            llm_node="quiz",
+            state={},
+        ).mode
+        == "active"
+    )
+    assert (
+        resolve_context_policy(
+            node_name="mindmap_agent",
+            llm_node="mindmap",
+            state={},
+        ).mode
+        == "active"
+    )
+    assert (
+        resolve_context_policy(
+            node_name="video_script_agent",
+            llm_node="video_script",
+            state={},
+        ).mode
+        == "active"
+    )
     reviewer = resolve_context_policy(
         node_name="review_doc_reviewer",
         llm_node="review_doc",
         state={},
     )
+    assert reviewer.mode == "active"
     assert reviewer.injection_policy.injectable_sources == ("rules", "evidence")
     assert (
         resolve_context_policy(
             node_name="review_doc_output",
             llm_node="review_doc",
+            state={},
+        ).mode
+        == "disabled"
+    )
+    assert (
+        resolve_context_policy(
+            node_name="resource_bundle_output",
+            llm_node="resource_bundle",
             state={},
         ).mode
         == "disabled"
@@ -577,6 +638,28 @@ def test_source_filter_metadata_aliases_match_user_subject_task_and_purpose():
 
     assert [item.id for item in result.kept_items] == ["alias-kept"]
     assert result.drop_reasons == {}
+
+
+def test_require_user_match_does_not_use_thread_or_session_aliases():
+    policies = {
+        "memory": SourceBudgetPolicy(
+            source_type="memory",
+            require_user_match=True,
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [
+            _item("thread-only", metadata={"thread_id": "thread-1"}),
+            _item("user-kept", metadata={"user_id": "user-1"}),
+        ],
+        injectable_sources=("memory",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={"thread_id": "thread-1", "user_id": "user-1"},
+    )
+
+    assert [item.id for item in result.kept_items] == ["user-kept"]
+    assert result.source_drop_reasons["user_mismatch"] == 1
 
 
 def test_evidence_without_relevance_score_is_not_injectable():

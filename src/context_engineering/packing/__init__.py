@@ -27,11 +27,13 @@ from src.context_engineering.packing.apply_trace import (
     build_context_applied_event,
     build_context_apply_error_event,
     build_context_apply_plan_event,
+    build_context_apply_policy_resolved_summary_event,
     build_context_apply_selection_event,
     build_context_importance_scored_event,
     emit_context_applied,
     emit_context_apply_error,
     emit_context_apply_plan,
+    emit_context_apply_policy_resolved_summary,
     emit_context_apply_selection,
     emit_context_importance_scored,
 )
@@ -47,6 +49,15 @@ from src.context_engineering.packing.importance import (
     parse_importance_scorer_output,
 )
 from src.context_engineering.packing.packer import pack_context_items
+from src.context_engineering.packing.node_policy import (
+    NodeContextPolicy,
+    PolicySource,
+    ResolvedContextPolicy,
+    SourceBudgetPolicy,
+    build_context_policy_summary,
+    resolve_context_policy,
+    should_emit_context_policy_summary,
+)
 from src.context_engineering.packing.policies import (
     PackingPolicy,
     get_packing_policy,
@@ -59,6 +70,10 @@ from src.context_engineering.packing.schema import (
     PackingDecision,
     PackingReason,
     PackingStrategy,
+)
+from src.context_engineering.packing.source_policy import (
+    SourceFilterResult,
+    filter_context_items_by_source_policy,
 )
 from src.context_engineering.packing.trace import (
     build_context_packed_event,
@@ -85,12 +100,17 @@ __all__ = [
     "ContextInjectionPolicy",
     "ContextPackingError",
     "ImportanceScoringPolicy",
+    "NodeContextPolicy",
     "PackedContext",
     "PackingDecision",
     "PackingPolicy",
     "PackingReason",
     "PackingStrategy",
+    "PolicySource",
+    "ResolvedContextPolicy",
     "RouteRolloutPolicy",
+    "SourceBudgetPolicy",
+    "SourceFilterResult",
     "aggregate_importance_failure",
     "aggregate_importance_success",
     "apply_node_enabled",
@@ -99,7 +119,9 @@ __all__ = [
     "build_context_applied_event",
     "build_context_apply_error_event",
     "build_context_apply_plan_event",
+    "build_context_apply_policy_resolved_summary_event",
     "build_context_apply_selection_event",
+    "build_context_policy_summary",
     "build_context_importance_scored_event",
     "build_context_packed_event",
     "build_context_packing_error_event",
@@ -109,6 +131,7 @@ __all__ = [
     "emit_context_applied",
     "emit_context_apply_error",
     "emit_context_apply_plan",
+    "emit_context_apply_policy_resolved_summary",
     "emit_context_apply_selection",
     "emit_context_importance_scored",
     "emit_context_packed",
@@ -117,6 +140,7 @@ __all__ = [
     "emit_context_packing_shadow",
     "evaluate_context_apply_route",
     "filter_injectable_items",
+    "filter_context_items_by_source_policy",
     "get_context_injection_policy",
     "get_packing_policy",
     "make_context_apply_skip_selection",
@@ -126,6 +150,8 @@ __all__ = [
     "prepare_context_apply_selection",
     "render_injected_context",
     "render_selected_context",
+    "resolve_context_policy",
     "sanitize_context_content",
+    "should_emit_context_policy_summary",
     "with_context_apply_selection_warnings",
 ]

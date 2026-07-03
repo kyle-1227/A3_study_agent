@@ -812,6 +812,7 @@ class TestSSETextEvent:
         text_events = [p for p in all_payloads if p.get("type") == "text"]
         assert len(text_events) == 0
 
+
 class TestSSEEvidenceSummaryResourceFinal:
     """Evidence controlled stop should emit a normal resource_final event."""
 
@@ -894,6 +895,53 @@ class TestSSEProviderRetryEvents:
         assert retry_events[0]["max_retries"] == 2
 
 
+class TestSSEResourceSubnodeEvents:
+    """Resource worker internal subnode traces should be visible safely."""
+
+    @pytest.mark.anyio
+    async def test_resource_subnode_trace_is_emitted_as_sse_event(self):
+        from app import generate_sse
+
+        async def events():
+            emit_a3_trace(
+                logging.getLogger("test_sse_resource_subnode"),
+                "resource_subnode.start",
+                {
+                    "resource_type": "quiz",
+                    "subnode": "exercise_agent api_key=secret",
+                    "elapsed_ms": 0,
+                    "status": "start",
+                    "error_type": "",
+                    "content": "must-not-leak",
+                },
+                state={"request_id": "r1"},
+            )
+            yield _node_start("resource_worker")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={}),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        subnode_events = [
+            payload for payload in payloads if payload.get("type") == "resource_subnode"
+        ]
+        assert len(subnode_events) == 1
+        assert subnode_events[0]["stage"] == "resource_subnode.start"
+        assert subnode_events[0]["resource_type"] == "quiz"
+        assert subnode_events[0]["subnode"].startswith("exercise_agent")
+        assert "[REDACTED]" in subnode_events[0]["subnode"]
+        assert subnode_events[0]["status"] == "start"
+        assert "content" not in subnode_events[0]
+        assert "secret" not in json.dumps(subnode_events[0], ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # TestSSEDoneEvent - "done" SSE event at stream completion (BUG-09)
 # ---------------------------------------------------------------------------
@@ -929,7 +977,9 @@ class TestSSEDoneEvent:
         interrupt_obj = SimpleNamespace(value="## 请确认是否继续生成学习计划")
         task = SimpleNamespace(interrupts=[interrupt_obj])
         mock_graph.aget_state = AsyncMock(
-            return_value=SimpleNamespace(next=("resource_bundle_output",), tasks=[task]),
+            return_value=SimpleNamespace(
+                next=("resource_bundle_output",), tasks=[task]
+            ),
         )
 
         collected = []

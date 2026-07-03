@@ -792,6 +792,33 @@ async def _stream_graph_events(
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
+            if stage in {"resource_subnode.start", "resource_subnode.end"}:
+                elapsed_ms = event.get("elapsed_ms", 0)
+                payload = {
+                    "type": "resource_subnode",
+                    "stage": stage,
+                    "resource_type": sanitize_error_message(
+                        event.get("resource_type", ""),
+                        max_chars=80,
+                    ),
+                    "subnode": sanitize_error_message(
+                        event.get("subnode", ""),
+                        max_chars=120,
+                    ),
+                    "elapsed_ms": elapsed_ms
+                    if isinstance(elapsed_ms, int) and not isinstance(elapsed_ms, bool)
+                    else 0,
+                    "status": sanitize_error_message(
+                        event.get("status", ""),
+                        max_chars=40,
+                    ),
+                    "error_type": sanitize_error_message(
+                        event.get("error_type", ""),
+                        max_chars=120,
+                    ),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
             if stage == "context_usage":
                 payload = {
                     "type": "context_usage",

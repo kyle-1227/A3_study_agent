@@ -180,7 +180,7 @@ def resolve_context_policy(
         policy_source=policy_source,
         injection_policy=injection_policy,
         source_policies=source_policies,
-        legacy_mode_enabled=True,
+        legacy_mode_enabled=False,
         node_policy_enabled=True,
         summary=summary,
     )
@@ -201,6 +201,8 @@ def build_context_policy_summary(
     default_policy = _optional_mapping(config.get("default_policy")) if config else {}
     default_mode = str(default_policy.get("mode") or "").strip()
     default_risk_tier = default_policy.get("risk_tier", 0)
+    node_policy_schema_configured = _node_policy_schema_configured(config)
+    legacy_global_enabled = _legacy_global_configured(config)
 
     active_nodes: set[str] = set()
     observe_only_nodes: set[str] = set()
@@ -239,10 +241,10 @@ def build_context_policy_summary(
     importance = _optional_mapping(config.get("importance_scoring")) if config else {}
     return {
         "enabled": enabled,
-        "legacy_mode_enabled": enabled,
-        "legacy_global_enabled": enabled,
-        "node_policy_enabled": _node_policy_schema_configured(config),
-        "node_policy_schema_configured": _node_policy_schema_configured(config),
+        "legacy_mode_enabled": enabled and not node_policy_schema_configured,
+        "legacy_global_enabled": legacy_global_enabled,
+        "node_policy_enabled": node_policy_schema_configured,
+        "node_policy_schema_configured": node_policy_schema_configured,
         "node_policy_count": len(node_policies),
         "node_group_count": len(node_groups),
         "resource_type_policy_count": len(resource_type_policies),
@@ -493,18 +495,34 @@ def _resource_type_from_state(state: dict | None) -> str:
         resource_type = str(resource_task.get("resource_type") or "").strip()
         if resource_type:
             return resource_type
-    requested_resource_type = str(state.get("requested_resource_type") or "").strip()
-    if requested_resource_type:
-        return requested_resource_type
-    requested_resource_types = state.get("requested_resource_types")
-    if not isinstance(requested_resource_types, list):
+    values = _single_string_list(state.get("requested_resource_types"))
+    if len(values) > 1:
         return ""
-    values = [
-        str(item or "").strip()
-        for item in requested_resource_types
-        if str(item or "").strip()
-    ]
-    return values[0] if len(values) == 1 else ""
+    requested_resource_type = str(state.get("requested_resource_type") or "").strip()
+    if requested_resource_type and (not values or values == [requested_resource_type]):
+        return requested_resource_type
+    if len(values) == 1:
+        return values[0]
+    return ""
+
+
+def _legacy_global_configured(apply_config: dict[str, Any]) -> bool:
+    route_rollout = _optional_mapping(apply_config.get("route_rollout"))
+    quality = _optional_mapping(apply_config.get("quality"))
+    return any(
+        (
+            isinstance(apply_config.get("apply_enabled_nodes"), list),
+            isinstance(route_rollout.get("apply_enabled_nodes"), list),
+            "max_injected_context_tokens" in apply_config,
+            bool(quality),
+        )
+    )
+
+
+def _single_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
 
 
 def _parse_source_policy(
