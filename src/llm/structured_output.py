@@ -605,7 +605,7 @@ def _refresh_parse_validate_total(metrics: _InvokeMetrics) -> None:
     )
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
+def _extract_structured_json_payload(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -999,7 +999,7 @@ def _validate_mode(mode: str) -> None:
         )
 
 
-def _json_output_contract_with_debug(
+def _structured_json_contract_with_debug(
     schema: type[BaseModel],
     node_name: str,
     mode: str,
@@ -1037,13 +1037,13 @@ def _json_output_contract_with_debug(
     return contract, debug
 
 
-def _json_output_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
-    contract, _debug = _json_output_contract_with_debug(schema, node_name, mode)
+def _structured_json_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
+    contract, _debug = _structured_json_contract_with_debug(schema, node_name, mode)
     return contract
 
 
 def _inject_json_contract(messages: list, *, schema: type[BaseModel], node_name: str, mode: str) -> list:
-    contract, _debug = _json_output_contract_with_debug(schema, node_name, mode)
+    contract, _debug = _structured_json_contract_with_debug(schema, node_name, mode)
     if messages and isinstance(messages[0], dict):
         return [{"role": "system", "content": contract}, *messages]
     return [SystemMessage(content=contract), *messages]
@@ -1056,7 +1056,7 @@ def _inject_json_contract_with_debug(
     node_name: str,
     mode: str,
 ) -> tuple[list, dict[str, Any]]:
-    contract, debug = _json_output_contract_with_debug(schema, node_name, mode)
+    contract, debug = _structured_json_contract_with_debug(schema, node_name, mode)
     if messages and isinstance(messages[0], dict):
         return [{"role": "system", "content": contract}, *messages], debug
     return [SystemMessage(content=contract), *messages], debug
@@ -1314,7 +1314,7 @@ async def _invoke_openrouter_native(
 
     parse_started = time.perf_counter()
     try:
-        parsed = schema.model_validate(_extract_json_object(raw_output))
+        parsed = schema.model_validate(_extract_structured_json_payload(raw_output))
         metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
     except Exception as exc:
         metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
@@ -1637,7 +1637,7 @@ async def _invoke_deepseek_json_object(
 
     parse_started = time.perf_counter()
     try:
-        parsed = schema.model_validate(_extract_json_object(content))
+        parsed = schema.model_validate(_extract_structured_json_payload(content))
         metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
     except Exception as exc:
         metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
@@ -1779,7 +1779,7 @@ async def _invoke_one_mode(
 
         parse_started = time.perf_counter()
         try:
-            parsed = schema.model_validate(_extract_json_object(raw_output))
+            parsed = schema.model_validate(_extract_structured_json_payload(raw_output))
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
         except Exception as exc:
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
@@ -1814,7 +1814,7 @@ async def _invoke_one_mode(
 
         parse_started = time.perf_counter()
         try:
-            parsed = schema.model_validate(_extract_json_object(raw_output))
+            parsed = schema.model_validate(_extract_structured_json_payload(raw_output))
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
         except Exception as exc:
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
@@ -1896,7 +1896,7 @@ async def _invoke_one_mode(
 
         parse_started = time.perf_counter()
         try:
-            parsed = schema.model_validate(_extract_json_object(raw_output))
+            parsed = schema.model_validate(_extract_structured_json_payload(raw_output))
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
         except Exception as exc:
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)

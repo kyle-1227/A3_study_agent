@@ -21,7 +21,7 @@ A3 Study Agent - AI-powered personalized learning resource generation assistant 
 
 ## About
 
-A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized learning resources such as course Q&A, layered exercises, mind maps, review documents, project examples, and study plans.
+A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized resources such as course Q&A, review documents, mind maps, quizzes, code practice, teaching scripts, teaching animations, and study plans.
 
 The system combines local course-material RAG, BM25, reranking, Tavily Web Research, Evidence Judge V2, DeepSeek strict structured output, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows.
 
@@ -30,8 +30,8 @@ The external LangGraph/SSE node name `web_search` is kept for lifecycle compatib
 ## Core Capabilities
 
 - **Course Q&A**: Answer university course questions using local course materials and judged web evidence.
-- **Personalized Resource Generation**: Generate exercises, mind maps, review documents, project cases, and learning-material summaries.
-- **Study Planning**: Draft and review staged study plans with multi-agent review and human feedback.
+- **Personalized Resource Generation**: The unified resource path supports `review_doc`, `mindmap`, `quiz`, `code_practice`, `video_script`, `video_animation`, and `study_plan`.
+- **Study Planning**: Generate Markdown / Word study plan documents through the unified resource path.
 - **Academic Support**: Respond with the tone of a university learning mentor or academic support advisor.
 - **Stable Structured Output**: Use DeepSeek official strict tool calling for small structured nodes and re-ask retry for recoverable compliance failures.
 - **Observability**: Use A3_TRACE, OpenTelemetry, SSE node events, and structured diagnostics to inspect real interactions.
@@ -42,10 +42,12 @@ The external LangGraph/SSE node name `web_search` is kept for lifecycle compatib
 ```mermaid
 graph TD
   START([Learner Input]) --> supervisor[Intent Classification]
-  supervisor --> search_query_rewriter[Query Rewriter]
+  supervisor --> episodic_memory_retriever[Episodic Memory Retriever]
   supervisor -->|emotional| emotional_response[Academic Support]
   supervisor -->|unknown| handle_unknown[Unknown Intent]
 
+  episodic_memory_retriever --> memory_use_decider[Memory Use Decider]
+  memory_use_decider --> search_query_rewriter[Query Rewriter]
   search_query_rewriter --> academic_router[Academic Router]
   academic_router --> rag_retrieve[Local RAG]
   academic_router --> web_search[Web Research V2]
@@ -53,10 +55,11 @@ graph TD
   web_search --> evidence_judge
 
   evidence_judge --> generate_answer[Generate Answer]
-  evidence_judge --> mindmap_planner[Mindmap Planner]
-  evidence_judge --> exercise_planner[Exercise Planner]
-  evidence_judge --> review_doc_planner[Review Doc Planner]
-  evidence_judge --> study_plan_emotional_intel[Study Plan Emotional Intel]
+  evidence_judge --> resource_orchestrator[Resource Orchestrator]
+  evidence_judge --> evidence_summary_output[Evidence Summary Output]
+
+  resource_orchestrator --> resource_worker[Resource Worker]
+  resource_worker --> resource_bundle_output[Resource Bundle Output]
 ```
 
 See [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md) for the complete diagrams.

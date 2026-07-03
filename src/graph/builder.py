@@ -6,9 +6,6 @@ from langgraph.graph import END, StateGraph
 
 from src.graph.academic import (
     academic_router,
-    adaptive_practice_responder,
-    assessment_result_handler,
-    curriculum_planner,
     episodic_memory_retriever,
     episodic_memory_writer,
     evidence_judge,
@@ -17,46 +14,14 @@ from src.graph.academic import (
     generate_answer,
     memory_use_decider,
     rag_retrieve,
-    recommendation_provider,
     rewrite_query,
     search_query_rewriter,
     should_retry_or_end,
     web_search,
 )
 from src.graph.emotional import emotional_response
-from src.graph.code_practice import (
-    code_practice_agent,
-    code_practice_output,
-    code_practice_planner,
-    code_practice_reviewer,
-    code_practice_rewrite,
-    should_rewrite_code_practice,
-)
-from src.graph.exercises import (
-    exercise_agent,
-    exercise_output,
-    exercise_planner,
-    exercise_reviewer,
-    exercise_rewrite,
-    should_rewrite_exercise,
-)
-from src.graph.mindmap import (
-    mindmap_agent,
-    mindmap_output,
-    mindmap_planner,
-    mindmap_reviewer,
-    mindmap_rewrite,
-    should_rewrite_mindmap,
-)
-from src.graph.review_doc import (
-    review_doc_agent,
-    review_doc_output,
-    review_doc_planner,
-    review_doc_reviewer,
-    review_doc_rewrite,
-    should_rewrite_review_doc,
-)
 from src.graph.resource_generation import (
+    SUPPORTED_RESOURCE_TYPES,
     dispatch_resource_workers,
     normalize_requested_resource_types,
     resource_bundle_output,
@@ -64,34 +29,7 @@ from src.graph.resource_generation import (
     resource_worker,
 )
 from src.graph.state import LearningState
-from src.graph.study_plan import (
-    route_after_study_plan_consensus,
-    study_plan_agent,
-    study_plan_consensus,
-    study_plan_emotional_intel,
-    study_plan_output,
-    study_plan_planner,
-    study_plan_reviewer_academic,
-    study_plan_reviewer_emotional,
-    study_plan_rewrite,
-)
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
-from src.graph.video_script import (
-    should_rewrite_video_script,
-    video_script_agent,
-    video_script_output,
-    video_script_planner,
-    video_script_reviewer,
-    video_script_rewrite,
-)
-from src.graph.video_animation import (
-    should_rewrite_video_animation,
-    video_animation_agent,
-    video_animation_output,
-    video_animation_planner,
-    video_animation_reviewer,
-    video_animation_rewrite,
-)
 from src.run_control import wrap_interruptible_node
 
 
@@ -121,71 +59,13 @@ def build_graph() -> StateGraph:
     add_interruptible_node("evaluate_hallucination", evaluate_hallucination)
     add_interruptible_node("rewrite_query", rewrite_query)
 
-    # Dynamic curriculum + recommendation + assessment
-    add_interruptible_node("curriculum_planner", curriculum_planner)
-    add_interruptible_node("assessment_result_handler", assessment_result_handler)
-    add_interruptible_node("adaptive_practice_responder", adaptive_practice_responder)
-    add_interruptible_node("recommendation_provider", recommendation_provider)
-
     # Emotional support
     add_interruptible_node("emotional_response", emotional_response)
 
-    # Mindmap resource generation
-    add_interruptible_node("mindmap_planner", mindmap_planner)
-    add_interruptible_node("mindmap_agent", mindmap_agent)
-    add_interruptible_node("mindmap_reviewer", mindmap_reviewer)
-    add_interruptible_node("mindmap_rewrite", mindmap_rewrite)
-    add_interruptible_node("mindmap_output", mindmap_output)
-
-    # Exercise resource generation
-    add_interruptible_node("exercise_planner", exercise_planner)
-    add_interruptible_node("exercise_agent", exercise_agent)
-    add_interruptible_node("exercise_reviewer", exercise_reviewer)
-    add_interruptible_node("exercise_rewrite", exercise_rewrite)
-    add_interruptible_node("exercise_output", exercise_output)
-
-    # Review document resource generation
-    add_interruptible_node("review_doc_planner", review_doc_planner)
-    add_interruptible_node("review_doc_agent", review_doc_agent)
-    add_interruptible_node("review_doc_reviewer", review_doc_reviewer)
-    add_interruptible_node("review_doc_rewrite", review_doc_rewrite)
-    add_interruptible_node("review_doc_output", review_doc_output)
-
-    # Code practice resource generation
-    add_interruptible_node("code_practice_planner", code_practice_planner)
-    add_interruptible_node("code_practice_agent", code_practice_agent)
-    add_interruptible_node("code_practice_reviewer", code_practice_reviewer)
-    add_interruptible_node("code_practice_rewrite", code_practice_rewrite)
-    add_interruptible_node("code_practice_output", code_practice_output)
-
-    # Teaching video / animation script resource generation
-    add_interruptible_node("video_script_planner", video_script_planner)
-    add_interruptible_node("video_script_agent", video_script_agent)
-    add_interruptible_node("video_script_reviewer", video_script_reviewer)
-    add_interruptible_node("video_script_rewrite", video_script_rewrite)
-    add_interruptible_node("video_script_output", video_script_output)
-
-    # Rendered teaching animation / MP4 resource generation
-    add_interruptible_node("video_animation_planner", video_animation_planner)
-    add_interruptible_node("video_animation_agent", video_animation_agent)
-    add_interruptible_node("video_animation_reviewer", video_animation_reviewer)
-    add_interruptible_node("video_animation_rewrite", video_animation_rewrite)
-    add_interruptible_node("video_animation_output", video_animation_output)
-
-    # Study plan resource generation
+    # Unified resource generation
     add_interruptible_node("resource_orchestrator", resource_orchestrator)
     add_interruptible_node("resource_worker", resource_worker)
     add_interruptible_node("resource_bundle_output", resource_bundle_output)
-    add_interruptible_node("study_plan_emotional_intel", study_plan_emotional_intel)
-    add_interruptible_node("study_plan_planner", study_plan_planner)
-    add_interruptible_node("study_plan_agent", study_plan_agent)
-    add_interruptible_node("study_plan_reviewer_academic", study_plan_reviewer_academic)
-    add_interruptible_node(
-        "study_plan_reviewer_emotional", study_plan_reviewer_emotional
-    )
-    add_interruptible_node("study_plan_consensus", study_plan_consensus)
-    add_interruptible_node("study_plan_rewrite", study_plan_rewrite)
-    add_interruptible_node("study_plan_output", study_plan_output)
 
     # Unknown / off-topic
     add_interruptible_node("handle_unknown", handle_unknown)
@@ -232,9 +112,6 @@ def build_graph() -> StateGraph:
         {
             "answer": "generate_answer",
             "resources": "resource_orchestrator",
-            "code_practice": "code_practice_planner",
-            "video_script": "video_script_planner",
-            "video_animation": "video_animation_planner",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
@@ -260,112 +137,6 @@ def build_graph() -> StateGraph:
     # Emotional support ends after the response node.
     graph.add_edge("emotional_response", END)
 
-    # Mindmap resource generation: plan -> JSON tree -> review -> export
-    graph.add_edge("mindmap_planner", "mindmap_agent")
-    graph.add_edge("mindmap_agent", "mindmap_reviewer")
-    graph.add_conditional_edges(
-        "mindmap_reviewer",
-        should_rewrite_mindmap,
-        {
-            "rewrite": "mindmap_rewrite",
-            "output": "mindmap_output",
-        },
-    )
-    graph.add_edge("mindmap_rewrite", "mindmap_agent")
-    graph.add_edge("mindmap_output", END)
-
-    # Exercise resource generation: plan -> structured exercises -> review -> output
-    graph.add_edge("exercise_planner", "exercise_agent")
-    graph.add_edge("exercise_agent", "exercise_reviewer")
-    graph.add_conditional_edges(
-        "exercise_reviewer",
-        should_rewrite_exercise,
-        {
-            "rewrite": "exercise_rewrite",
-            "output": "exercise_output",
-        },
-    )
-    graph.add_edge("exercise_rewrite", "exercise_agent")
-    graph.add_edge("exercise_output", "assessment_result_handler")
-    graph.add_edge("assessment_result_handler", "adaptive_practice_responder")
-    graph.add_edge("adaptive_practice_responder", END)
-
-    # Review document resource generation: plan -> Markdown -> review -> output
-    graph.add_edge("review_doc_planner", "review_doc_agent")
-    graph.add_edge("review_doc_agent", "review_doc_reviewer")
-    graph.add_conditional_edges(
-        "review_doc_reviewer",
-        should_rewrite_review_doc,
-        {
-            "rewrite": "review_doc_rewrite",
-            "output": "review_doc_output",
-        },
-    )
-    graph.add_edge("review_doc_rewrite", "review_doc_agent")
-    graph.add_edge("review_doc_output", END)
-
-    # Code practice resource generation: plan -> Markdown/code -> review -> output
-    graph.add_edge("code_practice_planner", "code_practice_agent")
-    graph.add_edge("code_practice_agent", "code_practice_reviewer")
-    graph.add_conditional_edges(
-        "code_practice_reviewer",
-        should_rewrite_code_practice,
-        {
-            "rewrite": "code_practice_rewrite",
-            "output": "code_practice_output",
-        },
-    )
-    graph.add_edge("code_practice_rewrite", "code_practice_agent")
-    graph.add_edge("code_practice_output", END)
-
-    # Teaching video / animation script generation: plan -> Markdown/SRT -> review -> output
-    graph.add_edge("video_script_planner", "video_script_agent")
-    graph.add_edge("video_script_agent", "video_script_reviewer")
-    graph.add_conditional_edges(
-        "video_script_reviewer",
-        should_rewrite_video_script,
-        {
-            "rewrite": "video_script_rewrite",
-            "output": "video_script_output",
-        },
-    )
-    graph.add_edge("video_script_rewrite", "video_script_agent")
-    graph.add_edge("video_script_output", END)
-
-    # Rendered teaching animation / MP4 generation: plan -> spec -> review -> output
-    graph.add_edge("video_animation_planner", "video_animation_agent")
-    graph.add_edge("video_animation_agent", "video_animation_reviewer")
-    graph.add_conditional_edges(
-        "video_animation_reviewer",
-        should_rewrite_video_animation,
-        {
-            "rewrite": "video_animation_rewrite",
-            "output": "video_animation_output",
-        },
-    )
-    graph.add_edge("video_animation_rewrite", "video_animation_agent")
-    graph.add_edge("video_animation_output", END)
-
-    graph.add_edge("study_plan_emotional_intel", "curriculum_planner")
-    graph.add_edge("curriculum_planner", "study_plan_planner")
-    graph.add_edge("study_plan_planner", "study_plan_agent")
-    graph.add_edge("study_plan_agent", "study_plan_reviewer_academic")
-    graph.add_edge("study_plan_agent", "study_plan_reviewer_emotional")
-    graph.add_edge(
-        ["study_plan_reviewer_academic", "study_plan_reviewer_emotional"],
-        "study_plan_consensus",
-    )
-    graph.add_conditional_edges(
-        "study_plan_consensus",
-        route_after_study_plan_consensus,
-        {
-            "rewrite": "study_plan_rewrite",
-            "output": "study_plan_output",
-        },
-    )
-    graph.add_edge("study_plan_rewrite", "study_plan_agent")
-    graph.add_edge("study_plan_output", END)
-
     # Unknown: direct to END
     graph.add_edge("handle_unknown", END)
 
@@ -380,18 +151,9 @@ def route_after_evidence_judge(state: LearningState) -> str:
         for item in state.get("requested_resource_types", []) or []
         if str(item or "").strip()
     ]
-    explicit_resource_types = {
-        "review_doc",
-        "mindmap",
-        "quiz",
-        "code_practice",
-        "video_script",
-        "video_animation",
-        "study_plan",
-    }
     has_explicit_resource_request = bool(
-        requested_resource_type in explicit_resource_types
-        or any(item in explicit_resource_types for item in requested_resource_types)
+        requested_resource_type in SUPPORTED_RESOURCE_TYPES
+        or any(item in SUPPORTED_RESOURCE_TYPES for item in requested_resource_types)
     )
     if state.get("evidence_controlled_stop") and not has_explicit_resource_request:
         return "evidence_summary_output"
@@ -403,10 +165,6 @@ def route_after_evidence_judge(state: LearningState) -> str:
     if resource_types:
         return "resources"
     return "answer"
-
-
-# Backward-compatible import alias for older tests/tools; do not attach this to retrieval nodes.
-route_after_academic_retrieval = route_after_evidence_judge
 
 
 def route_after_query_rewrite(state: LearningState) -> str:

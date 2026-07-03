@@ -351,7 +351,15 @@ class TestResourceFinalPayloadArtifacts:
 
         final_state = {
             "requested_resource_type": "review_doc",
-            "requested_resource_types": ["review_doc", "mindmap", "quiz", "study_plan"],
+            "requested_resource_types": [
+                "review_doc",
+                "mindmap",
+                "quiz",
+                "code_practice",
+                "video_script",
+                "video_animation",
+                "study_plan",
+            ],
             "resource_generation_status": "success",
             "resource_bundle_artifact": {
                 "type": "resource_bundle",
@@ -361,6 +369,9 @@ class TestResourceFinalPayloadArtifacts:
                     {"resource_type": "review_doc", "status": "success"},
                     {"resource_type": "mindmap", "status": "success"},
                     {"resource_type": "quiz", "status": "success"},
+                    {"resource_type": "code_practice", "status": "success"},
+                    {"resource_type": "video_script", "status": "success"},
+                    {"resource_type": "video_animation", "status": "success"},
                     {"resource_type": "study_plan", "status": "success"},
                 ],
                 "errors": [],
@@ -396,6 +407,24 @@ class TestResourceFinalPayloadArtifacts:
                 "markdown_url": "/artifacts/exercises/e1/python.md",
                 "docx_url": "/artifacts/exercises/e1/python.docx",
             },
+            "code_practice_artifact": {
+                "title": "Python 代码题",
+                "markdown_url": "/artifacts/code-practice/c1/python.md",
+                "docx_url": "/artifacts/code-practice/c1/python.docx",
+                "source_url": "/artifacts/code-practice/c1/main.py",
+            },
+            "video_script_artifact": {
+                "title": "Python 教学脚本",
+                "markdown_url": "/artifacts/video-scripts/v1/script.md",
+                "docx_url": "/artifacts/video-scripts/v1/script.docx",
+                "srt_url": "/artifacts/video-scripts/v1/script.srt",
+            },
+            "video_animation_artifact": {
+                "title": "Python 教学动画",
+                "html_url": "/artifacts/video-animations/a1/preview.html",
+                "json_url": "/artifacts/video-animations/a1/timeline.json",
+                "srt_url": "/artifacts/video-animations/a1/captions.srt",
+            },
             "study_plan_artifact": {
                 "title": "Python Study Plan",
             },
@@ -415,11 +444,22 @@ class TestResourceFinalPayloadArtifacts:
         assert payload["resource_type"] == "bundle"
         assert payload["answer"] == "bundle summary"
         assert payload["resource_bundle"]["type"] == "resource_bundle"
-        assert [item["resource_type"] for item in payload["resources"]] == ["review_doc", "mindmap", "quiz", "study_plan"]
+        assert [item["resource_type"] for item in payload["resources"]] == [
+            "review_doc",
+            "mindmap",
+            "quiz",
+            "code_practice",
+            "video_script",
+            "video_animation",
+            "study_plan",
+        ]
         assert payload["errors"] == []
         assert payload["review_doc_artifacts"]
         assert payload["mindmap"]["title"] == "Python 思维导图"
         assert payload["exercise_artifact"]["title"] == "Python 练习题"
+        assert payload["code_practice_artifact"]["source_url"].endswith("main.py")
+        assert payload["video_script_artifact"]["srt_url"].endswith("script.srt")
+        assert payload["video_animation_artifact"]["html_url"].endswith("preview.html")
         assert payload["study_plan"]["markdown_url"] == "/artifacts/review-docs/s1/python-plan.md"
         assert payload["study_plan"]["markdown"] == "# Python Study Plan"
         assert "multi_resource_results" not in payload

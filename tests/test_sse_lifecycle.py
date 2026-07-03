@@ -349,40 +349,21 @@ class TestSSEAllGraphNodes:
 
     ALL_NODES = [
         "supervisor",
+        "episodic_memory_retriever",
+        "episodic_memory_writer",
+        "memory_use_decider",
         "academic_router",
         "search_query_rewriter",
         "rag_retrieve",
         "web_search",
         "evidence_judge",
+        "evidence_summary_output",
         "generate_answer",
         "evaluate_hallucination",
         "rewrite_query",
         "resource_orchestrator",
         "resource_worker",
         "resource_bundle_output",
-        "study_plan_emotional_intel",
-        "study_plan_planner",
-        "study_plan_agent",
-        "study_plan_reviewer_academic",
-        "study_plan_reviewer_emotional",
-        "study_plan_consensus",
-        "study_plan_rewrite",
-        "study_plan_output",
-        "mindmap_planner",
-        "mindmap_agent",
-        "mindmap_reviewer",
-        "mindmap_rewrite",
-        "mindmap_output",
-        "exercise_planner",
-        "exercise_agent",
-        "exercise_reviewer",
-        "exercise_rewrite",
-        "exercise_output",
-        "review_doc_planner",
-        "review_doc_agent",
-        "review_doc_reviewer",
-        "review_doc_rewrite",
-        "review_doc_output",
         "emotional_response",
         "handle_unknown",
     ]
@@ -658,32 +639,6 @@ class TestSSETextEvent:
     """Tests that TEXT_EMIT_NODES produce a 'text' SSE event on chain end."""
 
     @pytest.mark.anyio
-    async def test_text_event_emitted_for_study_plan_output(self):
-        """on_chain_end for study_plan_output with AIMessage emits text SSE."""
-        from langchain_core.messages import AIMessage
-        from app import generate_sse
-
-        end_event = {
-            "event": "on_chain_end",
-            "name": "study_plan_output",
-            "metadata": {"langgraph_node": "study_plan_output"},
-            "data": {
-                "output": {"messages": [AIMessage(content="## Final Study Plan")]}
-            },
-        }
-        mock_graph = _make_mock_graph([_node_start("study_plan_output"), end_event])
-
-        collected = []
-        async for sse in generate_sse("q", mock_graph):
-            collected.append(sse)
-
-        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
-        text_events = [p for p in all_payloads if p.get("type") == "text"]
-        assert len(text_events) == 1
-        assert text_events[0]["content"] == "## Final Study Plan"
-        assert text_events[0]["node"] == "study_plan_output"
-
-    @pytest.mark.anyio
     async def test_text_event_emitted_for_handle_unknown(self):
         """on_chain_end for handle_unknown with AIMessage emits text SSE."""
         from langchain_core.messages import AIMessage
@@ -857,43 +812,6 @@ class TestSSETextEvent:
         text_events = [p for p in all_payloads if p.get("type") == "text"]
         assert len(text_events) == 0
 
-
-class TestSSEMindmapResult:
-    """Tests that mindmap_output emits structured mindmap_result SSE payloads."""
-
-    @pytest.mark.anyio
-    async def test_mindmap_result_emitted(self):
-        from langchain_core.messages import AIMessage
-        from app import generate_sse
-
-        end_event = {
-            "event": "on_chain_end",
-            "name": "mindmap_output",
-            "metadata": {"langgraph_node": "mindmap_output"},
-            "data": {
-                "output": {
-                    "messages": [AIMessage(content="Mindmap generated")],
-                    "mindmap_artifact": {
-                        "title": "Mock Mindmap",
-                        "tree": {"title": "Mock Mindmap", "children": []},
-                        "xmind_url": "/artifacts/mindmaps/a/mindmap.xmind",
-                    },
-                },
-            },
-        }
-        mock_graph = _make_mock_graph([_node_start("mindmap_output"), end_event])
-
-        collected = []
-        async for sse in generate_sse("q", mock_graph):
-            collected.append(sse)
-
-        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
-        mindmap_events = [p for p in all_payloads if p.get("type") == "mindmap_result"]
-        assert len(mindmap_events) == 1
-        assert mindmap_events[0]["title"] == "Mock Mindmap"
-        assert mindmap_events[0]["tree"]["title"] == "Mock Mindmap"
-
-
 class TestSSEEvidenceSummaryResourceFinal:
     """Evidence controlled stop should emit a normal resource_final event."""
 
@@ -1011,7 +929,7 @@ class TestSSEDoneEvent:
         interrupt_obj = SimpleNamespace(value="## 请确认是否继续生成学习计划")
         task = SimpleNamespace(interrupts=[interrupt_obj])
         mock_graph.aget_state = AsyncMock(
-            return_value=SimpleNamespace(next=("study_plan_output",), tasks=[task]),
+            return_value=SimpleNamespace(next=("resource_bundle_output",), tasks=[task]),
         )
 
         collected = []

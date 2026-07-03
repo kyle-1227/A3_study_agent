@@ -47,25 +47,13 @@ TEXT_SUFFIXES = {
 
 MOJIBAKE_PATTERNS = [
     chr(0xFFFD),  # Unicode replacement character.
-    chr(0x9225),  # UTF-8/GBK mojibake for punctuation.
-    chr(0x922B),
-    chr(0x9239),
-    chr(0x95B3),
-    chr(0x9581),
-    chr(0x95BF),
-    chr(0x951F),
-    chr(0x9983),
-    chr(0x9286),
-    chr(0x4E63),
-    chr(0x4E77),
-    chr(0x4E80),
-    chr(0x4E81),
-    chr(0x6D93),
-    chr(0xE045),
-    chr(0xE1BC),
-    chr(0xE1EE),
-    chr(0xE21B),
-    chr(0xE63F),
+    "\u9422\u3126\u57db",
+    "\u9422\u8bf2\u511a",
+    "\u9477\ue047\u582a",
+    "\u5bb8\u63d2\u57b1",
+    "\u701b\ufe3f\u7bc4",
+    "\u93cd\u56ec",
+    "\u5bb8\u832c\u6553\u93b4",
     chr(0x20AC) + "?",
 ]
 

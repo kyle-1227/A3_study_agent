@@ -39,7 +39,7 @@ jobs:
       - name: Run unit tests
         env:
           OTEL_TRACING_ENABLED: "false"
-        run: python -m pytest tests/ --ignore=tests/test_integration.py -v --tb=short
+        run: python -m pytest tests/ -v --tb=short
 
   security-audit:
     runs-on: ubuntu-latest

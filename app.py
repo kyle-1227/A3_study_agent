@@ -261,13 +261,6 @@ ALLOWED_NODES = {"generate_answer", "emotional_response"}
 TEXT_EMIT_NODES = {
     "handle_unknown",
     "evidence_summary_output",
-    "mindmap_output",
-    "exercise_output",
-    "review_doc_output",
-    "code_practice_output",
-    "video_script_output",
-    "video_animation_output",
-    "study_plan_output",
     "resource_bundle_output",
     "adaptive_practice_responder",
     "recommendation_provider",
@@ -291,48 +284,10 @@ GRAPH_NODES = {
     "resource_orchestrator",
     "resource_worker",
     "resource_bundle_output",
-    "mindmap_planner",
-    "mindmap_agent",
-    "mindmap_reviewer",
-    "mindmap_rewrite",
-    "mindmap_output",
-    "exercise_planner",
-    "exercise_agent",
-    "exercise_reviewer",
-    "exercise_rewrite",
-    "exercise_output",
-    "review_doc_planner",
-    "review_doc_agent",
-    "review_doc_reviewer",
-    "review_doc_rewrite",
-    "review_doc_output",
-    "code_practice_planner",
-    "code_practice_agent",
-    "code_practice_reviewer",
-    "code_practice_rewrite",
-    "code_practice_output",
-    "video_script_planner",
-    "video_script_agent",
-    "video_script_reviewer",
-    "video_script_rewrite",
-    "video_script_output",
-    "video_animation_planner",
-    "video_animation_agent",
-    "video_animation_reviewer",
-    "video_animation_rewrite",
-    "video_animation_output",
     "curriculum_planner",
     "assessment_result_handler",
     "adaptive_practice_responder",
     "recommendation_provider",
-    "study_plan_emotional_intel",
-    "study_plan_planner",
-    "study_plan_agent",
-    "study_plan_reviewer_academic",
-    "study_plan_reviewer_emotional",
-    "study_plan_consensus",
-    "study_plan_rewrite",
-    "study_plan_output",
     "emotional_response",
     "handle_unknown",
 }
@@ -899,6 +854,16 @@ async def _stream_graph_events(
                     if isinstance(event.get("source_counts"), dict)
                     else {},
                     "total_estimated_tokens": event.get("total_estimated_tokens", 0),
+                    "evidence_rejected_count": event.get("evidence_rejected_count", 0),
+                    "evidence_reject_reasons": _safe_int_dict(
+                        event.get("evidence_reject_reasons")
+                    ),
+                    "missing_required_relevance_score_count": event.get(
+                        "missing_required_relevance_score_count", 0
+                    ),
+                    "invalid_relevance_score_count": event.get(
+                        "invalid_relevance_score_count", 0
+                    ),
                     "top_items": _safe_context_top_items(event.get("top_items")),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
@@ -977,6 +942,15 @@ async def _stream_graph_events(
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
                     "apply_enabled": bool(event.get("apply_enabled", False)),
+                    "mode": sanitize_error_message(
+                        event.get("mode", ""),
+                        max_chars=80,
+                    ),
+                    "risk_tier": event.get("risk_tier", 0),
+                    "policy_source": sanitize_error_message(
+                        event.get("policy_source", ""),
+                        max_chars=80,
+                    ),
                     "original_message_count": event.get("original_message_count", 0),
                     "selected_item_count": event.get("selected_item_count", 0),
                     "injectable_item_count": event.get("injectable_item_count", 0),
@@ -991,6 +965,15 @@ async def _stream_graph_events(
                     "type": "context_apply_selection",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "mode": sanitize_error_message(
+                        event.get("mode", ""),
+                        max_chars=80,
+                    ),
+                    "risk_tier": event.get("risk_tier", 0),
+                    "policy_source": sanitize_error_message(
+                        event.get("policy_source", ""),
+                        max_chars=80,
+                    ),
                     "skip_reason": sanitize_error_message(
                         event.get("skip_reason", ""),
                         max_chars=120,
@@ -1012,7 +995,16 @@ async def _stream_graph_events(
                     "source_counts_after": _safe_int_dict(
                         event.get("source_counts_after")
                     ),
+                    "source_counts_dropped": _safe_int_dict(
+                        event.get("source_counts_dropped")
+                    ),
                     "drop_reasons": _safe_int_dict(event.get("drop_reasons")),
+                    "source_drop_reasons": _safe_int_dict(
+                        event.get("source_drop_reasons")
+                    ),
+                    "budget_drop_reasons": _safe_int_dict(
+                        event.get("budget_drop_reasons")
+                    ),
                     "warnings": _safe_warning_list(event.get("warnings")),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
@@ -1024,6 +1016,15 @@ async def _stream_graph_events(
                     "llm_node": event.get("llm_node", ""),
                     "applied": bool(event.get("applied", False)),
                     "fallback_used": bool(event.get("fallback_used", False)),
+                    "mode": sanitize_error_message(
+                        event.get("mode", ""),
+                        max_chars=80,
+                    ),
+                    "risk_tier": event.get("risk_tier", 0),
+                    "policy_source": sanitize_error_message(
+                        event.get("policy_source", ""),
+                        max_chars=80,
+                    ),
                     "original_message_count": event.get("original_message_count", 0),
                     "final_message_count": event.get("final_message_count", 0),
                     "injected_items_count": event.get("injected_items_count", 0),
@@ -1040,9 +1041,56 @@ async def _stream_graph_events(
                         event.get("source_counts_after")
                     ),
                     "drop_reasons": _safe_int_dict(event.get("drop_reasons")),
+                    "source_drop_reasons": _safe_int_dict(
+                        event.get("source_drop_reasons")
+                    ),
+                    "budget_drop_reasons": _safe_int_dict(
+                        event.get("budget_drop_reasons")
+                    ),
                     "injection_role": event.get("injection_role", ""),
                     "injection_position": event.get("injection_position", ""),
                     "warnings": _safe_warning_list(event.get("warnings")),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_apply_policy_resolved_summary":
+                payload = {
+                    "type": "context_apply_policy_resolved_summary",
+                    "enabled": bool(event.get("enabled", False)),
+                    "legacy_mode_enabled": bool(
+                        event.get("legacy_mode_enabled", False)
+                    ),
+                    "legacy_global_enabled": bool(
+                        event.get("legacy_global_enabled", False)
+                    ),
+                    "node_policy_enabled": bool(
+                        event.get("node_policy_enabled", False)
+                    ),
+                    "node_policy_schema_configured": bool(
+                        event.get("node_policy_schema_configured", False)
+                    ),
+                    "node_policy_count": event.get("node_policy_count", 0),
+                    "node_group_count": event.get("node_group_count", 0),
+                    "resource_type_policy_count": event.get(
+                        "resource_type_policy_count", 0
+                    ),
+                    "default_policy_mode": sanitize_error_message(
+                        event.get("default_policy_mode", ""),
+                        max_chars=80,
+                    ),
+                    "default_risk_tier": event.get("default_risk_tier", 0),
+                    "active_nodes": _safe_warning_list(event.get("active_nodes")),
+                    "observe_only_nodes": _safe_warning_list(
+                        event.get("observe_only_nodes")
+                    ),
+                    "disabled_nodes": _safe_warning_list(event.get("disabled_nodes")),
+                    "source_defaults": _safe_warning_list(event.get("source_defaults")),
+                    "importance_scoring_enabled": bool(
+                        event.get("importance_scoring_enabled", False)
+                    ),
+                    "importance_scoring_shadow_mode": bool(
+                        event.get("importance_scoring_shadow_mode", False)
+                    ),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
@@ -1189,42 +1237,6 @@ async def _stream_graph_events(
                                     )
                                     yield f"data: {text_payload}\n\n"
 
-                    if event_type == "on_chain_end" and node_name == "mindmap_output":
-                        output = event.get("data", {}).get("output")
-                        if isinstance(output, dict) and output.get("mindmap_artifact"):
-                            artifact = output["mindmap_artifact"]
-                            mindmap_payload = json.dumps(
-                                {
-                                    "type": "mindmap_result",
-                                    "title": artifact.get("title", "Markdown复习文档"),
-                                    "tree": artifact.get("tree", {}),
-                                    "xmind_url": artifact.get("xmind_url", ""),
-                                },
-                                ensure_ascii=False,
-                            )
-                            yield f"data: {mindmap_payload}\n\n"
-
-                    if (
-                        event_type == "on_chain_end"
-                        and node_name == "review_doc_output"
-                    ):
-                        output = event.get("data", {}).get("output")
-                        if isinstance(output, dict) and output.get(
-                            "review_doc_artifact"
-                        ):
-                            artifact = output["review_doc_artifact"]
-                            review_doc_payload = json.dumps(
-                                {
-                                    "type": "review_doc_result",
-                                    "title": artifact.get("title", "Markdown复习文档"),
-                                    "filename": artifact.get("filename", ""),
-                                    "docx_filename": artifact.get("docx_filename", ""),
-                                    "markdown_url": artifact.get("markdown_url", ""),
-                                    "docx_url": artifact.get("docx_url", ""),
-                                },
-                                ensure_ascii=False,
-                            )
-                            yield f"data: {review_doc_payload}\n\n"
                     for trace_payload in await _drain_trace_events():
                         yield trace_payload
 
@@ -2026,7 +2038,7 @@ async def onboard_endpoint(req: OnboardRequest):
     if req.grade:
         obs_list.append(
             AgentObservation(
-                content=f"鐢ㄦ埛鑷堪骞寸骇: {req.grade}",
+                content=f"用户自述年级: {req.grade}",
                 category="general",
                 importance=0.8,
                 created_at=now,
@@ -2060,7 +2072,7 @@ async def onboard_endpoint(req: OnboardRequest):
 
     await manager.store.save(profile)
     logger.info(
-        "Onboarding 鐢诲儚宸插垱寤?user=%s nickname=%s subjects=%d goals=%d",
+        "Onboarding 用户画像已创建 user=%s nickname=%s subjects=%d goals=%d",
         req.user_id,
         req.nickname,
         len(skills),

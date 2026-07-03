@@ -62,7 +62,7 @@ Structured output contract:
 
 ```powershell
 Select-String -Path 'src\**\*.py','tests\*.py' -Pattern 'BaseModel','ConfigDict','model_validate','model_validate_json','model_construct','ValidationError','business_validator','validation_alias','alias_generator','populate_by_name'
-python -m pytest tests/test_deepseek_structured_output.py tests/test_structured_retry.py tests/test_json_output.py tests/test_profile.py tests/test_profile_manager.py -q
+python -m pytest tests/test_deepseek_structured_output.py tests/test_structured_retry.py tests/test_structured_output_contract.py tests/test_profile.py tests/test_profile_manager.py -q
 semgrep --config semgrep_rules/a3_no_fallback_no_hardcode.yml src tests app.py
 ```
 

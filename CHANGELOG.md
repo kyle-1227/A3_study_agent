@@ -5,6 +5,20 @@
 
 ---
 
+## [Unreleased] — 2026-07-02
+
+### 变更
+
+- 清理旧单资源 LangGraph 直连节点注册和 SSE 展示常量，单资源与多资源请求统一通过 `evidence_judge -> resource_orchestrator -> resource_worker -> resource_bundle_output` 运行。
+- 资源最终 payload 保持 `review_doc_artifacts`、`mindmap`、`exercise_artifact`、`code_practice_artifact`、`video_script_artifact`、`video_animation_artifact`、`study_plan`、`resource_bundle`、`resources` 和 `errors` 兼容字段。
+- 更新 README 与 v0.3.0 架构图，归档 v0.2.0 架构文档到 `docs/archive/architecture/v0.2.0/`。
+
+### 移除
+
+- 删除旧 JSON 输出 helper、旧集成/工具/JSON 测试、临时调试脚本、mojibake 清理报告和历史 agent handoff 目录。
+
+---
+
 ## [0.3.0] — 2026-04-06
 
 ### 新增
@@ -70,7 +84,7 @@
 
 - 将 `README.md` 主体替换为中文版（原英文内容迁移至 `README_en.md` 存档）
 - 删除冗余的 `README_zh.md`，导航链接更新为 `README.md` ↔ `README_en.md` 互指
-- 翻译 `docs/architecture/v0.2.0/diagram_design.md` 散文部分为中文（Mermaid 节点标签保持英文）
+- 翻译 `docs/archive/architecture/v0.2.0/diagram_design.md` 散文部分为中文（Mermaid 节点标签保持英文）
 - 翻译本 `CHANGELOG.md` 为中文
 - 新增 `docs/requirements/backlog_drafts.md` 中文占位说明
 

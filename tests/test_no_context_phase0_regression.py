@@ -110,7 +110,7 @@ async def test_resume_keeps_basic_stream_path():
     final_snapshot = _snapshot({"schema_version": "run_control_v1"})
     graph = MagicMock()
     graph.astream_events = MagicMock(
-        return_value=AsyncIteratorMock([_node_start("study_plan_output")])
+        return_value=AsyncIteratorMock([_node_start("resource_bundle_output")])
     )
     graph.aget_state = AsyncMock(
         side_effect=[

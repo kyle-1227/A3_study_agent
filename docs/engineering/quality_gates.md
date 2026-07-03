@@ -38,7 +38,7 @@ If Ruff is missing, report it as missing. Do not call another command "Ruff pass
 Use when touching Pydantic models, structured output, graph outputs, profile extraction, or business validators:
 
 ```powershell
-python -m pytest tests/test_deepseek_structured_output.py tests/test_structured_retry.py tests/test_json_output.py -q
+python -m pytest tests/test_deepseek_structured_output.py tests/test_structured_retry.py tests/test_structured_output_contract.py -q
 semgrep --config semgrep_rules/a3_no_fallback_no_hardcode.yml src tests app.py
 ```
 

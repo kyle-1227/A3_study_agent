@@ -12,7 +12,6 @@ forbidden_modules =
     src.graph.emotional
     src.graph.evidence
     src.graph.exercises
-    src.graph.json_output
     src.graph.mindmap
     src.graph.resource_generation
     src.graph.review_doc
@@ -30,7 +29,6 @@ source_modules =
     src.graph.emotional
     src.graph.evidence
     src.graph.exercises
-    src.graph.json_output
     src.graph.mindmap
     src.graph.resource_generation
     src.graph.review_doc

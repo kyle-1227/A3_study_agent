@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.graph.evidence import EvidenceSufficiencyOutput
 from src.graph.web_research import WebSourceSummaryBatch
-from src.llm.structured_output import _json_output_contract_with_debug
+from src.llm.structured_output import _structured_json_contract_with_debug
 
 
 class TinyContractModel(BaseModel):
@@ -11,8 +11,8 @@ class TinyContractModel(BaseModel):
     reason: str = Field("")
 
 
-def test_json_output_contract_injects_manifest_and_drift_guard():
-    contract, debug = _json_output_contract_with_debug(
+def test_structured_json_contract_injects_manifest_and_drift_guard():
+    contract, debug = _structured_json_contract_with_debug(
         WebSourceSummaryBatch,
         "web_source_summarizer",
         "deepseek_tool_call_strict",
@@ -41,7 +41,7 @@ def test_manifest_disabled_is_reported_in_contract_debug(monkeypatch):
 
     monkeypatch.setattr("src.llm.schema_manifest.get_setting", fake_get_setting)
 
-    contract, debug = _json_output_contract_with_debug(
+    contract, debug = _structured_json_contract_with_debug(
         TinyContractModel,
         "tiny_node",
         "deepseek_tool_call_strict",
@@ -65,7 +65,7 @@ def test_manifest_truncation_is_reported(monkeypatch):
 
     monkeypatch.setattr("src.llm.schema_manifest.get_setting", fake_get_setting)
 
-    contract, debug = _json_output_contract_with_debug(
+    contract, debug = _structured_json_contract_with_debug(
         EvidenceSufficiencyOutput,
         "evidence_sufficiency_judge",
         "deepseek_tool_call_strict",

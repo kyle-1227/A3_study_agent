@@ -10,7 +10,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.builder import (
     build_graph,
     get_compiled_graph,
-    route_after_academic_retrieval,
     route_after_evidence_judge,
     route_after_query_rewrite,
 )
@@ -40,6 +39,12 @@ class TestBuildGraph:
             "resource_orchestrator",
             "resource_worker",
             "resource_bundle_output",
+            "emotional_response",
+            "handle_unknown",
+        }
+        assert expected.issubset(node_names), f"Missing nodes: {expected - node_names}"
+        assert "multi_resource_runner" not in node_names
+        removed_direct_nodes = {
             "study_plan_emotional_intel",
             "study_plan_planner",
             "study_plan_agent",
@@ -63,11 +68,11 @@ class TestBuildGraph:
             "review_doc_reviewer",
             "review_doc_rewrite",
             "review_doc_output",
-            "emotional_response",
-            "handle_unknown",
+            "code_practice_planner",
+            "video_script_planner",
+            "video_animation_planner",
         }
-        assert expected.issubset(node_names), f"Missing nodes: {expected - node_names}"
-        assert "multi_resource_runner" not in node_names
+        assert removed_direct_nodes.isdisjoint(node_names)
 
     def test_graph_compiles_without_error(self):
         graph = build_graph()
@@ -79,16 +84,30 @@ class TestBuildGraph:
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
 
-    def test_route_after_evidence_judge_routes_resource_requests_to_orchestrator(self):
-        assert route_after_evidence_judge({"requested_resource_type": "mindmap"}) == "resources"
-        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": "quiz"}) == "resources"
+    @pytest.mark.parametrize(
+        "resource_type",
+        [
+            "review_doc",
+            "mindmap",
+            "quiz",
+            "code_practice",
+            "video_script",
+            "video_animation",
+            "study_plan",
+        ],
+    )
+    def test_route_after_evidence_judge_routes_single_resource_requests_to_orchestrator(
+        self, resource_type
+    ):
+        assert route_after_evidence_judge({"requested_resource_type": resource_type}) == "resources"
+        assert route_after_evidence_judge({"requested_resource_types": [resource_type]}) == "resources"
+
+    def test_route_after_evidence_judge_routes_non_resource_requests_to_answer(self):
         assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
-        assert route_after_evidence_judge({"needs_mindmap": True, "requested_resource_type": "quiz"}) == "resources"
-        assert route_after_evidence_judge({"requested_resource_type": "review_doc"}) == "resources"
-        assert route_after_evidence_judge({"requested_resource_type": "study_plan"}) == "resources"
-        assert route_after_evidence_judge({"requested_resource_types": ["mindmap", "quiz"]}) == "resources"
         assert route_after_evidence_judge({}) == "answer"
-        assert route_after_academic_retrieval({}) == "answer"
+
+    def test_route_after_evidence_judge_routes_multi_resource_requests_to_orchestrator(self):
+        assert route_after_evidence_judge({"requested_resource_types": ["mindmap", "quiz"]}) == "resources"
 
     def test_route_after_query_rewrite_routes_academic(self):
         assert route_after_query_rewrite({"intent": "academic"}) == "academic"
@@ -113,6 +132,8 @@ class TestBuildGraph:
             ("web_search", "exercise_planner"),
             ("rag_retrieve", "review_doc_planner"),
             ("web_search", "review_doc_planner"),
+            ("rag_retrieve", "resource_orchestrator"),
+            ("web_search", "resource_orchestrator"),
         }
         assert old_direct_edges.isdisjoint(graph.edges)
         assert "route_after_evidence_judge" in graph.branches["evidence_judge"]
@@ -129,14 +150,14 @@ class TestBuildGraph:
         assert "search_query_rewriter" in graph.branches
         assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]
 
-    def test_study_plan_reviewer_fan_in_uses_barrier(self):
+    def test_unified_resource_chain_has_no_legacy_resource_nodes(self):
         graph = build_graph()
-        assert (
-            ("study_plan_reviewer_academic", "study_plan_reviewer_emotional"),
-            "study_plan_consensus",
-        ) in graph.waiting_edges
-        assert ("study_plan_reviewer_academic", "study_plan_consensus") not in graph.edges
-        assert ("study_plan_reviewer_emotional", "study_plan_consensus") not in graph.edges
+        assert "resource_orchestrator" in graph.nodes
+        assert "resource_worker" in graph.nodes
+        assert "resource_bundle_output" in graph.nodes
+        assert "study_plan_output" not in graph.nodes
+        assert "review_doc_output" not in graph.nodes
+        assert "mindmap_output" not in graph.nodes
 
     @pytest.mark.anyio
     async def test_evidence_judge_runs_once_after_local_and_web_candidates(self):

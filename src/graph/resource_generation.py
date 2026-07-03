@@ -606,7 +606,7 @@ def _compose_resource_section(result: dict) -> list[str]:
     if resource_type == "review_doc":
         lines.extend(
             [
-                "已生成 Markdown / Word / PDF 等版本。",
+                "已生成 Markdown / Word 版本。",
                 f"- 标题：{title}",
                 f"- 文档数量：{metrics.get('artifact_count', 0)}",
                 f"- Markdown 字数：{metrics.get('markdown_chars', 0)}",
@@ -615,7 +615,7 @@ def _compose_resource_section(result: dict) -> list[str]:
     elif resource_type == "mindmap":
         lines.extend(
             [
-                "已生成 XMind / Markdown / SVG / PNG 等导出版本。",
+                "已生成 XMind 版本。",
                 f"- 标题：{title}",
                 f"- 节点数量：{metrics.get('node_count', 0)}",
             ]
@@ -623,7 +623,7 @@ def _compose_resource_section(result: dict) -> list[str]:
     elif resource_type == "quiz":
         lines.extend(
             [
-                "已生成 Markdown / Word / PDF 等版本。",
+                "已生成 Markdown / Word 版本。",
                 f"- 标题：{title}",
                 f"- 题目数量：{metrics.get('item_count', 0)}",
             ]
@@ -645,9 +645,12 @@ def _compose_resource_section(result: dict) -> list[str]:
             ]
         )
     elif resource_type == "video_animation":
+        generated_formats = "HTML 预览 / JSON / SRT"
+        if bool(metrics.get("render_success")):
+            generated_formats += " / MP4"
         lines.extend(
             [
-                "已生成 HTML 预览 / MP4 / SRT / JSON 版本。",
+                f"已生成 {generated_formats} 版本。",
                 f"- 标题：{title}",
                 f"- MP4 渲染成功：{_yes_no(bool(metrics.get('render_success')))}",
             ]
@@ -655,7 +658,7 @@ def _compose_resource_section(result: dict) -> list[str]:
     elif resource_type == "study_plan":
         lines.extend(
             [
-                "已生成个性化学习计划文档。",
+                "已生成 Markdown / Word 学习计划文档。",
                 f"- 标题：{title}",
                 f"- 是否包含文档：{_yes_no(bool(metrics.get('has_document')))}",
             ]
@@ -704,7 +707,6 @@ def _compose_bundle_message(
         lines.append("部分资源已生成，失败的资源可以稍后单独重试。")
 
     return "\n".join(lines).strip()
-
 
 def _resource_metrics(result: dict) -> dict:
     resource_type = result.get("resource_type")

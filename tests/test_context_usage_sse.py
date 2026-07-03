@@ -43,7 +43,7 @@ async def test_context_usage_sse_uses_canonical_fields_and_updates_state():
             logging.getLogger("test_context_usage_sse"),
             "context_usage",
             {
-                "node_name": "study_plan_agent",
+                "node_name": "resource_bundle_output",
                 "llm_node": "study_plan",
                 "provider": "deepseek_official",
                 "model": "deepseek-v4-pro",
@@ -69,8 +69,8 @@ async def test_context_usage_sse_uses_canonical_fields_and_updates_state():
         )
         yield {
             "event": "on_chain_start",
-            "name": "study_plan_agent",
-            "metadata": {"langgraph_node": "study_plan_agent"},
+            "name": "resource_bundle_output",
+            "metadata": {"langgraph_node": "resource_bundle_output"},
             "data": {"input": {}},
         }
 
@@ -119,7 +119,7 @@ async def test_context_usage_error_sse_does_not_break_stream():
             logging.getLogger("test_context_usage_error_sse"),
             "context_usage_error",
             {
-                "node_name": "study_plan_agent",
+                "node_name": "resource_bundle_output",
                 "llm_node": "study_plan",
                 "provider": "deepseek_official",
                 "model": "unknown-model",
@@ -130,8 +130,8 @@ async def test_context_usage_error_sse_does_not_break_stream():
         )
         yield {
             "event": "on_chain_start",
-            "name": "study_plan_agent",
-            "metadata": {"langgraph_node": "study_plan_agent"},
+            "name": "resource_bundle_output",
+            "metadata": {"langgraph_node": "resource_bundle_output"},
             "data": {"input": {}},
         }
 
@@ -153,7 +153,7 @@ async def test_context_usage_error_sse_does_not_break_stream():
     assert error_events == [
         {
             "type": "context_usage_error",
-            "node": "study_plan_agent",
+            "node": "resource_bundle_output",
             "llm_node": "study_plan",
             "provider": "deepseek_official",
             "model": "unknown-model",
