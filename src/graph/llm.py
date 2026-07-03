@@ -12,6 +12,7 @@ import os
 import asyncio
 import time
 import ssl
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, TypeVar
 
 from langchain_core.messages import BaseMessage
@@ -31,14 +32,16 @@ from src.context_engineering.packing import (
     emit_context_applied,
     emit_context_apply_error,
     emit_context_apply_plan,
+    emit_context_apply_policy_resolved_summary,
     emit_context_importance_scored,
     emit_context_packing_shadow,
     evaluate_context_apply_route,
-    filter_injectable_items,
-    get_context_injection_policy,
+    filter_context_items_by_source_policy,
     make_context_apply_skip_selection,
     parse_importance_scorer_output,
     prepare_context_apply_selection,
+    resolve_context_policy,
+    should_emit_context_policy_summary,
     with_context_apply_selection_warnings,
 )
 from src.context_engineering.providers import emit_context_items_shadow
@@ -47,6 +50,7 @@ from src.observability.a3_trace import emit_a3_trace
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+_CONTEXT_POLICY_SUMMARY_EMITTED = False
 
 DEFAULT_DEEPSEEK_PROVIDER = "deepseek_official"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -612,6 +616,21 @@ async def invoke_context_importance_scorer_raw(
     return parse_importance_scorer_output(raw)
 
 
+def _emit_context_policy_summary_once(
+    summary: dict[str, Any], state: dict | None
+) -> None:
+    """Emit CE policy summary once per process unless debug env requests more."""
+    global _CONTEXT_POLICY_SUMMARY_EMITTED
+    if _CONTEXT_POLICY_SUMMARY_EMITTED and not should_emit_context_policy_summary():
+        return
+    emit_context_apply_policy_resolved_summary(
+        logger,
+        summary=summary,
+        state=state or {},
+    )
+    _CONTEXT_POLICY_SUMMARY_EMITTED = True
+
+
 async def invoke_plain_llm_fail_fast(
     *,
     node_name: str,
@@ -648,12 +667,16 @@ async def invoke_plain_llm_fail_fast(
     context_apply_applied = False
     context_apply_fallback_used = False
     try:
-        apply_policy = get_context_injection_policy(
+        resolved_policy = resolve_context_policy(
             node_name=node_name,
             llm_node=llm_node,
+            state=state_payload,
         )
+        apply_policy = resolved_policy.injection_policy
+        _emit_context_policy_summary_once(resolved_policy.summary, state_payload)
     except ContextApplyError as exc:
         exc.fallback_used = True
+        resolved_policy = None
         apply_policy = None
         context_apply_fallback_used = True
         emit_context_apply_error(logger, error=exc, state=state_payload)
@@ -683,33 +706,97 @@ async def invoke_plain_llm_fail_fast(
             state=state_payload,
         )
 
-    if apply_policy is None or not apply_policy.enabled:
-        _emit_original_usage_and_shadow()
-    else:
-        assert apply_policy is not None
-        route_enabled, skip_reason, single_resource_result, route_warnings = (
-            evaluate_context_apply_route(
-                policy=apply_policy,
-                node_name=node_name,
-                state=state_payload,
-            )
-        )
-        if not route_enabled:
-            selection = make_context_apply_skip_selection(
-                skip_reason=skip_reason,
-                single_resource_result=single_resource_result,
-                warnings=route_warnings,
-            )
-            emit_context_apply_selection(
+    async def _emit_importance_shadow_if_allowed(
+        selection, *, observe_only: bool
+    ) -> None:
+        if apply_policy is None:
+            return
+        if (
+            observe_only
+            and not apply_policy.importance_scoring.enabled_for_observe_only
+        ):
+            return
+        if apply_policy.importance_scoring.disabled_reason:
+            emit_context_importance_scored(
                 logger,
                 node_name=node_name,
                 llm_node=llm_node,
-                selection=selection,
+                telemetry=aggregate_importance_failure(
+                    items=selection.final_items,
+                    policy=apply_policy.importance_scoring,
+                    started_at=None,
+                    reason=apply_policy.importance_scoring.disabled_reason,
+                ),
                 state=state_payload,
             )
-            _emit_original_usage_and_shadow()
-        else:
-            assert apply_policy is not None
+            return
+        if not (
+            apply_policy.importance_scoring.enabled
+            and apply_policy.importance_scoring.emit_shadow_telemetry
+            and selection.final_items
+        ):
+            return
+        scorer_started = time.perf_counter()
+        scorer_messages = build_importance_scorer_messages(
+            items=selection.final_items,
+            policy=apply_policy.importance_scoring,
+        )
+        try:
+            scores = await invoke_context_importance_scorer_raw(
+                llm_node=apply_policy.importance_scoring.llm_node,
+                scorer_messages=scorer_messages,
+                timeout_seconds=apply_policy.importance_scoring.timeout_seconds,
+            )
+            telemetry = aggregate_importance_success(
+                items=selection.final_items,
+                scores=scores,
+                policy=apply_policy.importance_scoring,
+                started_at=scorer_started,
+            )
+        except ContextImportanceError as exc:
+            telemetry = aggregate_importance_failure(
+                items=selection.final_items,
+                policy=apply_policy.importance_scoring,
+                started_at=scorer_started,
+                reason=exc.reason,
+                error_type=exc.error_type,
+                warning=exc.warning,
+            )
+        emit_context_importance_scored(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            telemetry=telemetry,
+            state=state_payload,
+        )
+
+    if apply_policy is None or not apply_policy.enabled:
+        _emit_original_usage_and_shadow()
+    elif apply_policy.mode == "disabled":
+        selection = make_context_apply_skip_selection(
+            skip_reason="node_policy_disabled",
+            policy=apply_policy,
+        )
+        emit_context_apply_selection(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            selection=selection,
+            state=state_payload,
+        )
+        emit_context_usage_trace(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            messages=messages_for_llm,
+            state=state_payload,
+        )
+    else:
+        assert apply_policy is not None
+        assert resolved_policy is not None
+        if apply_policy.mode == "observe_only":
             context_items = emit_context_items_shadow(
                 logger,
                 node_name=node_name,
@@ -724,18 +811,13 @@ async def invoke_plain_llm_fail_fast(
                 items=context_items,
                 state=state_payload,
             )
-            try:
-                if packed is None:
-                    raise ContextApplyError(
-                        reason="packed_context_missing",
-                        warning="context packing did not produce a PackedContext",
-                        node_name=node_name,
-                        llm_node=llm_node,
-                        fallback_used=apply_policy.fallback_on_error,
-                    )
-                injectable_items, skipped_items = filter_injectable_items(
-                    packed=packed,
-                    policy=apply_policy,
+            if packed is not None:
+                source_filter = filter_context_items_by_source_policy(
+                    packed.selected_items,
+                    injectable_sources=apply_policy.injectable_sources,
+                    exclude_message_source=apply_policy.exclude_message_source,
+                    source_policies=resolved_policy.source_policies,
+                    state=state_payload,
                 )
                 emit_context_apply_plan(
                     logger,
@@ -744,8 +826,8 @@ async def invoke_plain_llm_fail_fast(
                     policy=apply_policy,
                     original_message_count=len(original_messages),
                     selected_item_count=len(packed.selected_items),
-                    injectable_item_count=len(injectable_items),
-                    skipped_item_count=len(skipped_items),
+                    injectable_item_count=len(source_filter.kept_items),
+                    skipped_item_count=len(source_filter.dropped_items),
                     state=state_payload,
                 )
                 selection = prepare_context_apply_selection(
@@ -753,10 +835,16 @@ async def invoke_plain_llm_fail_fast(
                     policy=apply_policy,
                     node_name=node_name,
                     llm_node=llm_node,
+                    source_filter_result=source_filter,
                 )
                 selection = with_context_apply_selection_warnings(
                     selection,
-                    route_warnings,
+                    ["node_policy_observe_only"],
+                )
+                selection = replace(
+                    selection,
+                    skip_reason="node_policy_observe_only",
+                    rendered_context="",
                 )
                 emit_context_apply_selection(
                     logger,
@@ -765,101 +853,34 @@ async def invoke_plain_llm_fail_fast(
                     selection=selection,
                     state=state_payload,
                 )
-                if apply_policy.importance_scoring.disabled_reason:
-                    emit_context_importance_scored(
-                        logger,
-                        node_name=node_name,
-                        llm_node=llm_node,
-                        telemetry=aggregate_importance_failure(
-                            items=selection.final_items,
-                            policy=apply_policy.importance_scoring,
-                            started_at=None,
-                            reason=apply_policy.importance_scoring.disabled_reason,
-                        ),
-                        state=state_payload,
-                    )
-                elif (
-                    apply_policy.importance_scoring.enabled
-                    and apply_policy.importance_scoring.emit_shadow_telemetry
-                    and selection.final_items
-                ):
-                    scorer_started = time.perf_counter()
-                    scorer_messages = build_importance_scorer_messages(
-                        items=selection.final_items,
-                        policy=apply_policy.importance_scoring,
-                    )
-                    try:
-                        scores = await invoke_context_importance_scorer_raw(
-                            llm_node=apply_policy.importance_scoring.llm_node,
-                            scorer_messages=scorer_messages,
-                            timeout_seconds=(
-                                apply_policy.importance_scoring.timeout_seconds
-                            ),
-                        )
-                        telemetry = aggregate_importance_success(
-                            items=selection.final_items,
-                            scores=scores,
-                            policy=apply_policy.importance_scoring,
-                            started_at=scorer_started,
-                        )
-                    except ContextImportanceError as exc:
-                        telemetry = aggregate_importance_failure(
-                            items=selection.final_items,
-                            policy=apply_policy.importance_scoring,
-                            started_at=scorer_started,
-                            reason=exc.reason,
-                            error_type=exc.error_type,
-                            warning=exc.warning,
-                        )
-                    emit_context_importance_scored(
-                        logger,
-                        node_name=node_name,
-                        llm_node=llm_node,
-                        telemetry=telemetry,
-                        state=state_payload,
-                    )
-                if selection.skip_reason:
-                    if (
-                        selection.skip_reason == "budget_fit_failed"
-                        and not apply_policy.budget.fallback_if_empty_after_drop
-                    ):
-                        raise ContextApplyError(
-                            reason="context_apply_budget_fit_failed",
-                            warning="context apply could not fit any item in budget",
-                            node_name=node_name,
-                            llm_node=llm_node,
-                            fallback_used=apply_policy.fallback_on_error,
-                        )
-                    messages_for_llm = original_messages
-                    context_apply_fallback_used = (
-                        selection.skip_reason == "budget_fit_failed"
-                    )
-                else:
-                    apply_result = build_applied_messages_from_selection(
-                        node_name=node_name,
-                        llm_node=llm_node,
-                        original_messages=original_messages,
-                        selection=selection,
-                    )
-                    emit_context_applied(
-                        logger,
-                        node_name=node_name,
-                        llm_node=llm_node,
-                        policy=apply_policy,
-                        result=apply_result,
-                        state=state_payload,
-                    )
-                    if apply_result.applied:
-                        messages_for_llm = apply_result.final_messages
-                    context_apply_applied = apply_result.applied
-                    context_apply_fallback_used = apply_result.fallback_used
-            except ContextApplyError as exc:
-                exc.fallback_used = apply_policy.fallback_on_error
-                emit_context_apply_error(logger, error=exc, state=state_payload)
-                if not apply_policy.fallback_on_error:
-                    raise
-                messages_for_llm = original_messages
-                context_apply_fallback_used = True
+                await _emit_importance_shadow_if_allowed(
+                    selection,
+                    observe_only=True,
+                )
+            else:
+                emit_context_apply_plan(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    policy=apply_policy,
+                    original_message_count=len(original_messages),
+                    selected_item_count=0,
+                    injectable_item_count=0,
+                    skipped_item_count=0,
+                    state=state_payload,
+                )
+                selection = make_context_apply_skip_selection(
+                    skip_reason="node_policy_observe_only",
+                    warnings=["packed_context_missing"],
+                    policy=apply_policy,
+                )
+                emit_context_apply_selection(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    selection=selection,
+                    state=state_payload,
+                )
             emit_context_usage_trace(
                 logger,
                 node_name=node_name,
@@ -869,6 +890,167 @@ async def invoke_plain_llm_fail_fast(
                 messages=messages_for_llm,
                 state=state_payload,
             )
+        else:
+            route_enabled, skip_reason, single_resource_result, route_warnings = (
+                evaluate_context_apply_route(
+                    policy=apply_policy,
+                    node_name=node_name,
+                    state=state_payload,
+                )
+            )
+            if not route_enabled:
+                selection = make_context_apply_skip_selection(
+                    skip_reason=skip_reason,
+                    single_resource_result=single_resource_result,
+                    warnings=route_warnings,
+                    policy=apply_policy,
+                )
+                emit_context_apply_selection(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    selection=selection,
+                    state=state_payload,
+                )
+                _emit_original_usage_and_shadow()
+            else:
+                context_items = emit_context_items_shadow(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    messages=original_messages,
+                    state=state_payload,
+                )
+                packed = emit_context_packing_shadow(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    items=context_items,
+                    state=state_payload,
+                )
+                try:
+                    if packed is None:
+                        emit_context_apply_plan(
+                            logger,
+                            node_name=node_name,
+                            llm_node=llm_node,
+                            policy=apply_policy,
+                            original_message_count=len(original_messages),
+                            selected_item_count=0,
+                            injectable_item_count=0,
+                            skipped_item_count=0,
+                            state=state_payload,
+                        )
+                        selection = make_context_apply_skip_selection(
+                            skip_reason="packed_context_missing",
+                            warnings=["packed_context_missing"],
+                            policy=apply_policy,
+                        )
+                        emit_context_apply_selection(
+                            logger,
+                            node_name=node_name,
+                            llm_node=llm_node,
+                            selection=selection,
+                            state=state_payload,
+                        )
+                        raise ContextApplyError(
+                            reason="packed_context_missing",
+                            warning="context packing did not produce a PackedContext",
+                            node_name=node_name,
+                            llm_node=llm_node,
+                            fallback_used=apply_policy.fallback_on_error,
+                        )
+                    source_filter = filter_context_items_by_source_policy(
+                        packed.selected_items,
+                        injectable_sources=apply_policy.injectable_sources,
+                        exclude_message_source=apply_policy.exclude_message_source,
+                        source_policies=resolved_policy.source_policies,
+                        state=state_payload,
+                    )
+                    emit_context_apply_plan(
+                        logger,
+                        node_name=node_name,
+                        llm_node=llm_node,
+                        policy=apply_policy,
+                        original_message_count=len(original_messages),
+                        selected_item_count=len(packed.selected_items),
+                        injectable_item_count=len(source_filter.kept_items),
+                        skipped_item_count=len(source_filter.dropped_items),
+                        state=state_payload,
+                    )
+                    selection = prepare_context_apply_selection(
+                        packed=packed,
+                        policy=apply_policy,
+                        node_name=node_name,
+                        llm_node=llm_node,
+                        source_filter_result=source_filter,
+                    )
+                    selection = with_context_apply_selection_warnings(
+                        selection,
+                        route_warnings,
+                    )
+                    emit_context_apply_selection(
+                        logger,
+                        node_name=node_name,
+                        llm_node=llm_node,
+                        selection=selection,
+                        state=state_payload,
+                    )
+                    await _emit_importance_shadow_if_allowed(
+                        selection,
+                        observe_only=False,
+                    )
+                    if selection.skip_reason:
+                        if (
+                            selection.skip_reason == "budget_fit_failed"
+                            and not apply_policy.budget.fallback_if_empty_after_drop
+                        ):
+                            raise ContextApplyError(
+                                reason="context_apply_budget_fit_failed",
+                                warning="context apply could not fit any item in budget",
+                                node_name=node_name,
+                                llm_node=llm_node,
+                                fallback_used=apply_policy.fallback_on_error,
+                            )
+                        messages_for_llm = original_messages
+                        context_apply_fallback_used = (
+                            selection.skip_reason == "budget_fit_failed"
+                        )
+                    else:
+                        apply_result = build_applied_messages_from_selection(
+                            node_name=node_name,
+                            llm_node=llm_node,
+                            original_messages=original_messages,
+                            selection=selection,
+                        )
+                        emit_context_applied(
+                            logger,
+                            node_name=node_name,
+                            llm_node=llm_node,
+                            policy=apply_policy,
+                            result=apply_result,
+                            state=state_payload,
+                        )
+                        if apply_result.applied:
+                            messages_for_llm = apply_result.final_messages
+                        context_apply_applied = apply_result.applied
+                        context_apply_fallback_used = apply_result.fallback_used
+                except ContextApplyError as exc:
+                    exc.fallback_used = apply_policy.fallback_on_error
+                    emit_context_apply_error(logger, error=exc, state=state_payload)
+                    if not apply_policy.fallback_on_error:
+                        raise
+                    messages_for_llm = original_messages
+                    context_apply_fallback_used = True
+                emit_context_usage_trace(
+                    logger,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                    provider=str(provider or ""),
+                    model=str(model or ""),
+                    messages=messages_for_llm,
+                    state=state_payload,
+                )
 
     base_payload = {
         "node_name": node_name,

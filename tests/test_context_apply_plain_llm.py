@@ -16,6 +16,7 @@ from src.context_engineering.packing.apply import (
     ImportanceScoringPolicy,
     RouteRolloutPolicy,
 )
+from src.context_engineering.packing.node_policy import ResolvedContextPolicy
 from src.context_engineering.packing.packer import pack_context_items
 from src.context_engineering.schema import ContextItem
 
@@ -77,6 +78,19 @@ def _policy(
     )
 
 
+def _resolved(policy: ContextInjectionPolicy) -> ResolvedContextPolicy:
+    return ResolvedContextPolicy(
+        mode=policy.mode if policy.enabled else "disabled",
+        risk_tier=policy.risk_tier,
+        policy_source=policy.policy_source,
+        injection_policy=policy,
+        source_policies={},
+        legacy_mode_enabled=policy.enabled,
+        node_policy_enabled=False,
+        summary={},
+    )
+
+
 def _item(
     item_id: str = "memory-1",
     *,
@@ -132,8 +146,8 @@ async def test_apply_disabled_keeps_phase3a_order_and_original_messages(monkeypa
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(enabled=False),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy(enabled=False)),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(
@@ -176,8 +190,8 @@ async def test_apply_enabled_but_node_miss_uses_original_messages(monkeypatch):
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(nodes=("other_node",)),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy(nodes=("other_node",))),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
@@ -231,8 +245,8 @@ async def test_route_rollout_disabled_keeps_original_messages_and_emits_selectio
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: policy,
+        "resolve_context_policy",
+        lambda **_: _resolved(policy),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
@@ -282,8 +296,8 @@ async def test_apply_enabled_node_uses_final_messages_and_context_usage(monkeypa
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy()),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(
@@ -335,8 +349,8 @@ async def test_apply_error_with_fallback_uses_original_messages_and_usage(monkey
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(max_tokens=1, fallback_on_error=True),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy(max_tokens=1, fallback_on_error=True)),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(
@@ -398,8 +412,8 @@ async def test_apply_error_without_fallback_raises_before_llm_and_emits_safe_err
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(max_tokens=1, fallback_on_error=False),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy(max_tokens=1, fallback_on_error=False)),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
@@ -470,8 +484,8 @@ async def test_apply_retry_uses_same_final_messages_object(monkeypatch):
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
         llm_module,
-        "get_context_injection_policy",
-        lambda **_: _policy(),
+        "resolve_context_policy",
+        lambda **_: _resolved(_policy()),
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 1)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)

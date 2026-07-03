@@ -4,9 +4,30 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.context_engineering.evidence_normalizer import (
+    normalize_evidence_candidate_score,
+)
 from src.context_engineering.itemizer import make_context_item
 from src.context_engineering.providers.base import ProviderContext
 from src.context_engineering.schema import ContextItem, ContextProviderError
+
+_SCORE_METADATA_KEYS = (
+    "relevance_score",
+    "score",
+    "similarity_score",
+    "coverage_score",
+    "support_score",
+    "grader_score",
+    "evidence_score",
+    "confidence",
+    "confidence_kind",
+    "confidence_type",
+    "confidence_scope",
+    "confidence_source",
+    "confidence_represents",
+    "confidence_is_relevance",
+    "score_type",
+)
 
 
 class EvidenceContextProvider:
@@ -99,6 +120,18 @@ def _candidate_to_item(
         candidate.get("title") or candidate.get("source") or f"evidence_{index}"
     )
     content = _candidate_content(candidate)
+    metadata = {
+        "evidence_id": evidence_id,
+        "source_type": source_type,
+        "provider": candidate.get("provider", ""),
+        "url": candidate.get("url", ""),
+        "title": title,
+        "rank": index,
+        "retrieval_mode": candidate.get("_context_source_bucket", ""),
+    }
+    metadata.update(_candidate_score_metadata(candidate))
+    if score is not None:
+        metadata["score"] = score
     return make_context_item(
         source_type="evidence",
         title=title,
@@ -110,26 +143,13 @@ def _candidate_to_item(
         can_drop=True,
         disclosure_level="snippet",
         relevance_score=score,
-        metadata={
-            "evidence_id": evidence_id,
-            "source_type": source_type,
-            "provider": candidate.get("provider", ""),
-            "url": candidate.get("url", ""),
-            "title": title,
-            "rank": index,
-            "retrieval_mode": candidate.get("_context_source_bucket", ""),
-            "score": score,
-        },
+        metadata=metadata,
         max_content_chars=max_content_chars,
     )
 
 
 def _candidate_score(candidate: dict[str, Any]) -> float | None:
-    for key in ("score", "rerank_score", "raw_vector_score"):
-        score = _safe_score(candidate.get(key))
-        if score is not None:
-            return score
-    return None
+    return normalize_evidence_candidate_score(candidate)
 
 
 def _candidate_content(candidate: dict[str, Any]) -> str:
@@ -149,13 +169,24 @@ def _candidate_content(candidate: dict[str, Any]) -> str:
     return ""
 
 
-def _safe_score(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    score = float(value)
-    if score < 0.0 or score > 1.0:
-        return None
-    return score
+def _candidate_score_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in _SCORE_METADATA_KEYS:
+        if key in candidate:
+            metadata[key] = candidate[key]
+        max_key = f"{key}_max"
+        if max_key in candidate:
+            metadata[max_key] = candidate[max_key]
+        scale_key = f"{key}_scale"
+        if scale_key in candidate:
+            metadata[scale_key] = candidate[scale_key]
+        percent_key = f"{key}_is_percent"
+        if percent_key in candidate:
+            metadata[percent_key] = candidate[percent_key]
+    for key in ("score_max", "score_scale", "score_is_percent", "is_percent_score"):
+        if key in candidate:
+            metadata[key] = candidate[key]
+    return metadata
 
 
 def _evidence_priority(score: float | None) -> int:

@@ -19,6 +19,7 @@ from src.context_engineering.packing.apply_trace import (
     build_context_applied_event,
     build_context_apply_error_event,
     build_context_apply_plan_event,
+    build_context_apply_policy_resolved_summary_event,
     build_context_apply_selection_event,
     build_context_importance_scored_event,
 )
@@ -134,14 +135,22 @@ def test_context_apply_selection_event_is_safe_and_aggregate_only():
             injected_context_tokens=20,
             source_counts_before={"memory": 2},
             source_counts_after={"memory": 1},
+            source_counts_dropped={"memory": 1},
             drop_reasons={"over_budget": 1},
             warnings=["api_key=sk-secret cookie=session"],
+            mode="observe_only",
+            risk_tier=2,
+            policy_source="node_policy",
         ),
     )
 
     serialized = repr(event).lower()
     assert event["budget_dropped_count"] == 1
     assert event["final_injected_count"] == 1
+    assert event["mode"] == "observe_only"
+    assert event["risk_tier"] == 2
+    assert event["policy_source"] == "node_policy"
+    assert event["source_counts_dropped"] == {"memory": 1}
     assert "original_estimated_tokens" not in event
     assert "final_estimated_tokens" not in event
     assert "token_delta" not in event
@@ -150,6 +159,30 @@ def test_context_apply_selection_event_is_safe_and_aggregate_only():
     assert "sk-secret" not in serialized
     assert "content" not in serialized
     assert "metadata" not in serialized
+
+
+def test_context_apply_policy_summary_event_includes_safe_policy_fields():
+    event = build_context_apply_policy_resolved_summary_event(
+        {
+            "enabled": True,
+            "legacy_global_enabled": True,
+            "node_policy_schema_configured": True,
+            "resource_type_policy_count": 2,
+            "default_policy_mode": "observe_only",
+            "default_risk_tier": 2,
+            "node_policy_count": 1,
+            "node_group_count": 1,
+            "raw_policy": {"content": "must not forward"},
+        }
+    )
+
+    assert event["legacy_global_enabled"] is True
+    assert event["node_policy_schema_configured"] is True
+    assert event["resource_type_policy_count"] == 2
+    assert event["default_policy_mode"] == "observe_only"
+    assert event["default_risk_tier"] == 2
+    assert "raw_policy" not in event
+    assert "content" not in repr(event).lower()
 
 
 def test_context_importance_scored_event_is_aggregate_only():
@@ -232,7 +265,11 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
                 "token_delta": 12,
                 "source_counts_before": {"memory": 2},
                 "source_counts_after": {"memory": 1},
+                "source_counts_dropped": {"memory": 1},
                 "drop_reasons": {"over_budget": 1},
+                "mode": "observe_only",
+                "risk_tier": 2,
+                "policy_source": "node_policy",
                 "warnings": ["api_key=sk-secret-value cookie=session"],
                 "content": "must not forward",
                 "metadata": {"secret": "must not forward"},
@@ -324,6 +361,10 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
     assert "original_estimated_tokens" not in selection_payload
     assert "final_estimated_tokens" not in selection_payload
     assert "token_delta" not in selection_payload
+    assert selection_payload["mode"] == "observe_only"
+    assert selection_payload["risk_tier"] == 2
+    assert selection_payload["policy_source"] == "node_policy"
+    assert selection_payload["source_counts_dropped"] == {"memory": 1}
     for payload in apply_payloads:
         assert "injected_context" not in payload
         assert "final_messages" not in payload

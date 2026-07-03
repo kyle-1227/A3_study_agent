@@ -163,6 +163,194 @@ context_engineering:
         - artifact
         - trajectory
         - curriculum
+      default_policy:
+        mode: observe_only
+        risk_tier: 2
+        max_injected_context_tokens: 1200
+        max_items_total: 4
+        min_injectable_items: 1
+        injectable_sources:
+          - rules
+          - evidence
+          - memory
+          - profile
+          - artifact
+          - trajectory
+          - curriculum
+      source_defaults:
+        rules:
+          max_items: 3
+          max_tokens: 800
+          # Transitional floor: rules provider priorities are not fully unified yet.
+          # 30 avoids obviously low-quality rules without killing useful rule context;
+          # this can be raised to 80 after the rules provider stabilizes.
+          min_priority: 30
+          min_relevance_score: null
+          allowed_purposes:
+            - quality_control
+            - instruction_support
+        evidence:
+          max_items: 4
+          max_tokens: 1600
+          min_priority: 0
+          min_relevance_score: 0.35
+          allowed_purposes:
+            - factual_grounding
+        profile:
+          max_items: 1
+          max_tokens: 500
+          min_priority: 0
+          min_relevance_score: null
+          require_user_match: true
+          allowed_purposes:
+            - personalization
+        curriculum:
+          max_items: 3
+          max_tokens: 1000
+          min_priority: 0
+          min_relevance_score: null
+          require_subject_match: true
+          allowed_purposes:
+            - curriculum_alignment
+        memory:
+          max_items: 2
+          max_tokens: 900
+          min_priority: 0
+          min_relevance_score: 0.45
+          require_user_match: true
+          require_task_match: true
+          stale_policy: downrank
+          allowed_purposes:
+            - continuity
+            - personalization
+        trajectory:
+          max_items: 3
+          max_tokens: 1200
+          min_priority: 0
+          min_relevance_score: 0.45
+          require_user_match: true
+          require_task_match: true
+          stale_policy: downrank
+          allowed_purposes:
+            - learning_state
+            - personalization
+        artifact:
+          max_items: 2
+          max_tokens: 1600
+          min_priority: 0
+          min_relevance_score: 0.4
+          require_task_match: true
+          allowed_purposes:
+            - artifact_reference
+      resource_type_policies: {}
+      node_groups:
+        router_nodes:
+          mode: observe_only
+          risk_tier: 0
+          nodes:
+            - supervisor
+            - search_query_rewriter
+            - web_research_planner
+            - web_source_summarizer
+            - evidence_item_grader
+            - evidence_sufficiency_judge
+        planner_nodes:
+          mode: active
+          risk_tier: 2
+          max_injected_context_tokens: 1500
+          max_items_total: 5
+          injectable_sources:
+            - rules
+            - curriculum
+            - profile
+            - evidence
+          source_overrides:
+            evidence:
+              max_items: 2
+              max_tokens: 700
+        agent_nodes:
+          mode: active
+          risk_tier: 1
+          max_injected_context_tokens: 3000
+          max_items_total: 8
+          injectable_sources:
+            - rules
+            - evidence
+            - profile
+            - curriculum
+            - memory
+            - trajectory
+            - artifact
+        reviewer_nodes:
+          mode: active
+          risk_tier: 3
+          max_injected_context_tokens: 1200
+          max_items_total: 4
+          injectable_sources:
+            - rules
+            - evidence
+          source_overrides:
+            evidence:
+              max_items: 2
+              max_tokens: 600
+        output_nodes:
+          mode: disabled
+          risk_tier: 4
+          nodes:
+            - review_doc_output
+            - exercise_output
+            - mindmap_output
+            - code_practice_output
+            - video_script_output
+            - study_plan_output
+            - resource_bundle_output
+      node_policies:
+        review_doc_planner:
+          inherit: planner_nodes
+          source_overrides:
+            evidence:
+              max_items: 2
+            curriculum:
+              max_items: 2
+            rules:
+              max_items: 2
+        review_doc_agent:
+          inherit: agent_nodes
+          max_injected_context_tokens: 3000
+          source_overrides:
+            evidence:
+              max_items: 4
+            rules:
+              max_items: 2
+            curriculum:
+              max_items: 2
+            memory:
+              max_items: 2
+        review_doc_reviewer:
+          inherit: reviewer_nodes
+          source_overrides:
+            rules:
+              max_items: 3
+            evidence:
+              max_items: 2
+        exercise_agent:
+          inherit: agent_nodes
+          source_overrides:
+            trajectory:
+              max_items: 3
+            memory:
+              max_items: 2
+            evidence:
+              max_items: 3
+        code_practice_agent:
+          inherit: agent_nodes
+          source_overrides:
+            artifact:
+              max_items: 3
+            evidence:
+              max_items: 3
+            profile:
+              max_items: 1
       route_rollout:
         enabled: true
         route_name: single_resource_generation
@@ -210,6 +398,7 @@ context_engineering:
         fallback_to_rule_based: true
         emit_shadow_telemetry: true
         min_shadow_score_for_analysis: 0.5
+        enabled_for_observe_only: false
 
 web_search:
   provider: tavily                       # Web Research executor provider

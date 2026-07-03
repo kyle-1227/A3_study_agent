@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from src.context_engineering.budget import build_context_usage_payload
+from src.context_engineering.evidence_normalizer import EvidenceNormalizationStats
 from src.context_engineering.schema import ContextItem, ContextProviderError
 from src.observability.a3_trace import emit_a3_trace
 
@@ -108,6 +109,7 @@ def build_context_items_collected_event(
     provider_count: int,
     items: list[ContextItem],
     trace_top_items: int,
+    evidence_stats: EvidenceNormalizationStats | None = None,
 ) -> dict[str, Any]:
     """Return a safe context item collection summary."""
     source_counts: dict[str, int] = {}
@@ -115,7 +117,7 @@ def build_context_items_collected_event(
     for item in items:
         source_counts[item.source_type] = source_counts.get(item.source_type, 0) + 1
         total_estimated_tokens += item.token_estimate
-    return {
+    event = {
         "node_name": node_name,
         "llm_node": llm_node,
         "provider_count": provider_count,
@@ -126,6 +128,9 @@ def build_context_items_collected_event(
             _safe_top_item(item) for item in items[: max(trace_top_items, 0)]
         ],
     }
+    if evidence_stats is not None:
+        event.update(evidence_stats.as_event_fields())
+    return event
 
 
 def build_context_provider_error_event(
@@ -200,6 +205,7 @@ def emit_context_items_collected(
     items: list[ContextItem],
     trace_top_items: int,
     state: dict | None,
+    evidence_stats: EvidenceNormalizationStats | None = None,
 ) -> None:
     """Emit a safe context_items_collected event."""
     emit_a3_trace(
@@ -211,6 +217,7 @@ def emit_context_items_collected(
             provider_count=provider_count,
             items=items,
             trace_top_items=trace_top_items,
+            evidence_stats=evidence_stats,
         ),
         state=state or {},
         env_flag="LOG_A3_TRACE",

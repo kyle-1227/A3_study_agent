@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Sequence, cast
 
 from src.config import get_setting
+from src.context_engineering.evidence_normalizer import (
+    EvidenceNormalizationStats,
+    normalize_evidence_items,
+)
 from src.context_engineering.providers.artifact_provider import ArtifactContextProvider
 from src.context_engineering.providers.base import ContextProvider, ProviderContext
 from src.context_engineering.providers.curriculum_provider import (
@@ -139,7 +143,7 @@ def collect_context_items(
 ) -> list[ContextItem]:
     """Collect context items without emitting trace events."""
     settings = settings or get_context_provider_settings()
-    items, errors, _provider_count = _collect_with_errors(
+    items, errors, _provider_count, _evidence_stats = _collect_with_errors(
         context,
         providers=providers,
         settings=settings,
@@ -193,7 +197,7 @@ def emit_context_items_shadow(
         max_items_per_provider=settings.max_items_per_provider,
         max_content_chars_per_item=settings.max_content_chars_per_item,
     )
-    items, errors, provider_count = _collect_with_errors(
+    items, errors, provider_count, evidence_stats = _collect_with_errors(
         context,
         providers=None,
         settings=settings,
@@ -215,6 +219,7 @@ def emit_context_items_shadow(
         provider_count=provider_count,
         items=items,
         trace_top_items=settings.trace_top_items,
+        evidence_stats=evidence_stats,
         state=state,
     )
     return items
@@ -225,9 +230,14 @@ def _collect_with_errors(
     *,
     providers: Sequence[ContextProvider] | None,
     settings: ContextProviderSettings,
-) -> tuple[list[ContextItem], list[ContextProviderError], int]:
+) -> tuple[
+    list[ContextItem],
+    list[ContextProviderError],
+    int,
+    EvidenceNormalizationStats,
+]:
     if not settings.enabled:
-        return [], [], 0
+        return [], [], 0, EvidenceNormalizationStats()
     selected = (
         list(providers) if providers is not None else get_default_providers(settings)
     )
@@ -275,7 +285,8 @@ def _collect_with_errors(
             )
             if settings.strict:
                 break
-    return items, errors, provider_count
+    items, evidence_stats = normalize_evidence_items(items)
+    return items, errors, provider_count, evidence_stats
 
 
 def _required_bool(values: dict[str, Any], key: str) -> bool:

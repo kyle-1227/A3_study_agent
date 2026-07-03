@@ -37,6 +37,9 @@ def build_context_apply_plan_event(
         "skipped_item_count": skipped_item_count,
         "injection_role": policy.role,
         "injection_position": policy.position,
+        "mode": policy.mode,
+        "risk_tier": policy.risk_tier,
+        "policy_source": policy.policy_source,
     }
 
 
@@ -65,8 +68,13 @@ def build_context_applied_event(
         "token_delta": result.token_delta,
         "source_counts_after": _safe_int_dict(result.source_counts_after),
         "drop_reasons": _safe_int_dict(result.drop_reasons),
+        "source_drop_reasons": _safe_int_dict(result.source_drop_reasons),
+        "budget_drop_reasons": _safe_int_dict(result.budget_drop_reasons),
         "injection_role": policy.role,
         "injection_position": policy.position,
+        "mode": result.mode,
+        "risk_tier": result.risk_tier,
+        "policy_source": result.policy_source,
         "warnings": _sanitize_warnings(result.warnings),
     }
 
@@ -92,8 +100,49 @@ def build_context_apply_selection_event(
         "injected_context_tokens": selection.injected_context_tokens,
         "source_counts_before": _safe_int_dict(selection.source_counts_before),
         "source_counts_after": _safe_int_dict(selection.source_counts_after),
+        "source_counts_dropped": _safe_int_dict(selection.source_counts_dropped),
         "drop_reasons": _safe_int_dict(selection.drop_reasons),
+        "source_drop_reasons": _safe_int_dict(selection.source_drop_reasons),
+        "budget_drop_reasons": _safe_int_dict(selection.budget_drop_reasons),
+        "mode": selection.mode,
+        "risk_tier": selection.risk_tier,
+        "policy_source": selection.policy_source,
         "warnings": _sanitize_warnings(selection.warnings),
+    }
+
+
+def build_context_apply_policy_resolved_summary_event(
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a safe context_apply_policy_resolved_summary event."""
+    return {
+        "enabled": bool(summary.get("enabled", False)),
+        "legacy_mode_enabled": bool(summary.get("legacy_mode_enabled", False)),
+        "legacy_global_enabled": bool(summary.get("legacy_global_enabled", False)),
+        "node_policy_enabled": bool(summary.get("node_policy_enabled", False)),
+        "node_policy_schema_configured": bool(
+            summary.get("node_policy_schema_configured", False)
+        ),
+        "node_policy_count": _safe_int(summary.get("node_policy_count")),
+        "node_group_count": _safe_int(summary.get("node_group_count")),
+        "resource_type_policy_count": _safe_int(
+            summary.get("resource_type_policy_count")
+        ),
+        "default_policy_mode": sanitize_error_message(
+            summary.get("default_policy_mode", ""),
+            max_chars=80,
+        ),
+        "default_risk_tier": _safe_int(summary.get("default_risk_tier")),
+        "active_nodes": _safe_string_list(summary.get("active_nodes")),
+        "observe_only_nodes": _safe_string_list(summary.get("observe_only_nodes")),
+        "disabled_nodes": _safe_string_list(summary.get("disabled_nodes")),
+        "source_defaults": _safe_string_list(summary.get("source_defaults")),
+        "importance_scoring_enabled": bool(
+            summary.get("importance_scoring_enabled", False)
+        ),
+        "importance_scoring_shadow_mode": bool(
+            summary.get("importance_scoring_shadow_mode", False)
+        ),
     }
 
 
@@ -160,6 +209,22 @@ def emit_context_apply_plan(
             injectable_item_count=injectable_item_count,
             skipped_item_count=skipped_item_count,
         ),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def emit_context_apply_policy_resolved_summary(
+    logger: logging.Logger,
+    *,
+    summary: dict[str, Any],
+    state: dict | None,
+) -> None:
+    """Emit safe CE apply policy summary telemetry."""
+    emit_a3_trace(
+        logger,
+        "context_apply_policy_resolved_summary",
+        build_context_apply_policy_resolved_summary_event(summary),
         state=state or {},
         env_flag="LOG_A3_TRACE",
     )
@@ -259,4 +324,21 @@ def _safe_int_dict(value: dict[str, int]) -> dict[str, int]:
         if isinstance(item, bool) or not isinstance(item, int):
             continue
         result[sanitize_error_message(key, max_chars=80)] = item
+    return result
+
+
+def _safe_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _safe_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = sanitize_error_message(item, max_chars=120)
+        if text:
+            result.append(text)
     return result
