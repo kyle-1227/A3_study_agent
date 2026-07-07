@@ -62,6 +62,39 @@ def test_evidence_provider_objectizes_existing_candidates_without_reranking():
     assert "raw_html" not in items[0].metadata
 
 
+def test_evidence_provider_prefers_graded_evidence_handoff():
+    state = {
+        "graded_evidence": [
+            {
+                "evidence_id": "graded:1",
+                "source_type": "local_rag",
+                "provider": "chroma_rag",
+                "title": "Judged source",
+                "content": "LLM-judged evidence text.",
+                "evidence_score": 0.82,
+                "relevance_score": 0.82,
+                "score_source": "evidence_item_grader",
+                "score_scale": "0-1",
+                "score_type": "task_relevance",
+                "score_reason": "Directly supports the requested review document.",
+            }
+        ],
+        "evidence_candidates": [
+            {
+                "evidence_id": "raw:1",
+                "content_preview": "raw candidate without judge score",
+            }
+        ],
+    }
+
+    items = EvidenceContextProvider().collect(_context(state))
+
+    assert [item.metadata["evidence_id"] for item in items] == ["graded:1", "raw:1"]
+    assert items[0].relevance_score == pytest.approx(0.82)
+    assert items[0].metadata["score_source"] == "evidence_item_grader"
+    assert items[0].content == "LLM-judged evidence text."
+
+
 def test_evidence_provider_dedupes_existing_bucket_overlap():
     state = {
         "evidence_candidates": [{"evidence_id": "same", "content_preview": "first"}],

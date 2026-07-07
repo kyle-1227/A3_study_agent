@@ -149,9 +149,12 @@ async def test_status_returns_legacy_checkpoint_without_fake_resume():
     status = await get_thread_status_payload(graph, "thread-1")
 
     assert status.schema_version == "legacy"
-    assert status.run_status == "unknown"
+    assert status.run_status == "idle"
     assert status.resume_available is False
     assert "run_status" in status.missing_run_control_fields
+    assert status.request_context_window["last_event_count"] == 0
+    assert status.thread_context_window["context_usage_history_count"] == 0
+    assert status.thread_context_window["artifact_count"] == 0
 
 
 @pytest.mark.anyio
@@ -165,6 +168,178 @@ async def test_status_missing_checkpoint_is_404():
         await get_thread_status_payload(graph, "missing-thread")
 
     assert getattr(exc_info.value, "status_code", None) == 404
+
+
+@pytest.mark.anyio
+async def test_status_prefers_active_run_without_checkpoint_read():
+    from app import get_thread_status_payload
+    from src.run_control import finish_active_run, start_active_run
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(side_effect=AssertionError("checkpoint not needed"))
+    start_active_run(
+        "active-thread",
+        {
+            "schema_version": "run_control_v1",
+            "run_status": "running",
+            "current_node": "review_doc_agent",
+            "request_context_window": {
+                "current_request_id": "req-1",
+                "current_node": "review_doc_agent",
+                "last_event_count": 2,
+            },
+            "thread_context_window": {
+                "context_usage_history_count": 0,
+                "artifact_count": 0,
+                "conversation_summary_present": False,
+                "last_context_policy_by_node_keys": ["review_doc_agent"],
+                "last_provider_supply_by_node_keys": [],
+                "last_context_selection_by_node_keys": [],
+                "last_context_applied_by_node_keys": [],
+                "last_resource_subnodes_count": 0,
+            },
+        },
+    )
+
+    try:
+        status = await get_thread_status_payload(graph, "active-thread")
+    finally:
+        finish_active_run("active-thread")
+
+    assert status.run_status == "running"
+    assert status.current_node == "review_doc_agent"
+    assert status.request_context_window["last_event_count"] == 2
+    graph.aget_state.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("run_status", ["completed", "failed", "stopped"])
+async def test_status_preserves_terminal_checkpoint_status(run_status):
+    from app import get_thread_status_payload
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(
+            values={
+                "schema_version": "run_control_v1",
+                "run_status": run_status,
+                "stop_requested": False,
+                "stop_reason": "",
+                "current_node": "",
+                "last_completed_node": "resource_bundle_output",
+                "resume_available": False,
+                "stopped_at": "",
+                "pending_interrupt_type": "",
+                "context_usage": {},
+                "context_usage_history": [{"node": "review_doc_agent"}],
+                "request_context_window": {
+                    "current_request_id": "req-1",
+                    "current_node": "",
+                    "last_event_count": 3,
+                },
+                "resource_artifacts_by_type": {"review_doc": {"ok": True}},
+            },
+        )
+    )
+
+    status = await get_thread_status_payload(graph, f"thread-{run_status}")
+
+    assert status.run_status == run_status
+    assert status.thread_context_window["context_usage_history_count"] == 1
+    assert status.thread_context_window["artifact_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_stream_initializes_checkpoint_before_thread_id():
+    from app import generate_sse
+    from src.run_control import finish_active_run, get_active_run
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aupdate_state = AsyncMock()
+    graph.aget_state = AsyncMock(return_value=_snapshot(values={}))
+
+    stream = generate_sse("q", graph, thread_id="init-thread")
+    active_snapshot = None
+    try:
+        first = await stream.__anext__()
+        first_payload = json.loads(first.removeprefix("data: ").strip())
+        active_snapshot = get_active_run("init-thread")
+    finally:
+        await stream.aclose()
+        finish_active_run("init-thread")
+
+    assert first_payload == {"type": "thread_id", "thread_id": "init-thread"}
+    first_update = graph.aupdate_state.await_args_list[0]
+    assert first_update.args[0] == {"configurable": {"thread_id": "init-thread"}}
+    assert first_update.args[1]["run_status"] == "running"
+    assert first_update.args[1]["request_context_window"]["current_request_id"]
+    assert first_update.kwargs == {"as_node": "supervisor"}
+    assert active_snapshot is not None
+    assert active_snapshot["run_status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_stream_checkpoint_init_failure_does_not_emit_thread_id():
+    from app import generate_sse
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aupdate_state = AsyncMock(side_effect=RuntimeError("checkpoint down"))
+    graph.aget_state = AsyncMock(return_value=_snapshot(values={}))
+
+    collected = []
+    async for sse in generate_sse("q", graph, thread_id="broken-thread"):
+        collected.append(sse)
+
+    payloads = _payloads(collected)
+    assert payloads == [
+        {
+            "type": "error",
+            "message": "thread_checkpoint_initialization_failed",
+            "recoverable": False,
+        }
+    ]
+    graph.astream_events.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_safe_update_thread_state_uses_registered_node_when_unspecified():
+    from app import safe_update_thread_state
+
+    graph = MagicMock()
+    graph.aupdate_state = AsyncMock()
+
+    await safe_update_thread_state(
+        graph,
+        {"configurable": {"thread_id": "thread-1"}},
+        {"run_status": "failed"},
+        state={},
+    )
+
+    graph.aupdate_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "thread-1"}},
+        {"run_status": "failed"},
+        as_node="supervisor",
+    )
+
+
+@pytest.mark.anyio
+async def test_dev_memory_clear_uses_registered_supervisor_writer(monkeypatch):
+    import app as app_module
+
+    graph = MagicMock()
+    graph.aupdate_state = AsyncMock()
+    monkeypatch.setattr(app_module, "_dev_memory_clear_enabled", lambda: True)
+
+    result = await app_module.clear_persistent_memory_for_thread(graph, "thread-1")
+
+    assert result["ok"] is True
+    graph.aupdate_state.assert_awaited_once()
+    assert graph.aupdate_state.await_args.kwargs == {"as_node": "supervisor"}
+    assert graph.aupdate_state.await_args.args[0] == {
+        "configurable": {"thread_id": "thread-1"}
+    }
 
 
 @pytest.mark.anyio

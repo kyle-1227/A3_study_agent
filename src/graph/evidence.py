@@ -56,6 +56,21 @@ class EvidenceJudgeItem(BaseModel):
     authority: Literal["high", "medium", "low"] = "low"
     usefulness: Literal["high", "medium", "low"] = "low"
     risk: Literal["high", "medium", "low"] = "low"
+    evidence_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "LLM-assigned score in [0, 1] for how strongly this evidence supports "
+            "the current user request, learning goal, and requested resource type."
+        ),
+    )
+    score_reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=300,
+        description="Brief reason for the evidence_score decision.",
+    )
 
     evidence_type: Literal[
         "local_course_material",
@@ -106,6 +121,10 @@ class EvidenceJudgeItem(BaseModel):
 
     @model_validator(mode="after")
     def validate_keep_requires_coverage_contribution(self):
+        if not self.score_reason.strip():
+            raise ValueError(
+                f"score_reason must not be empty for evidence_id={self.evidence_id}"
+            )
         if self.keep and not self.coverage_contribution.strip():
             raise ValueError(
                 "coverage_contribution must not be empty when keep=true "

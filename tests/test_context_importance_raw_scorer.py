@@ -95,5 +95,5 @@ async def test_raw_scorer_timeout_raises_safe_error(monkeypatch):
             timeout_seconds=1,
         )
 
-    assert exc_info.value.reason == "context_importance_timeout"
+    assert exc_info.value.reason == "context_importance_scorer_timed_out"
     assert "api_key" not in exc_info.value.warning.lower()

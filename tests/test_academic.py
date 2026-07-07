@@ -18,6 +18,7 @@ from src.graph.academic import (
     _evaluate_retrieval_branch,
     _format_retrieved,
     _format_web_research_context,
+    _context_item_from_evidence,
     _normalize_retrieval_plan,
     _order_evidence_candidates_for_grading,
     _safe_evidence_id_part,
@@ -1095,6 +1096,45 @@ class TestWebSearchDualSource:
 
 
 class TestEvidenceMemorySummary:
+    def test_context_item_from_evidence_exports_llm_score_for_ce(self):
+        candidate = EvidenceCandidate(
+            evidence_id="local:python:score",
+            source_type="local_rag",
+            provider="chroma_rag",
+            subject="python",
+            role="core_concept",
+            title="Python functions",
+            content_preview="Function notes.",
+        )
+        judge_item = EvidenceJudgeItem(
+            evidence_id="local:python:score",
+            keep=True,
+            final_quality="high",
+            relevance="high",
+            authority="medium",
+            usefulness="high",
+            risk="low",
+            evidence_score=0.87,
+            score_reason="Directly supports the requested review material.",
+            evidence_type="local_textbook_chunk",
+            use_case="core_evidence",
+            coverage_contribution="Covers Python function concepts.",
+            reason="Useful course evidence.",
+        )
+
+        doc = _context_item_from_evidence(
+            candidate=candidate,
+            judge_item=judge_item,
+            original={"content": "Function notes."},
+        )
+
+        assert doc["evidence_score"] == pytest.approx(0.87)
+        assert doc["relevance_score"] == pytest.approx(0.87)
+        assert doc["score"] == pytest.approx(0.87)
+        assert doc["score_source"] == "evidence_item_grader"
+        assert doc["score_scale"] == "0-1"
+        assert doc["score_type"] == "task_relevance"
+
     def test_builder_uses_current_call_candidates_and_originals(self):
         parsed = EvidenceJudgeOutput(
             overall_evidence_state="sufficient",
@@ -1104,6 +1144,8 @@ class TestEvidenceMemorySummary:
                     evidence_id="current",
                     keep=True,
                     final_quality="high",
+                    evidence_score=0.93,
+                    score_reason="Directly supports the current quiz resource.",
                     use_case="core_evidence",
                     coverage_contribution="covers Python function basics",
                     reason="useful course note",

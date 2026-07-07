@@ -1,4 +1,4 @@
-﻿"""LearningState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
+"""LearningState: the shared state object that flows through all nodes in the LangGraph, acting as the single source of truth for the system."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ RESOURCE_RESULTS_CLEAR: list[dict] = [{"__resource_results_clear__": True}]
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
+CONTEXT_WINDOW_HISTORY_LIMIT = 30
+CONTEXT_WINDOW_EVENT_LIMIT = 120
 
 
 def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
@@ -47,6 +49,41 @@ def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[di
         reverse=True,
     )
     return sorted_entries[:EVIDENCE_MEMORY_MAX_ENTRIES]
+
+
+def bounded_context_window_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Append bounded context-window telemetry without unbounded growth."""
+    values = list(existing or []) + list(update or [])
+    return values[-CONTEXT_WINDOW_HISTORY_LIMIT:]
+
+
+def bounded_context_event_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Append bounded request-local CE events."""
+    values = list(existing or []) + list(update or [])
+    return values[-CONTEXT_WINDOW_EVENT_LIMIT:]
+
+
+def merge_dict_reducer(existing: dict, update: dict) -> dict:
+    """Reducer-safe shallow dict merge for keyed context-window state."""
+    merged = dict(existing or {})
+    merged.update(update or {})
+    return merged
+
+
+def latest_dict_reducer(_existing: dict, update: dict) -> dict:
+    """Replace with the latest dict value."""
+    return dict(update or {})
+
+
+def latest_string_reducer(_existing: str, update: str) -> str:
+    """Replace with the latest string value."""
+    return str(update or "")
 
 
 # Current-turn transient state reset
@@ -105,6 +142,7 @@ def initial_request_reset_transient_state() -> dict:
         "local_evidence_originals": {},
         "web_evidence_originals": {},
         "evidence_candidates": [],
+        "graded_evidence": [],
         "evidence_judge_output": {},
         "evidence_judge_debug": {},
         "evidence_judge_rounds": 0,
@@ -209,7 +247,11 @@ def initial_request_reset_transient_state() -> dict:
         "pending_interrupt_type": "",
         # context window telemetry
         "context_usage": {},
-        "context_usage_history": [],
+        "request_context_window": {
+            "current_request_id": "",
+            "current_node": "",
+            "last_event_count": 0,
+        },
     }
 
 
@@ -224,7 +266,9 @@ def context_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
     return existing + update
 
 
-def resource_branch_results_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
+def resource_branch_results_reducer(
+    existing: list[dict], update: list[dict]
+) -> list[dict]:
     """Merge resource worker results from dynamic fan-out branches."""
     if not update or update[0].get("__resource_results_clear__"):
         return []
@@ -242,154 +286,235 @@ def resource_branch_results_reducer(existing: list[dict], update: list[dict]) ->
     order = ["mindmap", "quiz", "review_doc", "study_plan"]
     return sorted(
         merged.values(),
-        key=lambda item: order.index(item.get("resource_type")) if item.get("resource_type") in order else len(order),
+        key=lambda item: order.index(item.get("resource_type"))
+        if item.get("resource_type") in order
+        else len(order),
     )
 
 
 class LearningState(TypedDict):
-    messages: Annotated[list, add_messages]                             # Chat history
-    conversation_summary: str                                            # Compact multi-turn conversation summary
-    evidence_summary_memory: Annotated[list[dict], evidence_memory_reducer]  # Bounded evidence memory
-    evidence_gap_memory: Annotated[list[dict], evidence_memory_reducer]     # Bounded gap memory
-    request_id: str                                                      # Per-request trace identifier
-    session_id: str                                                      # Session identifier for trace grouping
-    thread_id: str                                                       # LangGraph thread identifier
-    schema_version: str                                                  # Run-control state schema version
-    run_status: str                                                      # running / stopping / stopped / completed / error
-    stop_requested: bool                                                 # Whether user requested safe stop
-    stop_reason: str                                                     # User-visible safe-stop reason
-    stop_requested_at: str                                               # UTC timestamp for stop request
-    current_node: str                                                    # Current LangGraph node, for status UI
-    last_completed_node: str                                             # Last completed LangGraph node, for status UI
-    resume_available: bool                                               # True only when a real checkpoint interrupt can continue
-    stopped_at: str                                                      # UTC timestamp for saved stop checkpoint
-    pending_interrupt_type: str                                          # user_stop / plan_review / memory_confirmation
-    context_usage: dict                                                  # Most recent LLM context window usage
-    context_usage_history: list[dict]                                    # Current request_id bounded usage history
-    intent: Literal["academic", "emotional", "unknown"]    # User intent
-    subject: str                                                        # The topic being discussed
-    subject_candidates: list[str]                                       # Ordered available-subject candidates
-    keypoints: list[str]                                                # Key points
-    requested_resource_type: str                                        # Requested resource type, e.g. mindmap
-    requested_resource_types: list[str]                                  # Ordered resource types requested for parallel generation
-    needs_mindmap: bool                                                 # Route to mindmap collaboration chain when true
-    memory_use_policy: Literal["use", "ignore", "ask_user", "unset"]    # Whether query rewrite may use selected memory
-    memory_use_reason: str                                              # Reason for the memory use policy
-    memory_use_user_choice: Literal["use", "ignore", ""]               # User choice after HIL confirmation
-    memory_confirmation_required: bool                                  # Whether memory use confirmation was requested
-    memory_confirmation_question: str                                   # HIL question shown to the user
-    selected_evidence_memory_summaries: list[dict]                      # Compact evidence summaries selected for current query
-    episodic_memory_results: list[dict]                                 # Top-K episodic memories with scores (from episodic_memory_retriever)
-    semantic_memory_results: list[dict]                                 # Top-K semantic memories with scores (from episodic_memory_retriever)
-    mindmap_outline: str                                                # Planner-produced knowledge structure blueprint
-    mindmap_tree: dict                                                  # Reviewed JSON tree draft
-    mindmap_artifact: dict                                              # Generated mindmap tree and artifact metadata
-    mindmap_review_verdict: str                                         # "approve" / "reject"
-    mindmap_review_reason: str                                          # Reviewer reasoning
-    mindmap_revision_notes: str                                         # Feedback for mindmap_agent regeneration
-    mindmap_round: int                                                  # Mindmap generation/review round
-    exercise_outline: str                                               # Planner-produced exercise blueprint
-    exercise_items: list[dict]                                          # Reviewed exercise item drafts
-    exercise_artifact: dict                                             # Generated exercise metadata/content
-    exercise_review_verdict: str                                        # "approve" / "reject"
-    exercise_review_reason: str                                         # Exercise reviewer reasoning
-    exercise_revision_notes: str                                        # Feedback for exercise_agent regeneration
-    exercise_round: int                                                 # Exercise generation/review round
-    review_doc_outline: str                                             # Planner-produced review document blueprint
-    review_doc_markdown: str                                            # Reviewed Markdown review document draft
-    review_doc_markdowns: list[dict]                                    # Per-subject Markdown review documents
-    review_doc_artifact: dict                                           # Generated review document content and artifact metadata
-    review_doc_artifacts: list[dict]                                    # Per-subject review document artifact metadata
-    review_doc_review_verdict: str                                      # "approve" / "reject"
-    review_doc_review_reason: str                                       # Review document reviewer reasoning
-    review_doc_revision_notes: str                                      # Feedback for review_doc_agent regeneration
-    review_doc_round: int                                               # Review document generation/review round
-    code_practice_outline: str                                           # Planner-produced code practice case blueprint
-    code_practice_markdown: str                                          # Reviewed Markdown code practice case draft
-    code_practice_artifact: dict                                         # Generated code practice content and artifact metadata
-    code_practice_review_verdict: str                                    # "approve" / "reject"
-    code_practice_review_reason: str                                     # Code practice reviewer reasoning
-    code_practice_revision_notes: str                                    # Feedback for code_practice_agent regeneration
-    code_practice_round: int                                             # Code practice generation/review round
-    video_script_outline: str                                            # Planner-produced teaching video / animation script blueprint
-    video_script_markdown: str                                           # Reviewed Markdown teaching video / animation script draft
-    video_script_srt: str                                                # Generated subtitle/caption text in SRT format
-    video_script_artifact: dict                                          # Generated video script content and artifact metadata
-    video_script_review_verdict: str                                     # "approve" / "reject"
-    video_script_review_reason: str                                      # Video script reviewer reasoning
-    video_script_revision_notes: str                                     # Feedback for video_script_agent regeneration
-    video_script_round: int                                              # Video script generation/review round
-    video_animation_spec: dict                                           # Structured animation/MP4 generation specification
-    video_animation_html: str                                            # Generated animation HTML source for rendering
-    video_animation_artifact: dict                                       # Generated animation/MP4 artifact metadata
-    video_animation_review_verdict: str                                  # "approve" / "reject"
-    video_animation_review_reason: str                                   # Video animation reviewer reasoning
-    video_animation_revision_notes: str                                  # Feedback for video_animation regeneration
-    video_animation_round: int                                           # Video animation generation/review round
-    video_animation_render_log: str                                      # Renderer log or failure details for animation export
-    study_plan_emotional_intel: str                                     # Study-plan learner workload/emotional summary
-    study_plan_emotional_profile: dict                                  # Structured emotional/workload profile
-    study_plan_outline: str                                             # Planner-produced study-plan outline
-    study_plan_artifact: dict                                           # Structured personalized study-plan artifact
-    study_plan_markdown: str                                            # Rendered study-plan Markdown
-    study_plan_round: int                                               # Study-plan generation/review round
-    study_plan_academic_verdict: str                                    # "approve" / "reject"
-    study_plan_academic_reason: str                                     # Academic reviewer reasoning
-    study_plan_emotional_verdict: str                                   # "approve" / "reject"
-    study_plan_emotional_reason: str                                    # Emotional/workload reviewer reasoning
-    study_plan_consensus: bool                                          # Both study-plan reviewers approved
-    study_plan_revision_notes: str                                      # Feedback for study_plan_agent regeneration
-    study_plan_document_artifact: dict                                  # Markdown/DOCX artifact metadata
-    context: Annotated[list[dict], context_reducer]                    # Merged retrieval context (fan-in)
-    retrieval_plan: list[dict]                                          # Multi-subject retrieval plan
-    primary_subject: str                                                # Main subject of the user goal
-    learning_goal: str                                                  # Normalized learning goal
-    subject_relation_summary: str                                       # How subjects relate to the goal
-    local_retrieval_query: str                                               # Initial rewritten query for local course retrieval
-    web_research_seed_query: str                                               # Initial rewritten query for Web Research
-    expanded_keypoints: list[str]                                       # Query rewriter expanded concrete keypoints
-    search_query_rewrite_reason: str                                    # Query rewriter rationale
-    search_query_rewrite_error: str                                     # Query rewriter failure reason, if any
-    search_query_rewrite_raw_preview: str                               # Truncated raw query-rewriter output for diagnostics
-    retrieval_branch_mode: str                                          # multi_subject_plan / single_subject_synthetic
-    web_evidence_count: int                                             # Approved source_type=web evidence count
-    web_research_debug: dict                                             # Web Research V2 execution status/debug summary
-    web_research_outcome: Literal["", "success", "failed", "skipped"]  # Web Research V2 outcome
-    local_evidence_candidates: list[dict]                                # Local RAG EvidenceCandidate snapshots from rag_retrieve
-    web_evidence_candidates: list[dict]                                  # Web EvidenceCandidate snapshots from Web Research V2
-    local_evidence_originals: dict                                       # Original local RAG docs keyed by evidence_id
-    web_evidence_originals: dict                                         # Original Tavily results keyed by evidence_id
-    evidence_candidates: list[dict]                                      # Dual-source local/web EvidenceCandidate snapshots
-    evidence_judge_output: dict                                          # Raw structured Evidence Judge output
-    evidence_judge_debug: dict                                           # Evidence Judge execution status/debug summary
-    evidence_judge_rounds: int                                           # Evidence Judge rounds executed
-    evidence_judge_state: str                                            # sufficient / partially_sufficient / insufficient
-    evidence_coverage_gaps: list[dict]                                   # Coverage gaps reserved for future search optimization
-    search_refinement_needed: bool                                       # Evidence Judge requested more search
-    search_refinement_deferred: bool                                     # Follow-up search is intentionally deferred
-    search_refinement_deferred_reason: str                               # Why refinement was not executed
-    proposed_followup_search_queries: list[dict]                         # Reserved future search queries from coverage gaps
-    search_optimization_reserved: bool                                   # Search optimization hook is reserved
-    search_optimization_status: str                                      # reserved_not_implemented / disabled
-    dual_source_mode: bool                                               # rag_retrieve used dual_source_evidence mode
-    evidence_judge_failed: bool                                          # Evidence Judge failed and no evidence was admitted
-    degraded_generation: bool                                            # Generation proceeds without approved evidence
-    degraded_reason: str                                                 # Reason for degraded generation
-    evidence_controlled_stop: bool                                       # Controlled stop due to insufficient evidence
-    evidence_controlled_stop_reason: str                                 # Reason for controlled stop
-    plan: str                                                           # Generated plans
-    resource_generation_plan: dict                                      # Parallel resource generation plan
-    resource_branch_results: Annotated[list[dict], resource_branch_results_reducer]  # Parallel resource worker results
-    resource_bundle_artifact: dict                                      # Aggregated multi-resource artifact metadata
-    resource_generation_debug: dict                                     # Resource generation execution status/debug summary
-    resource_generation_status: str                                     # success / partial_success / failed / skipped
-    learning_path: dict                                                 # Curriculum Engine: LearningPath serialized
-    curriculum_context: str                                             # KG-aware context string for study_plan_planner
-    quiz_results: list[dict]                                            # Assessment: recent quiz attempts with error classifications
-    adaptive_tasks: list[dict]                                          # Assessment: generated adaptive practice tasks
-    recommendations: list[dict]                                         # Recommendation Engine: ranked recommendations
-    review_schedule: list[dict]                                         # Assessment: due spaced repetition review items
-    retry_count: int                                                    # Hallucination retry counter
-    hallucination_detected: bool                                        # Hallucination flag
-    rewritten_query: str                                                # Rewritten query on retry
-    hallucination_reason: str                                           # Reason from hallucination eval
+    messages: Annotated[list, add_messages]  # Chat history
+    conversation_summary: Annotated[
+        str, latest_string_reducer
+    ]  # Compact multi-turn conversation summary
+    evidence_summary_memory: Annotated[
+        list[dict], evidence_memory_reducer
+    ]  # Bounded evidence memory
+    evidence_gap_memory: Annotated[
+        list[dict], evidence_memory_reducer
+    ]  # Bounded gap memory
+    request_id: str  # Per-request trace identifier
+    session_id: str  # Session identifier for trace grouping
+    thread_id: str  # LangGraph thread identifier
+    schema_version: str  # Run-control state schema version
+    run_status: str  # running / stopping / stopped / completed / error
+    stop_requested: bool  # Whether user requested safe stop
+    stop_reason: str  # User-visible safe-stop reason
+    stop_requested_at: str  # UTC timestamp for stop request
+    current_node: str  # Current LangGraph node, for status UI
+    last_completed_node: str  # Last completed LangGraph node, for status UI
+    resume_available: bool  # True only when a real checkpoint interrupt can continue
+    stopped_at: str  # UTC timestamp for saved stop checkpoint
+    pending_interrupt_type: str  # user_stop / plan_review / memory_confirmation
+    context_usage: dict  # Most recent LLM context window usage
+    context_usage_history: Annotated[
+        list[dict], bounded_context_window_reducer
+    ]  # Cross-request bounded usage history
+    request_context_window: Annotated[
+        dict, latest_dict_reducer
+    ]  # Current request CE window summary
+    context_window_events: Annotated[
+        list[dict], bounded_context_event_reducer
+    ]  # Current/recent CE event summaries
+    last_context_policy_by_node: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last resolved policy by node
+    last_provider_supply_by_node: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last provider supply by node
+    last_context_selection_by_node: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last apply selection by node
+    last_context_applied_by_node: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last applied context by node
+    last_drop_reasons_by_node: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last drop reason counts by node
+    last_resource_subnodes: Annotated[
+        list[dict], bounded_context_window_reducer
+    ]  # Bounded resource subnode events
+    resource_artifacts_by_type: Annotated[
+        dict, merge_dict_reducer
+    ]  # Artifact summaries by resource type
+    last_generated_artifacts: Annotated[
+        list[dict], bounded_context_window_reducer
+    ]  # Bounded generated artifact summaries
+    intent: Literal["academic", "emotional", "unknown"]  # User intent
+    subject: str  # The topic being discussed
+    subject_candidates: list[str]  # Ordered available-subject candidates
+    keypoints: list[str]  # Key points
+    requested_resource_type: str  # Requested resource type, e.g. mindmap
+    requested_resource_types: list[
+        str
+    ]  # Ordered resource types requested for parallel generation
+    needs_mindmap: bool  # Route to mindmap collaboration chain when true
+    memory_use_policy: Literal[
+        "use", "ignore", "ask_user", "unset"
+    ]  # Whether query rewrite may use selected memory
+    memory_use_reason: str  # Reason for the memory use policy
+    memory_use_user_choice: Literal[
+        "use", "ignore", ""
+    ]  # User choice after HIL confirmation
+    memory_confirmation_required: bool  # Whether memory use confirmation was requested
+    memory_confirmation_question: str  # HIL question shown to the user
+    selected_evidence_memory_summaries: list[
+        dict
+    ]  # Compact evidence summaries selected for current query
+    episodic_memory_results: list[
+        dict
+    ]  # Top-K episodic memories with scores (from episodic_memory_retriever)
+    semantic_memory_results: list[
+        dict
+    ]  # Top-K semantic memories with scores (from episodic_memory_retriever)
+    mindmap_outline: str  # Planner-produced knowledge structure blueprint
+    mindmap_tree: dict  # Reviewed JSON tree draft
+    mindmap_artifact: dict  # Generated mindmap tree and artifact metadata
+    mindmap_review_verdict: str  # "approve" / "reject"
+    mindmap_review_reason: str  # Reviewer reasoning
+    mindmap_revision_notes: str  # Feedback for mindmap_agent regeneration
+    mindmap_round: int  # Mindmap generation/review round
+    exercise_outline: str  # Planner-produced exercise blueprint
+    exercise_items: list[dict]  # Reviewed exercise item drafts
+    exercise_artifact: dict  # Generated exercise metadata/content
+    exercise_review_verdict: str  # "approve" / "reject"
+    exercise_review_reason: str  # Exercise reviewer reasoning
+    exercise_revision_notes: str  # Feedback for exercise_agent regeneration
+    exercise_round: int  # Exercise generation/review round
+    review_doc_outline: str  # Planner-produced review document blueprint
+    review_doc_markdown: str  # Reviewed Markdown review document draft
+    review_doc_markdowns: list[dict]  # Per-subject Markdown review documents
+    review_doc_artifact: dict  # Generated review document content and artifact metadata
+    review_doc_artifacts: list[dict]  # Per-subject review document artifact metadata
+    review_doc_review_verdict: str  # "approve" / "reject"
+    review_doc_review_reason: str  # Review document reviewer reasoning
+    review_doc_revision_notes: str  # Feedback for review_doc_agent regeneration
+    review_doc_round: int  # Review document generation/review round
+    code_practice_outline: str  # Planner-produced code practice case blueprint
+    code_practice_markdown: str  # Reviewed Markdown code practice case draft
+    code_practice_artifact: (
+        dict  # Generated code practice content and artifact metadata
+    )
+    code_practice_review_verdict: str  # "approve" / "reject"
+    code_practice_review_reason: str  # Code practice reviewer reasoning
+    code_practice_revision_notes: str  # Feedback for code_practice_agent regeneration
+    code_practice_round: int  # Code practice generation/review round
+    video_script_outline: (
+        str  # Planner-produced teaching video / animation script blueprint
+    )
+    video_script_markdown: (
+        str  # Reviewed Markdown teaching video / animation script draft
+    )
+    video_script_srt: str  # Generated subtitle/caption text in SRT format
+    video_script_artifact: dict  # Generated video script content and artifact metadata
+    video_script_review_verdict: str  # "approve" / "reject"
+    video_script_review_reason: str  # Video script reviewer reasoning
+    video_script_revision_notes: str  # Feedback for video_script_agent regeneration
+    video_script_round: int  # Video script generation/review round
+    video_animation_spec: dict  # Structured animation/MP4 generation specification
+    video_animation_html: str  # Generated animation HTML source for rendering
+    video_animation_artifact: dict  # Generated animation/MP4 artifact metadata
+    video_animation_review_verdict: str  # "approve" / "reject"
+    video_animation_review_reason: str  # Video animation reviewer reasoning
+    video_animation_revision_notes: str  # Feedback for video_animation regeneration
+    video_animation_round: int  # Video animation generation/review round
+    video_animation_render_log: (
+        str  # Renderer log or failure details for animation export
+    )
+    study_plan_emotional_intel: str  # Study-plan learner workload/emotional summary
+    study_plan_emotional_profile: dict  # Structured emotional/workload profile
+    study_plan_outline: str  # Planner-produced study-plan outline
+    study_plan_artifact: dict  # Structured personalized study-plan artifact
+    study_plan_markdown: str  # Rendered study-plan Markdown
+    study_plan_round: int  # Study-plan generation/review round
+    study_plan_academic_verdict: str  # "approve" / "reject"
+    study_plan_academic_reason: str  # Academic reviewer reasoning
+    study_plan_emotional_verdict: str  # "approve" / "reject"
+    study_plan_emotional_reason: str  # Emotional/workload reviewer reasoning
+    study_plan_consensus: bool  # Both study-plan reviewers approved
+    study_plan_revision_notes: str  # Feedback for study_plan_agent regeneration
+    study_plan_document_artifact: dict  # Markdown/DOCX artifact metadata
+    context: Annotated[list[dict], context_reducer]  # Merged retrieval context (fan-in)
+    retrieval_plan: list[dict]  # Multi-subject retrieval plan
+    primary_subject: str  # Main subject of the user goal
+    learning_goal: str  # Normalized learning goal
+    subject_relation_summary: str  # How subjects relate to the goal
+    local_retrieval_query: str  # Initial rewritten query for local course retrieval
+    web_research_seed_query: str  # Initial rewritten query for Web Research
+    expanded_keypoints: list[str]  # Query rewriter expanded concrete keypoints
+    search_query_rewrite_reason: str  # Query rewriter rationale
+    search_query_rewrite_error: str  # Query rewriter failure reason, if any
+    search_query_rewrite_raw_preview: (
+        str  # Truncated raw query-rewriter output for diagnostics
+    )
+    retrieval_branch_mode: str  # multi_subject_plan / single_subject_synthetic
+    web_evidence_count: int  # Approved source_type=web evidence count
+    web_research_debug: dict  # Web Research V2 execution status/debug summary
+    web_research_outcome: Literal[
+        "", "success", "failed", "skipped"
+    ]  # Web Research V2 outcome
+    local_evidence_candidates: list[
+        dict
+    ]  # Local RAG EvidenceCandidate snapshots from rag_retrieve
+    web_evidence_candidates: list[
+        dict
+    ]  # Web EvidenceCandidate snapshots from Web Research V2
+    local_evidence_originals: dict  # Original local RAG docs keyed by evidence_id
+    web_evidence_originals: dict  # Original Tavily results keyed by evidence_id
+    evidence_candidates: list[dict]  # Dual-source local/web EvidenceCandidate snapshots
+    graded_evidence: list[
+        dict
+    ]  # LLM-judged evidence snapshots for CE provider handoff
+    evidence_judge_output: dict  # Raw structured Evidence Judge output
+    evidence_judge_debug: dict  # Evidence Judge execution status/debug summary
+    evidence_judge_rounds: int  # Evidence Judge rounds executed
+    evidence_judge_state: str  # sufficient / partially_sufficient / insufficient
+    evidence_coverage_gaps: list[
+        dict
+    ]  # Coverage gaps reserved for future search optimization
+    search_refinement_needed: bool  # Evidence Judge requested more search
+    search_refinement_deferred: bool  # Follow-up search is intentionally deferred
+    search_refinement_deferred_reason: str  # Why refinement was not executed
+    proposed_followup_search_queries: list[
+        dict
+    ]  # Reserved future search queries from coverage gaps
+    search_optimization_reserved: bool  # Search optimization hook is reserved
+    search_optimization_status: str  # reserved_not_implemented / disabled
+    dual_source_mode: bool  # rag_retrieve used dual_source_evidence mode
+    evidence_judge_failed: bool  # Evidence Judge failed and no evidence was admitted
+    degraded_generation: bool  # Generation proceeds without approved evidence
+    degraded_reason: str  # Reason for degraded generation
+    evidence_controlled_stop: bool  # Controlled stop due to insufficient evidence
+    evidence_controlled_stop_reason: str  # Reason for controlled stop
+    plan: str  # Generated plans
+    resource_generation_plan: dict  # Parallel resource generation plan
+    resource_branch_results: Annotated[
+        list[dict], resource_branch_results_reducer
+    ]  # Parallel resource worker results
+    resource_bundle_artifact: dict  # Aggregated multi-resource artifact metadata
+    resource_generation_debug: (
+        dict  # Resource generation execution status/debug summary
+    )
+    resource_generation_status: str  # success / partial_success / failed / skipped
+    learning_path: dict  # Curriculum Engine: LearningPath serialized
+    curriculum_context: str  # KG-aware context string for study_plan_planner
+    quiz_results: list[
+        dict
+    ]  # Assessment: recent quiz attempts with error classifications
+    adaptive_tasks: list[dict]  # Assessment: generated adaptive practice tasks
+    recommendations: list[dict]  # Recommendation Engine: ranked recommendations
+    review_schedule: list[dict]  # Assessment: due spaced repetition review items
+    retry_count: int  # Hallucination retry counter
+    hallucination_detected: bool  # Hallucination flag
+    rewritten_query: str  # Rewritten query on retry
+    hallucination_reason: str  # Reason from hallucination eval

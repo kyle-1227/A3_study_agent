@@ -26,7 +26,9 @@ _SCORE_METADATA_KEYS = (
     "confidence_source",
     "confidence_represents",
     "confidence_is_relevance",
+    "score_source",
     "score_type",
+    "score_reason",
 )
 
 
@@ -72,6 +74,11 @@ def _existing_evidence_candidates(
     candidates: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for bucket in (
+        "graded_evidence",
+        "evidence_items",
+        "local_evidence",
+        "web_evidence",
+        "retrieval_evidence",
         "evidence_candidates",
         "local_evidence_candidates",
         "web_evidence_candidates",

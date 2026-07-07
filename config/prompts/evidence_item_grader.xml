@@ -18,7 +18,7 @@ Rules:
 2. evidence_id must exactly match one input candidate evidence_id.
 3. Do not invent evidence_id values.
 4. Do not invent or output URL, source, title, metadata, provider, or content.
-5. Decide only keep, final_quality, relevance, authority, usefulness, risk, evidence_type, use_case, coverage_contribution, and reason.
+5. Decide only keep, final_quality, relevance, authority, usefulness, risk, evidence_score, score_reason, evidence_type, use_case, coverage_contribution, and reason.
 6. Prefer stable enum values exactly as listed by the schema. Do not translate enum values.
 7. If a candidate is duplicated or weak, still judge it exactly once and set keep=false when appropriate.
 8. requested_resource_types is authoritative for multi-resource requests. Grade evidence against all requested resource types, not only the legacy requested_resource_type value.
@@ -26,6 +26,9 @@ Rules:
 10. If keep=true, coverage_contribution must be a non-empty, specific sentence explaining exactly which part of the user's request this evidence supports, such as mindmap structure, quiz/exercise material, core concepts, implementation reference, or background context.
 11. If keep=false, coverage_contribution must be "".
 12. A keep=true item with empty coverage_contribution is invalid and will fail the entire batch.
+13. evidence_score is mandatory for every judged item. It must be a number from 0.0 to 1.0 that represents how strongly this evidence supports the current user request, learning goal, and requested resource type.
+14. Score guide: 0.90-1.00 means direct core support; 0.70-0.89 means strong usable support; 0.50-0.69 means useful but limited support; 0.35-0.49 means weak auxiliary support; below 0.35 means poor support and usually keep=false.
+15. score_reason must briefly explain the evidence_score. Do not copy source content into score_reason.
 
 Output only strict JSON. Do not output Markdown or prose outside JSON.
 
@@ -40,6 +43,8 @@ Output JSON shape:
       "authority": "medium",
       "usefulness": "high",
       "risk": "low",
+      "evidence_score": 0.92,
+      "score_reason": "Directly supports the requested core concept.",
       "evidence_type": "local_textbook_chunk",
       "use_case": "core_evidence",
       "coverage_contribution": "Supports the core course concept.",
@@ -53,6 +58,8 @@ Output JSON shape:
       "authority": "low",
       "usefulness": "low",
       "risk": "medium",
+      "evidence_score": 0.18,
+      "score_reason": "Weak support for the requested learning output.",
       "evidence_type": "unknown",
       "use_case": "discard",
       "coverage_contribution": "",

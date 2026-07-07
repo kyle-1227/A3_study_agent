@@ -1,4 +1,4 @@
-"""ContextPacker shadow mode public API."""
+"""Context packing and apply public APIs."""
 
 from src.context_engineering.packing.apply import (
     ApplyBudgetPolicy,
@@ -58,6 +58,10 @@ from src.context_engineering.packing.node_policy import (
     resolve_context_policy,
     should_emit_context_policy_summary,
 )
+from src.context_engineering.packing.orchestrator import (
+    ContextPreparedMessages,
+    prepare_messages_with_context_policy,
+)
 from src.context_engineering.packing.policies import (
     PackingPolicy,
     get_packing_policy,
@@ -99,6 +103,7 @@ __all__ = [
     "ContextImportanceTelemetry",
     "ContextInjectionPolicy",
     "ContextPackingError",
+    "ContextPreparedMessages",
     "ImportanceScoringPolicy",
     "NodeContextPolicy",
     "PackedContext",
@@ -148,6 +153,7 @@ __all__ = [
     "pack_context_items",
     "parse_importance_scorer_output",
     "prepare_context_apply_selection",
+    "prepare_messages_with_context_policy",
     "render_injected_context",
     "render_selected_context",
     "resolve_context_policy",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.config import get_setting
 from src.context_engineering.itemizer import make_context_item
 from src.context_engineering.providers.base import ProviderContext
 from src.context_engineering.schema import ContextItem, ContextProviderError
@@ -54,7 +55,18 @@ def _existing_rules(
     limit: int,
 ) -> list[tuple[str, str, str]]:
     rules: list[tuple[str, str, str]] = []
-    for key in ("context_rules", "node_rules", "runtime_rules"):
+    for source, title, content in _config_rules():
+        rules.append((source, title, content))
+        if len(rules) >= limit:
+            return rules
+    for key in (
+        "context_rules",
+        "node_rules",
+        "runtime_rules",
+        "node_output_contracts",
+        "resource_quality_rules",
+        "reviewer_rubrics",
+    ):
         value = state.get(key)
         if value is None or value == "":
             continue
@@ -100,4 +112,32 @@ def _existing_rules(
             message=f"{key} must be str or list",
             original_exception_type="TypeError",
         )
+    return rules
+
+
+def _config_rules() -> list[tuple[str, str, str]]:
+    raw = get_setting("context_engineering.rules", [])
+    if not isinstance(raw, list):
+        return []
+    rules: list[tuple[str, str, str]] = []
+    for index, item in enumerate(raw):
+        if isinstance(item, str):
+            if item.strip():
+                rules.append(
+                    ("context_engineering.rules", f"config_rule_{index}", item)
+                )
+            continue
+        if not isinstance(item, dict):
+            continue
+        content = str(
+            item.get("content") or item.get("rule") or item.get("summary") or ""
+        )
+        if content.strip():
+            rules.append(
+                (
+                    "context_engineering.rules",
+                    str(item.get("title") or f"config_rule_{index}"),
+                    content,
+                )
+            )
     return rules

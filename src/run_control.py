@@ -17,7 +17,8 @@ RUN_STATUS_STOPPING = "stopping"
 RUN_STATUS_STOPPED = "stopped"
 RUN_STATUS_CONTINUING = "continuing"
 RUN_STATUS_COMPLETED = "completed"
-RUN_STATUS_ERROR = "error"
+RUN_STATUS_ERROR = "failed"
+RUN_STATUS_IDLE = "idle"
 RUN_STATUS_NOT_RESUMABLE = "not_resumable"
 RUN_STATUS_UNKNOWN = "unknown"
 
@@ -56,6 +57,7 @@ class RunControlRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._signals: dict[str, StopSignal] = {}
+        self._active_runs: dict[str, dict[str, Any]] = {}
 
     def request_stop(self, thread_id: str, reason: str) -> StopSignal:
         signal = StopSignal(
@@ -79,8 +81,102 @@ class RunControlRegistry:
         with self._lock:
             self._signals.pop(thread_id, None)
 
+    def start_active_run(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        snapshot = _safe_active_run_payload(thread_id, payload)
+        with self._lock:
+            self._active_runs[thread_id] = snapshot
+        return dict(snapshot)
+
+    def update_active_run(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        update = _safe_active_run_payload(thread_id, payload)
+        with self._lock:
+            current = dict(self._active_runs.get(thread_id) or {"thread_id": thread_id})
+            current.update(update)
+            self._active_runs[thread_id] = current
+            return dict(current)
+
+    def finish_active_run(
+        self,
+        thread_id: str,
+        terminal_payload: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            self._active_runs.pop(thread_id, None)
+
+    def get_active_run(self, thread_id: str | None) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        with self._lock:
+            snapshot = self._active_runs.get(thread_id)
+            return dict(snapshot) if snapshot is not None else None
+
 
 run_control_registry = RunControlRegistry()
+
+
+def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "thread_id",
+        "schema_version",
+        "run_status",
+        "resume_available",
+        "pending_interrupt_type",
+        "current_node",
+        "last_completed_node",
+        "stopped_at",
+        "stop_reason",
+        "request_context_window",
+        "thread_context_window",
+        "context_usage",
+        "context_usage_history",
+        "missing_run_control_fields",
+        "message",
+    }
+    result: dict[str, Any] = {"thread_id": str(thread_id)}
+    for key, value in (payload or {}).items():
+        if key in allowed:
+            result[key] = _safe_active_value(value)
+    return result
+
+
+def _safe_active_value(value: Any) -> Any:
+    if isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value[:512]
+    if isinstance(value, list):
+        return [_safe_active_value(item) for item in value[:50]]
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in list(value.items())[:50]:
+            safe[str(key)[:120]] = _safe_active_value(item)
+        return safe
+    if value is None:
+        return None
+    return str(value)[:512]
+
+
+def start_active_run(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return run_control_registry.start_active_run(thread_id, payload)
+
+
+def update_active_run(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return run_control_registry.update_active_run(thread_id, payload)
+
+
+def finish_active_run(
+    thread_id: str,
+    terminal_payload: dict[str, Any] | None = None,
+) -> None:
+    run_control_registry.finish_active_run(thread_id, terminal_payload)
+
+
+def get_active_run(thread_id: str | None) -> dict[str, Any] | None:
+    return run_control_registry.get_active_run(thread_id)
 
 
 def utc_now_iso() -> str:
@@ -110,7 +206,9 @@ def stop_requested_for_state(state: dict[str, Any]) -> StopSignal | None:
     return None
 
 
-def wrap_interruptible_node(node_name: str, node_fn: Callable[..., Any]) -> Callable[..., Any]:
+def wrap_interruptible_node(
+    node_name: str, node_fn: Callable[..., Any]
+) -> Callable[..., Any]:
     """Wrap a sync or async LangGraph node with a pre-node user stop gate."""
 
     async def _wrapped(state: dict[str, Any], *args: Any, **kwargs: Any) -> Any:

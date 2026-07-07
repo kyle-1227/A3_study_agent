@@ -167,6 +167,7 @@ def emit_context_usage(
     state: dict | None,
     reserved_output_tokens: int | None = None,
     schema_size_chars: int | None = None,
+    trace_fields: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Emit context usage or error telemetry as A3_TRACE."""
     stage, payload = build_context_usage_payload(
@@ -186,6 +187,8 @@ def emit_context_usage(
         if stage == "context_usage"
         else {key: payload[key] for key in _ALLOWED_ERROR_KEYS if key in payload}
     )
+    if trace_fields:
+        safe_payload = {**trace_fields, **safe_payload}
     emit_a3_trace(
         logger,
         stage,

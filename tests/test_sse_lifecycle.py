@@ -512,6 +512,7 @@ class TestSSEErrorCapture:
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(next=(), tasks=[])
         )
+        mock_graph.aupdate_state = AsyncMock()
 
         collected = []
         async for sse in generate_sse("q", mock_graph):
@@ -879,6 +880,7 @@ class TestSSEProviderRetryEvents:
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(next=(), tasks=[], values={}),
         )
+        mock_graph.aupdate_state = AsyncMock()
 
         collected = []
         async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
@@ -923,6 +925,7 @@ class TestSSEResourceSubnodeEvents:
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(next=(), tasks=[], values={}),
         )
+        mock_graph.aupdate_state = AsyncMock()
 
         collected = []
         async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
@@ -940,6 +943,143 @@ class TestSSEResourceSubnodeEvents:
         assert subnode_events[0]["status"] == "start"
         assert "content" not in subnode_events[0]
         assert "secret" not in json.dumps(subnode_events[0], ensure_ascii=False)
+
+
+class TestSSEContextErrorEvents:
+    """CE fail-fast traces should become explicit frontend-safe SSE errors."""
+
+    @pytest.mark.anyio
+    async def test_required_source_missing_emits_context_error_and_failed_status(self):
+        from app import generate_sse
+
+        async def events():
+            emit_a3_trace(
+                logging.getLogger("test_sse_context_error"),
+                "context_apply_error",
+                {
+                    "node_name": "review_doc_agent",
+                    "llm_node": "review_doc",
+                    "trace_call_id": "call-1",
+                    "trace_seq": 4,
+                    "reason": "required_sources_missing",
+                    "warning": "required context sources are unavailable",
+                    "fallback_used": False,
+                    "error_scope": "provider",
+                    "recoverable": False,
+                    "required_sources_missing": ["evidence"],
+                    "provider_missing_reasons": {"evidence": "provider_empty"},
+                    "content": "api_key=sk-secret must not leak",
+                },
+                state={"request_id": "r1"},
+            )
+            yield _node_start("review_doc_agent")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={}),
+        )
+        mock_graph.aupdate_state = AsyncMock()
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        context_errors = [
+            payload for payload in payloads if payload.get("type") == "context_error"
+        ]
+        assert len(context_errors) == 1
+        assert context_errors[0] == {
+            "type": "context_error",
+            "stage": "context_apply_error",
+            "node": "review_doc_agent",
+            "llm_node": "review_doc",
+            "trace_call_id": "call-1",
+            "trace_seq": 4,
+            "reason": "required_sources_missing",
+            "required_sources_missing": ["evidence"],
+            "required_sources_filtered_out": [],
+            "recoverable": False,
+            "provider_missing_reasons": {"evidence": "provider_empty"},
+            "source_drop_reasons": {},
+            "budget_drop_reasons": {},
+            "source_counts_before": {},
+            "source_counts_after": {},
+            "source_counts_dropped": {},
+        }
+        mock_graph.aupdate_state.assert_any_await(
+            {"configurable": {"thread_id": "t-1"}},
+            {
+                "run_status": "failed",
+                "resume_available": False,
+                "pending_interrupt_type": "",
+            },
+            as_node="supervisor",
+        )
+        serialized = json.dumps(context_errors[0], ensure_ascii=False).lower()
+        assert "api_key" not in serialized
+        assert "sk-secret" not in serialized
+        assert "must not leak" not in serialized
+
+    @pytest.mark.anyio
+    async def test_required_source_filtered_out_emits_safe_root_cause(self):
+        from app import generate_sse
+
+        async def events():
+            emit_a3_trace(
+                logging.getLogger("test_sse_context_filtered_out"),
+                "context_apply_error",
+                {
+                    "node_name": "review_doc_agent",
+                    "llm_node": "review_doc",
+                    "trace_call_id": "call-2",
+                    "trace_seq": 6,
+                    "reason": "required_sources_filtered_out",
+                    "warning": "required context sources were filtered out",
+                    "fallback_used": False,
+                    "error_scope": "source_filter",
+                    "recoverable": False,
+                    "required_sources_missing": [],
+                    "required_sources_filtered_out": ["evidence"],
+                    "provider_missing_reasons": {},
+                    "source_drop_reasons": {"quality_below_threshold": 1},
+                    "budget_drop_reasons": {},
+                    "source_counts_before": {"evidence": 1},
+                    "source_counts_after": {},
+                    "source_counts_dropped": {"evidence": 1},
+                    "content": "api_key=sk-secret must not leak",
+                },
+                state={"request_id": "r1"},
+            )
+            yield _node_start("review_doc_agent")
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={}),
+        )
+        mock_graph.aupdate_state = AsyncMock()
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        context_error = next(
+            payload for payload in payloads if payload.get("type") == "context_error"
+        )
+
+        assert context_error["reason"] == "required_sources_filtered_out"
+        assert context_error["required_sources_filtered_out"] == ["evidence"]
+        assert context_error["source_drop_reasons"] == {"quality_below_threshold": 1}
+        assert context_error["source_counts_before"] == {"evidence": 1}
+        assert context_error["source_counts_after"] == {}
+        assert context_error["source_counts_dropped"] == {"evidence": 1}
+        serialized = json.dumps(context_error, ensure_ascii=False).lower()
+        assert "api_key" not in serialized
+        assert "sk-secret" not in serialized
+        assert "must not leak" not in serialized
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +1113,7 @@ class TestSSEDoneEvent:
 
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
 
         interrupt_obj = SimpleNamespace(value="## 请确认是否继续生成学习计划")
         task = SimpleNamespace(interrupts=[interrupt_obj])
@@ -997,6 +1138,7 @@ class TestSSEDoneEvent:
 
         mock_graph = MagicMock()
         mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
 
         interrupt_obj = SimpleNamespace(
             value={

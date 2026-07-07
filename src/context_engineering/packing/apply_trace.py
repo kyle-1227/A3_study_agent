@@ -154,6 +154,32 @@ def build_context_apply_error_event(error: ContextApplyError) -> dict[str, Any]:
         "reason": error.reason,
         "warning": error.warning,
         "fallback_used": error.fallback_used,
+        "error_scope": error.error_scope,
+        "recoverable": error.recoverable,
+        "required_sources_missing": [
+            sanitize_error_message(source, max_chars=80)
+            for source in error.required_sources_missing
+        ],
+        "required_sources_filtered_out": [
+            sanitize_error_message(source, max_chars=80)
+            for source in error.required_sources_filtered_out
+        ],
+        "optional_sources_missing": [
+            sanitize_error_message(source, max_chars=80)
+            for source in error.optional_sources_missing
+        ],
+        "provider_missing_reasons": {
+            sanitize_error_message(source, max_chars=80): sanitize_error_message(
+                reason,
+                max_chars=120,
+            )
+            for source, reason in error.provider_missing_reasons.items()
+        },
+        "source_drop_reasons": _safe_int_dict(error.source_drop_reasons),
+        "budget_drop_reasons": _safe_int_dict(error.budget_drop_reasons),
+        "source_counts_before": _safe_int_dict(error.source_counts_before),
+        "source_counts_after": _safe_int_dict(error.source_counts_after),
+        "source_counts_dropped": _safe_int_dict(error.source_counts_dropped),
         "error_type": error.original_exception_type or type(error).__name__,
     }
 

@@ -51,10 +51,20 @@ class ProfileContextProvider:
 
 
 def _profile_summary_from_state(state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    for key in ("profile_summary", "profile_context", "learner_profile_summary"):
+    for key in (
+        "profile_summary",
+        "profile_context",
+        "learner_profile_summary",
+        "learner_profile",
+        "preferences",
+        "weaknesses",
+        "strengths",
+    ):
         value = state.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip(), {"profile_source": key}
+        if isinstance(value, (dict, list)) and value:
+            return str(value), {"profile_source": key}
 
     profile = state.get("profile") or state.get("user_profile")
     if not profile:

@@ -77,6 +77,9 @@ class NodeContextPolicy:
     max_items_total: int
     min_injectable_items: int
     injectable_sources: tuple[ContextSourceType, ...]
+    required_sources: tuple[ContextSourceType, ...]
+    optional_sources: tuple[ContextSourceType, ...]
+    exclude_message_source: bool
     source_overrides: dict[str, dict[str, Any]]
 
 
@@ -296,6 +299,9 @@ def _policy_from_node_policy(
         apply_enabled_nodes=(node_name,) if node_policy.mode == "active" else (),
         max_injected_context_tokens=node_policy.max_injected_context_tokens,
         injectable_sources=node_policy.injectable_sources,
+        required_sources=node_policy.required_sources,
+        optional_sources=node_policy.optional_sources,
+        exclude_message_source=node_policy.exclude_message_source,
         route_rollout=route,
         quality=quality,
         mode=node_policy.mode,
@@ -400,6 +406,13 @@ def _parse_node_policy(
         node_name=node_name,
         llm_node=llm_node,
     )
+    injectable_sources = _source_tuple(
+        raw.get("injectable_sources", list(legacy_policy.injectable_sources)),
+        node_name=node_name,
+        llm_node=llm_node,
+        field_name="injectable_sources",
+        allow_empty=False,
+    )
     return NodeContextPolicy(
         mode=mode,
         risk_tier=risk_tier,
@@ -427,8 +440,27 @@ def _parse_node_policy(
             node_name=node_name,
             llm_node=llm_node,
         ),
-        injectable_sources=_source_tuple(
-            raw.get("injectable_sources", list(legacy_policy.injectable_sources)),
+        injectable_sources=injectable_sources,
+        required_sources=_source_tuple(
+            raw.get("required_sources", list(legacy_policy.required_sources)),
+            node_name=node_name,
+            llm_node=llm_node,
+            field_name="required_sources",
+            allow_empty=True,
+        ),
+        optional_sources=_source_tuple(
+            raw.get(
+                "optional_sources",
+                list(legacy_policy.optional_sources or injectable_sources),
+            ),
+            node_name=node_name,
+            llm_node=llm_node,
+            field_name="optional_sources",
+            allow_empty=True,
+        ),
+        exclude_message_source=_bool_field(
+            raw.get("exclude_message_source", legacy_policy.exclude_message_source),
+            field_name="exclude_message_source",
             node_name=node_name,
             llm_node=llm_node,
         ),
@@ -472,6 +504,9 @@ def _legacy_policy_base(policy: ContextInjectionPolicy) -> dict[str, Any]:
         "max_items_total": policy.quality.max_items_total,
         "min_injectable_items": policy.route_rollout.min_injectable_items,
         "injectable_sources": list(policy.injectable_sources),
+        "required_sources": list(policy.required_sources),
+        "optional_sources": list(policy.optional_sources),
+        "exclude_message_source": policy.exclude_message_source,
         "source_overrides": source_overrides,
     }
 
@@ -663,12 +698,14 @@ def _source_tuple(
     *,
     node_name: str,
     llm_node: str,
+    field_name: str,
+    allow_empty: bool,
 ) -> tuple[ContextSourceType, ...]:
-    values = _string_tuple(value, path="injectable_sources")
-    if not values:
+    values = _string_tuple(value, path=field_name)
+    if not values and not allow_empty:
         raise _config_error(
-            "context_apply_injectable_sources_invalid",
-            "injectable_sources must be a non-empty list",
+            f"context_apply_{field_name}_invalid",
+            f"{field_name} must be a non-empty list",
             node_name=node_name,
             llm_node=llm_node,
         )
@@ -676,7 +713,7 @@ def _source_tuple(
     for source in values:
         if source not in _ALLOWED_SOURCES:
             raise _config_error(
-                "context_apply_injectable_sources_invalid",
+                f"context_apply_{field_name}_invalid",
                 f"unknown context source: {source}",
                 node_name=node_name,
                 llm_node=llm_node,
@@ -709,6 +746,23 @@ def _positive_int(
         raise _config_error(
             "context_apply_node_policy_invalid",
             f"{field_name} must be a positive integer",
+            node_name=node_name,
+            llm_node=llm_node,
+        )
+    return value
+
+
+def _bool_field(
+    value: Any,
+    *,
+    field_name: str,
+    node_name: str,
+    llm_node: str,
+) -> bool:
+    if not isinstance(value, bool):
+        raise _config_error(
+            "context_apply_node_policy_invalid",
+            f"{field_name} must be a boolean",
             node_name=node_name,
             llm_node=llm_node,
         )

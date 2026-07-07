@@ -23,6 +23,16 @@ from src.context_engineering.tokenizer import (
 
 InjectionRole = Literal["system"]
 InjectionPosition = Literal["after_system"]
+ContextApplyErrorScope = Literal[
+    "config",
+    "policy",
+    "provider",
+    "source_filter",
+    "budget",
+    "state",
+    "trace",
+    "llm_guard",
+]
 
 _ALLOWED_SOURCES = {
     "message",
@@ -116,7 +126,7 @@ class ApplyFormatPolicy:
 
 @dataclass(frozen=True)
 class ImportanceScoringPolicy:
-    """Shadow-only LLM importance scoring policy."""
+    """LLM importance scoring policy."""
 
     enabled: bool
     shadow_mode: bool
@@ -145,6 +155,8 @@ class ContextInjectionPolicy:
     exclude_message_source: bool
     max_injected_context_tokens: int
     injectable_sources: tuple[ContextSourceType, ...]
+    required_sources: tuple[ContextSourceType, ...] = ()
+    optional_sources: tuple[ContextSourceType, ...] = ()
     mode: str = "active"
     risk_tier: int = 1
     policy_source: str = "legacy_global"
@@ -170,7 +182,7 @@ class ContextInjectionPolicy:
         default_factory=lambda: ApplyBudgetPolicy(
             graceful_degradation_enabled=False,
             drop_order=("priority_asc", "token_estimate_desc", "id_asc"),
-            fallback_if_empty_after_drop=True,
+            fallback_if_empty_after_drop=False,
         )
     )
     format: ApplyFormatPolicy = field(
@@ -185,19 +197,21 @@ class ContextInjectionPolicy:
     importance_scoring: ImportanceScoringPolicy = field(
         default_factory=lambda: ImportanceScoringPolicy(
             enabled=False,
-            shadow_mode=True,
-            mode="shadow",
+            shadow_mode=False,
+            mode="disabled",
             llm_node="",
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=True,
+            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
         )
     )
 
     def __post_init__(self) -> None:
+        if not self.optional_sources and self.injectable_sources:
+            object.__setattr__(self, "optional_sources", self.injectable_sources)
         if self.format.source_order:
             return
         object.__setattr__(
@@ -273,6 +287,17 @@ class ContextApplyError(RuntimeError):
         llm_node: str,
         fallback_used: bool = False,
         original_exception_type: str = "",
+        error_scope: ContextApplyErrorScope = "policy",
+        recoverable: bool = False,
+        required_sources_missing: tuple[str, ...] = (),
+        required_sources_filtered_out: tuple[str, ...] = (),
+        optional_sources_missing: tuple[str, ...] = (),
+        provider_missing_reasons: dict[str, str] | None = None,
+        source_drop_reasons: dict[str, int] | None = None,
+        budget_drop_reasons: dict[str, int] | None = None,
+        source_counts_before: dict[str, int] | None = None,
+        source_counts_after: dict[str, int] | None = None,
+        source_counts_dropped: dict[str, int] | None = None,
     ) -> None:
         self.reason = str(reason or "").strip() or "context_apply_error"
         self.warning = sanitize_error_message(warning)
@@ -280,6 +305,36 @@ class ContextApplyError(RuntimeError):
         self.llm_node = str(llm_node or "").strip()
         self.fallback_used = bool(fallback_used)
         self.original_exception_type = str(original_exception_type or "").strip()
+        self.error_scope = _normalize_error_scope(error_scope)
+        self.recoverable = bool(recoverable)
+        self.required_sources_missing = tuple(
+            str(source or "").strip()
+            for source in required_sources_missing
+            if str(source or "").strip()
+        )
+        self.required_sources_filtered_out = tuple(
+            str(source or "").strip()
+            for source in required_sources_filtered_out
+            if str(source or "").strip()
+        )
+        self.optional_sources_missing = tuple(
+            str(source or "").strip()
+            for source in optional_sources_missing
+            if str(source or "").strip()
+        )
+        self.provider_missing_reasons = {
+            sanitize_error_message(source, max_chars=80): sanitize_error_message(
+                reason,
+                max_chars=120,
+            )
+            for source, reason in (provider_missing_reasons or {}).items()
+            if str(source or "").strip() and str(reason or "").strip()
+        }
+        self.source_drop_reasons = _safe_int_error_dict(source_drop_reasons)
+        self.budget_drop_reasons = _safe_int_error_dict(budget_drop_reasons)
+        self.source_counts_before = _safe_int_error_dict(source_counts_before)
+        self.source_counts_after = _safe_int_error_dict(source_counts_after)
+        self.source_counts_dropped = _safe_int_error_dict(source_counts_dropped)
         super().__init__(f"{self.reason}: {self.warning}")
 
 
@@ -378,6 +433,19 @@ def get_context_injection_policy(
             llm_node=llm_node,
         ),
         injectable_sources=injectable_sources,
+        required_sources=_optional_sources(
+            apply_config,
+            "required_sources",
+            node_name=node_name,
+            llm_node=llm_node,
+        ),
+        optional_sources=_optional_sources(
+            apply_config,
+            "optional_sources",
+            node_name=node_name,
+            llm_node=llm_node,
+            default=injectable_sources,
+        ),
         route_rollout=route_rollout,
         quality=_required_quality_policy(
             apply_config,
@@ -875,13 +943,15 @@ def _disabled_policy() -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=False,
         apply_enabled_nodes=(),
-        fallback_on_error=True,
+        fallback_on_error=False,
         allow_structured_output=False,
         role="",
         position="",
         exclude_message_source=True,
         max_injected_context_tokens=0,
         injectable_sources=(),
+        required_sources=(),
+        optional_sources=(),
         mode="disabled",
         risk_tier=0,
         policy_source="disabled_global",
@@ -1066,6 +1136,40 @@ def _required_sources(
         if source not in _ALLOWED_SOURCES:
             raise _config_error(
                 "context_apply_injectable_sources_invalid",
+                f"unknown context source: {source}",
+                node_name=node_name,
+                llm_node=llm_node,
+            )
+        sources.append(cast(ContextSourceType, source))
+    return tuple(sources)
+
+
+def _optional_sources(
+    values: dict[str, Any],
+    key: str,
+    *,
+    node_name: str,
+    llm_node: str,
+    default: tuple[ContextSourceType, ...] = (),
+) -> tuple[ContextSourceType, ...]:
+    raw = values.get(key)
+    if raw is None:
+        return default
+    if not isinstance(raw, list):
+        raise _config_error(
+            f"context_apply_{key}_invalid",
+            f"context_engineering.packer.apply.{key} must be a list",
+            node_name=node_name,
+            llm_node=llm_node,
+        )
+    sources: list[ContextSourceType] = []
+    for item in raw:
+        source = str(item or "").strip()
+        if not source:
+            continue
+        if source not in _ALLOWED_SOURCES:
+            raise _config_error(
+                f"context_apply_{key}_invalid",
                 f"unknown context source: {source}",
                 node_name=node_name,
                 llm_node=llm_node,
@@ -1365,13 +1469,13 @@ def _required_importance_scoring_policy(
     if not enabled:
         return ImportanceScoringPolicy(
             enabled=False,
-            shadow_mode=True,
-            mode="shadow",
+            shadow_mode=False,
+            mode="disabled",
             llm_node=str(raw.get("llm_node") or "").strip(),
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=True,
+            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
             enabled_for_observe_only=bool(
@@ -1788,6 +1892,19 @@ def _merge_reason_counts(
     return merged
 
 
+def _safe_int_error_dict(value: dict[str, int] | None) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, int] = {}
+    for key, item in value.items():
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            continue
+        text = sanitize_error_message(key, max_chars=80)
+        if text:
+            safe[text] = item
+    return safe
+
+
 def _message_kind(
     messages: list[Any],
     *,
@@ -1865,4 +1982,23 @@ def _config_error(
         node_name=node_name,
         llm_node=llm_node,
         original_exception_type="ContextConfigError",
+        error_scope="config",
+        recoverable=False,
     )
+
+
+def _normalize_error_scope(value: str) -> ContextApplyErrorScope:
+    allowed = {
+        "config",
+        "policy",
+        "provider",
+        "source_filter",
+        "budget",
+        "state",
+        "trace",
+        "llm_guard",
+    }
+    text = str(value or "").strip()
+    if text not in allowed:
+        return "policy"
+    return cast(ContextApplyErrorScope, text)

@@ -48,13 +48,18 @@ from src.run_control import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_CONTINUING,
     RUN_STATUS_ERROR,
+    RUN_STATUS_IDLE,
     RUN_STATUS_NOT_RESUMABLE,
     RUN_STATUS_RUNNING,
     RUN_STATUS_STOPPED,
     RUN_STATUS_STOPPING,
     RUN_STATUS_UNKNOWN,
+    finish_active_run,
+    get_active_run,
     run_control_registry,
+    start_active_run,
     trim_context_usage_history,
+    update_active_run,
     utc_now_iso,
 )
 from src.schemas import (
@@ -147,10 +152,146 @@ def _safe_int_dict(value: object) -> dict:
     return safe
 
 
+def _safe_int(value: object, *, default: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return max(value, 0)
+
+
 def _safe_warning_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [sanitize_error_message(warning) for warning in value]
+
+
+def _safe_reason_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        sanitize_error_message(key, max_chars=80): sanitize_error_message(
+            item,
+            max_chars=120,
+        )
+        for key, item in value.items()
+        if str(key or "").strip() and str(item or "").strip()
+    }
+
+
+def _safe_context_event_summary(event: dict) -> dict:
+    return {
+        "stage": sanitize_error_message(event.get("stage", ""), max_chars=120),
+        "request_id": sanitize_error_message(
+            event.get("request_id", ""),
+            max_chars=80,
+        ),
+        "node": sanitize_error_message(event.get("node_name", ""), max_chars=120),
+        "llm_node": sanitize_error_message(event.get("llm_node", ""), max_chars=120),
+        "trace_call_id": sanitize_error_message(
+            event.get("trace_call_id", ""),
+            max_chars=80,
+        ),
+        "trace_seq": event.get("trace_seq", 0)
+        if isinstance(event.get("trace_seq"), int)
+        and not isinstance(event.get("trace_seq"), bool)
+        else 0,
+    }
+
+
+def _trace_common_payload(event: dict, *, event_type: str) -> dict:
+    return {
+        "type": event_type,
+        "node": sanitize_error_message(event.get("node_name", ""), max_chars=120),
+        "llm_node": sanitize_error_message(event.get("llm_node", ""), max_chars=120),
+        "trace_call_id": sanitize_error_message(
+            event.get("trace_call_id", ""),
+            max_chars=80,
+        ),
+        "trace_seq": event.get("trace_seq", 0)
+        if isinstance(event.get("trace_seq"), int)
+        and not isinstance(event.get("trace_seq"), bool)
+        else 0,
+    }
+
+
+def _context_policy_resolved_payload(event: dict) -> dict:
+    payload = _trace_common_payload(event, event_type="context_policy_resolved")
+    payload.update(
+        {
+            "mode": sanitize_error_message(event.get("mode", ""), max_chars=80),
+            "risk_tier": event.get("risk_tier", 0),
+            "policy_source": sanitize_error_message(
+                event.get("policy_source", ""),
+                max_chars=80,
+            ),
+            "required_sources": _safe_warning_list(event.get("required_sources")),
+            "optional_sources": _safe_warning_list(event.get("optional_sources")),
+            "injectable_sources": _safe_warning_list(event.get("injectable_sources")),
+        }
+    )
+    return payload
+
+
+def _context_provider_supply_plan_payload(event: dict) -> dict:
+    payload = _trace_common_payload(event, event_type="context_provider_supply_plan")
+    payload.update(
+        {
+            "requested_sources": _safe_warning_list(event.get("requested_sources")),
+            "required_sources": _safe_warning_list(event.get("required_sources")),
+            "optional_sources": _safe_warning_list(event.get("optional_sources")),
+            "enabled_sources": _safe_warning_list(event.get("enabled_sources")),
+            "disabled_sources": _safe_warning_list(event.get("disabled_sources")),
+            "unregistered_sources": _safe_warning_list(
+                event.get("unregistered_sources")
+            ),
+            "provider_count": event.get("provider_count", 0),
+            "provider_sources_missing": _safe_int_dict(
+                event.get("provider_sources_missing")
+            ),
+            "provider_missing_reasons": _safe_reason_dict(
+                event.get("provider_missing_reasons")
+            ),
+        }
+    )
+    return payload
+
+
+def _context_provider_supply_payload(event: dict) -> dict:
+    payload = _trace_common_payload(event, event_type="context_provider_supply")
+    payload.update(
+        {
+            "provider_count": event.get("provider_count", 0),
+            "item_count": event.get("item_count", 0),
+            "source_counts": _safe_int_dict(event.get("source_counts")),
+            "provider_sources_missing": _safe_int_dict(
+                event.get("provider_sources_missing")
+            ),
+            "provider_missing_reasons": _safe_reason_dict(
+                event.get("provider_missing_reasons")
+            ),
+            "provider_error_count": event.get("provider_error_count", 0),
+            "evidence_rejected_count": event.get("evidence_rejected_count", 0),
+            "evidence_reject_reasons": _safe_int_dict(
+                event.get("evidence_reject_reasons")
+            ),
+        }
+    )
+    return payload
+
+
+def _context_source_filter_payload(event: dict) -> dict:
+    payload = _trace_common_payload(event, event_type="context_source_filter")
+    payload.update(
+        {
+            "source_counts_before": _safe_int_dict(event.get("source_counts_before")),
+            "source_counts_after": _safe_int_dict(event.get("source_counts_after")),
+            "source_counts_dropped": _safe_int_dict(event.get("source_counts_dropped")),
+            "drop_reasons": _safe_int_dict(event.get("drop_reasons")),
+            "source_drop_reasons": _safe_int_dict(event.get("source_drop_reasons")),
+            "budget_drop_reasons": _safe_int_dict(event.get("budget_drop_reasons")),
+            "warnings": _safe_warning_list(event.get("warnings")),
+        }
+    )
+    return payload
 
 
 def _graph_checkpointer_type(graph) -> str:
@@ -332,17 +473,89 @@ def _missing_run_control_fields(values: dict) -> list[str]:
     return [field for field in RUN_CONTROL_FIELDS if field not in values]
 
 
+def _context_window_status(values: dict) -> tuple[dict, dict]:
+    request_window = values.get("request_context_window")
+    request_context_window = {
+        "current_request_id": "",
+        "current_node": "",
+        "last_event_count": 0,
+    }
+    if isinstance(request_window, dict):
+        request_context_window.update(
+            {
+                "current_request_id": sanitize_error_message(
+                    request_window.get("current_request_id", ""),
+                    max_chars=120,
+                ),
+                "current_node": sanitize_error_message(
+                    request_window.get("current_node", ""),
+                    max_chars=120,
+                ),
+                "last_event_count": _safe_int(
+                    request_window.get("last_event_count"),
+                    default=0,
+                ),
+            }
+        )
+    usage_history = (
+        values.get("context_usage_history")
+        if isinstance(values.get("context_usage_history"), list)
+        else []
+    )
+    resource_artifacts_by_type = values.get("resource_artifacts_by_type")
+    last_generated_artifacts = values.get("last_generated_artifacts")
+    thread_context_window = {
+        "context_usage_history_count": len(usage_history),
+        "artifact_count": _artifact_count(
+            resource_artifacts_by_type,
+            last_generated_artifacts,
+        ),
+        "conversation_summary_present": bool(
+            str(values.get("conversation_summary") or "").strip()
+        ),
+        "last_context_policy_by_node_keys": _dict_keys(
+            values.get("last_context_policy_by_node")
+        ),
+        "last_provider_supply_by_node_keys": _dict_keys(
+            values.get("last_provider_supply_by_node")
+        ),
+        "last_context_selection_by_node_keys": _dict_keys(
+            values.get("last_context_selection_by_node")
+        ),
+        "last_context_applied_by_node_keys": _dict_keys(
+            values.get("last_context_applied_by_node")
+        ),
+        "last_resource_subnodes_count": len(values.get("last_resource_subnodes") or [])
+        if isinstance(values.get("last_resource_subnodes"), list)
+        else 0,
+    }
+    return request_context_window, thread_context_window
+
+
+def _dict_keys(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return sorted(sanitize_error_message(key, max_chars=120) for key in value)
+
+
+def _artifact_count(by_type: object, generated: object) -> int:
+    total = len(by_type) if isinstance(by_type, dict) else 0
+    total += len(generated) if isinstance(generated, list) else 0
+    return total
+
+
 def _thread_status_from_snapshot(
     thread_id: str, state_snapshot
 ) -> ThreadStatusResponse:
     values = _state_values(state_snapshot)
     pending_type = _pending_interrupt_type(state_snapshot)
     missing_fields = _missing_run_control_fields(values)
+    request_context_window, thread_context_window = _context_window_status(values)
     if missing_fields:
         return ThreadStatusResponse(
             thread_id=thread_id,
             schema_version="legacy",
-            run_status=RUN_STATUS_UNKNOWN,
+            run_status=RUN_STATUS_IDLE,
             resume_available=False,
             pending_interrupt_type=pending_type,
             current_node=str(values.get("current_node") or ""),
@@ -353,14 +566,27 @@ def _thread_status_from_snapshot(
             context_usage_history=values.get("context_usage_history")
             if isinstance(values.get("context_usage_history"), list)
             else [],
+            request_context_window=request_context_window,
+            thread_context_window=thread_context_window,
             missing_run_control_fields=missing_fields,
             message="legacy checkpoint does not include run-control fields",
         )
+    raw_run_status = str(values.get("run_status") or RUN_STATUS_UNKNOWN)
+    terminal_statuses = {RUN_STATUS_COMPLETED, RUN_STATUS_ERROR, RUN_STATUS_STOPPED}
+    active_statuses = {RUN_STATUS_RUNNING, RUN_STATUS_STOPPING, RUN_STATUS_CONTINUING}
+    if raw_run_status in terminal_statuses:
+        run_status = raw_run_status
+    elif pending_type:
+        run_status = RUN_STATUS_STOPPED
+    elif raw_run_status in active_statuses:
+        run_status = RUN_STATUS_IDLE
+    else:
+        run_status = RUN_STATUS_IDLE
 
     return ThreadStatusResponse(
         thread_id=thread_id,
         schema_version=RUN_CONTROL_SCHEMA_VERSION,
-        run_status=str(values.get("run_status") or RUN_STATUS_UNKNOWN),
+        run_status=run_status,
         resume_available=pending_type == "user_stop",
         pending_interrupt_type=pending_type
         or str(values.get("pending_interrupt_type") or ""),
@@ -374,21 +600,109 @@ def _thread_status_from_snapshot(
         context_usage_history=values.get("context_usage_history")
         if isinstance(values.get("context_usage_history"), list)
         else [],
+        request_context_window=request_context_window,
+        thread_context_window=thread_context_window,
         missing_run_control_fields=[],
     )
 
 
-async def _update_run_state(graph, config: dict, values: dict) -> None:
-    await graph.aupdate_state(config, values)
+def _thread_status_from_active_run(thread_id: str, active_run: dict) -> ThreadStatusResponse:
+    request_context_window = active_run.get("request_context_window")
+    thread_context_window = active_run.get("thread_context_window")
+    return ThreadStatusResponse(
+        thread_id=thread_id,
+        schema_version=RUN_CONTROL_SCHEMA_VERSION,
+        run_status=str(active_run.get("run_status") or RUN_STATUS_RUNNING),
+        resume_available=bool(active_run.get("resume_available", False)),
+        pending_interrupt_type=str(active_run.get("pending_interrupt_type") or ""),
+        current_node=str(active_run.get("current_node") or ""),
+        last_completed_node=str(active_run.get("last_completed_node") or ""),
+        stopped_at=str(active_run.get("stopped_at") or ""),
+        stop_reason=str(active_run.get("stop_reason") or ""),
+        context_usage=active_run.get("context_usage")
+        if isinstance(active_run.get("context_usage"), dict)
+        else {},
+        context_usage_history=active_run.get("context_usage_history")
+        if isinstance(active_run.get("context_usage_history"), list)
+        else [],
+        request_context_window=request_context_window
+        if isinstance(request_context_window, dict)
+        else {"current_request_id": "", "current_node": "", "last_event_count": 0},
+        thread_context_window=thread_context_window
+        if isinstance(thread_context_window, dict)
+        else {
+            "context_usage_history_count": 0,
+            "artifact_count": 0,
+            "conversation_summary_present": False,
+            "last_context_policy_by_node_keys": [],
+            "last_provider_supply_by_node_keys": [],
+            "last_context_selection_by_node_keys": [],
+            "last_context_applied_by_node_keys": [],
+            "last_resource_subnodes_count": 0,
+        },
+        missing_run_control_fields=[],
+    )
+
+
+def _valid_state_update_node(values: dict, state: dict | None = None) -> str:
+    candidates = (
+        values.get("current_node"),
+        (state or {}).get("current_node"),
+        (state or {}).get("last_completed_node"),
+        "supervisor",
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text in GRAPH_NODES:
+            return text
+    return "supervisor"
+
+
+async def safe_update_thread_state(
+    graph,
+    config: dict,
+    values: dict,
+    *,
+    state: dict | None = None,
+    as_node: str | None = None,
+) -> None:
+    """Update checkpoint state using a real graph node as LangGraph writer."""
+    node = str(as_node or "").strip()
+    if node not in GRAPH_NODES:
+        node = _valid_state_update_node(values, state)
+    await graph.aupdate_state(config, values, as_node=node)
+
+
+async def _update_run_state(
+    graph,
+    config: dict,
+    values: dict,
+    *,
+    state: dict | None = None,
+    as_node: str | None = None,
+) -> None:
+    await safe_update_thread_state(
+        graph,
+        config,
+        values,
+        state=state,
+        as_node=as_node,
+    )
 
 
 async def _try_update_run_state(
     graph, config: dict, values: dict, *, state: dict | None = None
 ) -> bool:
     try:
-        await _update_run_state(graph, config, values)
+        await _update_run_state(graph, config, values, state=state)
+        thread_id = _thread_id_from_update(config=config, values=values, state=state)
+        if thread_id and get_active_run(thread_id) is not None:
+            update_active_run(thread_id, values)
         return True
     except Exception as exc:
+        thread_id = _thread_id_from_update(config=config, values=values, state=state)
+        if thread_id and get_active_run(thread_id) is not None:
+            update_active_run(thread_id, values)
         emit_a3_trace(
             logger,
             "run_state_update_failed",
@@ -401,6 +715,88 @@ async def _try_update_run_state(
             env_flag="LOG_A3_TRACE",
         )
         return False
+
+
+def _thread_id_from_update(
+    *,
+    config: dict,
+    values: dict,
+    state: dict | None,
+) -> str:
+    configurable = config.get("configurable") if isinstance(config, dict) else {}
+    candidates = (
+        values.get("thread_id"),
+        values.get("session_id"),
+        (state or {}).get("thread_id"),
+        (state or {}).get("session_id"),
+        (configurable or {}).get("thread_id") if isinstance(configurable, dict) else "",
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+async def _update_context_window_state_from_trace(
+    graph,
+    config: dict,
+    *,
+    thread_id: str,
+    request_context_events: list[dict],
+    context_usage_history: list[dict],
+    last_context_policy_by_node: dict[str, dict],
+    last_provider_supply_by_node: dict[str, dict],
+    last_context_selection_by_node: dict[str, dict],
+    last_context_applied_by_node: dict[str, dict],
+    last_drop_reasons_by_node: dict[str, dict],
+    last_resource_subnodes: list[dict],
+    current_node: str,
+) -> None:
+    values = {
+        "request_context_window": {
+            "current_request_id": request_context_events[-1].get("request_id", "")
+            if request_context_events
+            else "",
+            "current_node": current_node,
+            "last_event_count": len(request_context_events),
+        },
+        "context_window_events": list(request_context_events),
+        "last_context_policy_by_node": dict(last_context_policy_by_node),
+        "last_provider_supply_by_node": dict(last_provider_supply_by_node),
+        "last_context_selection_by_node": dict(last_context_selection_by_node),
+        "last_context_applied_by_node": dict(last_context_applied_by_node),
+        "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
+        "last_resource_subnodes": list(last_resource_subnodes),
+    }
+    updated = await _try_update_run_state(
+        graph,
+        config,
+        values,
+        state={
+            "thread_id": thread_id,
+            "session_id": thread_id,
+            "current_node": current_node,
+        },
+    )
+    emit_a3_trace(
+        logger,
+        "context_window_state_updated"
+        if updated
+        else "context_window_state_update_failed",
+        {
+            "current_node": current_node,
+            "request_event_count": len(request_context_events),
+            "context_usage_history_count": len(context_usage_history),
+            "policy_node_count": len(last_context_policy_by_node),
+            "supply_node_count": len(last_provider_supply_by_node),
+            "selection_node_count": len(last_context_selection_by_node),
+            "applied_node_count": len(last_context_applied_by_node),
+            "resource_subnode_count": len(last_resource_subnodes),
+        },
+        state={"thread_id": thread_id, "session_id": thread_id},
+        env_flag="LOG_A3_TRACE",
+    )
 
 
 def _last_ai_message_content(final_state: dict) -> str:
@@ -710,7 +1106,13 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "episodic_memory_results": [],
         "semantic_memory_results": [],
     }
-    await graph.aupdate_state(config, values)
+    await safe_update_thread_state(
+        graph,
+        config,
+        values,
+        state={"thread_id": thread_id, "session_id": thread_id},
+        as_node="supervisor",
+    )
 
     trace_state = {
         "thread_id": thread_id,
@@ -748,6 +1150,13 @@ async def _stream_graph_events(
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
     context_usage_history: list[dict] = []
+    request_context_events: list[dict] = []
+    last_context_policy_by_node: dict[str, dict] = {}
+    last_provider_supply_by_node: dict[str, dict] = {}
+    last_context_selection_by_node: dict[str, dict] = {}
+    last_context_applied_by_node: dict[str, dict] = {}
+    last_drop_reasons_by_node: dict[str, dict] = {}
+    last_resource_subnodes: list[dict] = []
     terminal_resource_output: dict | None = None
     if preserve_context_history:
         try:
@@ -775,6 +1184,8 @@ async def _stream_graph_events(
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
+            if isinstance(stage, str) and stage.startswith("context_"):
+                request_context_events.append(_safe_context_event_summary(event))
             if stage in PROVIDER_RETRY_TRACE_STAGES:
                 payload = {
                     "type": "provider_retry",
@@ -817,6 +1228,54 @@ async def _stream_graph_events(
                         max_chars=120,
                     ),
                 }
+                last_resource_subnodes.append(payload)
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_policy_resolved":
+                payload = _context_policy_resolved_payload(event)
+                node = str(payload.get("node") or "")
+                if node:
+                    last_context_policy_by_node[node] = payload
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_provider_supply_plan":
+                payload = _context_provider_supply_plan_payload(event)
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_provider_supply":
+                payload = _context_provider_supply_payload(event)
+                node = str(payload.get("node") or "")
+                if node:
+                    last_provider_supply_by_node[node] = payload
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_source_filter":
+                payload = _context_source_filter_payload(event)
+                node = str(payload.get("node") or "")
+                if node:
+                    last_drop_reasons_by_node[node] = payload.get("drop_reasons", {})
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage in {
+                "context_window_state_updated",
+                "context_window_state_update_failed",
+            }:
+                payload = {
+                    "type": stage,
+                    "current_node": sanitize_error_message(
+                        event.get("current_node", ""),
+                        max_chars=120,
+                    ),
+                    "request_event_count": event.get("request_event_count", 0),
+                    "context_usage_history_count": event.get(
+                        "context_usage_history_count", 0
+                    ),
+                    "policy_node_count": event.get("policy_node_count", 0),
+                    "supply_node_count": event.get("supply_node_count", 0),
+                    "selection_node_count": event.get("selection_node_count", 0),
+                    "applied_node_count": event.get("applied_node_count", 0),
+                    "resource_subnode_count": event.get("resource_subnode_count", 0),
+                }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
             if stage == "context_usage":
@@ -824,6 +1283,8 @@ async def _stream_graph_events(
                     "type": "context_usage",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "provider": event.get("provider", ""),
                     "model": event.get("model", ""),
                     "input_estimated_tokens": event.get("input_estimated_tokens", 0),
@@ -845,12 +1306,12 @@ async def _stream_graph_events(
                 context_usage_history[:] = trim_context_usage_history(
                     context_usage_history
                 )
-                await _try_update_run_state(
+                failed_update_ok = await _try_update_run_state(
                     graph,
                     config,
                     {
                         "context_usage": payload,
-                        "context_usage_history": list(context_usage_history),
+                        "context_usage_history": [payload],
                     },
                     state={"thread_id": thread_id, "session_id": thread_id},
                 )
@@ -875,6 +1336,8 @@ async def _stream_graph_events(
                     "type": "context_items_collected",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "provider_count": event.get("provider_count", 0),
                     "item_count": event.get("item_count", 0),
                     "source_counts": event.get("source_counts")
@@ -900,6 +1363,8 @@ async def _stream_graph_events(
                     "type": "context_provider_error",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "provider": event.get("provider", ""),
                     "source_type": event.get("source_type", ""),
                     "provider_stage": event.get("provider_stage", ""),
@@ -913,6 +1378,8 @@ async def _stream_graph_events(
                     "type": "context_packing_plan",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "candidate_count": event.get("candidate_count", 0),
                     "source_counts": event.get("source_counts")
                     if isinstance(event.get("source_counts"), dict)
@@ -929,6 +1396,8 @@ async def _stream_graph_events(
                     "type": "context_packed",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "strategy": event.get("strategy", ""),
                     "selected_count": event.get("selected_count", 0),
                     "dropped_count": event.get("dropped_count", 0),
@@ -955,6 +1424,8 @@ async def _stream_graph_events(
                     "type": "context_packing_error",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "reason": event.get("reason", ""),
                     "warning": event.get("warning", ""),
                     "selected_tokens": event.get("selected_tokens"),
@@ -968,6 +1439,8 @@ async def _stream_graph_events(
                     "type": "context_apply_plan",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "apply_enabled": bool(event.get("apply_enabled", False)),
                     "mode": sanitize_error_message(
                         event.get("mode", ""),
@@ -992,6 +1465,8 @@ async def _stream_graph_events(
                     "type": "context_apply_selection",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "mode": sanitize_error_message(
                         event.get("mode", ""),
                         max_chars=80,
@@ -1034,6 +1509,10 @@ async def _stream_graph_events(
                     ),
                     "warnings": _safe_warning_list(event.get("warnings")),
                 }
+                node = str(payload.get("node") or "")
+                if node:
+                    last_context_selection_by_node[node] = payload
+                    last_drop_reasons_by_node[node] = payload.get("drop_reasons", {})
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
             if stage == "context_applied":
@@ -1041,6 +1520,8 @@ async def _stream_graph_events(
                     "type": "context_applied",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "applied": bool(event.get("applied", False)),
                     "fallback_used": bool(event.get("fallback_used", False)),
                     "mode": sanitize_error_message(
@@ -1078,6 +1559,9 @@ async def _stream_graph_events(
                     "injection_position": event.get("injection_position", ""),
                     "warnings": _safe_warning_list(event.get("warnings")),
                 }
+                node = str(payload.get("node") or "")
+                if node:
+                    last_context_applied_by_node[node] = payload
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
             if stage == "context_apply_policy_resolved_summary":
@@ -1126,10 +1610,125 @@ async def _stream_graph_events(
                     "type": "context_apply_error",
                     "node": event.get("node_name", ""),
                     "llm_node": event.get("llm_node", ""),
+                    "trace_call_id": event.get("trace_call_id", ""),
+                    "trace_seq": event.get("trace_seq", 0),
                     "reason": event.get("reason", ""),
                     "warning": sanitize_error_message(event.get("warning", "")),
                     "fallback_used": bool(event.get("fallback_used", False)),
+                    "error_scope": sanitize_error_message(
+                        event.get("error_scope", ""),
+                        max_chars=80,
+                    ),
+                    "recoverable": bool(event.get("recoverable", False)),
+                    "required_sources_missing": _safe_warning_list(
+                        event.get("required_sources_missing")
+                    ),
+                    "required_sources_filtered_out": _safe_warning_list(
+                        event.get("required_sources_filtered_out")
+                    ),
+                    "optional_sources_missing": _safe_warning_list(
+                        event.get("optional_sources_missing")
+                    ),
+                    "provider_missing_reasons": _safe_reason_dict(
+                        event.get("provider_missing_reasons")
+                    ),
+                    "source_drop_reasons": _safe_int_dict(
+                        event.get("source_drop_reasons")
+                    ),
+                    "budget_drop_reasons": _safe_int_dict(
+                        event.get("budget_drop_reasons")
+                    ),
+                    "source_counts_before": _safe_int_dict(
+                        event.get("source_counts_before")
+                    ),
+                    "source_counts_after": _safe_int_dict(
+                        event.get("source_counts_after")
+                    ),
+                    "source_counts_dropped": _safe_int_dict(
+                        event.get("source_counts_dropped")
+                    ),
                     "error_type": event.get("error_type", ""),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                context_error_payload = {
+                    "type": "context_error",
+                    "stage": "context_apply_error",
+                    "node": payload["node"],
+                    "llm_node": payload["llm_node"],
+                    "trace_call_id": payload["trace_call_id"],
+                    "trace_seq": payload["trace_seq"],
+                    "reason": payload["reason"],
+                    "required_sources_missing": payload["required_sources_missing"],
+                    "required_sources_filtered_out": payload[
+                        "required_sources_filtered_out"
+                    ],
+                    "recoverable": payload["recoverable"],
+                    "provider_missing_reasons": payload["provider_missing_reasons"],
+                    "source_drop_reasons": payload["source_drop_reasons"],
+                    "budget_drop_reasons": payload["budget_drop_reasons"],
+                    "source_counts_before": payload["source_counts_before"],
+                    "source_counts_after": payload["source_counts_after"],
+                    "source_counts_dropped": payload["source_counts_dropped"],
+                }
+                drained.append(
+                    f"data: {json.dumps(context_error_payload, ensure_ascii=False)}\n\n"
+                )
+                failed_update_ok = await _try_update_run_state(
+                    graph,
+                    config,
+                    {
+                        "run_status": RUN_STATUS_ERROR,
+                        "resume_available": False,
+                        "pending_interrupt_type": "",
+                    },
+                    state={"thread_id": thread_id, "session_id": thread_id},
+                )
+                if failed_update_ok:
+                    finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
+                await _update_context_window_state_from_trace(
+                    graph,
+                    config,
+                    thread_id=thread_id,
+                    request_context_events=request_context_events,
+                    context_usage_history=context_usage_history,
+                    last_context_policy_by_node=last_context_policy_by_node,
+                    last_provider_supply_by_node=last_provider_supply_by_node,
+                    last_context_selection_by_node=last_context_selection_by_node,
+                    last_context_applied_by_node=last_context_applied_by_node,
+                    last_drop_reasons_by_node=last_drop_reasons_by_node,
+                    last_resource_subnodes=last_resource_subnodes,
+                    current_node=str(payload["node"] or ""),
+                )
+                window_payload = {
+                    "type": "context_window_state_updated",
+                    "node": payload["node"],
+                    "llm_node": payload["llm_node"],
+                    "request_event_count": len(request_context_events),
+                }
+                drained.append(
+                    f"data: {json.dumps(window_payload, ensure_ascii=False)}\n\n"
+                )
+                continue
+            if stage == "plain_llm_output" or stage == "structured_llm_output":
+                await _update_context_window_state_from_trace(
+                    graph,
+                    config,
+                    thread_id=thread_id,
+                    request_context_events=request_context_events,
+                    context_usage_history=context_usage_history,
+                    last_context_policy_by_node=last_context_policy_by_node,
+                    last_provider_supply_by_node=last_provider_supply_by_node,
+                    last_context_selection_by_node=last_context_selection_by_node,
+                    last_context_applied_by_node=last_context_applied_by_node,
+                    last_drop_reasons_by_node=last_drop_reasons_by_node,
+                    last_resource_subnodes=last_resource_subnodes,
+                    current_node=str(event.get("node_name") or ""),
+                )
+                payload = {
+                    "type": "context_window_state_updated",
+                    "node": event.get("node_name", ""),
+                    "llm_node": event.get("llm_node", ""),
+                    "request_event_count": len(request_context_events),
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
@@ -1302,7 +1901,7 @@ async def _stream_graph_events(
         for trace_payload in await _drain_trace_events():
             yield trace_payload
         logger.exception("Unhandled error in graph streaming")
-        await _try_update_run_state(
+        failed_update_ok = await _try_update_run_state(
             graph,
             config,
             {
@@ -1343,6 +1942,8 @@ async def _stream_graph_events(
             ensure_ascii=False,
         )
         yield f"data: {error_payload}\n\n"
+        if failed_update_ok:
+            finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
         return
     finally:
         reset_trace_event_sink(trace_sink_token)
@@ -1387,7 +1988,7 @@ async def _stream_graph_events(
                 ):
                     stopped_at = utc_now_iso()
                     stopped_node = str(interrupt_value.get("node") or "")
-                    await _update_run_state(
+                    stopped_update_ok = await _try_update_run_state(
                         graph,
                         config,
                         {
@@ -1401,6 +2002,7 @@ async def _stream_graph_events(
                                 interrupt_value.get("reason") or "user_stop"
                             ),
                         },
+                        state=final_state,
                     )
                     emit_a3_trace(
                         logger,
@@ -1427,12 +2029,14 @@ async def _stream_graph_events(
                         ensure_ascii=False,
                     )
                     yield f"data: {payload}\n\n"
+                    if stopped_update_ok:
+                        finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
                     return
                 if (
                     isinstance(interrupt_value, dict)
                     and interrupt_value.get("type") == "memory_confirmation"
                 ):
-                    await _try_update_run_state(
+                    interrupt_update_ok = await _try_update_run_state(
                         graph,
                         config,
                         {
@@ -1453,7 +2057,7 @@ async def _stream_graph_events(
                         "thread_id": thread_id,
                     }
                 else:
-                    await _try_update_run_state(
+                    interrupt_update_ok = await _try_update_run_state(
                         graph,
                         config,
                         {
@@ -1470,9 +2074,11 @@ async def _stream_graph_events(
                     }
                 payload = json.dumps(payload_data, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
+                if interrupt_update_ok:
+                    finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
                 return
 
-    await _try_update_run_state(
+    completed_update_ok = await _try_update_run_state(
         graph,
         config,
         {
@@ -1485,7 +2091,12 @@ async def _stream_graph_events(
         state=final_state,
     )
     run_control_registry.clear_stop_signal(thread_id)
-    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_COMPLETED, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+    completed_payload = {
+        "type": "run_status",
+        "run_status": RUN_STATUS_COMPLETED,
+        "thread_id": thread_id,
+    }
+    yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n"
 
     resource_payload = _resource_final_payload(final_state)
     if terminal_resource_output:
@@ -1533,6 +2144,8 @@ async def _stream_graph_events(
         yield f"data: {json.dumps(resource_payload, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+    if completed_update_ok:
+        finish_active_run(thread_id, {"run_status": RUN_STATUS_COMPLETED})
 
 
 async def generate_sse(
@@ -1592,8 +2205,73 @@ async def generate_sse(
     }
     _emit_graph_config_trace(graph, config, state_input)
 
-    yield f"data: {json.dumps({'type': 'thread_id', 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
-    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_RUNNING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+    initial_request_context_window = {
+        "current_request_id": request_id,
+        "current_node": "",
+        "last_event_count": 0,
+    }
+    initial_run_values = {
+        "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+        "run_status": RUN_STATUS_RUNNING,
+        "stop_requested": False,
+        "stop_reason": "",
+        "current_node": "",
+        "last_completed_node": "",
+        "resume_available": False,
+        "stopped_at": "",
+        "pending_interrupt_type": "",
+        "context_usage": {},
+        "context_usage_history": [],
+        "request_context_window": initial_request_context_window,
+        "request_id": request_id,
+        "session_id": thread_id,
+        "thread_id": thread_id,
+    }
+    try:
+        await safe_update_thread_state(
+            graph,
+            config,
+            initial_run_values,
+            state=state_input,
+            as_node="supervisor",
+        )
+    except Exception:
+        logger.exception("Failed to initialize thread checkpoint thread=%s", thread_id)
+        payload = {
+            "type": "error",
+            "message": "thread_checkpoint_initialization_failed",
+            "recoverable": False,
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+
+    request_context_window, thread_context_window = _context_window_status(
+        initial_run_values
+    )
+    start_active_run(
+        thread_id,
+        {
+            "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+            "run_status": RUN_STATUS_RUNNING,
+            "resume_available": False,
+            "pending_interrupt_type": "",
+            "current_node": "",
+            "last_completed_node": "",
+            "request_context_window": request_context_window,
+            "thread_context_window": thread_context_window,
+            "context_usage": {},
+            "context_usage_history": [],
+        },
+    )
+
+    thread_payload = {"type": "thread_id", "thread_id": thread_id}
+    yield f"data: {json.dumps(thread_payload, ensure_ascii=False)}\n\n"
+    running_payload = {
+        "type": "run_status",
+        "run_status": RUN_STATUS_RUNNING,
+        "thread_id": thread_id,
+    }
+    yield f"data: {json.dumps(running_payload, ensure_ascii=False)}\n\n"
 
     # Record user input as episodic memory (non-fatal, fire-and-forget)
     if user_id:
@@ -1673,17 +2351,41 @@ async def generate_resume_sse(
         resume_value = edited_plan
 
     resume_input = Command(resume=resume_value)
+    resume_request_id = str(uuid.uuid4())
     _emit_graph_config_trace(
         graph,
         config,
         {
-            "request_id": str(uuid.uuid4()),
+            "request_id": resume_request_id,
             "session_id": thread_id,
             "thread_id": thread_id,
         },
     )
+    request_context_window, thread_context_window = _context_window_status(
+        _state_values(state_snapshot)
+    )
+    if not request_context_window.get("current_request_id"):
+        request_context_window["current_request_id"] = resume_request_id
+    start_active_run(
+        thread_id,
+        {
+            "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+            "run_status": RUN_STATUS_CONTINUING,
+            "resume_available": False,
+            "pending_interrupt_type": "",
+            "current_node": "",
+            "last_completed_node": "",
+            "request_context_window": request_context_window,
+            "thread_context_window": thread_context_window,
+        },
+    )
 
-    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_CONTINUING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+    continuing_payload = {
+        "type": "run_status",
+        "run_status": RUN_STATUS_CONTINUING,
+        "thread_id": thread_id,
+    }
+    yield f"data: {json.dumps(continuing_payload, ensure_ascii=False)}\n\n"
 
     async for chunk in _stream_graph_events(
         graph, resume_input, config, thread_id, preserve_context_history=True
@@ -1692,6 +2394,9 @@ async def generate_resume_sse(
 
 
 async def get_thread_status_payload(graph, thread_id: str) -> ThreadStatusResponse:
+    active_run = get_active_run(thread_id)
+    if active_run is not None:
+        return _thread_status_from_active_run(thread_id, active_run)
     config = make_thread_config(thread_id)
     state_snapshot = await graph.aget_state(config)
     if not _has_checkpoint_state(state_snapshot):
@@ -1770,6 +2475,22 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
         return
 
     run_control_registry.clear_stop_signal(thread_id)
+    request_context_window, thread_context_window = _context_window_status(
+        _state_values(state_snapshot)
+    )
+    start_active_run(
+        thread_id,
+        {
+            "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+            "run_status": RUN_STATUS_CONTINUING,
+            "resume_available": False,
+            "pending_interrupt_type": "",
+            "current_node": "",
+            "last_completed_node": "",
+            "request_context_window": request_context_window,
+            "thread_context_window": thread_context_window,
+        },
+    )
     await _update_run_state(
         graph,
         config,
@@ -1792,7 +2513,12 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
         state={"thread_id": thread_id, "session_id": thread_id},
         env_flag="LOG_A3_TRACE",
     )
-    yield f"data: {json.dumps({'type': 'run_status', 'run_status': RUN_STATUS_CONTINUING, 'thread_id': thread_id}, ensure_ascii=False)}\n\n"
+    continuing_payload = {
+        "type": "run_status",
+        "run_status": RUN_STATUS_CONTINUING,
+        "thread_id": thread_id,
+    }
+    yield f"data: {json.dumps(continuing_payload, ensure_ascii=False)}\n\n"
 
     resume_input = Command(resume={"type": "user_stop", "action": "continue"})
     _emit_graph_config_trace(

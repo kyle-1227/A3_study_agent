@@ -50,6 +50,27 @@ def _existing_memory_results(
     limit: int,
 ) -> list[tuple[str, dict[str, Any]]]:
     results: list[tuple[str, dict[str, Any]]] = []
+    selected_memory = state.get("selected_memory")
+    if isinstance(selected_memory, dict):
+        results.append(("selected_memory", selected_memory))
+    elif isinstance(selected_memory, list):
+        for item in selected_memory:
+            if isinstance(item, dict):
+                results.append(("selected_memory", item))
+                if len(results) >= limit:
+                    return results
+    for key in ("conversation_summary", "memory_summary", "memory_summaries"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            results.append((key, {"summary": value, "memory_type": key}))
+            if len(results) >= limit:
+                return results
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    results.append((key, item))
+                    if len(results) >= limit:
+                        return results
     for bucket in ("episodic_memory_results", "semantic_memory_results"):
         raw_items = state.get(bucket)
         if raw_items is None:

@@ -1,4 +1,4 @@
-"""Registry and shadow collection for ContextProvider implementations."""
+"""Registry and production collection settings for ContextProvider implementations."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from src.context_engineering.trace import (
 
 @dataclass(frozen=True)
 class ContextProviderSettings:
-    """Explicit settings for Phase 2 provider shadow collection."""
+    """Explicit settings for production context provider collection."""
 
     enabled: bool
     shadow_mode: bool
@@ -133,6 +133,14 @@ def get_default_providers(
         if provider.source_type in enabled_sources:
             providers.append(cast(ContextProvider, provider))
     return providers
+
+
+def get_registered_provider_sources() -> tuple[ContextSourceType, ...]:
+    """Return source types with production provider classes registered."""
+    return tuple(
+        cast(ContextSourceType, provider_cls.source_type)
+        for provider_cls in _PROVIDER_CLASSES
+    )
 
 
 def collect_context_items(

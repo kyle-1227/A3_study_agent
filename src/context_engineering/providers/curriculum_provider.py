@@ -16,8 +16,8 @@ class CurriculumContextProvider:
     def collect(self, context: ProviderContext) -> list[ContextItem]:
         if context.max_items_per_provider <= 0:
             return []
-        content = context.state.get("curriculum_context")
-        if not isinstance(content, str) or not content.strip():
+        content = _curriculum_content(context.state)
+        if not content.strip():
             return []
         learning_path = context.state.get("learning_path")
         path_id = ""
@@ -38,3 +38,25 @@ class CurriculumContextProvider:
                 max_content_chars=context.max_content_chars_per_item,
             )
         ]
+
+
+def _curriculum_content(state: dict) -> str:
+    parts: list[str] = []
+    for key in (
+        "curriculum_context",
+        "subject",
+        "primary_subject",
+        "available_subjects",
+        "learning_path",
+        "chapter_structure",
+        "knowledge_structure",
+        "keypoints",
+    ):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}: {value.strip()}")
+        elif isinstance(value, list) and value:
+            parts.append(f"{key}: {value}")
+        elif isinstance(value, dict) and value:
+            parts.append(f"{key}: {value}")
+    return "\n".join(parts)

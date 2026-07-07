@@ -10,12 +10,11 @@ from src.graph.academic import (
     _assert_no_silent_fallback,
     _build_evidence_item_grader_messages,
     _build_evidence_sufficiency_messages,
-    _deterministic_sufficiency_fallback,
     _grade_evidence_items_with_llm,
+    _judge_evidence_candidates_with_llm,
     _last_failed_execution_stage,
     _trace_parse_evidence_grade_raw,
     evidence_judge,
-    _judge_evidence_candidates_with_llm,
     validate_evidence_grade_batch_output,
     validate_evidence_sufficiency_output,
 )
@@ -24,6 +23,7 @@ from src.graph.evidence import (
     EvidenceCoverageGap,
     EvidenceGradeBatch,
     EvidenceJudgeItem,
+    EvidenceJudgeOutput,
     EvidenceSufficiencyOutput,
 )
 from src.llm.schema_drift import analyze_schema_drift_trace_only
@@ -50,6 +50,8 @@ def _judge_item(
     keep: bool = True,
     quality: str = "high",
     use_case: str = "core_evidence",
+    evidence_score: float = 0.9,
+    score_reason: str = "Directly supports the requested concept.",
     coverage_contribution: str = "Covers the requested concept.",
     reason: str = "Useful evidence.",
 ) -> EvidenceJudgeItem:
@@ -61,6 +63,8 @@ def _judge_item(
         authority="medium",
         usefulness="high" if keep else "low",
         risk="low",
+        evidence_score=evidence_score,
+        score_reason=score_reason,
         evidence_type="local_textbook_chunk",
         use_case=use_case,
         coverage_contribution=coverage_contribution,
@@ -125,6 +129,7 @@ def test_evidence_grade_batch_schema_validates_and_caps_items():
     batch = EvidenceGradeBatch(judged_evidence=[_judge_item()])
 
     assert batch.judged_evidence[0].evidence_id == "local:python:0"
+    assert batch.judged_evidence[0].evidence_score == pytest.approx(0.9)
 
     with pytest.raises(ValidationError):
         EvidenceGradeBatch(
@@ -164,13 +169,39 @@ def test_evidence_judge_item_requires_explicit_coverage_contribution():
     assert kept.coverage_contribution == "Covers Python quiz practice."
 
 
+def test_evidence_judge_item_requires_llm_evidence_score():
+    with pytest.raises(ValidationError, match="evidence_score"):
+        EvidenceJudgeItem(
+            evidence_id="local:python:0",
+            keep=True,
+            final_quality="high",
+            relevance="high",
+            authority="medium",
+            usefulness="high",
+            risk="low",
+            score_reason="Good support.",
+            evidence_type="local_textbook_chunk",
+            use_case="core_evidence",
+            coverage_contribution="Covers Python functions.",
+            reason="Useful evidence.",
+        )
+
+    with pytest.raises(ValidationError, match="less than or equal to 1"):
+        _judge_item(evidence_score=1.5)
+
+    with pytest.raises(ValidationError, match="score_reason"):
+        _judge_item(score_reason="")
+
+
 def test_evidence_descriptions_are_canonical_without_alias_lists():
     coverage_description = EvidenceJudgeItem.model_fields["coverage_contribution"].description or ""
     reason_description = EvidenceJudgeItem.model_fields["reason"].description or ""
+    score_description = EvidenceJudgeItem.model_fields["evidence_score"].description or ""
     gap_description = EvidenceCoverageGap.model_fields["gap"].description or ""
 
     assert "what coverage the evidence contributes" in coverage_description
     assert "why the grading decision was made" in reason_description
+    assert "supports the current user request" in score_description
     assert "missing or weak" in gap_description
     for forbidden_alias in ("coverage_reason", "support_reason", "topic", "followup_query"):
         assert forbidden_alias not in coverage_description
@@ -190,6 +221,8 @@ def test_evidence_alias_drift_is_reported_but_not_normalized():
                     "authority": "medium",
                     "usefulness": "high",
                     "risk": "low",
+                    "evidence_score": 0.88,
+                    "score_reason": "Direct support.",
                     "evidence_type": "local_textbook_chunk",
                     "use_case": "core_evidence",
                     "coverage_reason": "Covers functions.",
@@ -215,6 +248,8 @@ def test_evidence_alias_drift_is_reported_but_not_normalized():
                     "authority": "medium",
                     "usefulness": "high",
                     "risk": "low",
+                    "evidence_score": 0.88,
+                    "score_reason": "Direct support.",
                     "evidence_type": "local_textbook_chunk",
                     "use_case": "core_evidence",
                     "coverage_reason": "Covers functions.",
@@ -469,6 +504,8 @@ def test_evidence_prompts_include_json_requested_resource_types():
     item_prompt = item_messages[-1]["content"]
     assert "- requested_resource_type: mindmap" in item_prompt
     assert '["mindmap", "quiz"]' in item_prompt
+    assert "evidence_score is mandatory" in item_prompt
+    assert '"evidence_score": 0.92' in item_prompt
 
     sufficiency_messages = _build_evidence_sufficiency_messages(
         candidates=[candidate],
@@ -579,31 +616,29 @@ def test_sufficiency_validator_rules():
     )
 
 
-def test_deterministic_sufficiency_fallback_rules():
-    insufficient, reason = _deterministic_sufficiency_fallback([])
-    assert insufficient.overall_evidence_state == "insufficient"
-    assert insufficient.answerability == "cannot_answer"
-    assert reason == "no_kept_evidence"
+@pytest.mark.asyncio
+async def test_no_candidates_returns_explicit_insufficient_without_fallback(monkeypatch):
+    async def fail_if_called(**_kwargs):
+        raise AssertionError("No-candidate Evidence Judge path should not call LLM.")
 
-    sufficient, reason = _deterministic_sufficiency_fallback([
-        _judge_item(quality="high", use_case="core_evidence"),
-    ])
-    assert sufficient.overall_evidence_state == "sufficient"
-    assert reason == "high_quality_core_or_task_specific_evidence"
+    monkeypatch.setattr("src.graph.academic.invoke_structured_llm", fail_if_called)
 
-    partial, reason = _deterministic_sufficiency_fallback([
-        _judge_item(quality="low", use_case="background_context"),
-    ])
-    assert partial.overall_evidence_state == "partially_sufficient"
-    assert partial.answerability == "can_answer_with_caveats"
-    assert reason == "kept_evidence_quality_or_coverage_limited"
+    parsed, debug = await _judge_evidence_candidates_with_llm(
+        state=_state(),
+        candidates=[],
+        original_user_query="Explain Python functions",
+        learning_goal="Understand functions",
+        requested_resource_type="answer",
+        round_index=1,
+    )
 
-    sufficient_from_two_medium, reason = _deterministic_sufficiency_fallback([
-        _judge_item("local:python:0", quality="medium", use_case="background_context"),
-        _judge_item("local:python:1", quality="high", use_case="background_context"),
-    ])
-    assert sufficient_from_two_medium.overall_evidence_state == "sufficient"
-    assert reason == "at_least_two_medium_or_high_kept_evidence"
+    assert parsed is not None
+    assert parsed.overall_evidence_state == "insufficient"
+    assert parsed.need_more_web_research is True
+    assert parsed.judged_evidence == []
+    assert debug["used_fallback"] is False
+    assert debug["fallback_chain"] == []
+    assert debug["stages"][-1]["action_taken"] == "assembled_empty_evidence_judge_output"
 
 
 @pytest.mark.asyncio
@@ -670,7 +705,63 @@ async def test_item_grader_failure_returns_failed_without_previous_fallback(monk
     assert debug["evidence_judge_version"] == "v2"
     assert debug["status"] == "failed"
     assert debug["used_fallback"] is False
-    assert debug["developer_warnings"]
+    failed_stage = _last_failed_execution_stage(debug)
+    assert failed_stage["action_taken"] in {
+        "return_failed_stage_for_v2_dispatcher",
+        "return_failed_stage_to_v2_dispatcher",
+    }
+    assert failed_stage["validation_errors"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_judge_returns_graded_evidence_for_ce_handoff(monkeypatch):
+    parsed = EvidenceJudgeOutput(
+        overall_evidence_state="sufficient",
+        judged_evidence=[
+            _judge_item(
+                evidence_score=0.86,
+                score_reason="Directly supports generating the review document.",
+            )
+        ],
+        decision_summary="Evidence is sufficient for the requested resource.",
+    )
+
+    async def fake_judge(**_kwargs):
+        return parsed, {"status": "success", "stages": []}
+
+    monkeypatch.setattr(
+        "src.graph.academic._judge_evidence_candidates_with_llm",
+        fake_judge,
+    )
+
+    candidate = _candidate().model_dump(mode="json")
+    result = await evidence_judge(
+        {
+            **_state(),
+            "local_evidence_candidates": [candidate],
+            "local_evidence_originals": {
+                "local:python:0": {
+                    "content": "Python functions use parameters and return values.",
+                    "source": "python.pdf",
+                }
+            },
+            "requested_resource_type": "review_doc",
+            "requested_resource_types": ["review_doc"],
+            "learning_goal": "Generate a review document about Python functions.",
+        }
+    )
+
+    assert result["graded_evidence"] == result["context"]
+    assert len(result["graded_evidence"]) == 1
+    item = result["graded_evidence"][0]
+    assert item["evidence_id"] == "local:python:0"
+    assert item["content"] == "Python functions use parameters and return values."
+    assert item["evidence_score"] == pytest.approx(0.86)
+    assert item["relevance_score"] == pytest.approx(0.86)
+    assert item["score_source"] == "evidence_item_grader"
+    assert item["score_scale"] == "0-1"
+    assert item["score_type"] == "task_relevance"
+    assert item["score_reason"] == "Directly supports generating the review document."
 
 
 @pytest.mark.asyncio
@@ -872,7 +963,7 @@ def test_silent_fallback_guard_repairs_in_place_when_not_strict(monkeypatch, cap
         "fallback_chain": [
             {
                 "from": "evidence_sufficiency_judge",
-                "to": "deterministic_sufficiency_fallback",
+                "to": "legacy_unexpected_fallback",
                 "reason": "StructuredOutputError",
             }
         ],

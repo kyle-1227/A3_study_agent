@@ -44,6 +44,8 @@ class ThreadStatusResponse(BaseModel):
     stop_reason: str = ""
     context_usage: dict[str, Any] = Field(default_factory=dict)
     context_usage_history: list[dict[str, Any]] = Field(default_factory=list)
+    request_context_window: dict[str, Any] = Field(default_factory=dict)
+    thread_context_window: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)
     message: str = ""
 
@@ -58,7 +60,9 @@ class OnboardRequest(BaseModel):
     user_id: str
     nickname: str = Field(default="")
     subjects: list[str] = Field(default_factory=list)
-    skill_levels: dict[str, float] = Field(default_factory=dict)  # subject → 0.25|0.5|0.75
+    skill_levels: dict[str, float] = Field(
+        default_factory=dict
+    )  # subject → 0.25|0.5|0.75
     goals: list[str] = Field(default_factory=list)
     learning_style: dict[str, float] = Field(default_factory=dict)  # dim → 0.2|0.5|0.8
     grade: str | None = None

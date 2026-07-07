@@ -18,7 +18,11 @@ class TrajectoryContextProvider:
     def collect(self, context: ProviderContext) -> list[ContextItem]:
         if context.max_items_per_provider <= 0:
             return []
-        value = context.state.get("trajectory") or context.state.get("step_summaries")
+        value = (
+            context.state.get("trajectory")
+            or context.state.get("step_summaries")
+            or _trajectory_from_state(context.state)
+        )
         if not value:
             return []
         if not isinstance(value, list):
@@ -75,3 +79,21 @@ class TrajectoryContextProvider:
                 )
             )
         return items
+
+
+def _trajectory_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for key in ("learning_state", "progress", "mastery_profile"):
+        value = state.get(key)
+        if isinstance(value, (dict, list, str)) and value:
+            entries.append({"title": key, "summary": str(value), "node": key})
+    quiz_results = state.get("quiz_results")
+    if isinstance(quiz_results, list) and quiz_results:
+        entries.append(
+            {
+                "title": "previous_quiz_results",
+                "summary": str(quiz_results[-3:]),
+                "node": "quiz_results",
+            }
+        )
+    return entries

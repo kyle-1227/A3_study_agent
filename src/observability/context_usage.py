@@ -56,6 +56,7 @@ def emit_context_usage_trace(
     state: dict | None,
     output_reserved_tokens: int | None = None,
     schema_size_chars: int | None = None,
+    trace_fields: dict[str, Any] | None = None,
 ) -> None:
     """Emit context telemetry via the Context Engineering Kernel."""
     emit_context_usage(
@@ -68,4 +69,5 @@ def emit_context_usage_trace(
         state=state,
         reserved_output_tokens=output_reserved_tokens,
         schema_size_chars=schema_size_chars,
+        trace_fields=trace_fields,
     )

@@ -26,9 +26,15 @@ from src.context_engineering.packing.node_policy import (
     resolve_context_policy,
 )
 from src.context_engineering.packing.packer import pack_context_items
+from src.context_engineering.packing.policies import PackingPolicy
 from src.context_engineering.packing.source_policy import (
     filter_context_items_by_source_policy,
 )
+from src.context_engineering.providers.supply import (
+    ContextCollectionResult,
+    ProviderSupplyPlan,
+)
+from src.context_engineering.evidence_normalizer import EvidenceNormalizationStats
 from src.context_engineering.schema import ContextItem
 
 
@@ -105,8 +111,9 @@ def _policy(
     *,
     mode: str = "active",
     nodes: tuple[str, ...] = ("plain_node",),
-    fallback_on_error: bool = True,
+    fallback_on_error: bool = False,
     max_tokens: int = 10000,
+    required_sources: tuple[str, ...] = (),
 ) -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=True,
@@ -118,6 +125,7 @@ def _policy(
         exclude_message_source=True,
         max_injected_context_tokens=max_tokens,
         injectable_sources=("memory", "evidence", "rules"),
+        required_sources=required_sources,
         mode=mode,
         risk_tier=2,
         policy_source="node_policy",
@@ -148,13 +156,13 @@ def _policy(
         ),
         importance_scoring=ImportanceScoringPolicy(
             enabled=False,
-            shadow_mode=True,
-            mode="shadow",
+            shadow_mode=False,
+            mode="disabled",
             llm_node="",
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=True,
+            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
         ),
@@ -218,6 +226,110 @@ def _mock_llm(content: str = "answer"):
     mock_llm.model_name = "deepseek-v4-pro"
     mock_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content=content))
     return mock_llm
+
+
+def _packing_policy(*, enabled: bool = True, max_tokens: int = 10000) -> PackingPolicy:
+    return PackingPolicy(
+        enabled=enabled,
+        shadow_mode=False,
+        apply_to_llm=True,
+        strategy="priority_budget",
+        max_context_block_tokens=max_tokens,
+        trace_selected_items=0,
+        trace_dropped_items=0,
+        enabled_nodes=(),
+        enabled_sources=("message", "memory", "evidence", "rules"),
+    )
+
+
+def _collection(
+    items: list[ContextItem],
+    *,
+    requested_sources: tuple[str, ...] | None = None,
+    required_sources: tuple[str, ...] = (),
+    optional_sources: tuple[str, ...] = (),
+) -> tuple[ProviderSupplyPlan, ContextCollectionResult]:
+    requested = (
+        requested_sources
+        or tuple(dict.fromkeys(item.source_type for item in items))
+        or ("memory",)
+    )
+    present = {item.source_type for item in items}
+    missing = {
+        source: "provider_empty" for source in requested if source not in present
+    }
+    plan = ProviderSupplyPlan(
+        requested_sources=requested,
+        required_sources=required_sources,
+        optional_sources=optional_sources or requested,
+        enabled_sources=requested,
+        disabled_sources=(),
+        unregistered_sources=(),
+        provider_count=len(requested),
+        provider_sources_missing={source: 1 for source in missing},
+        provider_missing_reasons=missing,
+    )
+    return plan, ContextCollectionResult(
+        items=items,
+        provider_count=len(requested),
+        provider_sources_missing={source: 1 for source in missing},
+        provider_missing_reasons=missing,
+        errors=[],
+        evidence_stats=EvidenceNormalizationStats(),
+    )
+
+
+def _patch_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    policy: ContextInjectionPolicy | None = None,
+    error: ContextApplyError | None = None,
+    items: list[ContextItem] | None = None,
+    packing_enabled: bool = True,
+    trace_payloads: list[dict] | None = None,
+) -> None:
+    from src.context_engineering.packing import orchestrator as orchestrator_module
+
+    if error is None:
+        assert policy is not None
+        monkeypatch.setattr(
+            orchestrator_module,
+            "resolve_context_policy",
+            lambda **_: _resolved(policy),
+        )
+    else:
+        monkeypatch.setattr(
+            orchestrator_module,
+            "resolve_context_policy",
+            lambda **_: (_ for _ in ()).throw(error),
+        )
+    monkeypatch.setattr(
+        orchestrator_module,
+        "collect_context_for_policy",
+        lambda **kwargs: _collection(
+            items or [_item("memory-1")],
+            requested_sources=kwargs.get("requested_sources"),
+            required_sources=kwargs.get("required_sources", ()),
+            optional_sources=kwargs.get("optional_sources", ()),
+        ),
+    )
+    max_tokens = policy.max_injected_context_tokens if policy is not None else 10000
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_packing_policy",
+        lambda **_: _packing_policy(
+            enabled=packing_enabled,
+            max_tokens=max_tokens,
+        ),
+    )
+    if trace_payloads is not None:
+        monkeypatch.setattr(
+            orchestrator_module,
+            "emit_a3_trace",
+            lambda _logger, stage, payload, **_kwargs: trace_payloads.append(
+                {"stage": stage, **payload}
+            ),
+        )
 
 
 def test_resolver_keeps_legacy_when_node_policies_absent(monkeypatch):
@@ -481,6 +593,8 @@ def test_settings_resolve_expected_default_tiers():
         state={},
     )
     assert planner.mode == "active"
+    assert planner.injection_policy.required_sources == ("rules",)
+    assert "evidence" in planner.injection_policy.optional_sources
     assert planner.injection_policy.max_injected_context_tokens == 1500
     assert planner.source_policies["evidence"].max_items == 2
     assert planner.source_policies["rules"].min_priority == 30
@@ -492,14 +606,13 @@ def test_settings_resolve_expected_default_tiers():
         ).mode
         == "active"
     )
-    assert (
-        resolve_context_policy(
-            node_name="mindmap_agent",
-            llm_node="mindmap",
-            state={},
-        ).mode
-        == "active"
+    agent = resolve_context_policy(
+        node_name="mindmap_agent",
+        llm_node="mindmap",
+        state={},
     )
+    assert agent.mode == "active"
+    assert agent.injection_policy.required_sources == ("evidence",)
     assert (
         resolve_context_policy(
             node_name="video_script_agent",
@@ -514,7 +627,20 @@ def test_settings_resolve_expected_default_tiers():
         state={},
     )
     assert reviewer.mode == "active"
+    assert reviewer.injection_policy.required_sources == ("rules",)
     assert reviewer.injection_policy.injectable_sources == ("rules", "evidence")
+    summary = resolve_context_policy(
+        node_name="conversation_summary",
+        llm_node="summary",
+        state={},
+    )
+    assert summary.mode == "active"
+    assert summary.injection_policy.exclude_message_source is False
+    assert "message" in summary.injection_policy.injectable_sources
+    assert summary.injection_policy.required_sources == ("message",)
+    assert "message" in summary.source_policies
+    assert summary.source_policies["message"].max_items == 4
+    assert summary.source_policies["message"].max_tokens == 900
     assert (
         resolve_context_policy(
             node_name="review_doc_output",
@@ -539,6 +665,196 @@ def test_settings_resolve_expected_default_tiers():
         ).mode
         == "disabled"
     )
+
+
+def test_settings_agent_required_sources_are_node_specific():
+    from src.config import clear_cache
+
+    clear_cache()
+    evidence_agents = (
+        "review_doc_agent",
+        "exercise_agent",
+        "mindmap_agent",
+        "code_practice_agent",
+        "video_script_agent",
+        "video_animation_agent",
+    )
+    for node_name in evidence_agents:
+        resolved = resolve_context_policy(
+            node_name=node_name,
+            llm_node=node_name.removesuffix("_agent"),
+            state={},
+        )
+        assert resolved.mode == "active"
+        assert resolved.injection_policy.required_sources == ("evidence",)
+
+    study_plan = resolve_context_policy(
+        node_name="study_plan_agent",
+        llm_node="study_plan",
+        state={},
+    )
+    assert study_plan.injection_policy.required_sources == ("profile",)
+
+    adaptive = resolve_context_policy(
+        node_name="adaptive_practice_responder",
+        llm_node="adaptive_practice",
+        state={},
+    )
+    recommendation = resolve_context_policy(
+        node_name="recommendation_provider",
+        llm_node="recommendation",
+        state={},
+    )
+    assert adaptive.injection_policy.required_sources == ("rules",)
+    assert recommendation.injection_policy.required_sources == ("rules",)
+    assert "profile" in adaptive.injection_policy.optional_sources
+    assert "trajectory" in adaptive.injection_policy.optional_sources
+    assert "profile" in recommendation.injection_policy.optional_sources
+    assert "trajectory" in recommendation.injection_policy.optional_sources
+
+
+def test_agent_injectable_sources_are_node_specific():
+    from src.config import clear_cache
+
+    clear_cache()
+    expected = {
+        "review_doc_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "curriculum", "memory", "profile"),
+            "injectable": ("evidence", "rules", "curriculum", "memory", "profile"),
+            "excluded": ("artifact", "trajectory"),
+        },
+        "exercise_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "trajectory", "memory", "curriculum"),
+            "injectable": ("evidence", "rules", "trajectory", "memory", "curriculum"),
+            "excluded": ("artifact",),
+        },
+        "mindmap_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "curriculum"),
+            "injectable": ("evidence", "rules", "curriculum"),
+            "excluded": ("artifact", "trajectory", "memory", "profile"),
+        },
+        "code_practice_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "artifact", "profile"),
+            "injectable": ("evidence", "rules", "artifact", "profile"),
+            "excluded": ("trajectory",),
+        },
+        "video_script_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "curriculum", "profile"),
+            "injectable": ("evidence", "rules", "curriculum", "profile"),
+            "excluded": ("artifact", "trajectory", "memory"),
+        },
+        "video_animation_agent": {
+            "required": ("evidence",),
+            "optional": ("rules", "curriculum"),
+            "injectable": ("evidence", "rules", "curriculum"),
+            "excluded": ("artifact", "trajectory", "memory", "profile"),
+        },
+        "study_plan_agent": {
+            "required": ("profile",),
+            "optional": ("rules", "trajectory", "memory", "curriculum"),
+            "injectable": ("profile", "rules", "trajectory", "memory", "curriculum"),
+            "excluded": ("evidence", "artifact"),
+        },
+        "adaptive_practice_responder": {
+            "required": ("rules",),
+            "optional": ("profile", "trajectory", "memory"),
+            "injectable": ("rules", "profile", "trajectory", "memory"),
+            "excluded": ("evidence", "artifact", "curriculum"),
+        },
+        "recommendation_provider": {
+            "required": ("rules",),
+            "optional": ("profile", "trajectory", "curriculum"),
+            "injectable": ("rules", "profile", "trajectory", "curriculum"),
+            "excluded": ("evidence", "artifact", "memory"),
+        },
+    }
+
+    for node_name, assertion in expected.items():
+        resolved = resolve_context_policy(
+            node_name=node_name,
+            llm_node=node_name,
+            state={},
+        )
+        policy = resolved.injection_policy
+
+        assert policy.required_sources == assertion["required"]
+        assert policy.optional_sources == assertion["optional"]
+        assert policy.injectable_sources == assertion["injectable"]
+        for source in assertion["excluded"]:
+            assert source not in policy.injectable_sources
+
+
+def test_settings_reviewer_sources_are_explicit_and_injectable():
+    from src.config import clear_cache
+
+    clear_cache()
+    expected = {
+        "review_doc_reviewer": ("rules", "evidence"),
+        "exercise_reviewer": ("rules", "evidence"),
+        "mindmap_reviewer": ("rules",),
+        "code_practice_reviewer": ("rules", "artifact"),
+        "video_script_reviewer": ("rules",),
+        "video_animation_reviewer": ("rules",),
+        "study_plan_reviewer_academic": ("rules", "curriculum"),
+        "study_plan_reviewer_emotional": ("rules", "profile"),
+        "study_plan_consensus": ("rules",),
+    }
+
+    for node_name, injectable_sources in expected.items():
+        resolved = resolve_context_policy(
+            node_name=node_name,
+            llm_node=node_name.removesuffix("_reviewer"),
+            state={},
+        )
+        assert resolved.mode == "active"
+        assert resolved.injection_policy.required_sources == ("rules",)
+        assert resolved.injection_policy.injectable_sources == injectable_sources
+        assert set(resolved.injection_policy.optional_sources).issubset(
+            set(injectable_sources)
+        )
+
+
+def test_conversation_summary_allows_message_but_generation_nodes_still_exclude():
+    from src.config import clear_cache
+
+    clear_cache()
+    summary = resolve_context_policy(
+        node_name="conversation_summary",
+        llm_node="summary",
+        state={},
+    )
+    review_agent = resolve_context_policy(
+        node_name="review_doc_agent",
+        llm_node="review_doc",
+        state={},
+    )
+    message_item = _item("current-message", source_type="message")
+
+    summary_result = filter_context_items_by_source_policy(
+        [message_item],
+        injectable_sources=summary.injection_policy.injectable_sources,
+        exclude_message_source=summary.injection_policy.exclude_message_source,
+        source_policies=summary.source_policies,
+        state={},
+    )
+    review_result = filter_context_items_by_source_policy(
+        [message_item],
+        injectable_sources=review_agent.injection_policy.injectable_sources,
+        exclude_message_source=review_agent.injection_policy.exclude_message_source,
+        source_policies=review_agent.source_policies,
+        state={},
+    )
+
+    assert [item.id for item in summary_result.kept_items] == ["current-message"]
+    assert "message_source_excluded" not in summary_result.drop_reasons
+    assert review_agent.injection_policy.exclude_message_source is True
+    assert review_result.kept_items == []
+    assert review_result.source_drop_reasons["message_source_excluded"] == 1
 
 
 def test_invalid_mode_raises_context_apply_error(monkeypatch):
@@ -825,25 +1141,15 @@ async def test_disabled_mode_emits_selection_without_collecting(monkeypatch):
     selections: list[str] = []
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: _resolved(_policy(mode="disabled")),
+    trace_payloads: list[dict] = []
+    _patch_orchestrator(
+        monkeypatch,
+        policy=_policy(mode="disabled"),
+        items=[],
+        trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: pytest.fail("disabled mode must not collect context"),
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_selection",
-        lambda _logger, *, selection, **_kwargs: selections.append(
-            selection.skip_reason
-        ),
-    )
 
     result = await invoke_plain_llm_fail_fast(
         node_name="plain_node",
@@ -853,6 +1159,11 @@ async def test_disabled_mode_emits_selection_without_collecting(monkeypatch):
     )
 
     assert result == "answer"
+    selections = [
+        payload["skip_reason"]
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_selection"
+    ]
     assert selections == ["node_policy_disabled"]
     mock_llm.ainvoke.assert_awaited_once_with(messages)
 
@@ -864,34 +1175,17 @@ async def test_observe_only_collects_filters_and_keeps_original_messages(monkeyp
 
     messages = [{"role": "user", "content": "question"}]
     mock_llm = _mock_llm()
-    selections: list[Any] = []
+    trace_payloads: list[dict] = []
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: _resolved(_policy(mode="observe_only")),
+    _patch_orchestrator(
+        monkeypatch,
+        policy=_policy(mode="observe_only"),
+        items=[_item("memory-1")],
+        trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module, "emit_context_applied", lambda *_, **__: pytest.fail()
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: [_item("memory-1")],
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_packing_shadow",
-        lambda *_, **__: _packed([_item("memory-1")]),
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_selection",
-        lambda _logger, *, selection, **_kwargs: selections.append(selection),
-    )
 
     result = await invoke_plain_llm_fail_fast(
         node_name="plain_node",
@@ -901,8 +1195,17 @@ async def test_observe_only_collects_filters_and_keeps_original_messages(monkeyp
     )
 
     assert result == "answer"
-    assert selections[0].skip_reason == "node_policy_observe_only"
-    assert selections[0].final_injected_count == 1
+    selections = [
+        payload
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_selection"
+    ]
+    applied = [
+        payload for payload in trace_payloads if payload["stage"] == "context_applied"
+    ]
+    assert selections[0]["skip_reason"] == "node_policy_observe_only"
+    assert selections[0]["final_injected_count"] == 1
+    assert applied == []
     mock_llm.ainvoke.assert_awaited_once_with(messages)
 
 
@@ -915,23 +1218,13 @@ async def test_active_mode_applies_context(monkeypatch):
     mock_llm = _mock_llm()
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: _resolved(_policy(mode="active")),
+    _patch_orchestrator(
+        monkeypatch,
+        policy=_policy(mode="active"),
+        items=[_item("memory-1")],
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: [_item("memory-1")],
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_packing_shadow",
-        lambda *_, **__: _packed([_item("memory-1")]),
-    )
 
     result = await invoke_plain_llm_fail_fast(
         node_name="plain_node",
@@ -951,50 +1244,45 @@ async def test_active_mode_applies_context(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_fallback_on_error_keeps_original_messages(monkeypatch):
+async def test_active_apply_error_does_not_fallback_to_original_messages(monkeypatch):
     from src.graph import llm as llm_module
     from src.graph.llm import invoke_plain_llm_fail_fast
 
     messages = [{"role": "user", "content": "question"}]
     mock_llm = _mock_llm()
-    errors: list[ContextApplyError] = []
+    trace_payloads: list[dict] = []
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: _resolved(_policy(mode="active", fallback_on_error=True)),
+    _patch_orchestrator(
+        monkeypatch,
+        policy=_policy(mode="active", fallback_on_error=False),
+        items=[_item("memory-1")],
+        packing_enabled=False,
+        trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: [_item("memory-1")],
-    )
-    monkeypatch.setattr(
-        llm_module, "emit_context_packing_shadow", lambda *_, **__: None
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_error",
-        lambda _logger, *, error, **_kwargs: errors.append(error),
-    )
 
-    result = await invoke_plain_llm_fail_fast(
-        node_name="plain_node",
-        llm_node="llm",
-        messages=messages,
-        state={
-            "request_id": "r1",
-            "thread_id": "t1",
-            "requested_resource_types": ["review_doc"],
-        },
-    )
+    with pytest.raises(ContextApplyError) as exc_info:
+        await invoke_plain_llm_fail_fast(
+            node_name="plain_node",
+            llm_node="llm",
+            messages=messages,
+            state={
+                "request_id": "r1",
+                "thread_id": "t1",
+                "requested_resource_types": ["review_doc"],
+            },
+        )
 
-    assert result == "answer"
-    assert errors[0].fallback_used is True
-    mock_llm.ainvoke.assert_awaited_once_with(messages)
+    assert exc_info.value.reason == "packed_context_missing"
+    errors = [
+        payload
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_error"
+    ]
+    assert errors[0]["fallback_used"] is False
+    mock_llm.ainvoke.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -1004,111 +1292,93 @@ async def test_packed_context_missing_emits_plan_and_selection(monkeypatch):
 
     messages = [{"role": "user", "content": "question"}]
     mock_llm = _mock_llm()
-    plans: list[dict[str, int]] = []
-    selections: list[str] = []
+    trace_payloads: list[dict] = []
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: _resolved(_policy(mode="active", fallback_on_error=True)),
+    _patch_orchestrator(
+        monkeypatch,
+        policy=_policy(mode="active", fallback_on_error=False),
+        items=[_item("memory-1")],
+        packing_enabled=False,
+        trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: [_item("memory-1")],
-    )
-    monkeypatch.setattr(
-        llm_module, "emit_context_packing_shadow", lambda *_, **__: None
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_plan",
-        lambda _logger, **kwargs: plans.append(
-            {
-                "selected": kwargs["selected_item_count"],
-                "injectable": kwargs["injectable_item_count"],
-                "skipped": kwargs["skipped_item_count"],
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_selection",
-        lambda _logger, *, selection, **_kwargs: selections.append(
-            selection.skip_reason
-        ),
-    )
-    monkeypatch.setattr(llm_module, "emit_context_apply_error", lambda *_, **__: None)
 
-    result = await invoke_plain_llm_fail_fast(
-        node_name="plain_node",
-        llm_node="llm",
-        messages=messages,
-        state={
-            "request_id": "r1",
-            "thread_id": "t1",
-            "requested_resource_types": ["review_doc"],
-        },
-    )
+    with pytest.raises(ContextApplyError):
+        await invoke_plain_llm_fail_fast(
+            node_name="plain_node",
+            llm_node="llm",
+            messages=messages,
+            state={
+                "request_id": "r1",
+                "thread_id": "t1",
+                "requested_resource_types": ["review_doc"],
+            },
+        )
 
-    assert result == "answer"
-    assert plans == [{"selected": 0, "injectable": 0, "skipped": 0}]
+    plans = [
+        payload
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_plan"
+    ]
+    selections = [
+        payload["skip_reason"]
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_selection"
+    ]
+    applied = [
+        payload for payload in trace_payloads if payload["stage"] == "context_applied"
+    ]
+    assert len(plans) == 1
+    assert plans[0]["selected_item_count"] == 0
+    assert plans[0]["injectable_item_count"] == 0
+    assert plans[0]["skipped_item_count"] == 0
     assert selections == ["packed_context_missing"]
-    mock_llm.ainvoke.assert_awaited_once_with(messages)
+    assert applied == []
+    mock_llm.ainvoke.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_inherit_missing_fallback_uses_original_messages(monkeypatch):
+async def test_inherit_missing_fail_fast_before_llm(monkeypatch):
     from src.graph import llm as llm_module
     from src.graph.llm import invoke_plain_llm_fail_fast
 
     messages = [{"role": "user", "content": "question"}]
     mock_llm = _mock_llm()
-    errors: list[ContextApplyError] = []
+    trace_payloads: list[dict] = []
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
-    monkeypatch.setattr(
-        llm_module,
-        "resolve_context_policy",
-        lambda **_: (_ for _ in ()).throw(
-            ContextApplyError(
-                reason="context_apply_node_policy_inherit_missing",
-                warning="missing group",
-                node_name="plain_node",
-                llm_node="llm",
-            )
+    _patch_orchestrator(
+        monkeypatch,
+        error=ContextApplyError(
+            reason="context_apply_node_policy_inherit_missing",
+            warning="missing group",
+            node_name="plain_node",
+            llm_node="llm",
         ),
+        trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
     monkeypatch.setattr(llm_module, "emit_context_usage_trace", lambda *_, **__: None)
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: [],
-    )
-    monkeypatch.setattr(
-        llm_module, "emit_context_packing_shadow", lambda *_, **__: None
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_apply_error",
-        lambda _logger, *, error, **_kwargs: errors.append(error),
-    )
 
-    result = await invoke_plain_llm_fail_fast(
-        node_name="plain_node",
-        llm_node="llm",
-        messages=messages,
-        state={"request_id": "r1", "thread_id": "t1"},
-    )
+    with pytest.raises(ContextApplyError) as exc_info:
+        await invoke_plain_llm_fail_fast(
+            node_name="plain_node",
+            llm_node="llm",
+            messages=messages,
+            state={"request_id": "r1", "thread_id": "t1"},
+        )
 
-    assert result == "answer"
-    assert errors[0].reason == "context_apply_node_policy_inherit_missing"
-    assert errors[0].fallback_used is True
-    mock_llm.ainvoke.assert_awaited_once_with(messages)
+    assert exc_info.value.reason == "context_apply_node_policy_inherit_missing"
+    errors = [
+        payload
+        for payload in trace_payloads
+        if payload["stage"] == "context_apply_error"
+    ]
+    assert errors[0]["reason"] == "context_apply_node_policy_inherit_missing"
+    assert errors[0]["fallback_used"] is False
+    mock_llm.ainvoke.assert_not_awaited()
 
 
 def test_injected_context_header_preserves_user_requested_depth():
