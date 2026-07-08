@@ -12,7 +12,7 @@ import os
 import asyncio
 import time
 import ssl
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, Awaitable, Callable, Mapping, TypeVar
 
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
@@ -26,6 +26,11 @@ from src.context_engineering.packing import (
     parse_importance_scorer_output,
     prepare_messages_with_context_policy,
     should_emit_context_policy_summary,
+)
+from src.context_engineering.input_manifest import (
+    build_llm_input_manifest,
+    llm_input_manifest_trace_payload,
+    validate_llm_input_manifest,
 )
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
@@ -366,6 +371,42 @@ def _message_content_chars(messages: list[Any]) -> int:
     return total
 
 
+def _emit_llm_input_manifest_built(
+    manifest: Mapping[str, Any],
+    *,
+    state: dict | None,
+) -> None:
+    emit_a3_trace(
+        logger,
+        "llm_input_manifest.built",
+        llm_input_manifest_trace_payload(manifest),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def _emit_llm_input_manifest_failed(
+    *,
+    node_name: str,
+    llm_node: str,
+    state: dict | None,
+    exc: BaseException,
+) -> None:
+    emit_a3_trace(
+        logger,
+        "llm_input_manifest.failed",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            "reason": "manifest_build_or_validation_failed",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        },
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
 def _provider_error_body(exc: BaseException, *, max_chars: int = 12000) -> str:
     """Return no raw provider body; provider responses may contain secrets."""
     _ = (exc, max_chars)
@@ -440,6 +481,7 @@ async def invoke_with_provider_transport_retry(
     llm_node: str,
     provider: str,
     model: str,
+    llm_input_manifest: Mapping[str, Any],
     output_mode: str = "",
     trace_stage_prefix: str = "provider_transport",
     state: dict | None = None,
@@ -450,6 +492,37 @@ async def invoke_with_provider_transport_retry(
     The caller supplies the exact same operation each time, so model, prompt,
     schema, and request payload remain unchanged.
     """
+    try:
+        validate_llm_input_manifest(llm_input_manifest)
+    except Exception as exc:
+        _emit_llm_input_manifest_failed(
+            node_name=node_name,
+            llm_node=llm_node,
+            state=state or {},
+            exc=exc,
+        )
+        raise
+    manifest_payload = llm_input_manifest_trace_payload(llm_input_manifest)
+    emit_a3_trace(
+        logger,
+        "llm_provider.invoke_guarded",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            "provider": provider,
+            "model": model,
+            "output_mode": output_mode,
+            "manifest_id": manifest_payload.get("manifest_id", ""),
+            "message_count": manifest_payload.get("message_count", 0),
+            "input_estimated_tokens": manifest_payload.get(
+                "input_estimated_tokens",
+                0,
+            ),
+            "fallback_used": False,
+        },
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
     max_retries = _provider_transport_max_retries(node_name)
     retry_count = 0
     while True:
@@ -548,13 +621,14 @@ async def invoke_context_importance_scorer_raw(
     llm_node: str,
     scorer_messages: list[dict[str, str]],
     timeout_seconds: float,
+    state: dict | None = None,
 ) -> ContextImportanceScores:
-    """Invoke the raw scorer without context apply or trace side effects.
+    """Invoke the raw scorer without context apply or state/memory writes.
 
     CE-3 production config keeps importance scoring disabled. This raw transport
     path remains isolated for explicit tests or future opt-in experiments and
     must avoid invoke_plain_llm_fail_fast(), context usage/items/packing/apply,
-    and state or memory writes.
+    and state or memory writes, while still emitting provider input manifests.
     """
     if timeout_seconds <= 0:
         raise ContextImportanceError(
@@ -563,10 +637,57 @@ async def invoke_context_importance_scorer_raw(
             error_type="ContextConfigError",
         )
     llm = get_node_llm(llm_node)
+    provider = get_setting(
+        f"llm.{llm_node}.provider",
+        get_setting(f"{llm_node}.provider", ""),
+    )
+    model = get_setting(
+        f"llm.{llm_node}.model",
+        get_setting(f"{llm_node}.model", getattr(llm, "model_name", "")),
+    )
+    state_payload = state or {}
     try:
-        result = await asyncio.wait_for(
-            llm.ainvoke(scorer_messages),
-            timeout=timeout_seconds,
+        llm_input_manifest = build_llm_input_manifest(
+            node_name="context_importance_scorer",
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            messages=scorer_messages,
+            state=state_payload,
+            call_purpose="context_importance_scoring",
+            context_apply_applied=False,
+            schema_contract_first=False,
+            provider_bound_messages_mutated=False,
+        )
+        _emit_llm_input_manifest_built(
+            llm_input_manifest,
+            state=state_payload,
+        )
+    except Exception as exc:
+        _emit_llm_input_manifest_failed(
+            node_name="context_importance_scorer",
+            llm_node=llm_node,
+            state=state_payload,
+            exc=exc,
+        )
+        raise ContextImportanceError(
+            reason="context_importance_manifest_failed",
+            warning="importance scorer input manifest failed",
+            error_type=type(exc).__name__,
+        ) from exc
+    try:
+        result, _transport_retry_count = await invoke_with_provider_transport_retry(
+            lambda: asyncio.wait_for(
+                llm.ainvoke(scorer_messages),
+                timeout=timeout_seconds,
+            ),
+            node_name="context_importance_scorer",
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            llm_input_manifest=llm_input_manifest,
+            output_mode="context_importance_scores",
+            state=state_payload,
         )
     except TimeoutError as exc:
         raise ContextImportanceError(
@@ -671,6 +792,33 @@ async def invoke_plain_llm_fail_fast(
         "trace_call_id": prepared.trace_call_id,
         "trace_seq": prepared.next_trace_seq + 2,
     }
+    try:
+        llm_input_manifest = build_llm_input_manifest(
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=str(provider or ""),
+            model=str(model or ""),
+            messages=messages_for_llm,
+            state=state_payload,
+            call_purpose="plain_llm",
+            context_apply_applied=prepared.context_apply_applied,
+            schema_contract_first=False,
+            provider_bound_messages_mutated=prepared.context_apply_applied,
+            trace_call_id=prepared.trace_call_id,
+            trace_seq=prepared.next_trace_seq + 2,
+        )
+        _emit_llm_input_manifest_built(
+            llm_input_manifest,
+            state=state_payload,
+        )
+    except Exception as exc:
+        _emit_llm_input_manifest_failed(
+            node_name=node_name,
+            llm_node=llm_node,
+            state=state_payload,
+            exc=exc,
+        )
+        raise
     max_retries = get_llm_call_max_retries(node_name)
     retry_count = 0
     total_transport_retry_count = 0
@@ -683,6 +831,7 @@ async def invoke_plain_llm_fail_fast(
                 llm_node=llm_node,
                 provider=provider,
                 model=model,
+                llm_input_manifest=llm_input_manifest,
                 state=state_payload,
             )
             total_transport_retry_count += transport_retry_count

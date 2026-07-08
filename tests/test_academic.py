@@ -1,4 +1,4 @@
-﻿"""Unit tests for the current academic evidence path."""
+"""Unit tests for the current academic evidence path."""
 
 from __future__ import annotations
 
@@ -39,8 +39,17 @@ from src.graph.academic import (
 )
 from src.graph.evidence import EvidenceCandidate, EvidenceJudgeItem, EvidenceJudgeOutput
 from src.graph.state import CONTEXT_CLEAR
-from src.graph.web_research import WebResearchPlan, WebResearchTask, WebSourceSummary, WebSourceSummaryBatch
-from src.llm.structured_output import StructuredLLMResult, StructuredOutputError, get_llm_output_mode
+from src.graph.web_research import (
+    WebResearchPlan,
+    WebResearchTask,
+    WebSourceSummary,
+    WebSourceSummaryBatch,
+)
+from src.llm.structured_output import (
+    StructuredLLMResult,
+    StructuredOutputError,
+    get_llm_output_mode,
+)
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 
 
@@ -89,18 +98,24 @@ def _structured_output_error(
             error_message=error_message,
             parsing_error=error_message if phase == "parsing_error" else "",
             validation_error=error_message if phase == "validation_error" else "",
-            business_validation_error=error_message if phase == "business_validation_error" else "",
+            business_validation_error=error_message
+            if phase == "business_validation_error"
+            else "",
         )
     )
 
 
 class TestAcademicRouterRetry:
     async def test_returns_empty_on_first_run(self):
-        result = await academic_router({"messages": [HumanMessage(content="test")], "retry_count": 0})
+        result = await academic_router(
+            {"messages": [HumanMessage(content="test")], "retry_count": 0}
+        )
         assert "context" not in result
 
     async def test_clears_context_on_retry(self):
-        result = await academic_router({"messages": [HumanMessage(content="test")], "retry_count": 1})
+        result = await academic_router(
+            {"messages": [HumanMessage(content="test")], "retry_count": 1}
+        )
         assert result["context"] is CONTEXT_CLEAR
 
 
@@ -109,13 +124,15 @@ class TestRewriteQuery:
     async def test_produces_rewritten_query(self, mock_invoke_plain):
         mock_invoke_plain.return_value = "improved retrieval query"
 
-        result = await rewrite_query({
-            "messages": [HumanMessage(content="original question")],
-            "hallucination_reason": "fabricated detail",
-            "retry_count": 1,
-            "request_id": "test-req",
-            "thread_id": "test-thread",
-        })
+        result = await rewrite_query(
+            {
+                "messages": [HumanMessage(content="original question")],
+                "hallucination_reason": "fabricated detail",
+                "retry_count": 1,
+                "request_id": "test-req",
+                "thread_id": "test-thread",
+            }
+        )
 
         assert result["rewritten_query"] == "improved retrieval query"
         assert result["retrieval_plan"] == []
@@ -126,53 +143,70 @@ class TestRewriteQuery:
         mock_invoke_plain.side_effect = RuntimeError("LLM error")
 
         with pytest.raises(RuntimeError, match="LLM error"):
-            await rewrite_query({
-                "messages": [HumanMessage(content="original question")],
-                "hallucination_reason": "bad",
-                "retry_count": 1,
-                "request_id": "test-req",
-                "thread_id": "test-thread",
-            })
+            await rewrite_query(
+                {
+                    "messages": [HumanMessage(content="original question")],
+                    "hallucination_reason": "bad",
+                    "retry_count": 1,
+                    "request_id": "test-req",
+                    "thread_id": "test-thread",
+                }
+            )
 
 
 class TestMemoryUseDecision:
     def test_memory_use_decider_has_explicit_deepseek_official_config(self):
         assert get_setting("llm.memory_use_decider.provider") == "deepseek_official"
-        assert get_setting("llm.memory_use_decider.base_url") == "https://api.deepseek.com"
-        assert get_setting("llm.memory_use_decider.beta_base_url") == "https://api.deepseek.com/beta"
+        assert (
+            get_setting("llm.memory_use_decider.base_url") == "https://api.deepseek.com"
+        )
+        assert (
+            get_setting("llm.memory_use_decider.beta_base_url")
+            == "https://api.deepseek.com/beta"
+        )
         assert get_setting("llm.memory_use_decider.api_key_env") == "DEEPSEEK_API_KEY"
         assert get_llm_output_mode("memory_use_decider") == "deepseek_tool_call_strict"
 
     def test_empty_memory_ignores_without_prompt(self):
-        decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=0)
+        decision = _deterministic_memory_use_decision(
+            "重新给我一份学习计划", selected_memory_count=0
+        )
         assert decision is not None
         assert decision.decision == "ignore"
 
     def test_explicit_history_reference_uses_memory(self):
-        decision = _deterministic_memory_use_decision("结合之前的内容，给我一份学习计划", selected_memory_count=1)
+        decision = _deterministic_memory_use_decision(
+            "结合之前的内容，给我一份学习计划", selected_memory_count=1
+        )
         assert decision is not None
         assert decision.decision == "use"
 
     def test_explicit_history_exclusion_ignores_memory(self):
-        decision = _deterministic_memory_use_decision("不要参考之前，给我一份学习计划", selected_memory_count=1)
+        decision = _deterministic_memory_use_decision(
+            "不要参考之前，给我一份学习计划", selected_memory_count=1
+        )
         assert decision is not None
         assert decision.decision == "ignore"
 
     def test_ambiguous_revision_asks_user_when_memory_exists(self):
-        decision = _deterministic_memory_use_decision("重新给我一份学习计划", selected_memory_count=1)
+        decision = _deterministic_memory_use_decision(
+            "重新给我一份学习计划", selected_memory_count=1
+        )
         assert decision is not None
         assert decision.decision == "ask_user"
         assert decision.question_to_user
 
     async def test_memory_use_decider_ignores_when_no_memory(self):
-        result = await memory_use_decider({
-            "messages": [HumanMessage(content="重新给我一份学习计划")],
-            "evidence_summary_memory": [],
-            "subject": "other",
-            "requested_resource_type": "study_plan",
-            "request_id": "req",
-            "thread_id": "thread",
-        })
+        result = await memory_use_decider(
+            {
+                "messages": [HumanMessage(content="重新给我一份学习计划")],
+                "evidence_summary_memory": [],
+                "subject": "other",
+                "requested_resource_type": "study_plan",
+                "request_id": "req",
+                "thread_id": "thread",
+            }
+        )
         assert result["memory_use_policy"] == "ignore"
         assert result["selected_evidence_memory_summaries"] == []
 
@@ -199,21 +233,23 @@ class TestMemoryUseDecision:
 
     @patch("src.graph.academic.interrupt", return_value={"choice": "ignore"})
     async def test_relevant_memory_plus_ambiguous_query_asks_user(self, mock_interrupt):
-        result = await memory_use_decider({
-            "messages": [HumanMessage(content="重新给我一份学习计划")],
-            "evidence_summary_memory": [
-                {
-                    "memory_id": "python-plan",
-                    "subject": "python",
-                    "resource_type": "study_plan",
-                    "summary": "Python functions parameters return values learning plan",
-                }
-            ],
-            "subject": "python",
-            "requested_resource_type": "study_plan",
-            "request_id": "req",
-            "thread_id": "thread",
-        })
+        result = await memory_use_decider(
+            {
+                "messages": [HumanMessage(content="重新给我一份学习计划")],
+                "evidence_summary_memory": [
+                    {
+                        "memory_id": "python-plan",
+                        "subject": "python",
+                        "resource_type": "study_plan",
+                        "summary": "Python functions parameters return values learning plan",
+                    }
+                ],
+                "subject": "python",
+                "requested_resource_type": "study_plan",
+                "request_id": "req",
+                "thread_id": "thread",
+            }
+        )
 
         mock_interrupt.assert_called_once()
         assert result["memory_use_policy"] == "ignore"
@@ -221,27 +257,31 @@ class TestMemoryUseDecision:
 
     @patch("src.graph.academic.interrupt")
     async def test_explicit_history_use_bypasses_popup(self, mock_interrupt):
-        result = await memory_use_decider({
-            "messages": [HumanMessage(content="结合之前的内容，给我一份学习计划")],
-            "evidence_summary_memory": [
-                {
-                    "memory_id": "python-plan",
-                    "subject": "python",
-                    "resource_type": "study_plan",
-                    "summary": "Python functions parameters return values learning plan",
-                }
-            ],
-            "subject": "python",
-            "requested_resource_type": "study_plan",
-            "request_id": "req",
-            "thread_id": "thread",
-        })
+        result = await memory_use_decider(
+            {
+                "messages": [HumanMessage(content="结合之前的内容，给我一份学习计划")],
+                "evidence_summary_memory": [
+                    {
+                        "memory_id": "python-plan",
+                        "subject": "python",
+                        "resource_type": "study_plan",
+                        "summary": "Python functions parameters return values learning plan",
+                    }
+                ],
+                "subject": "python",
+                "requested_resource_type": "study_plan",
+                "request_id": "req",
+                "thread_id": "thread",
+            }
+        )
 
         mock_interrupt.assert_not_called()
         assert result["memory_use_policy"] == "use"
         assert result["selected_evidence_memory_summaries"]
 
-    async def test_memory_use_decider_prompt_discourages_ask_user_for_explicit_mismatch(self):
+    async def test_memory_use_decider_prompt_discourages_ask_user_for_explicit_mismatch(
+        self,
+    ):
         captured: dict = {}
 
         async def fake_invoke_structured_llm(**kwargs):
@@ -262,30 +302,40 @@ class TestMemoryUseDecision:
             )
 
         with (
-            patch("src.graph.academic._deterministic_memory_use_decision", return_value=None),
-            patch("src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm),
+            patch(
+                "src.graph.academic._deterministic_memory_use_decision",
+                return_value=None,
+            ),
+            patch(
+                "src.graph.academic.invoke_structured_llm", fake_invoke_structured_llm
+            ),
         ):
-            result = await memory_use_decider({
-                "messages": [HumanMessage(content="我还想要一份大数据的练习题")],
-                "evidence_summary_memory": [
-                    {
-                        "memory_id": "python-quiz",
-                        "subject": "python",
-                        "resource_type": "quiz",
-                        "summary": "Python functions practice quiz",
-                    }
-                ],
-                "subject": "big_data",
-                "requested_resource_type": "quiz",
-                "request_id": "req",
-                "thread_id": "thread",
-            })
+            result = await memory_use_decider(
+                {
+                    "messages": [HumanMessage(content="我还想要一份大数据的练习题")],
+                    "evidence_summary_memory": [
+                        {
+                            "memory_id": "python-quiz",
+                            "subject": "python",
+                            "resource_type": "quiz",
+                            "summary": "Python functions practice quiz",
+                        }
+                    ],
+                    "subject": "big_data",
+                    "requested_resource_type": "quiz",
+                    "request_id": "req",
+                    "thread_id": "thread",
+                }
+            )
 
         system_prompt = captured["messages"][0].content
         assert "explicit subject and explicit requested resource type" in system_prompt
         assert "subject/resource mismatched" in system_prompt
         assert "choose ignore" in system_prompt
-        assert "Choose ask_user only when the current query contains a genuinely ambiguous history reference" in system_prompt
+        assert (
+            "Choose ask_user only when the current query contains a genuinely ambiguous history reference"
+            in system_prompt
+        )
         assert result["memory_use_policy"] == "ignore"
 
 
@@ -309,7 +359,10 @@ class TestSearchQueryRewriter:
 
     def test_search_query_rewriter_uses_unified_structured_retry(self):
         assert get_setting("llm_outputs.search_query_rewriter.max_retries") == 2
-        assert get_setting("llm_outputs.search_query_rewriter.output_mode") == "deepseek_tool_call_strict"
+        assert (
+            get_setting("llm_outputs.search_query_rewriter.output_mode")
+            == "deepseek_tool_call_strict"
+        )
         assert get_setting("provider_transport_retry.max_retries") == 2
 
     def test_overlong_query_fields_fail_schema_validation(self):
@@ -336,7 +389,9 @@ class TestSearchQueryRewriter:
 
     def test_repeated_chinese_phrases_fail_business_validation(self):
         parsed = _valid_query_rewrite_output()
-        parsed.local_retrieval_query = "检索意图 资源类型 练习题 答案 解析 实操任务 " * 3
+        parsed.local_retrieval_query = (
+            "检索意图 资源类型 练习题 答案 解析 实操任务 " * 3
+        )
 
         error = validate_search_query_rewrite_output(parsed, memory_use_policy="ignore")
 
@@ -352,14 +407,19 @@ class TestSearchQueryRewriter:
         assert "repeated query ngram" in error
 
     def test_valid_concise_query_passes_business_validation(self):
-        assert validate_search_query_rewrite_output(
-            _valid_query_rewrite_output(),
-            memory_use_policy="ignore",
-        ) == ""
+        assert (
+            validate_search_query_rewrite_output(
+                _valid_query_rewrite_output(),
+                memory_use_policy="ignore",
+            )
+            == ""
+        )
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
-    async def test_produces_rag_web_queries_and_plan(self, mock_invoke, mock_available_subjects):
+    async def test_produces_rag_web_queries_and_plan(
+        self, mock_invoke, mock_available_subjects
+    ):
         mock_available_subjects.return_value = ["python", "machine_learning"]
         parsed = SearchQueryRewriteOutput(
             local_retrieval_query="Python functions parameters return values",
@@ -379,21 +439,94 @@ class TestSearchQueryRewriter:
                 ),
             ],
         )
-        mock_invoke.return_value = SimpleNamespace(parsed=parsed, raw_output='{"ok": true}')
+        mock_invoke.return_value = SimpleNamespace(
+            parsed=parsed, raw_output='{"ok": true}'
+        )
 
-        result = await search_query_rewriter({
-            "messages": [HumanMessage(content="Explain Python functions")],
-            "keypoints": ["Python"],
-            "subject": "python",
-            "subject_candidates": ["python"],
-            "memory_use_policy": "ignore",
-        })
+        result = await search_query_rewriter(
+            {
+                "messages": [HumanMessage(content="Explain Python functions")],
+                "keypoints": ["Python"],
+                "subject": "python",
+                "subject_candidates": ["python"],
+                "memory_use_policy": "ignore",
+            }
+        )
 
-        assert result["local_retrieval_query"] == "Python functions parameters return values"
-        assert result["web_research_seed_query"] == "Python functions course notes tutorial"
+        assert (
+            result["local_retrieval_query"]
+            == "Python functions parameters return values"
+        )
+        assert (
+            result["web_research_seed_query"]
+            == "Python functions course notes tutorial"
+        )
         assert result["retrieval_plan"][0]["subject"] == "python"
         assert result["primary_subject"] == "python"
         mock_invoke.assert_awaited_once()
+
+    @patch("src.graph.academic.get_available_subjects_from_data")
+    @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
+    @patch("src.graph.academic._maintain_conversation_summary", new_callable=AsyncMock)
+    async def test_workspace_continuation_is_prompted_even_when_memory_ignored(
+        self,
+        mock_summary,
+        mock_invoke,
+        mock_available_subjects,
+    ):
+        mock_available_subjects.return_value = ["machine_learning"]
+        mock_summary.return_value = ""
+        parsed = SearchQueryRewriteOutput(
+            local_retrieval_query="machine learning core concepts mindmap structure",
+            web_research_seed_query="machine learning concept map prerequisites pitfalls",
+            expanded_keypoints=["machine learning", "concept relationships"],
+            reason="Use same-thread workspace subject for resource continuity.",
+            learning_goal="Review machine learning concepts",
+            primary_subject="machine_learning",
+            subject_relation_summary="single subject",
+            retrieval_plan=[
+                RetrievalPlanItem(
+                    subject="machine_learning",
+                    role="core_concept",
+                    local_retrieval_query="machine learning core concepts",
+                    web_research_seed_query="machine learning concept map",
+                    priority=0.9,
+                ),
+            ],
+        )
+        mock_invoke.return_value = SimpleNamespace(
+            parsed=parsed, raw_output='{"ok": true}'
+        )
+
+        result = await search_query_rewriter(
+            {
+                "messages": [HumanMessage(content="make another mindmap")],
+                "keypoints": ["mindmap"],
+                "requested_resource_type": "mindmap",
+                "subject": "machine_learning",
+                "subject_candidates": [],
+                "memory_use_policy": "ignore",
+                "workspace_continuation_applied": True,
+                "workspace_continuation_reason": "",
+                "workspace_continuation": {
+                    "can_continue": True,
+                    "continuation_applied": True,
+                    "workspace_id": "workspace:v1:ml",
+                    "thread_id": "thread-1",
+                    "active_subject": "Machine Learning",
+                    "normalized_subject": "machine_learning",
+                    "active_learning_goal": "Review machine learning concepts",
+                    "resource_types": ["mindmap"],
+                },
+            }
+        )
+
+        messages = mock_invoke.await_args.kwargs["messages"]
+        prompt = messages[1].content
+        assert "Task Workspace Continuation" in prompt
+        assert "machine_learning" in prompt
+        assert "Review machine learning concepts" in prompt
+        assert result["primary_subject"] == "machine_learning"
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -407,29 +540,40 @@ class TestSearchQueryRewriter:
         mock_available_subjects.return_value = ["python"]
         mock_summary.return_value = ""
         parsed = _valid_query_rewrite_output()
-        mock_invoke.return_value = SimpleNamespace(parsed=parsed, raw_output='{"ok": true}')
+        mock_invoke.return_value = SimpleNamespace(
+            parsed=parsed, raw_output='{"ok": true}'
+        )
         events: list[dict] = []
         token = set_trace_event_sink(events)
         try:
-            result = await search_query_rewriter({
-                "messages": [HumanMessage(content="Explain Python functions")],
-                "keypoints": ["Python"],
-                "subject": "python",
-                "subject_candidates": ["python"],
-                "memory_use_policy": "ignore",
-                "request_id": "req",
-                "thread_id": "thread",
-            })
+            result = await search_query_rewriter(
+                {
+                    "messages": [HumanMessage(content="Explain Python functions")],
+                    "keypoints": ["Python"],
+                    "subject": "python",
+                    "subject_candidates": ["python"],
+                    "memory_use_policy": "ignore",
+                    "request_id": "req",
+                    "thread_id": "thread",
+                }
+            )
         finally:
             reset_trace_event_sink(token)
 
         assert result["local_retrieval_query"] == parsed.local_retrieval_query
         assert mock_invoke.await_count == 1
         assert mock_invoke.await_args.kwargs["fallback_modes"] == []
-        assert not any(event["stage"] == "query_rewrite_compliance_retry" for event in events)
-        memory_event = next(event for event in events if event["stage"] == "query_rewrite_memory_use")
+        assert not any(
+            event["stage"] == "query_rewrite_compliance_retry" for event in events
+        )
+        memory_event = next(
+            event for event in events if event["stage"] == "query_rewrite_memory_use"
+        )
         assert memory_event["memory_prompt_injected"] is False
-        assert memory_event["memory_used_for_retrieval"] == memory_event["llm_reported_memory_used_for_retrieval"]
+        assert (
+            memory_event["memory_used_for_retrieval"]
+            == memory_event["llm_reported_memory_used_for_retrieval"]
+        )
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -451,20 +595,24 @@ class TestSearchQueryRewriter:
         token = set_trace_event_sink(events)
         try:
             with pytest.raises(StructuredOutputError):
-                await search_query_rewriter({
-                    "messages": [HumanMessage(content="Explain Python functions")],
-                    "keypoints": ["Python"],
-                    "subject": "python",
-                    "subject_candidates": ["python"],
-                    "memory_use_policy": "ignore",
-                    "request_id": "req",
-                    "thread_id": "thread",
-                })
+                await search_query_rewriter(
+                    {
+                        "messages": [HumanMessage(content="Explain Python functions")],
+                        "keypoints": ["Python"],
+                        "subject": "python",
+                        "subject_candidates": ["python"],
+                        "memory_use_policy": "ignore",
+                        "request_id": "req",
+                        "thread_id": "thread",
+                    }
+                )
         finally:
             reset_trace_event_sink(token)
 
         assert mock_invoke.await_count == 1
-        assert not any(event["stage"] == "query_rewrite_compliance_retry" for event in events)
+        assert not any(
+            event["stage"] == "query_rewrite_compliance_retry" for event in events
+        )
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
@@ -484,13 +632,15 @@ class TestSearchQueryRewriter:
         )
 
         with pytest.raises(StructuredOutputError):
-            await search_query_rewriter({
-                "messages": [HumanMessage(content="Explain Python functions")],
-                "keypoints": ["Python"],
-                "subject": "python",
-                "subject_candidates": ["python"],
-                "memory_use_policy": "ignore",
-            })
+            await search_query_rewriter(
+                {
+                    "messages": [HumanMessage(content="Explain Python functions")],
+                    "keypoints": ["Python"],
+                    "subject": "python",
+                    "subject_candidates": ["python"],
+                    "memory_use_policy": "ignore",
+                }
+            )
 
         assert mock_invoke.await_count == 1
 
@@ -522,15 +672,19 @@ class TestSearchQueryRewriter:
                 ),
             ],
         )
-        mock_invoke.return_value = SimpleNamespace(parsed=parsed, raw_output='{"ok": true}')
+        mock_invoke.return_value = SimpleNamespace(
+            parsed=parsed, raw_output='{"ok": true}'
+        )
 
-        result = await search_query_rewriter({
-            "messages": [HumanMessage(content="new request")],
-            "rewritten_query": "stale retry query from previous turn",
-            "subject": "python",
-            "subject_candidates": ["python"],
-            "memory_use_policy": "ignore",
-        })
+        result = await search_query_rewriter(
+            {
+                "messages": [HumanMessage(content="new request")],
+                "rewritten_query": "stale retry query from previous turn",
+                "subject": "python",
+                "subject_candidates": ["python"],
+                "memory_use_policy": "ignore",
+            }
+        )
 
         assert result["local_retrieval_query"] == "fresh rag query"
         assert result["web_research_seed_query"] == "fresh web query"
@@ -545,11 +699,33 @@ class TestSearchQueryRewriter:
 
         plan, debug = _normalize_retrieval_plan(
             [
-                RetrievalPlanItem(subject="", role="core_concept", local_retrieval_query="x"),
-                RetrievalPlanItem(subject="python", role="bad_role", local_retrieval_query="old", priority=0.1),
-                RetrievalPlanItem(subject="python", role="implementation_tool", local_retrieval_query="new", priority=0.9),
-                RetrievalPlanItem(subject="law", role="core_concept", local_retrieval_query="law", priority=0.8),
-                RetrievalPlanItem(subject="machine_learning", role="core_concept", local_retrieval_query="", priority=0.8),
+                RetrievalPlanItem(
+                    subject="", role="core_concept", local_retrieval_query="x"
+                ),
+                RetrievalPlanItem(
+                    subject="python",
+                    role="bad_role",
+                    local_retrieval_query="old",
+                    priority=0.1,
+                ),
+                RetrievalPlanItem(
+                    subject="python",
+                    role="implementation_tool",
+                    local_retrieval_query="new",
+                    priority=0.9,
+                ),
+                RetrievalPlanItem(
+                    subject="law",
+                    role="core_concept",
+                    local_retrieval_query="law",
+                    priority=0.8,
+                ),
+                RetrievalPlanItem(
+                    subject="machine_learning",
+                    role="core_concept",
+                    local_retrieval_query="",
+                    priority=0.8,
+                ),
             ],
             {"subject": "python"},
         )
@@ -569,10 +745,7 @@ class TestSearchQueryRewriter:
         assert debug["raw_plan_count"] == 5
         assert debug["normalized_plan_count"] == 1
         assert debug["accepted_subjects"] == ["python"]
-        assert any(
-            item["reason"] == "invalid_role"
-            for item in debug["rejected_items"]
-        )
+        assert any(item["reason"] == "invalid_role" for item in debug["rejected_items"])
 
     @patch("src.graph.academic.get_available_subjects_from_data")
     def test_normalize_retrieval_plan_keeps_core_and_practice_roles(
@@ -649,49 +822,62 @@ class TestSearchQueryRewriter:
             item["reason"] == "duplicate_subject_role_lower_priority"
             for item in debug["rejected_items"]
         )
-        assert all(
-            item["reason"] != "invalid_role"
-            for item in debug["rejected_items"]
+        assert all(item["reason"] != "invalid_role" for item in debug["rejected_items"])
+        assert (
+            next(item for item in plan if item["role"] == "practice")[
+                "local_retrieval_query"
+            ]
+            == "new practice"
         )
-        assert next(item for item in plan if item["role"] == "practice")[
-            "local_retrieval_query"
-        ] == "new practice"
 
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     async def test_structured_runtime_failure_raises(self, mock_invoke):
         mock_invoke.side_effect = RuntimeError("structured failure")
 
         with pytest.raises(RuntimeError, match="structured failure"):
-            await search_query_rewriter({
-                "messages": [HumanMessage(content="Python practice")],
-                "keypoints": ["Python"],
-                "subject": "python",
-                "memory_use_policy": "ignore",
-            })
+            await search_query_rewriter(
+                {
+                    "messages": [HumanMessage(content="Python practice")],
+                    "keypoints": ["Python"],
+                    "subject": "python",
+                    "memory_use_policy": "ignore",
+                }
+            )
 
 
 class TestRetrievalBranchQuality:
     def test_best_doc_score_prefers_rerank_score(self):
-        assert _best_doc_score([
-            {"raw_vector_score": 0.9, "rerank_score": 0.2},
-            {"raw_vector_score": 0.4, "rerank_score": 0.8},
-        ]) == 0.8
+        assert (
+            _best_doc_score(
+                [
+                    {"raw_vector_score": 0.9, "rerank_score": 0.2},
+                    {"raw_vector_score": 0.4, "rerank_score": 0.8},
+                ]
+            )
+            == 0.8
+        )
 
     def test_evaluates_strong_usable_weak_missing(self):
-        assert _evaluate_retrieval_branch(
-            subject="python",
-            role="core_concept",
-            docs=[{"rerank_score": 0.8}],
-            is_hit=True,
-            subject_mismatch_count=0,
-        )["branch_status"] == "strong"
-        assert _evaluate_retrieval_branch(
-            subject="python",
-            role="core_concept",
-            docs=[],
-            is_hit=False,
-            subject_mismatch_count=0,
-        )["branch_status"] == "missing"
+        assert (
+            _evaluate_retrieval_branch(
+                subject="python",
+                role="core_concept",
+                docs=[{"rerank_score": 0.8}],
+                is_hit=True,
+                subject_mismatch_count=0,
+            )["branch_status"]
+            == "strong"
+        )
+        assert (
+            _evaluate_retrieval_branch(
+                subject="python",
+                role="core_concept",
+                docs=[],
+                is_hit=False,
+                subject_mismatch_count=0,
+            )["branch_status"]
+            == "missing"
+        )
 
     def test_select_docs_with_subject_quota_caps_subject_and_weak_docs(self):
         docs = [
@@ -715,7 +901,9 @@ class TestRetrievalBranchQuality:
             },
         ]
 
-        selected, debug = _select_docs_with_subject_quota(docs, 4, primary_subject="machine_learning")
+        selected, debug = _select_docs_with_subject_quota(
+            docs, 4, primary_subject="machine_learning"
+        )
 
         assert len(selected) == 4
         assert debug["weak_subjects"] == ["python"]
@@ -725,119 +913,157 @@ class TestRagRetrieveDualSource:
     @patch("src.graph.academic.retrieve")
     async def test_returns_local_candidates_not_context(self, mock_retrieve):
         mock_retrieve.return_value = {
-            "docs": [{"content": "Python functions", "source": "python.pdf", "rerank_score": 0.9}],
+            "docs": [
+                {
+                    "content": "Python functions",
+                    "source": "python.pdf",
+                    "rerank_score": 0.9,
+                }
+            ],
             "is_hit": True,
             "reranker_failed": False,
         }
 
-        result = await rag_retrieve({
-            "messages": [HumanMessage(content="Explain Python functions")],
-            "keypoints": ["Python", "functions"],
-            "subject": "python",
-        })
+        result = await rag_retrieve(
+            {
+                "messages": [HumanMessage(content="Explain Python functions")],
+                "keypoints": ["Python", "functions"],
+                "subject": "python",
+            }
+        )
 
         assert "context" not in result
         assert len(result["local_evidence_candidates"]) == 1
         assert result["local_evidence_candidates"][0]["source_type"] == "local_rag"
         assert result["local_evidence_originals"]
-        mock_retrieve.assert_called_once_with(query="Python functions", subject="python", top_k=3)
+        mock_retrieve.assert_called_once_with(
+            query="Python functions", subject="python", top_k=3
+        )
 
     @patch("src.graph.academic.retrieve")
-    async def test_core_and_practice_branches_generate_unique_stable_local_ids(self, mock_retrieve):
+    async def test_core_and_practice_branches_generate_unique_stable_local_ids(
+        self, mock_retrieve
+    ):
         mock_retrieve.side_effect = [
             {
-                "docs": [{
-                    "content": "Python functions explain parameters.",
-                    "source": "python.pdf",
-                    "metadata": {"chunk_id": "intro"},
-                    "rerank_score": 0.9,
-                }],
+                "docs": [
+                    {
+                        "content": "Python functions explain parameters.",
+                        "source": "python.pdf",
+                        "metadata": {"chunk_id": "intro"},
+                        "rerank_score": 0.9,
+                    }
+                ],
                 "is_hit": True,
             },
             {
-                "docs": [{
-                    "content": "Python function practice exercises.",
-                    "source": "python.pdf",
-                    "metadata": {"chunk_id": "practice"},
-                    "rerank_score": 0.8,
-                }],
+                "docs": [
+                    {
+                        "content": "Python function practice exercises.",
+                        "source": "python.pdf",
+                        "metadata": {"chunk_id": "practice"},
+                        "rerank_score": 0.8,
+                    }
+                ],
                 "is_hit": True,
             },
         ]
 
-        result = await rag_retrieve({
-            "messages": [HumanMessage(content="给我 Python mindmap 和 quiz")],
-            "requested_resource_types": ["mindmap", "quiz"],
-            "retrieval_plan": [
-                {
-                    "subject": "python",
-                    "role": "core_concept",
-                    "local_retrieval_query": "Python functions concept",
-                    "priority": 0.9,
-                },
-                {
-                    "subject": "python",
-                    "role": "practice",
-                    "local_retrieval_query": "Python functions practice",
-                    "priority": 0.8,
-                },
-            ],
-        })
+        result = await rag_retrieve(
+            {
+                "messages": [HumanMessage(content="给我 Python mindmap 和 quiz")],
+                "requested_resource_types": ["mindmap", "quiz"],
+                "retrieval_plan": [
+                    {
+                        "subject": "python",
+                        "role": "core_concept",
+                        "local_retrieval_query": "Python functions concept",
+                        "priority": 0.9,
+                    },
+                    {
+                        "subject": "python",
+                        "role": "practice",
+                        "local_retrieval_query": "Python functions practice",
+                        "priority": 0.8,
+                    },
+                ],
+            }
+        )
 
-        candidate_ids = [candidate["evidence_id"] for candidate in result["local_evidence_candidates"]]
+        candidate_ids = [
+            candidate["evidence_id"]
+            for candidate in result["local_evidence_candidates"]
+        ]
         assert len(candidate_ids) == len(set(candidate_ids)) == 2
-        assert all(candidate_id.startswith("local:python:") for candidate_id in candidate_ids)
+        assert all(
+            candidate_id.startswith("local:python:") for candidate_id in candidate_ids
+        )
         assert "local:python:0" not in candidate_ids
-        assert {candidate["role"] for candidate in result["local_evidence_candidates"]} == {
+        assert {
+            candidate["role"] for candidate in result["local_evidence_candidates"]
+        } == {
             "core_concept",
             "practice",
         }
 
     @patch("src.graph.academic.retrieve")
-    async def test_math_core_and_practice_branches_do_not_reuse_rank_ids(self, mock_retrieve):
+    async def test_math_core_and_practice_branches_do_not_reuse_rank_ids(
+        self, mock_retrieve
+    ):
         mock_retrieve.side_effect = [
             {
-                "docs": [{
-                    "content": "线性代数核心概念",
-                    "source": "math.pdf",
-                    "metadata": {"chunk_id": "core"},
-                    "rerank_score": 0.9,
-                }],
+                "docs": [
+                    {
+                        "content": "线性代数核心概念",
+                        "source": "math.pdf",
+                        "metadata": {"chunk_id": "core"},
+                        "rerank_score": 0.9,
+                    }
+                ],
                 "is_hit": True,
             },
             {
-                "docs": [{
-                    "content": "线性代数练习题",
-                    "source": "math.pdf",
-                    "metadata": {"chunk_id": "practice"},
-                    "rerank_score": 0.8,
-                }],
+                "docs": [
+                    {
+                        "content": "线性代数练习题",
+                        "source": "math.pdf",
+                        "metadata": {"chunk_id": "practice"},
+                        "rerank_score": 0.8,
+                    }
+                ],
                 "is_hit": True,
             },
         ]
 
-        result = await rag_retrieve({
-            "messages": [HumanMessage(content="线性代数思维导图和练习题")],
-            "requested_resource_types": ["mindmap", "quiz"],
-            "retrieval_plan": [
-                {
-                    "subject": "math",
-                    "role": "core_concept",
-                    "local_retrieval_query": "linear algebra concept",
-                    "priority": 0.9,
-                },
-                {
-                    "subject": "math",
-                    "role": "practice",
-                    "local_retrieval_query": "linear algebra practice",
-                    "priority": 0.8,
-                },
-            ],
-        })
+        result = await rag_retrieve(
+            {
+                "messages": [HumanMessage(content="线性代数思维导图和练习题")],
+                "requested_resource_types": ["mindmap", "quiz"],
+                "retrieval_plan": [
+                    {
+                        "subject": "math",
+                        "role": "core_concept",
+                        "local_retrieval_query": "linear algebra concept",
+                        "priority": 0.9,
+                    },
+                    {
+                        "subject": "math",
+                        "role": "practice",
+                        "local_retrieval_query": "linear algebra practice",
+                        "priority": 0.8,
+                    },
+                ],
+            }
+        )
 
-        candidate_ids = [candidate["evidence_id"] for candidate in result["local_evidence_candidates"]]
+        candidate_ids = [
+            candidate["evidence_id"]
+            for candidate in result["local_evidence_candidates"]
+        ]
         assert len(candidate_ids) == len(set(candidate_ids)) == 2
-        assert all(candidate_id.startswith("local:math:") for candidate_id in candidate_ids)
+        assert all(
+            candidate_id.startswith("local:math:") for candidate_id in candidate_ids
+        )
         assert "local:math:0" not in candidate_ids
 
 
@@ -862,7 +1088,13 @@ class TestEvidenceCandidateIdentity:
             branch_status_score_source="rerank_score",
         )
         practice_candidates = _build_local_evidence_candidates(
-            docs=[{**docs[0], "retrieval_query": "Python functions practice", "retrieval_priority": 0.8}],
+            docs=[
+                {
+                    **docs[0],
+                    "retrieval_query": "Python functions practice",
+                    "retrieval_priority": 0.8,
+                }
+            ],
             subject="python",
             role="practice",
             branch_index=1,
@@ -870,7 +1102,9 @@ class TestEvidenceCandidateIdentity:
             branch_status_score_source="rerank_score",
         )
 
-        merged, debug = _dedupe_and_merge_local_candidates([*core_candidates, *practice_candidates])
+        merged, debug = _dedupe_and_merge_local_candidates(
+            [*core_candidates, *practice_candidates]
+        )
 
         assert len(merged) == 1
         metadata = merged[0].metadata
@@ -934,14 +1168,19 @@ class TestEvidenceCandidateIdentity:
         assert candidates[0].content_preview == candidates[1].content_preview
         assert candidates[0].evidence_id != candidates[1].evidence_id
         assert candidates[0].metadata["chunk_identity_kind"] == "content_hash"
-        assert candidates[0].metadata["content_hash8"] != candidates[1].metadata["content_hash8"]
+        assert (
+            candidates[0].metadata["content_hash8"]
+            != candidates[1].metadata["content_hash8"]
+        )
 
     def test_safe_id_part_does_not_alias_normalize_roles(self):
         assert _safe_evidence_id_part("practice") == "practice"
         assert _safe_evidence_id_part("exercise") == "exercise"
         assert _safe_evidence_id_part("Practice Quiz") == "practice_quiz"
 
-    def test_first_batch_reorders_for_valid_web_and_core_practice_without_dropping_candidates(self):
+    def test_first_batch_reorders_for_valid_web_and_core_practice_without_dropping_candidates(
+        self,
+    ):
         local_core = EvidenceCandidate(
             evidence_id="local:python:source1:chunk1",
             source_type="local_rag",
@@ -967,7 +1206,11 @@ class TestEvidenceCandidateIdentity:
             role="practice",
             content_preview="",
             tavily_score=1.0,
-            metadata={"fetch_status": "failed", "content_chars": 0, "covered_roles": ["practice"]},
+            metadata={
+                "fetch_status": "failed",
+                "content_chars": 0,
+                "covered_roles": ["practice"],
+            },
         )
         valid_web = EvidenceCandidate(
             evidence_id="web:valid",
@@ -976,7 +1219,11 @@ class TestEvidenceCandidateIdentity:
             role="practice",
             content_preview="Useful web evidence.",
             tavily_score=0.1,
-            metadata={"fetch_status": "success", "content_chars": 120, "covered_roles": ["practice"]},
+            metadata={
+                "fetch_status": "success",
+                "content_chars": 120,
+                "covered_roles": ["practice"],
+            },
         )
 
         ordered, debug = _order_evidence_candidates_for_grading(
@@ -995,12 +1242,16 @@ class TestEvidenceCandidateIdentity:
         assert debug["candidate_count_preserved"] is True
         assert "web:valid" in debug["first_batch_evidence_ids"]
         assert "web:invalid" not in debug["first_batch_evidence_ids"]
-        assert len(debug["first_batch_evidence_ids"]) == len(set(debug["first_batch_evidence_ids"]))
+        assert len(debug["first_batch_evidence_ids"]) == len(
+            set(debug["first_batch_evidence_ids"])
+        )
         assert set(debug["first_batch_role_coverage"]) >= {"core_concept", "practice"}
         assert debug["first_batch_source_type_counts"]["web"] == 1
 
 
-def _web_research_structured_result(parsed, *, node_name: str, schema_name: str) -> StructuredLLMResult:
+def _web_research_structured_result(
+    parsed, *, node_name: str, schema_name: str
+) -> StructuredLLMResult:
     return StructuredLLMResult(
         success=True,
         parsed=parsed,
@@ -1020,39 +1271,45 @@ async def _fake_web_research_v2_llm(**kwargs):
         planner_prompt = str(kwargs["messages"][-1]["content"])
         subject_matches = re.findall(r'"subject":\s*"([^"]+)"', planner_prompt)
         subject = subject_matches[-1] if subject_matches else "python"
-        plan = WebResearchPlan(tasks=[
-            WebResearchTask(
-                task_id=f"task-{subject}-0",
-                subject=subject,
-                role="supporting_context",
-                purpose=f"Find {subject} tutorial material.",
-                search_query=f"{subject} tutorial",
-                reason=f"Need web evidence for the requested {subject} topic.",
-                priority=0.8,
-            )
-        ])
+        plan = WebResearchPlan(
+            tasks=[
+                WebResearchTask(
+                    task_id=f"task-{subject}-0",
+                    subject=subject,
+                    role="supporting_context",
+                    purpose=f"Find {subject} tutorial material.",
+                    search_query=f"{subject} tutorial",
+                    reason=f"Need web evidence for the requested {subject} topic.",
+                    priority=0.8,
+                )
+            ]
+        )
         return _web_research_structured_result(
             plan,
             node_name="web_research_planner",
             schema_name="WebResearchPlan",
         )
 
-    source_ids = re.findall(r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"]))
-    batch = WebSourceSummaryBatch(summaries=[
-        WebSourceSummary(
-            source_id=source_id,
-            keep=True,
-            summary="Python tutorial source.",
-            coverage_points=["Python function basics"],
-            reason="Relevant tutorial result.",
-            evidence_type="tutorial",
-            use_case="background_context",
-            relevance="medium",
-            usefulness="medium",
-            risk="low",
-        )
-        for source_id in source_ids
-    ])
+    source_ids = re.findall(
+        r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"])
+    )
+    batch = WebSourceSummaryBatch(
+        summaries=[
+            WebSourceSummary(
+                source_id=source_id,
+                keep=True,
+                summary="Python tutorial source.",
+                coverage_points=["Python function basics"],
+                reason="Relevant tutorial result.",
+                evidence_type="tutorial",
+                use_case="background_context",
+                relevance="medium",
+                usefulness="medium",
+                risk="low",
+            )
+            for source_id in source_ids
+        ]
+    )
     return _web_research_structured_result(
         batch,
         node_name="web_source_summarizer",
@@ -1068,24 +1325,40 @@ class TestWebSearchDualSource:
             "ok": True,
             "status_code": 200,
             "elapsed_ms": 10,
-            "results": [{"content": "Python tutorial", "title": "Python", "url": "https://example.com"}],
+            "results": [
+                {
+                    "content": "Python tutorial",
+                    "title": "Python",
+                    "url": "https://example.com",
+                }
+            ],
         }
-        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
+        monkeypatch.setattr(
+            "src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm
+        )
 
-        result = await web_search({
-            "messages": [HumanMessage(content="Explain Python functions")],
-            "web_research_seed_query": "Python functions tutorial",
-            "subject": "python",
-        })
+        result = await web_search(
+            {
+                "messages": [HumanMessage(content="Explain Python functions")],
+                "web_research_seed_query": "Python functions tutorial",
+                "subject": "python",
+            }
+        )
 
         assert "context" not in result
         assert len(result["web_evidence_candidates"]) == 1
         assert result["web_evidence_candidates"][0]["source_type"] == "web"
         assert result["web_evidence_originals"]
 
-    @patch("src.graph.academic.web_search_fn", side_effect=RuntimeError("network error"))
-    async def test_returns_empty_candidates_on_search_exception(self, mock_search, monkeypatch):
-        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
+    @patch(
+        "src.graph.academic.web_search_fn", side_effect=RuntimeError("network error")
+    )
+    async def test_returns_empty_candidates_on_search_exception(
+        self, mock_search, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm
+        )
 
         with pytest.raises(RuntimeError, match="fallback is disabled") as exc_info:
             await web_search({"messages": [HumanMessage(content="test")]})
@@ -1211,7 +1484,11 @@ class TestEvidenceMemorySummary:
         assert "content" not in entry
         assert "raw_docs" not in entry
         assert "content_preview" not in kept
-        trace = next(event for event in events if event["stage"] == "evidence_memory_summary_build")
+        trace = next(
+            event
+            for event in events
+            if event["stage"] == "evidence_memory_summary_build"
+        )
         assert trace["candidate_metadata_source"] == "current_call_arguments"
         assert trace["candidate_count"] == 1
         assert trace["original_count"] == 1
@@ -1222,10 +1499,12 @@ class TestFormatHelpers:
         assert _format_retrieved([]).strip()
 
     def test_format_retrieved_with_docs(self):
-        output = _format_retrieved([
-            {"content": "Doc one", "source": "one.pdf", "rerank_score": 0.9},
-            {"content": "Doc two", "source": "two.pdf", "rerank_score": 0.8},
-        ])
+        output = _format_retrieved(
+            [
+                {"content": "Doc one", "source": "one.pdf", "rerank_score": 0.9},
+                {"content": "Doc two", "source": "two.pdf", "rerank_score": 0.8},
+            ]
+        )
         assert "[1]" in output
         assert "one.pdf" in output
 
@@ -1233,14 +1512,16 @@ class TestFormatHelpers:
         assert _format_web_research_context([]).strip()
 
     def test_format_web_research_context_with_results(self):
-        output = _format_web_research_context([
-            {
-                "type": "web_evidence",
-                "title": "Course project plan",
-                "url": "https://example.com/1",
-                "content": "project plan",
-            },
-        ])
+        output = _format_web_research_context(
+            [
+                {
+                    "type": "web_evidence",
+                    "title": "Course project plan",
+                    "url": "https://example.com/1",
+                    "content": "project plan",
+                },
+            ]
+        )
         assert "[1]" in output
         assert "Course project plan" in output
 
@@ -1250,10 +1531,12 @@ class TestGenerateAnswer:
     async def test_generates_ai_message(self, mock_invoke_plain):
         mock_invoke_plain.return_value = "answer"
 
-        result = await generate_answer({
-            "messages": [HumanMessage(content="question")],
-            "context": [{"type": "rag", "content": "doc"}],
-        })
+        result = await generate_answer(
+            {
+                "messages": [HumanMessage(content="question")],
+                "context": [{"type": "rag", "content": "doc"}],
+            }
+        )
 
         assert result["messages"][0].content == "answer"
         assert mock_invoke_plain.await_args.kwargs["llm_node"] == "academic"
@@ -1262,9 +1545,11 @@ class TestGenerateAnswer:
     async def test_handles_empty_context(self, mock_invoke_plain):
         mock_invoke_plain.return_value = "answer without context"
 
-        result = await generate_answer({
-            "messages": [HumanMessage(content="question")],
-            "context": [],
-        })
+        result = await generate_answer(
+            {
+                "messages": [HumanMessage(content="question")],
+                "context": [],
+            }
+        )
 
         assert result["messages"][0].content == "answer without context"

@@ -95,6 +95,88 @@ def test_evidence_provider_prefers_graded_evidence_handoff():
     assert items[0].content == "LLM-judged evidence text."
 
 
+def test_evidence_provider_collects_workspace_after_current_judged_evidence():
+    state = {
+        "graded_evidence": [
+            {
+                "evidence_id": "graded:1",
+                "source_type": "local_rag",
+                "title": "Fresh judged source",
+                "content": "Fresh evidence.",
+                "relevance_score": 0.9,
+            }
+        ],
+        "task_workspace": {
+            "schema_version": 1,
+            "evidence_summaries": [
+                {
+                    "evidence_id": "evidence:v1:old",
+                    "original_evidence_id": "old",
+                    "title": "Prior judged source",
+                    "summary": "Prior compact evidence.",
+                    "source_type": "local_rag",
+                    "purpose": "factual_grounding",
+                    "relevance_score": 0.9,
+                    "thread_id": "thread-1",
+                    "request_id": "request-1",
+                }
+            ],
+        },
+    }
+
+    items = EvidenceContextProvider().collect(_context(state))
+
+    assert [item.metadata["evidence_id"] for item in items] == [
+        "graded:1",
+        "evidence:v1:old",
+    ]
+    assert items[0].priority > items[1].priority
+    assert items[1].scope == "session"
+    assert items[1].metadata["purpose"] == "factual_grounding"
+
+
+def test_evidence_provider_collects_workspace_when_current_buckets_empty():
+    state = {
+        "task_workspace": {
+            "schema_version": 1,
+            "evidence_summaries": [
+                {
+                    "evidence_id": "evidence:v1:old",
+                    "title": "Prior judged source",
+                    "summary": "Prior compact evidence.",
+                    "source_type": "web",
+                    "purpose": "factual_grounding",
+                    "support_score": 0.7,
+                    "thread_id": "thread-1",
+                    "request_id": "request-1",
+                }
+            ],
+        }
+    }
+
+    items = EvidenceContextProvider().collect(_context(state))
+
+    assert len(items) == 1
+    assert items[0].metadata["retrieval_mode"] == "task_workspace.evidence_summaries"
+    assert items[0].content == "Prior compact evidence."
+
+
+def test_evidence_provider_skips_corrupt_workspace_evidence():
+    state = {
+        "task_workspace": {
+            "schema_version": 1,
+            "evidence_summaries": ["bad", {"evidence_id": "", "summary": "missing"}],
+        },
+        "evidence_candidates": [
+            {"evidence_id": "raw:1", "content_preview": "candidate"}
+        ],
+    }
+
+    items = EvidenceContextProvider().collect(_context(state))
+
+    assert [item.metadata["evidence_id"] for item in items] == ["raw:1"]
+
+
 def test_evidence_provider_dedupes_existing_bucket_overlap():
     state = {
         "evidence_candidates": [{"evidence_id": "same", "content_preview": "first"}],

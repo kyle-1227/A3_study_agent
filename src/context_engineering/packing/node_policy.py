@@ -61,6 +61,7 @@ class SourceBudgetPolicy:
     min_trust_level: float | None = None
     allowed_purposes: tuple[str, ...] = ()
     require_user_match: bool = False
+    require_thread_match: bool = False
     require_subject_match: bool = False
     require_task_match: bool = False
     strict_match: bool = False
@@ -612,6 +613,7 @@ def _parse_source_policy(
             path="allowed_purposes",
         ),
         require_user_match=bool(raw.get("require_user_match") is True),
+        require_thread_match=bool(raw.get("require_thread_match") is True),
         require_subject_match=bool(raw.get("require_subject_match") is True),
         require_task_match=bool(raw.get("require_task_match") is True),
         strict_match=bool(raw.get("strict_match") is True),

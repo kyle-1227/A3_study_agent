@@ -7,12 +7,14 @@ from typing import Any
 
 from src.context_engineering.packing.node_policy import SourceBudgetPolicy
 from src.context_engineering.schema import ContextItem
+from src.rag.course_catalog import normalize_subject
 
 _HIGH_RISK_MATCH_SOURCES = {"memory", "trajectory", "artifact"}
 _LOW_RISK_MATCH_SOURCES = {"rules", "curriculum", "evidence"}
 _USER_ALIASES = ("user_id", "student_id", "learner_id", "profile_user_id")
 _THREAD_ALIASES = ("thread_id", "session_id")
 _SUBJECT_ALIASES = (
+    "normalized_subject",
     "subject",
     "subject_id",
     "course_subject",
@@ -173,6 +175,7 @@ def _match_drop_reason(
 ) -> str:
     checks = (
         ("user", policy.require_user_match, "user_mismatch"),
+        ("thread", policy.require_thread_match, "thread_mismatch"),
         ("subject", policy.require_subject_match, "subject_mismatch"),
         ("task", policy.require_task_match, "task_mismatch"),
     )
@@ -181,6 +184,9 @@ def _match_drop_reason(
             continue
         item_value = _metadata_match_value(item, key)
         state_value = state_values.get(key, "")
+        if key == "subject":
+            item_value = normalize_subject(item_value) if item_value else ""
+            state_value = normalize_subject(state_value) if state_value else ""
         if item_value and state_value and item_value == state_value:
             continue
         if item_value and state_value and item_value != state_value:
@@ -260,14 +266,15 @@ def _source_budget_sort_key(
 
 def _state_match_values(state: dict | None) -> dict[str, str]:
     if not isinstance(state, dict):
-        return {"user": "", "subject": "", "task": ""}
+        return {"user": "", "thread": "", "subject": "", "task": ""}
     resource_task = state.get("resource_task")
     subject = _first_value_from_mapping(state, _SUBJECT_ALIASES)
     if isinstance(resource_task, dict):
         subject = subject or str(resource_task.get("subject") or "").strip()
     return {
         "user": _first_value_from_mapping(state, _USER_ALIASES),
-        "subject": subject,
+        "thread": _first_value_from_mapping(state, _THREAD_ALIASES),
+        "subject": normalize_subject(subject) if subject else "",
         "task": _state_task_match_value(state),
     }
 
@@ -295,6 +302,7 @@ def _state_task_match_value(state: dict[str, Any]) -> str:
 def _metadata_match_value(item: ContextItem, key: str) -> str:
     candidates = {
         "user": _USER_ALIASES,
+        "thread": _THREAD_ALIASES,
         "subject": _SUBJECT_ALIASES,
         "task": _TASK_ALIASES,
     }[key]

@@ -13,6 +13,10 @@ from typing import Any, Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from src.context_engineering.workspace import (
+    workspace_continuation_context,
+    workspace_continuation_trace_payload,
+)
 from src.config import get_setting, load_prompt
 from src.graph.resource_generation import (
     SUPPORTED_RESOURCE_TYPES,
@@ -257,6 +261,49 @@ async def supervisor_node(state: LearningState) -> dict:
     needs_mindmap = (
         requested_resource_type == "mindmap" or "mindmap" in requested_resource_types
     )
+    continuation_state = {
+        **state,
+        "subject": subject,
+        "subject_candidates": subject_candidates,
+        "requested_resource_type": requested_resource_type,
+        "requested_resource_types": requested_resource_types,
+    }
+    workspace_continuation = workspace_continuation_context(continuation_state)
+    workspace_continuation_applied = False
+    if workspace_continuation.get("can_continue"):
+        continuation_subject = str(
+            workspace_continuation.get("normalized_subject")
+            or workspace_continuation.get("active_subject")
+            or ""
+        ).strip()
+        if available_subject_set and continuation_subject not in available_subject_set:
+            workspace_continuation["can_continue"] = False
+            workspace_continuation["skip_reason"] = "subject_unavailable"
+        elif continuation_subject:
+            subject = continuation_subject
+            workspace_continuation["continuation_applied"] = True
+            workspace_continuation_applied = True
+
+    continuation_payload = workspace_continuation_trace_payload(workspace_continuation)
+    emit_a3_trace(
+        logger,
+        "task_workspace.continuation_checked",
+        continuation_payload,
+        state=state,
+        env_flag="LOG_A3_TRACE",
+        max_chars=200,
+    )
+    if workspace_continuation.get("workspace_id") or requested_resource_types:
+        emit_a3_trace(
+            logger,
+            "task_workspace.continuation_applied"
+            if workspace_continuation_applied
+            else "task_workspace.continuation_skipped",
+            continuation_payload,
+            state=state,
+            env_flag="LOG_A3_TRACE",
+            max_chars=200,
+        )
 
     # TEMP A3_TRACE: remove after multi-subject retrieval validation.
     emit_a3_trace(
@@ -271,6 +318,10 @@ async def supervisor_node(state: LearningState) -> dict:
             "requested_resource_types": requested_resource_types,
             "is_parallel_resource_request": is_parallel_resource_request,
             "needs_mindmap": needs_mindmap,
+            "workspace_continuation_applied": workspace_continuation_applied,
+            "workspace_continuation_reason": workspace_continuation.get(
+                "skip_reason", ""
+            ),
             "confidence": result.confidence if "result" in locals() else 0.0,
             "available_subjects": available_subjects,
             "user_query_preview": user_text,
@@ -289,6 +340,9 @@ async def supervisor_node(state: LearningState) -> dict:
         "requested_resource_types": requested_resource_types,
         "is_parallel_resource_request": is_parallel_resource_request,
         "needs_mindmap": needs_mindmap,
+        "workspace_continuation": workspace_continuation,
+        "workspace_continuation_applied": workspace_continuation_applied,
+        "workspace_continuation_reason": workspace_continuation.get("skip_reason", ""),
     }
 
 

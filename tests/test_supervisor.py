@@ -88,7 +88,9 @@ class TestSupervisorNode:
                 await supervisor_node(state)
 
         record = next(
-            r for r in caplog.records if r.getMessage().startswith("A3_TRACE ")
+            r
+            for r in caplog.records
+            if r.getMessage().startswith('A3_TRACE {"stage": "supervisor"')
         )
         payload = json.loads(record.getMessage().removeprefix("A3_TRACE "))
         assert payload["stage"] == "supervisor"
@@ -320,6 +322,76 @@ class TestSupervisorNode:
 
         assert result["needs_mindmap"] is False
         assert result["requested_resource_type"] == ""
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_resource_only_request_inherits_workspace_subject(self, mock_invoke):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["mindmap"],
+            requested_resource_type="mindmap",
+            requested_resource_types=["mindmap"],
+        )
+        state = {
+            "messages": [HumanMessage(content="make another mindmap")],
+            "thread_id": "thread-1",
+            "session_id": "thread-1",
+            "request_id": "request-2",
+            "task_workspace": {
+                "schema_version": 1,
+                "workspace_id": "workspace:v1:ml",
+                "thread_id": "thread-1",
+                "active_subject": "Machine Learning",
+                "normalized_subject": "machine_learning",
+                "active_learning_goal": "Review machine learning concepts",
+            },
+        }
+
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["machine_learning"],
+        ):
+            result = await supervisor_node(state)
+
+        assert result["subject"] == "machine_learning"
+        assert result["subject_candidates"] == []
+        assert result["workspace_continuation_applied"] is True
+        assert (
+            result["workspace_continuation"]["normalized_subject"] == "machine_learning"
+        )
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_explicit_subject_does_not_inherit_workspace_subject(
+        self, mock_invoke
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["python", "mindmap"],
+            subject_candidates=["python"],
+            requested_resource_type="mindmap",
+            requested_resource_types=["mindmap"],
+        )
+        state = {
+            "messages": [HumanMessage(content="make a Python mindmap")],
+            "thread_id": "thread-1",
+            "session_id": "thread-1",
+            "task_workspace": {
+                "schema_version": 1,
+                "workspace_id": "workspace:v1:ml",
+                "thread_id": "thread-1",
+                "active_subject": "Machine Learning",
+                "normalized_subject": "machine_learning",
+            },
+        }
+
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["python", "machine_learning"],
+        ):
+            result = await supervisor_node(state)
+
+        assert result["subject"] == "python"
+        assert result["workspace_continuation_applied"] is False
+        assert result["workspace_continuation_reason"] == "current_subject_present"
 
     @pytest.mark.parametrize(
         ("query", "expected_type", "expected_types"),

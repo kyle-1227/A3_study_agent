@@ -15,6 +15,10 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
+from src.context_engineering.workspace import (
+    build_workspace_artifact_update,
+    workspace_trace_payload,
+)
 from src.graph.code_practice import (
     code_practice_agent,
     code_practice_output,
@@ -1126,6 +1130,70 @@ async def resource_bundle_output(state: LearningState) -> dict:
     )
     message = _compose_bundle_message(status, successes, failures)
     bundle["message"] = message
+    artifact_updates: dict[str, Any] = {}
+    if successes:
+        try:
+            workspace_successes = [
+                {**result, "metrics": _resource_metrics(result)}
+                for result in successes
+            ]
+            artifact_updates = build_workspace_artifact_update(
+                state,
+                workspace_successes,
+            )
+            workspace_payload = workspace_trace_payload(
+                artifact_updates.get("task_workspace") or {}
+            )
+            emit_a3_trace(
+                logger,
+                "task_workspace.update_planned",
+                workspace_payload,
+                state=state,
+                env_flag="LOG_A3_TRACE",
+            )
+            emit_a3_trace(
+                logger,
+                "resource_artifacts.indexed",
+                workspace_payload,
+                state=state,
+                env_flag="LOG_A3_TRACE",
+            )
+            emit_a3_trace(
+                logger,
+                "task_workspace.updated",
+                workspace_payload,
+                state=state,
+                env_flag="LOG_A3_TRACE",
+            )
+            workspace_events = list(artifact_updates.get("workspace_events") or [])
+            workspace_events.extend(
+                [
+                    {
+                        "stage": "task_workspace.updated",
+                        **workspace_payload,
+                    }
+                ]
+            )
+            artifact_updates["workspace_events"] = workspace_events
+        except Exception as exc:
+            failure_payload = {
+                "thread_id": state.get("thread_id", ""),
+                "request_id": state.get("request_id", ""),
+                "updated_sources": ["resource_bundle_output"],
+                "diagnostics": [sanitize_error_message(exc, max_chars=160)],
+            }
+            emit_a3_trace(
+                logger,
+                "task_workspace.update_failed",
+                failure_payload,
+                state=state,
+                env_flag="LOG_A3_TRACE",
+            )
+            artifact_updates = {
+                "workspace_events": [
+                    {"stage": "task_workspace.update_failed", **failure_payload}
+                ]
+            }
     emit_a3_trace(
         logger,
         "resource_generation.bundle.complete",
@@ -1140,6 +1208,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
     )
     return {
         **state_updates,
+        **artifact_updates,
         "resource_bundle_artifact": bundle,
         "resource_generation_debug": debug,
         "resource_generation_status": status,

@@ -27,7 +27,11 @@ import "@xyflow/react/dist/style.css"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import type { ContextUsage, ContextUsageError } from "@/components/chat-area"
+import type {
+  BackgroundContextWindow,
+  ContextUsage,
+  ContextUsageError,
+} from "@/components/chat-area"
 
 export interface LogEntry {
   type: "info" | "error" | "warning" | "perf" | "usage" | "context"
@@ -51,6 +55,7 @@ interface RightPanelProps {
   tokenUsage: { input: number; output: number; total: number }
   contextUsage?: ContextUsage | null
   contextUsageError?: ContextUsageError | null
+  backgroundContextWindow?: BackgroundContextWindow | null
   isInterrupted?: boolean
 }
 
@@ -193,6 +198,7 @@ export function RightPanel({
   tokenUsage,
   contextUsage,
   contextUsageError,
+  backgroundContextWindow,
   isInterrupted,
 }: RightPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -340,6 +346,47 @@ export function RightPanel({
               </div>
             )}
 
+            {backgroundContextWindow && (
+              <div className="border-t border-border bg-[var(--surface-muted)]/70 px-4 py-3 pl-12 font-mono text-[11px]">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-semibold text-primary">Background Context</span>
+                    <span className="text-muted-foreground">
+                      {Math.round(backgroundContextWindow.usedRatio * 100)}% used
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>used / max</span>
+                    <span className="text-right text-foreground">
+                      {backgroundContextWindow.usedTokens} / {backgroundContextWindow.maxContextTokens}
+                    </span>
+                    <span>manifests</span>
+                    <span className="text-right text-foreground">{backgroundContextWindow.manifestCount}</span>
+                    <span>sections</span>
+                    <span className="truncate text-right text-foreground">
+                      {backgroundContextWindow.sectionNames.join(", ") || "none"}
+                    </span>
+                    <span>workspace</span>
+                    <span className="text-right text-foreground">
+                      {backgroundContextWindow.workspacePresent ? "present" : "empty"}
+                    </span>
+                    {backgroundContextWindow.workspaceActiveSubject && (
+                      <>
+                        <span>subject</span>
+                        <span className="truncate text-right text-foreground">
+                          {backgroundContextWindow.workspaceActiveSubject}
+                        </span>
+                      </>
+                    )}
+                    <span>evidence / gaps / artifacts</span>
+                    <span className="text-right text-foreground">
+                      {backgroundContextWindow.workspaceEvidenceSummaryCount} / {backgroundContextWindow.workspaceGapCount} / {backgroundContextWindow.workspaceArtifactCount}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {(contextUsage || contextUsageError) && (
               <div className="border-t border-border bg-[var(--surface-muted)]/70 px-4 py-3 pl-12 font-mono text-[11px]">
                 {contextUsageError ? (
@@ -360,7 +407,7 @@ export function RightPanel({
                   contextUsage && (
                     <div className="space-y-1">
                       <div className="flex items-center justify-between gap-2 text-xs">
-                        <span className="font-semibold text-primary">Context Window</span>
+                        <span className="font-semibold text-primary">LLM Call Usage</span>
                         <span className="text-muted-foreground">
                           {Math.round(contextUsage.usedRatio * 100)}% / {contextUsage.warningLevel}
                         </span>

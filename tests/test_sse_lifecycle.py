@@ -1178,3 +1178,4 @@ class TestSSEDoneEvent:
             }
         ]
         assert not [p for p in all_payloads if p.get("type") == "done"]
+        assert mock_graph.aupdate_state.await_count == 1

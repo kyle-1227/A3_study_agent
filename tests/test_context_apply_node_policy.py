@@ -720,21 +720,35 @@ def test_agent_injectable_sources_are_node_specific():
     expected = {
         "review_doc_agent": {
             "required": ("evidence",),
-            "optional": ("rules", "curriculum", "memory", "profile"),
-            "injectable": ("evidence", "rules", "curriculum", "memory", "profile"),
-            "excluded": ("artifact", "trajectory"),
+            "optional": ("rules", "curriculum", "memory", "profile", "artifact"),
+            "injectable": (
+                "evidence",
+                "rules",
+                "curriculum",
+                "memory",
+                "profile",
+                "artifact",
+            ),
+            "excluded": ("trajectory",),
         },
         "exercise_agent": {
             "required": ("evidence",),
-            "optional": ("rules", "trajectory", "memory", "curriculum"),
-            "injectable": ("evidence", "rules", "trajectory", "memory", "curriculum"),
-            "excluded": ("artifact",),
+            "optional": ("rules", "trajectory", "memory", "curriculum", "artifact"),
+            "injectable": (
+                "evidence",
+                "rules",
+                "trajectory",
+                "memory",
+                "curriculum",
+                "artifact",
+            ),
+            "excluded": (),
         },
         "mindmap_agent": {
             "required": ("evidence",),
-            "optional": ("rules", "curriculum"),
-            "injectable": ("evidence", "rules", "curriculum"),
-            "excluded": ("artifact", "trajectory", "memory", "profile"),
+            "optional": ("rules", "curriculum", "artifact"),
+            "injectable": ("evidence", "rules", "curriculum", "artifact"),
+            "excluded": ("trajectory", "memory", "profile"),
         },
         "code_practice_agent": {
             "required": ("evidence",),
@@ -744,21 +758,28 @@ def test_agent_injectable_sources_are_node_specific():
         },
         "video_script_agent": {
             "required": ("evidence",),
-            "optional": ("rules", "curriculum", "profile"),
-            "injectable": ("evidence", "rules", "curriculum", "profile"),
-            "excluded": ("artifact", "trajectory", "memory"),
+            "optional": ("rules", "curriculum", "profile", "artifact"),
+            "injectable": ("evidence", "rules", "curriculum", "profile", "artifact"),
+            "excluded": ("trajectory", "memory"),
         },
         "video_animation_agent": {
             "required": ("evidence",),
-            "optional": ("rules", "curriculum"),
-            "injectable": ("evidence", "rules", "curriculum"),
-            "excluded": ("artifact", "trajectory", "memory", "profile"),
+            "optional": ("rules", "curriculum", "artifact"),
+            "injectable": ("evidence", "rules", "curriculum", "artifact"),
+            "excluded": ("trajectory", "memory", "profile"),
         },
         "study_plan_agent": {
             "required": ("profile",),
-            "optional": ("rules", "trajectory", "memory", "curriculum"),
-            "injectable": ("profile", "rules", "trajectory", "memory", "curriculum"),
-            "excluded": ("evidence", "artifact"),
+            "optional": ("rules", "trajectory", "memory", "curriculum", "artifact"),
+            "injectable": (
+                "profile",
+                "rules",
+                "trajectory",
+                "memory",
+                "curriculum",
+                "artifact",
+            ),
+            "excluded": ("evidence",),
         },
         "adaptive_practice_responder": {
             "required": ("rules",),
@@ -984,6 +1005,101 @@ def test_require_user_match_does_not_use_thread_or_session_aliases():
 
     assert [item.id for item in result.kept_items] == ["user-kept"]
     assert result.source_drop_reasons["user_mismatch"] == 1
+
+
+def test_thread_match_keeps_cross_resource_artifact_when_subject_matches():
+    policies = {
+        "artifact": SourceBudgetPolicy(
+            source_type="artifact",
+            require_thread_match=True,
+            require_subject_match=True,
+            require_task_match=False,
+            allowed_purposes=("artifact_reference",),
+            min_relevance_score=0.4,
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [
+            _item(
+                "prior-review-doc",
+                source_type="artifact",
+                relevance_score=0.8,
+                metadata={
+                    "thread_id": "thread-1",
+                    "normalized_subject": "machine_learning",
+                    "resource_type": "review_doc",
+                    "purpose": "artifact_reference",
+                },
+            )
+        ],
+        injectable_sources=("artifact",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={
+            "thread_id": "thread-1",
+            "subject": "Machine Learning",
+            "requested_resource_type": "quiz",
+        },
+    )
+
+    assert [item.id for item in result.kept_items] == ["prior-review-doc"]
+    assert result.drop_reasons == {}
+
+
+def test_thread_match_drops_artifact_on_thread_mismatch():
+    policies = {
+        "artifact": SourceBudgetPolicy(
+            source_type="artifact",
+            require_thread_match=True,
+            allowed_purposes=("artifact_reference",),
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [
+            _item(
+                "other-thread-artifact",
+                source_type="artifact",
+                metadata={
+                    "thread_id": "thread-other",
+                    "purpose": "artifact_reference",
+                },
+            )
+        ],
+        injectable_sources=("artifact",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={"thread_id": "thread-1"},
+    )
+
+    assert result.kept_items == []
+    assert result.source_drop_reasons["thread_mismatch"] == 1
+
+
+def test_source_policy_without_thread_match_behaves_as_before():
+    policies = {
+        "artifact": SourceBudgetPolicy(
+            source_type="artifact",
+            allowed_purposes=("artifact_reference",),
+        )
+    }
+    result = filter_context_items_by_source_policy(
+        [
+            _item(
+                "artifact",
+                source_type="artifact",
+                metadata={
+                    "thread_id": "thread-other",
+                    "purpose": "artifact_reference",
+                },
+            )
+        ],
+        injectable_sources=("artifact",),
+        exclude_message_source=True,
+        source_policies=policies,
+        state={"thread_id": "thread-1"},
+    )
+
+    assert [item.id for item in result.kept_items] == ["artifact"]
 
 
 def test_task_match_does_not_use_top_level_requested_resource_type_for_multi_resource():

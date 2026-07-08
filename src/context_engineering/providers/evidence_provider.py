@@ -76,6 +76,7 @@ def _existing_evidence_candidates(
     for bucket in (
         "graded_evidence",
         "evidence_items",
+        "task_workspace.evidence_summaries",
         "local_evidence",
         "web_evidence",
         "retrieval_evidence",
@@ -83,7 +84,11 @@ def _existing_evidence_candidates(
         "local_evidence_candidates",
         "web_evidence_candidates",
     ):
-        raw_items = state.get(bucket) or []
+        raw_items = (
+            _workspace_evidence_summaries(state)
+            if bucket == "task_workspace.evidence_summaries"
+            else state.get(bucket) or []
+        )
         if not isinstance(raw_items, list):
             raise ContextProviderError(
                 provider=EvidenceContextProvider.name,
@@ -112,6 +117,27 @@ def _existing_evidence_candidates(
     return candidates
 
 
+def _workspace_evidence_summaries(state: dict[str, Any]) -> list[dict[str, Any]]:
+    workspace = state.get("task_workspace")
+    if not isinstance(workspace, dict):
+        return []
+    raw_items = workspace.get("evidence_summaries") or []
+    if not isinstance(raw_items, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("purpose") != "factual_grounding":
+            continue
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        if not evidence_id or not summary:
+            continue
+        result.append(item)
+    return result
+
+
 def _candidate_to_item(
     candidate: dict[str, Any],
     *,
@@ -127,6 +153,9 @@ def _candidate_to_item(
         candidate.get("title") or candidate.get("source") or f"evidence_{index}"
     )
     content = _candidate_content(candidate)
+    workspace_item = (
+        candidate.get("_context_source_bucket") == "task_workspace.evidence_summaries"
+    )
     metadata = {
         "evidence_id": evidence_id,
         "source_type": source_type,
@@ -135,6 +164,12 @@ def _candidate_to_item(
         "title": title,
         "rank": index,
         "retrieval_mode": candidate.get("_context_source_bucket", ""),
+        "purpose": candidate.get("purpose", ""),
+        "subject": candidate.get("subject", ""),
+        "normalized_subject": candidate.get("normalized_subject", ""),
+        "thread_id": candidate.get("thread_id", ""),
+        "request_id": candidate.get("request_id", ""),
+        "created_at": candidate.get("created_at", ""),
     }
     metadata.update(_candidate_score_metadata(candidate))
     if score is not None:
@@ -143,13 +178,13 @@ def _candidate_to_item(
         source_type="evidence",
         title=title,
         content=content,
-        priority=_evidence_priority(score),
-        scope="turn",
-        lifetime="turn",
+        priority=_evidence_priority(score, workspace=workspace_item),
+        scope="session" if workspace_item else "turn",
+        lifetime="session" if workspace_item else "turn",
         compressible=True,
         can_drop=True,
-        disclosure_level="snippet",
-        relevance_score=score,
+        disclosure_level="summary" if workspace_item else "snippet",
+        relevance_score=_workspace_relevance(score) if workspace_item else score,
         metadata=metadata,
         max_content_chars=max_content_chars,
     )
@@ -196,7 +231,15 @@ def _candidate_score_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _evidence_priority(score: float | None) -> int:
+def _evidence_priority(score: float | None, *, workspace: bool = False) -> int:
+    if workspace:
+        if score is None:
+            return 58
+        if score >= 0.7:
+            return 66
+        if score >= 0.4:
+            return 60
+        return 55
     if score is None:
         return 75
     if score >= 0.7:
@@ -204,3 +247,9 @@ def _evidence_priority(score: float | None) -> int:
     if score >= 0.4:
         return 75
     return 65
+
+
+def _workspace_relevance(score: float | None) -> float:
+    if score is None:
+        return 0.45
+    return max(0.35, min(float(score) * 0.85, 0.75))

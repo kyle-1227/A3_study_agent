@@ -7,6 +7,15 @@ from typing import Annotated, Literal
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from src.context_engineering.workspace import (
+    TASK_WORKSPACE_CLEAR as _TASK_WORKSPACE_CLEAR,
+    merge_task_workspace,
+)
+from src.context_engineering.input_manifest import (
+    merge_llm_input_manifest_history,
+    merge_thread_context_ledger,
+)
+
 
 # Sentinel value: returning this from a node signals "clear all context"
 CONTEXT_CLEAR: list[dict] = [{"__clear__": True}]
@@ -16,6 +25,13 @@ MEMORY_CLEAR: list[dict] = [{"__memory_clear__": True}]
 
 # Sentinel value: returning this to resource result reducers clears the list.
 RESOURCE_RESULTS_CLEAR: list[dict] = [{"__resource_results_clear__": True}]
+
+# Sentinel values for reducer-owned persistent context.
+TASK_WORKSPACE_CLEAR: dict = _TASK_WORKSPACE_CLEAR
+DICT_CLEAR: dict = {"__dict_clear__": True}
+GENERATED_ARTIFACTS_CLEAR: list[dict] = [{"__generated_artifacts_clear__": True}]
+WORKSPACE_EVENTS_CLEAR: list[dict] = [{"__workspace_events_clear__": True}]
+LLM_INPUT_MANIFESTS_CLEAR: list[dict] = [{"__llm_input_manifests_clear__": True}]
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
@@ -65,15 +81,36 @@ def bounded_context_event_reducer(
     update: list[dict],
 ) -> list[dict]:
     """Append bounded request-local CE events."""
+    if update and update[0].get("__workspace_events_clear__"):
+        return []
     values = list(existing or []) + list(update or [])
     return values[-CONTEXT_WINDOW_EVENT_LIMIT:]
 
 
+def llm_input_manifests_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Merge bounded LLM input manifests idempotently by manifest_id."""
+    if update and update[0].get("__llm_input_manifests_clear__"):
+        return []
+    return merge_llm_input_manifest_history(existing, update)
+
+
 def merge_dict_reducer(existing: dict, update: dict) -> dict:
     """Reducer-safe shallow dict merge for keyed context-window state."""
+    if isinstance(update, dict) and update.get("__dict_clear__") is True:
+        return {}
     merged = dict(existing or {})
     merged.update(update or {})
     return merged
+
+
+def thread_context_ledger_reducer(existing: dict, update: dict) -> dict:
+    """Merge sanitized thread-level context ledger updates."""
+    if isinstance(update, dict) and update.get("__dict_clear__") is True:
+        return {}
+    return merge_thread_context_ledger(existing, update)
 
 
 def latest_dict_reducer(_existing: dict, update: dict) -> dict:
@@ -84,6 +121,37 @@ def latest_dict_reducer(_existing: dict, update: dict) -> dict:
 def latest_string_reducer(_existing: str, update: str) -> str:
     """Replace with the latest string value."""
     return str(update or "")
+
+
+def generated_artifacts_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Merge bounded generated artifact summaries idempotently by artifact_id."""
+    if update and update[0].get("__generated_artifacts_clear__"):
+        return []
+    merged: dict[str, dict] = {}
+    for entry in [*(existing or []), *(update or [])]:
+        if not isinstance(entry, dict):
+            continue
+        artifact_id = str(entry.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        merged[artifact_id] = entry
+    sorted_entries = sorted(
+        merged.values(),
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("artifact_id") or ""),
+        ),
+        reverse=True,
+    )
+    return sorted_entries[:CONTEXT_WINDOW_HISTORY_LIMIT]
+
+
+def task_workspace_reducer(existing: dict, update: dict) -> dict:
+    """Merge versioned task workspace updates without unbounded growth."""
+    return merge_task_workspace(existing, update)
 
 
 # Current-turn transient state reset
@@ -107,6 +175,9 @@ def initial_request_reset_transient_state() -> dict:
         "requested_resource_type": "",
         "requested_resource_types": [],
         "needs_mindmap": False,
+        "workspace_continuation": {},
+        "workspace_continuation_applied": False,
+        "workspace_continuation_reason": "",
         # memory use policy for current query rewrite
         "memory_use_policy": "unset",
         "memory_use_reason": "",
@@ -247,6 +318,7 @@ def initial_request_reset_transient_state() -> dict:
         "pending_interrupt_type": "",
         # context window telemetry
         "context_usage": {},
+        "llm_input_manifest": {},
         "request_context_window": {
             "current_request_id": "",
             "current_node": "",
@@ -283,12 +355,23 @@ def resource_branch_results_reducer(
         if resource_type:
             merged[resource_type] = entry
 
-    order = ["mindmap", "quiz", "review_doc", "study_plan"]
+    order = [
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+    ]
+
+    def sort_key(item: dict) -> int:
+        resource_type = str(item.get("resource_type") or "")
+        return order.index(resource_type) if resource_type in order else len(order)
+
     return sorted(
         merged.values(),
-        key=lambda item: order.index(item.get("resource_type"))
-        if item.get("resource_type") in order
-        else len(order),
+        key=sort_key,
     )
 
 
@@ -303,6 +386,12 @@ class LearningState(TypedDict):
     evidence_gap_memory: Annotated[
         list[dict], evidence_memory_reducer
     ]  # Bounded gap memory
+    task_workspace: Annotated[
+        dict, task_workspace_reducer
+    ]  # Versioned durable task-level workspace
+    workspace_events: Annotated[
+        list[dict], bounded_context_event_reducer
+    ]  # Bounded workspace update/context events
     request_id: str  # Per-request trace identifier
     session_id: str  # Session identifier for trace grouping
     thread_id: str  # LangGraph thread identifier
@@ -320,6 +409,21 @@ class LearningState(TypedDict):
     context_usage_history: Annotated[
         list[dict], bounded_context_window_reducer
     ]  # Cross-request bounded usage history
+    llm_input_manifest: Annotated[
+        dict, latest_dict_reducer
+    ]  # Most recent provider-bound LLM input manifest
+    llm_input_manifests: Annotated[
+        list[dict], llm_input_manifests_reducer
+    ]  # Cross-request bounded manifest history
+    thread_context_ledger: Annotated[
+        dict, thread_context_ledger_reducer
+    ]  # Thread-level context source ledger
+    background_context_window: Annotated[
+        dict, latest_dict_reducer
+    ]  # Codex-like thread-level background context window
+    context_continuity: Annotated[
+        dict, latest_dict_reducer
+    ]  # Task-continuity diagnostics for current request
     request_context_window: Annotated[
         dict, latest_dict_reducer
     ]  # Current request CE window summary
@@ -348,7 +452,7 @@ class LearningState(TypedDict):
         dict, merge_dict_reducer
     ]  # Artifact summaries by resource type
     last_generated_artifacts: Annotated[
-        list[dict], bounded_context_window_reducer
+        list[dict], generated_artifacts_reducer
     ]  # Bounded generated artifact summaries
     intent: Literal["academic", "emotional", "unknown"]  # User intent
     subject: str  # The topic being discussed
@@ -359,6 +463,9 @@ class LearningState(TypedDict):
         str
     ]  # Ordered resource types requested for parallel generation
     needs_mindmap: bool  # Route to mindmap collaboration chain when true
+    workspace_continuation: dict  # Safe current-turn workspace continuation diagnostics
+    workspace_continuation_applied: bool  # True when subject inherited from workspace
+    workspace_continuation_reason: str  # Continuation skip/apply diagnostic reason
     memory_use_policy: Literal[
         "use", "ignore", "ask_user", "unset"
     ]  # Whether query rewrite may use selected memory
@@ -472,9 +579,7 @@ class LearningState(TypedDict):
     local_evidence_originals: dict  # Original local RAG docs keyed by evidence_id
     web_evidence_originals: dict  # Original Tavily results keyed by evidence_id
     evidence_candidates: list[dict]  # Dual-source local/web EvidenceCandidate snapshots
-    graded_evidence: list[
-        dict
-    ]  # LLM-judged evidence snapshots for CE provider handoff
+    graded_evidence: list[dict]  # LLM-judged evidence snapshots for CE provider handoff
     evidence_judge_output: dict  # Raw structured Evidence Judge output
     evidence_judge_debug: dict  # Evidence Judge execution status/debug summary
     evidence_judge_rounds: int  # Evidence Judge rounds executed

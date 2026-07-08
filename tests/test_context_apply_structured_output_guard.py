@@ -126,3 +126,4 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
     assert original_messages == [{"role": "user", "content": "question"}]
     assert scorer_calls == []
     assert "context_importance_scored" not in trace_stages
+    assert "llm_input_manifest.built" in trace_stages

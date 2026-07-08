@@ -12,7 +12,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.context_engineering.input_manifest import build_llm_input_manifest
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+
+
+def _test_manifest(
+    *,
+    node_name: str = "test_node",
+    llm_node: str = "test_node",
+    provider: str = "test_provider",
+    model: str = "test-model",
+    state: dict | None = None,
+) -> dict:
+    return build_llm_input_manifest(
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=provider,
+        model=model,
+        messages=[HumanMessage(content="test prompt")],
+        state=state or {"request_id": "r-test", "thread_id": "t-test"},
+        call_purpose="test_llm_call",
+    )
 
 
 # ===========================================================================
@@ -308,6 +328,12 @@ class TestProviderTransportRetry:
                 llm_node="evidence_judge",
                 provider="openrouter",
                 model="test-model",
+                llm_input_manifest=_test_manifest(
+                    node_name="evidence_judge",
+                    llm_node="evidence_judge",
+                    provider="openrouter",
+                    state={"request_id": "r1", "thread_id": "t1"},
+                ),
                 state={"request_id": "r1"},
             )
         finally:
@@ -345,6 +371,11 @@ class TestProviderTransportRetry:
                 llm_node="supervisor",
                 provider="openrouter",
                 model="test-model",
+                llm_input_manifest=_test_manifest(
+                    node_name="supervisor",
+                    llm_node="supervisor",
+                    provider="openrouter",
+                ),
                 state={},
             )
 
@@ -379,6 +410,12 @@ class TestProviderTransportRetry:
                     llm_node="query_rewrite",
                     provider="openrouter",
                     model="test-model",
+                    llm_input_manifest=_test_manifest(
+                        node_name="query_rewrite",
+                        llm_node="query_rewrite",
+                        provider="openrouter",
+                        state={"request_id": "r2", "thread_id": "t2"},
+                    ),
                     state={"request_id": "r2"},
                 )
         finally:
@@ -420,11 +457,37 @@ class TestProviderTransportRetry:
                 llm_node="supervisor",
                 provider="deepseek_official",
                 model="deepseek-v4-pro",
+                llm_input_manifest=_test_manifest(
+                    node_name="supervisor",
+                    llm_node="supervisor",
+                    provider="deepseek_official",
+                    model="deepseek-v4-pro",
+                ),
                 state={},
             )
 
         assert calls == 1
         llm_module.asyncio.sleep.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_missing_manifest_fails_before_provider_call(self):
+        from src.context_engineering.input_manifest import LLMInputManifestError
+        from src.graph.llm import invoke_with_provider_transport_retry
+
+        operation = AsyncMock(return_value="should-not-run")
+
+        with pytest.raises(LLMInputManifestError):
+            await invoke_with_provider_transport_retry(
+                operation,
+                node_name="supervisor",
+                llm_node="supervisor",
+                provider="deepseek_official",
+                model="deepseek-v4-pro",
+                llm_input_manifest={},
+                state={},
+            )
+
+        operation.assert_not_called()
 
 
 class TestPlainLLMRetry:
@@ -435,6 +498,7 @@ class TestPlainLLMRetry:
 
         monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
         mock_llm = MagicMock()
+        mock_llm.model_name = "deepseek-v4-pro"
         mock_llm.ainvoke = AsyncMock(
             side_effect=[
                 AIMessage(content="   "),

@@ -22,6 +22,12 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_setting, load_prompt
+from src.context_engineering.workspace import (
+    build_workspace_evidence_update,
+    sanitize_workspace_text,
+    workspace_continuation_trace_payload,
+    workspace_trace_payload,
+)
 from src.graph.evidence import (
     EvidenceCandidate,
     EvidenceGradeBatch,
@@ -58,7 +64,10 @@ from src.llm.structured_output import (
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
 from src.rag.retriever import retrieve
-from src.tools.search_tool import sanitize_error_message, search_with_diagnostics as web_search_fn
+from src.tools.search_tool import (
+    sanitize_error_message,
+    search_with_diagnostics as web_search_fn,
+)
 from src.tracing import traced_llm_call, traced_node, traced_retrieval
 
 logger = logging.getLogger(__name__)
@@ -101,7 +110,9 @@ class RetrievalPlanItem(BaseModel):
     relation_to_goal: NoteText240 = ""
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
     retrieval_coverage_hint: NoteText240 = ""
-    retrieval_coverage_goals: list[KeypointText120] = Field(default_factory=list, max_length=8)
+    retrieval_coverage_goals: list[KeypointText120] = Field(
+        default_factory=list, max_length=8
+    )
 
 
 class SearchQueryRewriteOutput(BaseModel):
@@ -109,16 +120,26 @@ class SearchQueryRewriteOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    local_retrieval_query: QueryText240 = Field(description="Query optimized for local course/RAG retrieval")
-    web_research_seed_query: WebQueryText180 = Field(description="Query optimized for external Web Research")
+    local_retrieval_query: QueryText240 = Field(
+        description="Query optimized for local course/RAG retrieval"
+    )
+    web_research_seed_query: WebQueryText180 = Field(
+        description="Query optimized for external Web Research"
+    )
     expanded_keypoints: list[KeypointText120] = Field(
         description="Expanded concrete knowledge points",
         max_length=8,
     )
     reason: ReasonText300 = Field(description="Brief rationale for the rewrite")
-    learning_goal: GoalText160 = Field(default="", description="Normalized learning goal")
-    primary_subject: ShortText64 = Field(default="", description="Main subject for the user goal")
-    subject_relation_summary: NoteText240 = Field(default="", description="How subjects relate to the goal")
+    learning_goal: GoalText160 = Field(
+        default="", description="Normalized learning goal"
+    )
+    primary_subject: ShortText64 = Field(
+        default="", description="Main subject for the user goal"
+    )
+    subject_relation_summary: NoteText240 = Field(
+        default="", description="How subjects relate to the goal"
+    )
     retrieval_plan: list[RetrievalPlanItem] = Field(
         default_factory=list,
         description="Per-subject retrieval plan",
@@ -146,13 +167,13 @@ class MemoryUseDecisionOutput(BaseModel):
         description="Whether to use, ignore, or ask the user about selected memory",
     )
     reason: str = Field(description="Brief reason for the decision")
-    question_to_user: str = Field(default="", description="Question shown when decision is ask_user")
+    question_to_user: str = Field(
+        default="", description="Question shown when decision is ask_user"
+    )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
-_MEMORY_CONFIRMATION_QUESTION = (
-    "\u6211\u68c0\u6d4b\u5230\u4e4b\u524d\u6709\u76f8\u5173\u5b66\u4e60\u8bb0\u5f55\u3002\u4f60\u5e0c\u671b\u8fd9\u6b21\u7ed3\u5408\u5386\u53f2\u5185\u5bb9\uff0c\u8fd8\u662f\u53ea\u6839\u636e\u5f53\u524d\u95ee\u9898\u91cd\u65b0\u751f\u6210\uff1f"
-)
+_MEMORY_CONFIRMATION_QUESTION = "\u6211\u68c0\u6d4b\u5230\u4e4b\u524d\u6709\u76f8\u5173\u5b66\u4e60\u8bb0\u5f55\u3002\u4f60\u5e0c\u671b\u8fd9\u6b21\u7ed3\u5408\u5386\u53f2\u5185\u5bb9\uff0c\u8fd8\u662f\u53ea\u6839\u636e\u5f53\u524d\u95ee\u9898\u91cd\u65b0\u751f\u6210\uff1f"
 
 _MEMORY_USE_PATTERNS = (
     "\u7ed3\u5408\u4e4b\u524d",
@@ -226,6 +247,7 @@ _HISTORY_REFERENCE_PATTERNS = _MEMORY_USE_PATTERNS + (
     "aforementioned",
 )
 
+
 def _has_explicit_history_reference(query: str) -> bool:
     """Check if the user query contains explicit history-reference language.
 
@@ -248,42 +270,54 @@ def _compact_memory_for_prompt(entry: dict, *, max_summary_chars: int = 800) -> 
     return {
         "memory_id": entry.get("memory_id", ""),
         "subject": entry.get("subject", ""),
-        "resource_type": entry.get("resource_type") or entry.get("requested_resource_type", ""),
-        "evidence_state": entry.get("evidence_state") or entry.get("overall_evidence_state", ""),
+        "resource_type": entry.get("resource_type")
+        or entry.get("requested_resource_type", ""),
+        "evidence_state": entry.get("evidence_state")
+        or entry.get("overall_evidence_state", ""),
         "summary": summary[:max_summary_chars],
         "followup_search_queries": followups[:3] if isinstance(followups, list) else [],
         "coverage_gaps": gaps[:3] if isinstance(gaps, list) else [],
     }
 
 
-def _serialize_episodic_for_prompt(state: LearningState, max_items: int = 3) -> list[dict]:
+def _serialize_episodic_for_prompt(
+    state: LearningState, max_items: int = 3
+) -> list[dict]:
     """Serialize episodic memory results from state for LLM prompt injection."""
     episodic_results = state.get("episodic_memory_results") or []
     serialized: list[dict] = []
     for entry in episodic_results[:max_items]:
-        serialized.append({
-            "content": str(entry.get("content", ""))[:300],
-            "memory_type": str(entry.get("memory_type", "")),
-            "importance": float(entry.get("importance", 0.5)),
-            "score": float(entry.get("score", 0.0)),
-            "match_reason": str(entry.get("match_reason", "")),
-        })
+        serialized.append(
+            {
+                "content": str(entry.get("content", ""))[:300],
+                "memory_type": str(entry.get("memory_type", "")),
+                "importance": float(entry.get("importance", 0.5)),
+                "score": float(entry.get("score", 0.0)),
+                "match_reason": str(entry.get("match_reason", "")),
+            }
+        )
     return serialized
 
 
-def _serialize_semantic_for_prompt(state: LearningState, max_items: int = 2) -> list[dict]:
+def _serialize_semantic_for_prompt(
+    state: LearningState, max_items: int = 2
+) -> list[dict]:
     """Serialize semantic memory results from state for LLM prompt injection."""
     semantic_results = state.get("semantic_memory_results") or []
     serialized: list[dict] = []
     for entry in semantic_results[:max_items]:
         weak_points = entry.get("weak_knowledge_points") or []
-        serialized.append({
-            "content": str(entry.get("content", ""))[:400],
-            "weak_knowledge_points": weak_points[:5] if isinstance(weak_points, list) else [],
-            "confidence": float(entry.get("confidence", 0.5)),
-            "score": float(entry.get("score", 0.0)),
-            "match_reason": str(entry.get("match_reason", "")),
-        })
+        serialized.append(
+            {
+                "content": str(entry.get("content", ""))[:400],
+                "weak_knowledge_points": weak_points[:5]
+                if isinstance(weak_points, list)
+                else [],
+                "confidence": float(entry.get("confidence", 0.5)),
+                "score": float(entry.get("score", 0.0)),
+                "match_reason": str(entry.get("match_reason", "")),
+            }
+        )
     return serialized
 
 
@@ -291,6 +325,7 @@ def _deterministic_memory_use_decision(
     current_query: str,
     *,
     selected_memory_count: int,
+    task_continuity_resolved: bool = False,
 ) -> MemoryUseDecisionOutput | None:
     """Handle clear memory-use cases using generic conversation cues only."""
     if selected_memory_count <= 0:
@@ -309,6 +344,15 @@ def _deterministic_memory_use_decision(
         return MemoryUseDecisionOutput(
             decision="use",
             reason="The current query explicitly asks to use previous context.",
+            confidence=0.95,
+        )
+    if task_continuity_resolved:
+        return MemoryUseDecisionOutput(
+            decision="ignore",
+            reason=(
+                "Same-thread task continuity was resolved from the task workspace; "
+                "long-term memory is not needed for this request."
+            ),
             confidence=0.95,
         )
     if _contains_any_pattern(current_query, _MEMORY_AMBIGUOUS_PATTERNS):
@@ -366,7 +410,9 @@ def _repeated_english_ngram(text: str, *, n: int = 4, max_occurrences: int = 2) 
     tokens = _ENGLISH_TOKEN_RE.findall((text or "").lower())
     if len(tokens) < n * max_occurrences:
         return ""
-    counts = Counter(" ".join(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1))
+    counts = Counter(
+        " ".join(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1)
+    )
     for gram, count in counts.items():
         if count > max_occurrences:
             return gram
@@ -493,6 +539,21 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
     return prompt
 
 
+def _workspace_continuation_prompt_text(state: LearningState) -> str:
+    continuation = state.get("workspace_continuation")
+    if not isinstance(continuation, dict) or not continuation.get(
+        "continuation_applied"
+    ):
+        return "none"
+    payload = dict(workspace_continuation_trace_payload(continuation))
+    payload["active_learning_goal"] = sanitize_workspace_text(
+        continuation.get("active_learning_goal"),
+        max_chars=240,
+        fallback="",
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _message_content_to_text(content) -> str:
     """Convert chat message content into text for diagnostics."""
     if isinstance(content, str):
@@ -562,7 +623,9 @@ def _clear_retrieval_plan_state() -> dict:
     }
 
 
-DEPRECATED_WEB_STATE_WARNING = "Dropped deprecated Web Research checkpoint keys during Web Research V2 migration."
+DEPRECATED_WEB_STATE_WARNING = (
+    "Dropped deprecated Web Research checkpoint keys during Web Research V2 migration."
+)
 
 
 def _deprecated_web_state_keys() -> set[str]:
@@ -590,7 +653,9 @@ def _deprecated_web_state_prefixes() -> tuple[str, ...]:
     return ("web_" + "supple" + "ment_",)
 
 
-def _drop_deprecated_web_state_keys(state: LearningState | dict) -> tuple[dict, list[str]]:
+def _drop_deprecated_web_state_keys(
+    state: LearningState | dict,
+) -> tuple[dict, list[str]]:
     """Return a copy without deprecated Web Research checkpoint keys.
 
     This protects Web Research V2 from historical Postgres checkpoints without
@@ -601,7 +666,9 @@ def _drop_deprecated_web_state_keys(state: LearningState | dict) -> tuple[dict, 
     deprecated_keys = _deprecated_web_state_keys()
     deprecated_prefixes = _deprecated_web_state_prefixes()
     for key in list(sanitized.keys()):
-        if key in deprecated_keys or any(key.startswith(prefix) for prefix in deprecated_prefixes):
+        if key in deprecated_keys or any(
+            key.startswith(prefix) for prefix in deprecated_prefixes
+        ):
             dropped.append(key)
             sanitized.pop(key, None)
     return sanitized, sorted(dropped)
@@ -621,8 +688,7 @@ def _deprecated_web_state_warning_update(dropped_keys: list[str]) -> dict:
 def _is_retry_rewrite_active(state: LearningState) -> bool:
     """True only when a hallucination retry rewrite is in progress."""
     return bool(
-        (state.get("retry_count") or 0) > 0
-        or state.get("hallucination_reason", "")
+        (state.get("retry_count") or 0) > 0 or state.get("hallucination_reason", "")
     )
 
 
@@ -685,7 +751,13 @@ def _select_relevant_memory_summaries_with_debug(
                 missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
 
         entry_subject = str(entry.get("subject") or "").lower().strip()
-        entry_resource = str(entry.get("resource_type") or entry.get("requested_resource_type") or "").lower().strip()
+        entry_resource = (
+            str(
+                entry.get("resource_type") or entry.get("requested_resource_type") or ""
+            )
+            .lower()
+            .strip()
+        )
         entry_summary = _memory_summary_text(entry).lower()
         summary_terms = _memory_terms(entry_summary)
         overlap_terms = query_terms & summary_terms
@@ -708,8 +780,12 @@ def _select_relevant_memory_summaries_with_debug(
                 or entry_resource in resource_lower
             )
         )
-        query_overlap_match = bool(overlap_terms and (len(overlap_terms) >= 2 or not subject_lower))
-        subject_keyword_in_summary = bool(subject_lower and entry_summary and subject_lower in entry_summary)
+        query_overlap_match = bool(
+            overlap_terms and (len(overlap_terms) >= 2 or not subject_lower)
+        )
+        subject_keyword_in_summary = bool(
+            subject_lower and entry_summary and subject_lower in entry_summary
+        )
         is_eligible = (
             subject_match
             or resource_match
@@ -752,7 +828,9 @@ def _select_relevant_memory_summaries_with_debug(
     debug["eligible_memory_count"] = len(eligible)
     debug["selected_count"] = len(selected)
     debug["selected_ids"] = [entry.get("memory_id", "") for entry in selected]
-    debug["prompt_chars_added"] = sum(len(_memory_summary_text(entry)) for entry in selected)
+    debug["prompt_chars_added"] = sum(
+        len(_memory_summary_text(entry)) for entry in selected
+    )
     debug["selection_reason"] = (
         f"eligible-first selection: {len(eligible)} eligible of {len(memory_entries)}, "
         f"selected {len(selected)}"
@@ -844,18 +922,23 @@ def _top_doc_summaries(docs: list[dict], limit: int = 5) -> list[dict]:
 
 
 def _subjects_used(docs: list[dict]) -> list[str]:
-    return sorted({str(doc.get("retrieval_subject")) for doc in docs if doc.get("retrieval_subject")})
+    return sorted(
+        {
+            str(doc.get("retrieval_subject"))
+            for doc in docs
+            if doc.get("retrieval_subject")
+        }
+    )
 
 
 def _roles_used(docs: list[dict]) -> list[str]:
-    return sorted({str(doc.get("retrieval_role")) for doc in docs if doc.get("retrieval_role")})
+    return sorted(
+        {str(doc.get("retrieval_role")) for doc in docs if doc.get("retrieval_role")}
+    )
 
 
 def _is_web_evidence(item: dict) -> bool:
-    return (
-        item.get("source_type") == "web"
-        or item.get("type") == "web_evidence"
-    )
+    return item.get("source_type") == "web" or item.get("type") == "web_evidence"
 
 
 def _web_evidence_items(items: list[dict]) -> list[dict]:
@@ -881,9 +964,7 @@ def _best_doc_score(docs: list[dict]) -> float:
     if not docs:
         return 0.0
     rerank_scores = [
-        _score_doc(doc)
-        for doc in docs
-        if doc.get("rerank_score") is not None
+        _score_doc(doc) for doc in docs if doc.get("rerank_score") is not None
     ]
     if rerank_scores:
         return max(rerank_scores)
@@ -895,7 +976,9 @@ def _has_rerank_score(docs: list[dict]) -> bool:
 
 
 def _branch_status_score_source(docs: list[dict]) -> str:
-    return "rerank_score" if _has_rerank_score(docs) else "fallback_raw_retrieval_signal"
+    return (
+        "rerank_score" if _has_rerank_score(docs) else "fallback_raw_retrieval_signal"
+    )
 
 
 def _evaluate_retrieval_branch(
@@ -930,7 +1013,11 @@ def _evaluate_retrieval_branch(
         weak_reason = "subject_mismatch"
     elif not has_rerank_score:
         branch_status = "weak" if reranker_failed or not is_hit else "usable"
-        weak_reason = "reranker_failed" if reranker_failed else ("retrieve_is_hit_false" if not is_hit else "")
+        weak_reason = (
+            "reranker_failed"
+            if reranker_failed
+            else ("retrieve_is_hit_false" if not is_hit else "")
+        )
     elif not is_hit:
         branch_status = "weak"
         weak_reason = "retrieve_is_hit_false"
@@ -958,7 +1045,9 @@ def _evaluate_retrieval_branch(
 
 
 def _doc_dedupe_key(doc: dict) -> str:
-    source = str(doc.get("source") or (doc.get("metadata") or {}).get("source_file") or "")
+    source = str(
+        doc.get("source") or (doc.get("metadata") or {}).get("source_file") or ""
+    )
     content = str(doc.get("content") or "")
     digest = hashlib.md5(content.encode("utf-8")).hexdigest()
     return f"{source}:{digest}"
@@ -997,19 +1086,25 @@ def _normalize_retrieval_plan(
             rejected_items.append({"subject": subject, "reason": "empty_subject"})
             continue
         if not local_retrieval_query:
-            rejected_items.append({"subject": subject, "reason": "empty_local_retrieval_query"})
+            rejected_items.append(
+                {"subject": subject, "reason": "empty_local_retrieval_query"}
+            )
             continue
         if subject not in allowed_subjects:
-            rejected_items.append({"subject": subject, "reason": "subject_not_in_available_subjects"})
+            rejected_items.append(
+                {"subject": subject, "reason": "subject_not_in_available_subjects"}
+            )
             continue
 
         role = _normalize_retrieval_role(item.role)
         if role not in _RETRIEVAL_ROLES:
-            rejected_items.append({
-                "subject": subject,
-                "role": role,
-                "reason": "invalid_role",
-            })
+            rejected_items.append(
+                {
+                    "subject": subject,
+                    "role": role,
+                    "reason": "invalid_role",
+                }
+            )
             continue
 
         normalized = {
@@ -1032,20 +1127,26 @@ def _normalize_retrieval_plan(
         existing = by_plan_key.get(plan_key)
         if existing is None or normalized["priority"] > existing["priority"]:
             if existing is not None:
-                rejected_items.append({
+                rejected_items.append(
+                    {
+                        "subject": subject,
+                        "role": role,
+                        "reason": "duplicate_subject_role_lower_priority",
+                    }
+                )
+            by_plan_key[plan_key] = normalized
+        else:
+            rejected_items.append(
+                {
                     "subject": subject,
                     "role": role,
                     "reason": "duplicate_subject_role_lower_priority",
-                })
-            by_plan_key[plan_key] = normalized
-        else:
-            rejected_items.append({
-                "subject": subject,
-                "role": role,
-                "reason": "duplicate_subject_role_lower_priority",
-            })
+                }
+            )
 
-    plan = sorted(by_plan_key.values(), key=lambda item: item["priority"], reverse=True)[:4]
+    plan = sorted(
+        by_plan_key.values(), key=lambda item: item["priority"], reverse=True
+    )[:4]
 
     return plan, {
         "raw_plan_count": len(raw_plan or []),
@@ -1134,7 +1235,9 @@ def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
     rewritten_query = state.get("rewritten_query", "")
 
     if retrieval_plan:
-        branches = [dict(item, _synthetic_single_subject=False) for item in retrieval_plan]
+        branches = [
+            dict(item, _synthetic_single_subject=False) for item in retrieval_plan
+        ]
         debug = {
             "mode": "multi_subject_plan",
             "branch_count": len(branches),
@@ -1224,7 +1327,9 @@ def _select_docs_with_subject_quota(
 
     subject_quota: dict[str, int] = {}
     for subject in grouped:
-        quota = subject_max_docs + (primary_extra_docs if subject == primary_subject else 0)
+        quota = subject_max_docs + (
+            primary_extra_docs if subject == primary_subject else 0
+        )
         subject_quota[subject] = max(1, quota)
 
     def _sort_key(doc: dict) -> tuple:
@@ -1244,7 +1349,9 @@ def _select_docs_with_subject_quota(
 
     def _doc_key(doc: dict) -> str:
         if doc.get("type") == "rag_diagnostic":
-            return f"diagnostic:{doc.get('retrieval_subject')}:{doc.get('retrieval_role')}"
+            return (
+                f"diagnostic:{doc.get('retrieval_subject')}:{doc.get('retrieval_role')}"
+            )
         return _doc_dedupe_key(doc)
 
     def _can_select(doc: dict) -> bool:
@@ -1284,9 +1391,7 @@ def _select_docs_with_subject_quota(
 
     subjects_by_priority = sorted(
         grouped,
-        key=lambda subject: (
-            _sort_key(grouped[subject][0]),
-        ),
+        key=lambda subject: (_sort_key(grouped[subject][0]),),
         reverse=True,
     )
 
@@ -1306,10 +1411,14 @@ def _select_docs_with_subject_quota(
     for doc in remaining:
         _add_doc(doc)
 
-    branch_status_distribution = Counter(doc.get("branch_status", "usable") for doc in selected)
+    branch_status_distribution = Counter(
+        doc.get("branch_status", "usable") for doc in selected
+    )
     branch_status_by_subject: dict[str, dict[str, int]] = defaultdict(dict)
     for subject, subject_docs in grouped.items():
-        status_counter = Counter(doc.get("branch_status", "usable") for doc in subject_docs)
+        status_counter = Counter(
+            doc.get("branch_status", "usable") for doc in subject_docs
+        )
         branch_status_by_subject[subject] = dict(status_counter)
 
     quota_debug = {
@@ -1318,16 +1427,20 @@ def _select_docs_with_subject_quota(
         "branch_status_distribution": dict(branch_status_distribution),
         "branch_status_by_subject": dict(branch_status_by_subject),
         "dropped_docs_count": max(0, len(deduped) - len(selected)),
-        "weak_subjects": sorted({
-            str(doc.get("retrieval_subject"))
-            for doc in deduped
-            if doc.get("branch_status") == "weak"
-        }),
-        "missing_subjects": sorted({
-            str(doc.get("retrieval_subject"))
-            for doc in deduped
-            if doc.get("branch_status") == "missing"
-        }),
+        "weak_subjects": sorted(
+            {
+                str(doc.get("retrieval_subject"))
+                for doc in deduped
+                if doc.get("branch_status") == "weak"
+            }
+        ),
+        "missing_subjects": sorted(
+            {
+                str(doc.get("retrieval_subject"))
+                for doc in deduped
+                if doc.get("branch_status") == "missing"
+            }
+        ),
     }
     return selected, quota_debug
 
@@ -1338,13 +1451,25 @@ def _web_setting(key: str, default):
 
 def _web_timeout_seconds() -> float:
     try:
-        return max(1.0, float(_web_setting("timeout_seconds", get_setting("academic.search_timeout", 6))))
+        return max(
+            1.0,
+            float(
+                _web_setting(
+                    "timeout_seconds", get_setting("academic.search_timeout", 6)
+                )
+            ),
+        )
     except (TypeError, ValueError):
         return 6.0
 
 
 def _web_research_provider() -> str:
-    provider = str(_web_setting("provider", get_setting("retrieval.web_research_v2.provider", "web")) or "web")
+    provider = str(
+        _web_setting(
+            "provider", get_setting("retrieval.web_research_v2.provider", "web")
+        )
+        or "web"
+    )
     return provider.strip() or "web"
 
 
@@ -1422,7 +1547,9 @@ def _clip_text(value: Any, limit: int) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_chars: int = 160) -> str:
+def _compact_web_query(
+    query: str, *, purpose: str = "", subject: str = "", max_chars: int = 160
+) -> str:
     """Pure compression only; never add subject, purpose, or discipline terms.
 
     - Normalize whitespace
@@ -1461,7 +1588,10 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
         if key in seen or key in filler_tokens:
             continue
         seen.add(key)
-        if any(ch.isascii() and (ch.isalnum() or ch in {"-", "_", ".", "+", "#"}) for ch in cleaned):
+        if any(
+            ch.isascii() and (ch.isalnum() or ch in {"-", "_", ".", "+", "#"})
+            for ch in cleaned
+        ):
             english_tokens.append(cleaned)
         else:
             other_tokens.append(cleaned)
@@ -1479,7 +1609,6 @@ def _compact_web_query(query: str, *, purpose: str = "", subject: str = "", max_
     return compacted[:max_chars] if compacted else text[:max_chars]
 
 
-
 def _retrieval_setting(key: str, default: Any) -> Any:
     return get_setting(f"retrieval.{key}", default)
 
@@ -1489,7 +1618,11 @@ def _dual_source_enabled() -> bool:
 
 
 def _block_generation_when_evidence_judge_failed() -> bool:
-    return bool(_retrieval_setting("dual_source_evidence.block_generation_when_evidence_judge_failed", True))
+    return bool(
+        _retrieval_setting(
+            "dual_source_evidence.block_generation_when_evidence_judge_failed", True
+        )
+    )
 
 
 def _web_research_v2_setting(key: str, default: Any) -> Any:
@@ -1497,8 +1630,13 @@ def _web_research_v2_setting(key: str, default: Any) -> Any:
 
 
 def _web_research_v2_enabled() -> bool:
-    scope = str(_web_research_v2_setting("scope", WEB_RESEARCH_V2_DEFAULT_SCOPE) or "").strip()
-    return bool(_web_research_v2_setting("enabled", True)) and scope == WEB_RESEARCH_V2_DEFAULT_SCOPE
+    scope = str(
+        _web_research_v2_setting("scope", WEB_RESEARCH_V2_DEFAULT_SCOPE) or ""
+    ).strip()
+    return (
+        bool(_web_research_v2_setting("enabled", True))
+        and scope == WEB_RESEARCH_V2_DEFAULT_SCOPE
+    )
 
 
 def _web_research_v2_fail_fast() -> bool:
@@ -1532,7 +1670,9 @@ def _web_research_v2_max_results_per_task() -> int:
 
 def _web_research_v2_source_summary_batch_size() -> int:
     try:
-        return max(1, min(12, int(_web_research_v2_setting("source_summary_batch_size", 6))))
+        return max(
+            1, min(12, int(_web_research_v2_setting("source_summary_batch_size", 6)))
+        )
     except (TypeError, ValueError):
         return 6
 
@@ -1586,7 +1726,9 @@ def _evidence_judge_v2_expose_fallback_trace() -> bool:
 
 def _schema_size_chars(schema: type[BaseModel]) -> int:
     try:
-        return len(json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str))
+        return len(
+            json.dumps(schema.model_json_schema(), ensure_ascii=False, default=str)
+        )
     except Exception:
         return 0
 
@@ -1642,11 +1784,13 @@ def _trace_parse_evidence_grade_raw(raw_output: str) -> dict:
                 if isinstance(item, dict)
             ],
             "kept_count": sum(
-                1 for item in items
+                1
+                for item in items
                 if isinstance(item, dict) and item.get("keep") is True
             ),
             "rejected_count": sum(
-                1 for item in items
+                1
+                for item in items
                 if isinstance(item, dict) and item.get("keep") is False
             ),
         }
@@ -1695,16 +1839,17 @@ def _trace_parse_web_source_summary_raw(raw_output: str) -> dict:
                 if isinstance(item, dict)
             ],
             "kept_count": sum(
-                1 for item in items
+                1
+                for item in items
                 if isinstance(item, dict) and item.get("keep") is True
             ),
             "rejected_count": sum(
-                1 for item in items
+                1
+                for item in items
                 if isinstance(item, dict) and item.get("keep") is False
             ),
             "missing_required_reason_count": sum(
-                1 for item in items
-                if isinstance(item, dict) and "reason" not in item
+                1 for item in items if isinstance(item, dict) and "reason" not in item
             ),
             "extra_field_names": sorted(set(extra_names)),
             "extra_field_count": len(extra_names),
@@ -1746,7 +1891,9 @@ def _structured_contract_debug(result: StructuredLLMResult | None) -> dict:
         "schema_manifest": debug.get("schema_manifest", {}),
         "schema_drift_report": debug.get("schema_drift_report", {}),
         "drift_guard_source": debug.get("drift_guard_source", ""),
-        "drift_guard_config_validated": bool(debug.get("drift_guard_config_validated", False)),
+        "drift_guard_config_validated": bool(
+            debug.get("drift_guard_config_validated", False)
+        ),
         "manifest_injected": bool(debug.get("manifest_injected", False)),
         "manifest_truncated": bool(debug.get("manifest_truncated", False)),
     }
@@ -1781,7 +1928,11 @@ def _make_execution_status(
         "fallback_to": fallback_to,
         "fallback_reason": fallback_reason,
         "error_type": error_type,
-        "error_message_sanitized": sanitize_error_message(error_message or "", max_chars=1200) if error_message else None,
+        "error_message_sanitized": sanitize_error_message(
+            error_message or "", max_chars=1200
+        )
+        if error_message
+        else None,
         "structured_output_mode": structured_output_mode,
         "fallback_modes_attempted": fallback_modes_attempted or [],
         "retry_count": int(retry_count or 0),
@@ -1794,7 +1945,9 @@ def _make_execution_status(
 
 
 def _emit_evidence_stage_trace(state: LearningState, stage_debug: dict) -> None:
-    if not _evidence_judge_v2_expose_fallback_trace() and not stage_debug.get("is_fallback"):
+    if not _evidence_judge_v2_expose_fallback_trace() and not stage_debug.get(
+        "is_fallback"
+    ):
         return
     emit_a3_trace(
         logger,
@@ -1802,7 +1955,9 @@ def _emit_evidence_stage_trace(state: LearningState, stage_debug: dict) -> None:
         stage_debug,
         state=state,
         env_flag="LOG_WEB_SEARCH_RESULT",
-        level="warning" if stage_debug.get("status") in {"fallback", "degraded", "failed"} else "info",
+        level="warning"
+        if stage_debug.get("status") in {"fallback", "degraded", "failed"}
+        else "info",
         max_chars=1200,
     )
 
@@ -1824,19 +1979,29 @@ def _new_evidence_judge_debug(
 
 def _append_stage(debug: dict, stage_debug: dict) -> None:
     debug.setdefault("stages", []).append(stage_debug)
-    if stage_debug.get("is_fallback") and stage_debug.get("fallback_from") and stage_debug.get("fallback_to"):
+    if (
+        stage_debug.get("is_fallback")
+        and stage_debug.get("fallback_from")
+        and stage_debug.get("fallback_to")
+    ):
         _append_fallback_chain(
             debug,
             fallback_from=str(stage_debug.get("fallback_from")),
             fallback_to=str(stage_debug.get("fallback_to")),
-            reason=str(stage_debug.get("fallback_reason") or stage_debug.get("error_type") or "fallback_used"),
+            reason=str(
+                stage_debug.get("fallback_reason")
+                or stage_debug.get("error_type")
+                or "fallback_used"
+            ),
         )
     warning = stage_debug.get("developer_warning")
     if warning:
         _append_developer_warning(debug, str(warning))
 
 
-def _append_fallback_chain(debug: dict, *, fallback_from: str, fallback_to: str, reason: str) -> None:
+def _append_fallback_chain(
+    debug: dict, *, fallback_from: str, fallback_to: str, reason: str
+) -> None:
     debug["used_fallback"] = True
     entry = {
         "from": fallback_from,
@@ -1864,7 +2029,9 @@ def _last_failed_execution_stage(debug: dict) -> dict:
 
 def _raise_evidence_judge_failed(judge_debug: dict) -> None:
     failed_stage = _last_failed_execution_stage(judge_debug)
-    stage = str(failed_stage.get("stage") or judge_debug.get("failure_phase") or "unknown")
+    stage = str(
+        failed_stage.get("stage") or judge_debug.get("failure_phase") or "unknown"
+    )
     node = str(failed_stage.get("node_name") or "evidence_judge")
     error_type = str(failed_stage.get("error_type") or "EvidenceJudgeFailed")
     validation_errors = failed_stage.get("validation_errors") or []
@@ -1885,9 +2052,15 @@ def _raise_evidence_judge_failed(judge_debug: dict) -> None:
 
 def _finalize_evidence_judge_debug(debug: dict) -> dict:
     stages = debug.get("stages") or []
-    has_fallback_stage = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
-    has_degraded_stage = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
-    has_failed_stage = any(stage.get("status") == "failed" for stage in stages if isinstance(stage, dict))
+    has_fallback_stage = any(
+        bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict)
+    )
+    has_degraded_stage = any(
+        stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict)
+    )
+    has_failed_stage = any(
+        stage.get("status") == "failed" for stage in stages if isinstance(stage, dict)
+    )
     has_fallback_chain = bool(debug.get("fallback_chain"))
     explicit_status = debug.get("status")
     if has_fallback_stage or has_fallback_chain:
@@ -1908,7 +2081,9 @@ def _finalize_evidence_judge_debug(debug: dict) -> dict:
 
 def _assert_no_silent_fallback(debug: dict) -> None:
     stages = debug.get("stages") or []
-    stage_fallback = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
+    stage_fallback = any(
+        bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict)
+    )
     fallback_chain = debug.get("fallback_chain") or []
     problems: list[str] = []
     if debug.get("status") == "success" and fallback_chain:
@@ -1932,14 +2107,18 @@ def _candidate_trace_payload(candidates: list[EvidenceCandidate]) -> list[dict]:
     payload: list[dict] = []
     for candidate in candidates:
         metadata = candidate.metadata or {}
-        covered_roles = metadata.get("covered_roles") or ([candidate.role] if candidate.role else [])
-        payload.append({
-            "evidence_id": candidate.evidence_id,
-            "source_type": candidate.source_type,
-            "subject": candidate.subject,
-            "role": candidate.role,
-            "covered_roles": covered_roles,
-        })
+        covered_roles = metadata.get("covered_roles") or (
+            [candidate.role] if candidate.role else []
+        )
+        payload.append(
+            {
+                "evidence_id": candidate.evidence_id,
+                "source_type": candidate.source_type,
+                "subject": candidate.subject,
+                "role": candidate.role,
+                "covered_roles": covered_roles,
+            }
+        )
     return payload
 
 
@@ -1989,26 +2168,28 @@ def _graded_evidence_summary(
     summary: list[dict] = []
     for item in judged_items:
         candidate = candidate_by_id.get(item.evidence_id)
-        summary.append({
-            "evidence_id": item.evidence_id,
-            "source_type": candidate.source_type if candidate else "",
-            "subject": candidate.subject if candidate else "",
-            "role": candidate.role if candidate else "",
-            "purpose": candidate.purpose if candidate else "",
-            "title": _clip_text(candidate.title if candidate else "", 160),
-            "keep": item.keep,
-            "final_quality": item.final_quality,
-            "relevance": item.relevance,
-            "authority": item.authority,
-            "usefulness": item.usefulness,
-            "risk": item.risk,
-            "evidence_score": item.evidence_score,
-            "score_reason": _clip_text(item.score_reason, 240),
-            "evidence_type": item.evidence_type,
-            "use_case": item.use_case,
-            "coverage_contribution": _clip_text(item.coverage_contribution, 240),
-            "reason": _clip_text(item.reason, 240),
-        })
+        summary.append(
+            {
+                "evidence_id": item.evidence_id,
+                "source_type": candidate.source_type if candidate else "",
+                "subject": candidate.subject if candidate else "",
+                "role": candidate.role if candidate else "",
+                "purpose": candidate.purpose if candidate else "",
+                "title": _clip_text(candidate.title if candidate else "", 160),
+                "keep": item.keep,
+                "final_quality": item.final_quality,
+                "relevance": item.relevance,
+                "authority": item.authority,
+                "usefulness": item.usefulness,
+                "risk": item.risk,
+                "evidence_score": item.evidence_score,
+                "score_reason": _clip_text(item.score_reason, 240),
+                "evidence_type": item.evidence_type,
+                "use_case": item.use_case,
+                "coverage_contribution": _clip_text(item.coverage_contribution, 240),
+                "reason": _clip_text(item.reason, 240),
+            }
+        )
     return summary
 
 
@@ -2033,9 +2214,13 @@ def _build_evidence_sufficiency_messages(
             "learning_goal": learning_goal,
             "requested_resource_type": requested_resource_type,
             "requested_resource_types": json.dumps(resource_types, ensure_ascii=False),
-            "expanded_keypoints": json.dumps(expanded_keypoints or [], ensure_ascii=False),
+            "expanded_keypoints": json.dumps(
+                expanded_keypoints or [], ensure_ascii=False
+            ),
             "graded_evidence_summary": json.dumps(
-                _graded_evidence_summary(candidates=candidates, judged_items=judged_items),
+                _graded_evidence_summary(
+                    candidates=candidates, judged_items=judged_items
+                ),
                 ensure_ascii=False,
             ),
         },
@@ -2052,8 +2237,12 @@ def _build_evidence_sufficiency_messages(
     ]
 
 
-def _evidence_id_validation_summary(expected_ids: list[str], judged_ids: list[str]) -> dict:
-    duplicate_ids = sorted([eid for eid, count in Counter(judged_ids).items() if count > 1])
+def _evidence_id_validation_summary(
+    expected_ids: list[str], judged_ids: list[str]
+) -> dict:
+    duplicate_ids = sorted(
+        [eid for eid, count in Counter(judged_ids).items() if count > 1]
+    )
     missing_ids = [eid for eid in expected_ids if eid not in judged_ids]
     unknown_ids = [eid for eid in judged_ids if eid not in expected_ids]
     return {
@@ -2063,7 +2252,9 @@ def _evidence_id_validation_summary(expected_ids: list[str], judged_ids: list[st
     }
 
 
-def validate_evidence_grade_batch_output(parsed: BaseModel, *, expected_ids: list[str]) -> str:
+def validate_evidence_grade_batch_output(
+    parsed: BaseModel, *, expected_ids: list[str]
+) -> str:
     if not isinstance(parsed, EvidenceGradeBatch):
         return "parsed result is not EvidenceGradeBatch"
     judged_ids = [item.evidence_id for item in parsed.judged_evidence]
@@ -2076,12 +2267,18 @@ def validate_evidence_grade_batch_output(parsed: BaseModel, *, expected_ids: lis
     if summary["unknown_ids"]:
         problems.append(f"unknown evidence_id values: {summary['unknown_ids']}")
     if len(judged_ids) != len(expected_ids):
-        problems.append(f"expected {len(expected_ids)} judged evidence items, got {len(judged_ids)}")
+        problems.append(
+            f"expected {len(expected_ids)} judged evidence items, got {len(judged_ids)}"
+        )
     for item in parsed.judged_evidence:
         if not item.reason.strip():
-            problems.append(f"reason must not be empty for evidence_id={item.evidence_id}")
+            problems.append(
+                f"reason must not be empty for evidence_id={item.evidence_id}"
+            )
         if item.keep and not item.coverage_contribution.strip():
-            problems.append(f"coverage_contribution must not be empty when keep=true for evidence_id={item.evidence_id}")
+            problems.append(
+                f"coverage_contribution must not be empty when keep=true for evidence_id={item.evidence_id}"
+            )
     return "; ".join(problems)
 
 
@@ -2089,11 +2286,22 @@ def validate_evidence_sufficiency_output(parsed: BaseModel, *, kept_count: int) 
     if not isinstance(parsed, EvidenceSufficiencyOutput):
         return "parsed result is not EvidenceSufficiencyOutput"
     problems: list[str] = []
-    if parsed.overall_evidence_state == "sufficient" and parsed.answerability != "can_answer":
+    if (
+        parsed.overall_evidence_state == "sufficient"
+        and parsed.answerability != "can_answer"
+    ):
         problems.append("sufficient evidence must have answerability=can_answer")
-    if parsed.overall_evidence_state == "partially_sufficient" and parsed.answerability == "cannot_answer":
-        problems.append("partially_sufficient evidence cannot have answerability=cannot_answer")
-    if parsed.overall_evidence_state == "insufficient" and parsed.answerability == "can_answer":
+    if (
+        parsed.overall_evidence_state == "partially_sufficient"
+        and parsed.answerability == "cannot_answer"
+    ):
+        problems.append(
+            "partially_sufficient evidence cannot have answerability=cannot_answer"
+        )
+    if (
+        parsed.overall_evidence_state == "insufficient"
+        and parsed.answerability == "can_answer"
+    ):
         problems.append("insufficient evidence cannot have answerability=can_answer")
     if kept_count == 0 and parsed.overall_evidence_state == "sufficient":
         problems.append("sufficient evidence is not allowed when kept_count=0")
@@ -2105,7 +2313,9 @@ def validate_evidence_sufficiency_output(parsed: BaseModel, *, kept_count: int) 
         problems.append("insufficient evidence must request local RAG or web research")
     for index, gap in enumerate(parsed.coverage_gaps):
         if not gap.suggested_search_query.strip():
-            problems.append(f"coverage_gaps[{index}].suggested_search_query must not be empty")
+            problems.append(
+                f"coverage_gaps[{index}].suggested_search_query must not be empty"
+            )
     if not parsed.decision_summary.strip():
         problems.append("decision_summary must not be empty")
     return "; ".join(problems)
@@ -2147,7 +2357,9 @@ def _candidate_is_usable_for_first_batch_role(candidate: EvidenceCandidate) -> b
     return candidate.source_type != "web" or _is_valid_web_evidence_candidate(candidate)
 
 
-def _first_batch_source_type_counts(candidates: list[EvidenceCandidate]) -> dict[str, int]:
+def _first_batch_source_type_counts(
+    candidates: list[EvidenceCandidate],
+) -> dict[str, int]:
     return dict(Counter(candidate.source_type for candidate in candidates))
 
 
@@ -2165,7 +2377,11 @@ def _append_candidate_once(
     *,
     limit: int,
 ) -> None:
-    if candidate is None or len(selected) >= limit or candidate.evidence_id in selected_ids:
+    if (
+        candidate is None
+        or len(selected) >= limit
+        or candidate.evidence_id in selected_ids
+    ):
         return
     selected.append(candidate)
     selected_ids.add(candidate.evidence_id)
@@ -2206,10 +2422,16 @@ def _order_evidence_candidates_for_grading(
             ),
             None,
         )
-        _append_candidate_once(first_batch, core_candidate, selected_ids, limit=batch_size)
-        _append_candidate_once(first_batch, practice_candidate, selected_ids, limit=batch_size)
+        _append_candidate_once(
+            first_batch, core_candidate, selected_ids, limit=batch_size
+        )
+        _append_candidate_once(
+            first_batch, practice_candidate, selected_ids, limit=batch_size
+        )
 
-    valid_web_candidates = [candidate for candidate in ranked if _is_valid_web_evidence_candidate(candidate)]
+    valid_web_candidates = [
+        candidate for candidate in ranked if _is_valid_web_evidence_candidate(candidate)
+    ]
     _append_candidate_once(
         first_batch,
         valid_web_candidates[0] if valid_web_candidates else None,
@@ -2217,22 +2439,30 @@ def _order_evidence_candidates_for_grading(
         limit=batch_size,
     )
 
-    local_candidate = next((candidate for candidate in ranked if candidate.source_type == "local_rag"), None)
+    local_candidate = next(
+        (candidate for candidate in ranked if candidate.source_type == "local_rag"),
+        None,
+    )
     _append_candidate_once(first_batch, local_candidate, selected_ids, limit=batch_size)
 
     preferred_fill = [
         candidate
         for candidate in ranked
-        if candidate.source_type == "local_rag" or _is_valid_web_evidence_candidate(candidate)
+        if candidate.source_type == "local_rag"
+        or _is_valid_web_evidence_candidate(candidate)
     ]
     for candidate in [*preferred_fill, *ranked]:
         _append_candidate_once(first_batch, candidate, selected_ids, limit=batch_size)
         if len(first_batch) >= batch_size:
             break
 
-    ordered = first_batch + [candidate for candidate in ranked if candidate.evidence_id not in selected_ids]
+    ordered = first_batch + [
+        candidate for candidate in ranked if candidate.evidence_id not in selected_ids
+    ]
     return ordered, {
-        "first_batch_evidence_ids": [candidate.evidence_id for candidate in first_batch],
+        "first_batch_evidence_ids": [
+            candidate.evidence_id for candidate in first_batch
+        ],
         "first_batch_source_type_counts": _first_batch_source_type_counts(first_batch),
         "first_batch_role_coverage": _first_batch_role_coverage(first_batch),
         "ordered_candidate_count": len(ordered),
@@ -2281,7 +2511,10 @@ async def _grade_evidence_items_with_llm(
         requested_resource_types=requested_resource_types,
     )
     debug["candidate_ordering"] = ordering_debug
-    batches = [candidates[index : index + batch_size] for index in range(0, len(candidates), batch_size)]
+    batches = [
+        candidates[index : index + batch_size]
+        for index in range(0, len(candidates), batch_size)
+    ]
     output_mode = get_llm_output_mode("evidence_item_grader")
     fallback_modes = get_fallback_modes("evidence_item_grader")
 
@@ -2304,7 +2537,8 @@ async def _grade_evidence_items_with_llm(
                 messages=messages,
                 output_mode=output_mode,
                 fallback_modes=fallback_modes,
-                business_validator=lambda parsed, ids=expected_ids: validate_evidence_grade_batch_output(
+                business_validator=lambda parsed,
+                ids=expected_ids: validate_evidence_grade_batch_output(
                     parsed,
                     expected_ids=ids,
                 ),
@@ -2313,9 +2547,13 @@ async def _grade_evidence_items_with_llm(
             )
         except StructuredOutputError as exc:
             result = exc.result
-            validation_errors = _validation_errors_from_text(result.business_validation_error or result.validation_error)
+            validation_errors = _validation_errors_from_text(
+                result.business_validation_error or result.validation_error
+            )
             raw_trace = _trace_parse_evidence_grade_raw(result.raw_output)
-            id_summary = _evidence_id_validation_summary(expected_ids, raw_trace["judged_ids"])
+            id_summary = _evidence_id_validation_summary(
+                expected_ids, raw_trace["judged_ids"]
+            )
             stage = _make_execution_status(
                 node_name="evidence_item_grader",
                 stage="evidence_item_grader.batch",
@@ -2377,13 +2615,16 @@ async def _grade_evidence_items_with_llm(
                 or "parsed result is not EvidenceGradeBatch"
             )
             raw_trace = _trace_parse_evidence_grade_raw(structured_result.raw_output)
-            id_summary = _evidence_id_validation_summary(expected_ids, raw_trace["judged_ids"])
+            id_summary = _evidence_id_validation_summary(
+                expected_ids, raw_trace["judged_ids"]
+            )
             stage = _make_execution_status(
                 node_name="evidence_item_grader",
                 stage="evidence_item_grader.batch",
                 status="failed",
                 error_type=structured_result.error_type or "InvalidStructuredResult",
-                error_message=structured_result.error_message or "Evidence item grader returned no parsed batch.",
+                error_message=structured_result.error_message
+                or "Evidence item grader returned no parsed batch.",
                 structured_output_mode=structured_result.output_mode or output_mode,
                 fallback_modes_attempted=_attempted_modes(structured_result),
                 retry_count=structured_result.retry_count,
@@ -2409,7 +2650,9 @@ async def _grade_evidence_items_with_llm(
             return None, debug
 
         judged_ids = [item.evidence_id for item in parsed.judged_evidence]
-        validation_error_text = validate_evidence_grade_batch_output(parsed, expected_ids=expected_ids)
+        validation_error_text = validate_evidence_grade_batch_output(
+            parsed, expected_ids=expected_ids
+        )
         validation_errors = _validation_errors_from_text(validation_error_text)
         if validation_error_text:
             stage = _make_execution_status(
@@ -2429,7 +2672,9 @@ async def _grade_evidence_items_with_llm(
                 expected_ids=expected_ids,
                 judged_ids=judged_ids,
                 kept_count=sum(1 for item in parsed.judged_evidence if item.keep),
-                rejected_count=sum(1 for item in parsed.judged_evidence if not item.keep),
+                rejected_count=sum(
+                    1 for item in parsed.judged_evidence if not item.keep
+                ),
                 raw_preview=_raw_preview(structured_result.raw_output),
                 schema_size_chars=_schema_size_chars(EvidenceGradeBatch),
                 **_structured_contract_debug(structured_result),
@@ -2445,8 +2690,12 @@ async def _grade_evidence_items_with_llm(
             status=stage_status,
             is_fallback=structured_result.fallback_used,
             fallback_from=output_mode if structured_result.fallback_used else None,
-            fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
-            fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+            fallback_to=structured_result.output_mode
+            if structured_result.fallback_used
+            else None,
+            fallback_reason="structured_output_mode_fallback"
+            if structured_result.fallback_used
+            else None,
             structured_output_mode=structured_result.output_mode,
             fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
@@ -2472,24 +2721,36 @@ async def _grade_evidence_items_with_llm(
     id_summary = _evidence_id_validation_summary(expected_all_ids, judged_all_ids)
     aggregate_errors: list[str] = []
     if id_summary["missing_ids"]:
-        aggregate_errors.append(f"missing evidence_id values: {id_summary['missing_ids']}")
+        aggregate_errors.append(
+            f"missing evidence_id values: {id_summary['missing_ids']}"
+        )
     if id_summary["duplicate_ids"]:
-        aggregate_errors.append(f"duplicate evidence_id values: {id_summary['duplicate_ids']}")
+        aggregate_errors.append(
+            f"duplicate evidence_id values: {id_summary['duplicate_ids']}"
+        )
     if id_summary["unknown_ids"]:
-        aggregate_errors.append(f"unknown evidence_id values: {id_summary['unknown_ids']}")
+        aggregate_errors.append(
+            f"unknown evidence_id values: {id_summary['unknown_ids']}"
+        )
     if len(judged_all_ids) != len(expected_all_ids):
-        aggregate_errors.append(f"expected {len(expected_all_ids)} judged evidence items, got {len(judged_all_ids)}")
+        aggregate_errors.append(
+            f"expected {len(expected_all_ids)} judged evidence items, got {len(judged_all_ids)}"
+        )
     aggregate_stage = _make_execution_status(
         node_name="evidence_item_grader",
         stage="evidence_item_grader.aggregate",
         status="failed" if aggregate_errors else "success",
         error_type="EvidenceIdAggregateMismatch" if aggregate_errors else None,
-        error_message="Evidence item aggregate validation failed." if aggregate_errors else None,
+        error_message="Evidence item aggregate validation failed."
+        if aggregate_errors
+        else None,
         structured_output_mode=output_mode,
         fallback_modes_attempted=fallback_modes,
         retry_count=0,
         validation_errors=aggregate_errors,
-        action_taken="aggregate_batch_judgements" if not aggregate_errors else "return_failed_stage_for_v2_dispatcher",
+        action_taken="aggregate_batch_judgements"
+        if not aggregate_errors
+        else "return_failed_stage_for_v2_dispatcher",
         candidate_count=len(candidates),
         judged_count=len(all_items),
         missing_ids=id_summary["missing_ids"],
@@ -2544,7 +2805,9 @@ async def _judge_evidence_sufficiency_with_llm(
         )
     except StructuredOutputError as exc:
         result = exc.result
-        validation_errors = _validation_errors_from_text(result.business_validation_error or result.validation_error)
+        validation_errors = _validation_errors_from_text(
+            result.business_validation_error or result.validation_error
+        )
         stage = _make_execution_status(
             node_name="evidence_sufficiency_judge",
             stage="evidence_sufficiency_judge",
@@ -2581,7 +2844,9 @@ async def _judge_evidence_sufficiency_with_llm(
         return None, stage
 
     parsed = structured_result.parsed
-    if not structured_result.success or not isinstance(parsed, EvidenceSufficiencyOutput):
+    if not structured_result.success or not isinstance(
+        parsed, EvidenceSufficiencyOutput
+    ):
         validation_errors = _validation_errors_from_text(
             structured_result.business_validation_error
             or structured_result.validation_error
@@ -2592,7 +2857,8 @@ async def _judge_evidence_sufficiency_with_llm(
             stage="evidence_sufficiency_judge",
             status="failed",
             error_type=structured_result.error_type or "InvalidStructuredResult",
-            error_message=structured_result.error_message or "Sufficiency judge returned no parsed output.",
+            error_message=structured_result.error_message
+            or "Sufficiency judge returned no parsed output.",
             structured_output_mode=structured_result.output_mode or output_mode,
             fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
@@ -2612,8 +2878,12 @@ async def _judge_evidence_sufficiency_with_llm(
         status="fallback" if structured_result.fallback_used else "success",
         is_fallback=structured_result.fallback_used,
         fallback_from=output_mode if structured_result.fallback_used else None,
-        fallback_to=structured_result.output_mode if structured_result.fallback_used else None,
-        fallback_reason="structured_output_mode_fallback" if structured_result.fallback_used else None,
+        fallback_to=structured_result.output_mode
+        if structured_result.fallback_used
+        else None,
+        fallback_reason="structured_output_mode_fallback"
+        if structured_result.fallback_used
+        else None,
         structured_output_mode=structured_result.output_mode,
         fallback_modes_attempted=_attempted_modes(structured_result),
         retry_count=structured_result.retry_count,
@@ -2731,7 +3001,9 @@ async def _judge_evidence_candidates_with_llm(
             coverage_gaps=sufficiency.coverage_gaps,
             decision_summary=sufficiency.decision_summary,
         )
-        final_stage = _final_assembly_stage(parsed=parsed, sufficiency=sufficiency, candidates=candidates)
+        final_stage = _final_assembly_stage(
+            parsed=parsed, sufficiency=sufficiency, candidates=candidates
+        )
         final_stage["action_taken"] = "assembled_empty_evidence_judge_output"
         _emit_evidence_stage_trace(state, final_stage)
         _append_stage(debug, final_stage)
@@ -2762,7 +3034,9 @@ async def _judge_evidence_candidates_with_llm(
         original_user_query=original_user_query,
         learning_goal=learning_goal,
         requested_resource_type=requested_resource_type,
-        expanded_keypoints=list(state.get("expanded_keypoints") or state.get("keypoints") or []),
+        expanded_keypoints=list(
+            state.get("expanded_keypoints") or state.get("keypoints") or []
+        ),
         requested_resource_types=resource_types,
     )
     _append_stage(debug, sufficiency_stage)
@@ -2778,7 +3052,9 @@ async def _judge_evidence_candidates_with_llm(
         coverage_gaps=sufficiency.coverage_gaps,
         decision_summary=sufficiency.decision_summary,
     )
-    final_stage = _final_assembly_stage(parsed=parsed, sufficiency=sufficiency, candidates=candidates)
+    final_stage = _final_assembly_stage(
+        parsed=parsed, sufficiency=sufficiency, candidates=candidates
+    )
     _emit_evidence_stage_trace(state, final_stage)
     _append_stage(debug, final_stage)
     _finalize_evidence_judge_debug(debug)
@@ -2929,30 +3205,46 @@ def _merge_local_evidence_candidate(
 ) -> EvidenceCandidate:
     base_metadata = dict(base.metadata or {})
     incoming_metadata = dict(incoming.metadata or {})
-    base_priority = float(base_metadata.get("max_priority") or base_metadata.get("retrieval_priority") or 0)
-    incoming_priority = float(incoming_metadata.get("max_priority") or incoming_metadata.get("retrieval_priority") or 0)
-    covered_roles = _ordered_unique([
-        *_metadata_list(base_metadata.get("covered_roles")),
-        base.role,
-        *_metadata_list(incoming_metadata.get("covered_roles")),
-        incoming.role,
-    ])
-    covered_branch_indices = _ordered_unique([
-        *_metadata_list(base_metadata.get("covered_branch_indices")),
-        *_metadata_list(incoming_metadata.get("covered_branch_indices")),
-    ])
-    covered_retrieval_queries = _ordered_unique([
-        *_metadata_list(base_metadata.get("covered_retrieval_queries")),
-        base_metadata.get("retrieval_query"),
-        *_metadata_list(incoming_metadata.get("covered_retrieval_queries")),
-        incoming_metadata.get("retrieval_query"),
-    ])
-    merged_from_ids = _ordered_unique([
-        *_metadata_list(base_metadata.get("merged_from_ids")),
-        base_metadata.get("candidate_origin_id"),
-        *_metadata_list(incoming_metadata.get("merged_from_ids")),
-        incoming_metadata.get("candidate_origin_id"),
-    ])
+    base_priority = float(
+        base_metadata.get("max_priority")
+        or base_metadata.get("retrieval_priority")
+        or 0
+    )
+    incoming_priority = float(
+        incoming_metadata.get("max_priority")
+        or incoming_metadata.get("retrieval_priority")
+        or 0
+    )
+    covered_roles = _ordered_unique(
+        [
+            *_metadata_list(base_metadata.get("covered_roles")),
+            base.role,
+            *_metadata_list(incoming_metadata.get("covered_roles")),
+            incoming.role,
+        ]
+    )
+    covered_branch_indices = _ordered_unique(
+        [
+            *_metadata_list(base_metadata.get("covered_branch_indices")),
+            *_metadata_list(incoming_metadata.get("covered_branch_indices")),
+        ]
+    )
+    covered_retrieval_queries = _ordered_unique(
+        [
+            *_metadata_list(base_metadata.get("covered_retrieval_queries")),
+            base_metadata.get("retrieval_query"),
+            *_metadata_list(incoming_metadata.get("covered_retrieval_queries")),
+            incoming_metadata.get("retrieval_query"),
+        ]
+    )
+    merged_from_ids = _ordered_unique(
+        [
+            *_metadata_list(base_metadata.get("merged_from_ids")),
+            base_metadata.get("candidate_origin_id"),
+            *_metadata_list(incoming_metadata.get("merged_from_ids")),
+            incoming_metadata.get("candidate_origin_id"),
+        ]
+    )
     merged_metadata = {
         **base_metadata,
         "covered_roles": covered_roles,
@@ -2964,14 +3256,22 @@ def _merge_local_evidence_candidate(
         "source_type": "local_rag",
         "merged_candidate_count": len(merged_from_ids),
     }
-    return base.model_copy(update={
-        "rerank_score": max(float(base.rerank_score or 0), float(incoming.rerank_score or 0)),
-        "raw_vector_score": max(float(base.raw_vector_score or 0), float(incoming.raw_vector_score or 0)),
-        "metadata": merged_metadata,
-    })
+    return base.model_copy(
+        update={
+            "rerank_score": max(
+                float(base.rerank_score or 0), float(incoming.rerank_score or 0)
+            ),
+            "raw_vector_score": max(
+                float(base.raw_vector_score or 0), float(incoming.raw_vector_score or 0)
+            ),
+            "metadata": merged_metadata,
+        }
+    )
 
 
-def _dedupe_and_merge_local_candidates(candidates: list[EvidenceCandidate]) -> tuple[list[EvidenceCandidate], dict]:
+def _dedupe_and_merge_local_candidates(
+    candidates: list[EvidenceCandidate],
+) -> tuple[list[EvidenceCandidate], dict]:
     by_dedupe_key: dict[str, EvidenceCandidate] = {}
     id_signatures: dict[str, tuple[str, str, str]] = {}
     deduped_chunk_count = 0
@@ -3036,65 +3336,76 @@ def _build_local_evidence_candidates(
         source = _local_doc_source_identity(doc)
         content = str(doc.get("content") or doc.get("page_content") or "")
         identity = _local_candidate_identity(doc, subject=subject)
-        candidate_origin_id = f"{identity['evidence_id']}:branch{branch_index}:doc{rank}"
+        candidate_origin_id = (
+            f"{identity['evidence_id']}:branch{branch_index}:doc{rank}"
+        )
         retrieval_query = str(doc.get("retrieval_query") or "")
         priority = _clamp_priority(doc.get("retrieval_priority", 0))
-        candidates.append(EvidenceCandidate(
-            evidence_id=identity["evidence_id"],
-            source_type="local_rag",
-            provider="chroma_rag",
-            subject=subject,
-            role=role,
-            purpose=str(doc.get("retrieval_purpose") or "local_course_retrieval"),
-            title=source,
-            source=source,
-            content_preview=_clip_text(content, 800),
-            raw_vector_score=doc.get("raw_vector_score"),
-            raw_vector_score_source=doc.get("raw_vector_score_source"),
-            raw_vector_score_direction=doc.get("raw_vector_score_direction"),
-            rerank_score=doc.get("rerank_score"),
-            branch_status=branch_status,
-            branch_status_score_source=branch_status_score_source,
-            metadata={
-                "metadata": metadata,
-                "retrieval_query": retrieval_query,
-                "weak_reason": doc.get("weak_reason", ""),
-                "relation_to_goal": doc.get("relation_to_goal", ""),
-                "retrieval_priority": priority,
-                "branch_index": branch_index,
-                "doc_index": rank,
-                "safe_subject": identity["safe_subject"],
-                "safe_role": _safe_evidence_id_part(role or "supporting_context", default="supporting_context"),
-                "dedupe_key": identity["dedupe_key"],
-                "source_hash": identity["source_hash"],
-                "source_hash8": identity["source_hash8"],
-                "chunk_identity_kind": identity["chunk_identity_kind"],
-                "chunk_key_hash": identity["chunk_key_hash"],
-                "chunk_key_hash8": identity["chunk_key_hash8"],
-                "content_hash": identity["content_hash"],
-                "content_hash8": identity["content_hash8"],
-                "covered_roles": [role] if role else [],
-                "covered_branch_indices": [branch_index],
-                "covered_retrieval_queries": [retrieval_query] if retrieval_query else [],
-                "best_priority": priority,
-                "max_priority": priority,
-                "candidate_origin_id": candidate_origin_id,
-                "merged_from_ids": [candidate_origin_id],
-                "source_type": "local_rag",
-            },
-        ))
+        candidates.append(
+            EvidenceCandidate(
+                evidence_id=identity["evidence_id"],
+                source_type="local_rag",
+                provider="chroma_rag",
+                subject=subject,
+                role=role,
+                purpose=str(doc.get("retrieval_purpose") or "local_course_retrieval"),
+                title=source,
+                source=source,
+                content_preview=_clip_text(content, 800),
+                raw_vector_score=doc.get("raw_vector_score"),
+                raw_vector_score_source=doc.get("raw_vector_score_source"),
+                raw_vector_score_direction=doc.get("raw_vector_score_direction"),
+                rerank_score=doc.get("rerank_score"),
+                branch_status=branch_status,
+                branch_status_score_source=branch_status_score_source,
+                metadata={
+                    "metadata": metadata,
+                    "retrieval_query": retrieval_query,
+                    "weak_reason": doc.get("weak_reason", ""),
+                    "relation_to_goal": doc.get("relation_to_goal", ""),
+                    "retrieval_priority": priority,
+                    "branch_index": branch_index,
+                    "doc_index": rank,
+                    "safe_subject": identity["safe_subject"],
+                    "safe_role": _safe_evidence_id_part(
+                        role or "supporting_context", default="supporting_context"
+                    ),
+                    "dedupe_key": identity["dedupe_key"],
+                    "source_hash": identity["source_hash"],
+                    "source_hash8": identity["source_hash8"],
+                    "chunk_identity_kind": identity["chunk_identity_kind"],
+                    "chunk_key_hash": identity["chunk_key_hash"],
+                    "chunk_key_hash8": identity["chunk_key_hash8"],
+                    "content_hash": identity["content_hash"],
+                    "content_hash8": identity["content_hash8"],
+                    "covered_roles": [role] if role else [],
+                    "covered_branch_indices": [branch_index],
+                    "covered_retrieval_queries": [retrieval_query]
+                    if retrieval_query
+                    else [],
+                    "best_priority": priority,
+                    "max_priority": priority,
+                    "candidate_origin_id": candidate_origin_id,
+                    "merged_from_ids": [candidate_origin_id],
+                    "source_type": "local_rag",
+                },
+            )
+        )
     return candidates
-
 
 
 WEB_RESEARCH_V2_VERSION = "v2"
 WEB_RESEARCH_V2_DEFAULT_SCOPE = "dual_source_evidence_only"
-WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON = "web_research_v2_uses_source_summarizer_and_evidence_judge_v2"
+WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON = (
+    "web_research_v2_uses_source_summarizer_and_evidence_judge_v2"
+)
 WEB_RESEARCH_V2_SOURCE_ID_PREFIX = "websrc"
 WEB_RESEARCH_V2_SOURCE_ID_TASK_MAX_CHARS = 48
 WEB_RESEARCH_V2_SOURCE_ID_HASH_CHARS = 12
 WEB_RESEARCH_V2_DEFAULT_TASK_ID = "task"
-WEB_RESEARCH_V2_DEFAULT_BRANCH_PURPOSE = "Find authoritative web resources for the current retrieval branch."
+WEB_RESEARCH_V2_DEFAULT_BRANCH_PURPOSE = (
+    "Find authoritative web resources for the current retrieval branch."
+)
 WEB_RESEARCH_V2_STAGE_START = "web_research_v2.start"
 WEB_RESEARCH_V2_STAGE_PLAN_START = "web_research_v2.plan.start"
 WEB_RESEARCH_V2_STAGE_PLAN_SUCCESS = "web_research_v2.plan.success"
@@ -3134,7 +3445,9 @@ WEB_RESEARCH_V2_ACTION_ACCEPTED_PLAN = "accepted_web_research_plan"
 WEB_RESEARCH_V2_ACTION_START_SEARCH = "started_web_research_search"
 WEB_RESEARCH_V2_ACTION_TASK_FAILED = "raise_failed_web_research_task"
 WEB_RESEARCH_V2_ACTION_ACCEPTED_WEB_RESULTS = "accepted_web_results"
-WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT = "fetched_source_from_provider_content"
+WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT = (
+    "fetched_source_from_provider_content"
+)
 WEB_RESEARCH_V2_ACTION_FETCH_FAILED = "raise_failed_web_source_fetch"
 WEB_RESEARCH_V2_ACTION_DEDUPE_SOURCES = "deduped_web_sources"
 WEB_RESEARCH_V2_ACTION_CURATE_SOURCES = "curated_web_sources"
@@ -3150,18 +3463,32 @@ WEB_RESEARCH_V2_ACTION_RAISE_PLANNER_FAILURE = "raise_planner_failure"
 WEB_RESEARCH_V2_WARNING_PLANNER_FAILED_FAIL_FAST = (
     "Web Research V2 failed; fallback is disabled for this phase."
 )
-WEB_RESEARCH_V2_WARNING_NO_TASKS = "Web Research V2 planner returned no tasks; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_ALL_TASKS_FAILED = "Web Research V2 search failed; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_NO_RAW_SOURCES = "Web Research V2 produced no raw sources; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_NO_DEDUPED_SOURCES = "Web Research V2 produced no deduped sources; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_FETCH_FAILED = "Web Research V2 source fetch failed; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED = "Web Research V2 source summarizer failed; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_ALL_SOURCES_REJECTED = (
-    "All web sources were rejected by Web Source Summarizer; fallback is disabled for this phase."
+WEB_RESEARCH_V2_WARNING_NO_TASKS = (
+    "Web Research V2 planner returned no tasks; fallback is disabled for this phase."
 )
+WEB_RESEARCH_V2_WARNING_ALL_TASKS_FAILED = (
+    "Web Research V2 search failed; fallback is disabled for this phase."
+)
+WEB_RESEARCH_V2_WARNING_NO_RAW_SOURCES = (
+    "Web Research V2 produced no raw sources; fallback is disabled for this phase."
+)
+WEB_RESEARCH_V2_WARNING_NO_DEDUPED_SOURCES = (
+    "Web Research V2 produced no deduped sources; fallback is disabled for this phase."
+)
+WEB_RESEARCH_V2_WARNING_FETCH_FAILED = (
+    "Web Research V2 source fetch failed; fallback is disabled for this phase."
+)
+WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED = (
+    "Web Research V2 source summarizer failed; fallback is disabled for this phase."
+)
+WEB_RESEARCH_V2_WARNING_ALL_SOURCES_REJECTED = "All web sources were rejected by Web Source Summarizer; fallback is disabled for this phase."
 WEB_RESEARCH_V2_WARNING_CANDIDATE_BUILD_EMPTY = "Web Research V2 candidate builder produced no candidates; fallback is disabled for this phase."
-WEB_RESEARCH_V2_WARNING_DISABLED = "Web Research V2 is disabled; no previous web pipeline fallback exists."
-WEB_RESEARCH_V2_WARNING_WEB_DISABLED = "retrieval.web.enabled=false; returning no web evidence."
+WEB_RESEARCH_V2_WARNING_DISABLED = (
+    "Web Research V2 is disabled; no previous web pipeline fallback exists."
+)
+WEB_RESEARCH_V2_WARNING_WEB_DISABLED = (
+    "retrieval.web.enabled=false; returning no web evidence."
+)
 WEB_RESEARCH_V2_FORBIDDEN_PLANNER_OUTPUT_FIELDS = (
     "local_retrieval_query",
     "web_research_seed_query",
@@ -3174,12 +3501,25 @@ WEB_RESEARCH_V2_FORBIDDEN_PLANNER_OUTPUT_FIELDS = (
 
 
 def _safe_web_research_task_id(value: Any) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or WEB_RESEARCH_V2_DEFAULT_TASK_ID).strip())
-    return (cleaned[:WEB_RESEARCH_V2_SOURCE_ID_TASK_MAX_CHARS].strip("_") or WEB_RESEARCH_V2_DEFAULT_TASK_ID)
+    cleaned = re.sub(
+        r"[^A-Za-z0-9_.-]+", "_", str(value or WEB_RESEARCH_V2_DEFAULT_TASK_ID).strip()
+    )
+    return (
+        cleaned[:WEB_RESEARCH_V2_SOURCE_ID_TASK_MAX_CHARS].strip("_")
+        or WEB_RESEARCH_V2_DEFAULT_TASK_ID
+    )
 
 
 def _web_research_source_hash_input(source: dict) -> str:
-    for key in ("canonical_url", "original_url", "title", "raw_content", "snippet", "content_preview", "content"):
+    for key in (
+        "canonical_url",
+        "original_url",
+        "title",
+        "raw_content",
+        "snippet",
+        "content_preview",
+        "content",
+    ):
         value = str(source.get(key) or "").strip()
         if value:
             return value
@@ -3188,7 +3528,9 @@ def _web_research_source_hash_input(source: dict) -> str:
 
 def _stable_web_research_source_id(source: dict) -> str:
     task_id = _safe_web_research_task_id(source.get("task_id"))
-    digest = hashlib.sha256(_web_research_source_hash_input(source).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        _web_research_source_hash_input(source).encode("utf-8")
+    ).hexdigest()
     return f"{WEB_RESEARCH_V2_SOURCE_ID_PREFIX}:{task_id}:{digest[:WEB_RESEARCH_V2_SOURCE_ID_HASH_CHARS]}"
 
 
@@ -3220,7 +3562,9 @@ def _new_web_research_debug(status: str = "success", outcome: str = "success") -
 
 
 def _emit_web_research_stage_trace(state: LearningState, stage_debug: dict) -> None:
-    if not _web_research_v2_expose_fallback_trace() and not stage_debug.get("is_fallback"):
+    if not _web_research_v2_expose_fallback_trace() and not stage_debug.get(
+        "is_fallback"
+    ):
         return
     emit_a3_trace(
         logger,
@@ -3228,21 +3572,33 @@ def _emit_web_research_stage_trace(state: LearningState, stage_debug: dict) -> N
         stage_debug,
         state=state,
         env_flag="LOG_WEB_SEARCH_RESULT",
-        level="warning" if stage_debug.get("status") in {"fallback", "degraded", "failed"} else "info",
+        level="warning"
+        if stage_debug.get("status") in {"fallback", "degraded", "failed"}
+        else "info",
         max_chars=3000,
     )
 
 
-def _append_web_research_stage(debug: dict, state: LearningState, stage_debug: dict) -> None:
+def _append_web_research_stage(
+    debug: dict, state: LearningState, stage_debug: dict
+) -> None:
     if debug.get("research_id") and not stage_debug.get("research_id"):
         stage_debug["research_id"] = debug.get("research_id")
     debug.setdefault("stages", []).append(stage_debug)
-    if stage_debug.get("is_fallback") and stage_debug.get("fallback_from") and stage_debug.get("fallback_to"):
+    if (
+        stage_debug.get("is_fallback")
+        and stage_debug.get("fallback_from")
+        and stage_debug.get("fallback_to")
+    ):
         _append_fallback_chain(
             debug,
             fallback_from=str(stage_debug.get("fallback_from")),
             fallback_to=str(stage_debug.get("fallback_to")),
-            reason=str(stage_debug.get("fallback_reason") or stage_debug.get("error_type") or "fallback_used"),
+            reason=str(
+                stage_debug.get("fallback_reason")
+                or stage_debug.get("error_type")
+                or "fallback_used"
+            ),
         )
     warning = stage_debug.get("developer_warning")
     if warning:
@@ -3252,9 +3608,15 @@ def _append_web_research_stage(debug: dict, state: LearningState, stage_debug: d
 
 def _finalize_web_research_debug(debug: dict) -> dict:
     stages = debug.get("stages") or []
-    has_fallback_stage = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
-    has_degraded_stage = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
-    has_failed_stage = any(stage.get("status") == "failed" for stage in stages if isinstance(stage, dict))
+    has_fallback_stage = any(
+        bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict)
+    )
+    has_degraded_stage = any(
+        stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict)
+    )
+    has_failed_stage = any(
+        stage.get("status") == "failed" for stage in stages if isinstance(stage, dict)
+    )
     if has_fallback_stage or debug.get("fallback_chain"):
         debug["used_fallback"] = True
     if debug.get("status") == "failed":
@@ -3278,8 +3640,12 @@ def _finalize_web_research_debug(debug: dict) -> dict:
 
 def _assert_no_silent_web_research_fallback(debug: dict) -> None:
     stages = debug.get("stages") or []
-    stage_fallback = any(bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict))
-    stage_degraded = any(stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict))
+    stage_fallback = any(
+        bool(stage.get("is_fallback")) for stage in stages if isinstance(stage, dict)
+    )
+    stage_degraded = any(
+        stage.get("status") == "degraded" for stage in stages if isinstance(stage, dict)
+    )
     fallback_chain = debug.get("fallback_chain") or []
     problems: list[str] = []
     if debug.get("status") == "success" and fallback_chain:
@@ -3314,7 +3680,9 @@ def _web_research_allowed_subjects(branches: list[dict]) -> list[str]:
     return subjects
 
 
-def _web_research_branch_payload(branches: list[dict], *, original_user_query: str) -> list[dict]:
+def _web_research_branch_payload(
+    branches: list[dict], *, original_user_query: str
+) -> list[dict]:
     payload: list[dict] = []
     for branch in branches:
         seed_search_query = (
@@ -3322,15 +3690,23 @@ def _web_research_branch_payload(branches: list[dict], *, original_user_query: s
             or str(branch.get("local_retrieval_query") or "").strip()
             or original_user_query
         )
-        payload.append({
-            "subject": str(branch.get("subject") or ""),
-            "role": str(branch.get("role") or "supporting_context"),
-            "purpose": _clip_text(branch.get("purpose") or WEB_RESEARCH_V2_DEFAULT_BRANCH_PURPOSE, 180),
-            "seed_search_query": _clip_text(seed_search_query, 220),
-            "local_branch_status": str(branch.get("local_branch_status") or branch.get("branch_status") or ""),
-            "weak_reason": _clip_text(branch.get("weak_reason", ""), 180),
-            "priority": _clamp_priority(branch.get("priority", 0.5)),
-        })
+        payload.append(
+            {
+                "subject": str(branch.get("subject") or ""),
+                "role": str(branch.get("role") or "supporting_context"),
+                "purpose": _clip_text(
+                    branch.get("purpose") or WEB_RESEARCH_V2_DEFAULT_BRANCH_PURPOSE, 180
+                ),
+                "seed_search_query": _clip_text(seed_search_query, 220),
+                "local_branch_status": str(
+                    branch.get("local_branch_status")
+                    or branch.get("branch_status")
+                    or ""
+                ),
+                "weak_reason": _clip_text(branch.get("weak_reason", ""), 180),
+                "priority": _clamp_priority(branch.get("priority", 0.5)),
+            }
+        )
     return payload
 
 
@@ -3345,11 +3721,15 @@ def _build_web_research_planner_messages(
         {
             "original_user_query": _clip_text(original_user_query, 1000),
             "learning_goal": _clip_text(state.get("learning_goal", ""), 500),
-            "requested_resource_type": _clip_text(state.get("requested_resource_type", ""), 120),
+            "requested_resource_type": _clip_text(
+                state.get("requested_resource_type", ""), 120
+            ),
             "max_total_tasks": str(_web_research_v2_max_total_tasks()),
             "max_tasks_per_subject": str(_web_research_v2_max_tasks_per_subject()),
             "branches_json": json.dumps(
-                _web_research_branch_payload(branches, original_user_query=original_user_query),
+                _web_research_branch_payload(
+                    branches, original_user_query=original_user_query
+                ),
                 ensure_ascii=False,
             ),
         },
@@ -3408,7 +3788,9 @@ async def _plan_web_research_tasks(
             structured_output_mode=result.output_mode or output_mode,
             fallback_modes_attempted=_attempted_modes(result),
             retry_count=result.retry_count,
-            validation_errors=_validation_errors_from_text(result.business_validation_error or result.validation_error),
+            validation_errors=_validation_errors_from_text(
+                result.business_validation_error or result.validation_error
+            ),
             action_taken=WEB_RESEARCH_V2_ACTION_PLANNER_FAILED,
             task_count=0,
             raw_preview=_raw_preview(result.raw_output),
@@ -3448,7 +3830,8 @@ async def _plan_web_research_tasks(
             stage=WEB_RESEARCH_V2_STAGE_PLAN_FAILED,
             status="failed",
             error_type=structured_result.error_type or "InvalidStructuredResult",
-            error_message=structured_result.error_message or "Web research planner returned no parsed plan.",
+            error_message=structured_result.error_message
+            or "Web research planner returned no parsed plan.",
             structured_output_mode=structured_result.output_mode or output_mode,
             fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
@@ -3573,21 +3956,29 @@ async def _execute_web_research_tasks(
                 role=task.role,
                 purpose=task.purpose,
             )
-        diagnostics.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000, 2))
+        diagnostics.setdefault(
+            "elapsed_ms", round((time.perf_counter() - started) * 1000, 2)
+        )
         raw_results = diagnostics.get("results") or []
         used_results = raw_results[:max_results]
-        task_failed = not bool(diagnostics.get("ok")) or bool(diagnostics.get("error_type"))
+        task_failed = not bool(diagnostics.get("ok")) or bool(
+            diagnostics.get("error_type")
+        )
         task_status = "failed" if task_failed or not used_results else "success"
         stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_EXECUTOR_NODE,
-            stage=WEB_RESEARCH_V2_STAGE_SEARCH_TASK if not task_failed else WEB_RESEARCH_V2_STAGE_SEARCH_FAILED,
+            stage=WEB_RESEARCH_V2_STAGE_SEARCH_TASK
+            if not task_failed
+            else WEB_RESEARCH_V2_STAGE_SEARCH_FAILED,
             status=task_status,
             error_type=diagnostics.get("error_type") or None,
             error_message=(
                 diagnostics.get("error_message")
                 or ("search task returned no results" if not used_results else None)
             ),
-            action_taken=WEB_RESEARCH_V2_ACTION_TASK_FAILED if task_failed or not used_results else WEB_RESEARCH_V2_ACTION_ACCEPTED_WEB_RESULTS,
+            action_taken=WEB_RESEARCH_V2_ACTION_TASK_FAILED
+            if task_failed or not used_results
+            else WEB_RESEARCH_V2_ACTION_ACCEPTED_WEB_RESULTS,
             task_id=task.task_id,
             subject=task.subject,
             role=task.role,
@@ -3631,16 +4022,24 @@ async def _execute_web_research_tasks(
     return sources, stages
 
 
-def _dedupe_web_sources_by_canonical_url(sources: list[dict]) -> tuple[list[dict], dict]:
+def _dedupe_web_sources_by_canonical_url(
+    sources: list[dict],
+) -> tuple[list[dict], dict]:
     deduped, debug = dedupe_sources_by_canonical_url(sources)
     for source in deduped:
-        source.setdefault("canonical_url", canonicalize_url(str(source.get("original_url") or "")))
-        source.setdefault("domain", domain_from_url(str(source.get("original_url") or "")))
+        source.setdefault(
+            "canonical_url", canonicalize_url(str(source.get("original_url") or ""))
+        )
+        source.setdefault(
+            "domain", domain_from_url(str(source.get("original_url") or ""))
+        )
         source["source_id"] = _stable_web_research_source_id(source)
     return deduped, debug
 
 
-def _fetch_web_sources_from_provider_content(sources: list[dict]) -> tuple[list[dict], list[dict]]:
+def _fetch_web_sources_from_provider_content(
+    sources: list[dict],
+) -> tuple[list[dict], list[dict]]:
     fetched: list[dict] = []
     stages: list[dict] = []
     for source in sources:
@@ -3652,24 +4051,30 @@ def _fetch_web_sources_from_provider_content(sources: list[dict]) -> tuple[list[
         item = fetched_source.model_dump(mode="json")
         fetched.append(item)
         status = "success" if fetched_source.fetch_status == "success" else "failed"
-        stages.append(_make_execution_status(
-            node_name=WEB_RESEARCH_V2_FETCHER_NODE,
-            stage=WEB_RESEARCH_V2_STAGE_FETCH_SOURCE if status == "success" else WEB_RESEARCH_V2_STAGE_FETCH_FAILED,
-            status=status,
-            error_type=fetched_source.fetch_error_type,
-            error_message=fetched_source.fetch_error_message_sanitized,
-            action_taken=WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT if status == "success" else WEB_RESEARCH_V2_ACTION_FETCH_FAILED,
-            source_id=fetched_source.source_id,
-            task_id=fetched_source.task_id,
-            domain=fetched_source.domain,
-            canonical_url_hash=_web_research_hash(fetched_source.canonical_url),
-            fetch_status=fetched_source.fetch_status,
-            content_chars=fetched_source.content_chars,
-            provider=fetched_source.provider,
-            provider_score=fetched_source.provider_score,
-            source_summarizer_used=True,
-            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-        ))
+        stages.append(
+            _make_execution_status(
+                node_name=WEB_RESEARCH_V2_FETCHER_NODE,
+                stage=WEB_RESEARCH_V2_STAGE_FETCH_SOURCE
+                if status == "success"
+                else WEB_RESEARCH_V2_STAGE_FETCH_FAILED,
+                status=status,
+                error_type=fetched_source.fetch_error_type,
+                error_message=fetched_source.fetch_error_message_sanitized,
+                action_taken=WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT
+                if status == "success"
+                else WEB_RESEARCH_V2_ACTION_FETCH_FAILED,
+                source_id=fetched_source.source_id,
+                task_id=fetched_source.task_id,
+                domain=fetched_source.domain,
+                canonical_url_hash=_web_research_hash(fetched_source.canonical_url),
+                fetch_status=fetched_source.fetch_status,
+                content_chars=fetched_source.content_chars,
+                provider=fetched_source.provider,
+                provider_score=fetched_source.provider_score,
+                source_summarizer_used=True,
+                evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+            )
+        )
     return fetched, stages
 
 
@@ -3678,7 +4083,10 @@ def _curate_web_sources(sources: list[dict]) -> tuple[list[dict], dict]:
     rejected_count = 0
     for source in sources:
         fetched_source = WebFetchedSource.model_validate(source)
-        keep = fetched_source.fetch_status == "success" and fetched_source.content_chars > 0
+        keep = (
+            fetched_source.fetch_status == "success"
+            and fetched_source.content_chars > 0
+        )
         if not keep:
             rejected_count += 1
         curated_source = WebCuratedSource(
@@ -3694,7 +4102,11 @@ def _curate_web_sources(sources: list[dict]) -> tuple[list[dict], dict]:
             curated.append(curated_source.model_dump(mode="json"))
     curated.sort(
         key=lambda source: (
-            float(source.get("provider_score") if source.get("provider_score") is not None else -1.0),
+            float(
+                source.get("provider_score")
+                if source.get("provider_score") is not None
+                else -1.0
+            ),
             float(source.get("task_priority") or 0.0),
         ),
         reverse=True,
@@ -3760,7 +4172,10 @@ async def _summarize_web_sources(
     fallback_modes: list[str] = []
     all_summaries: list[dict] = []
     stages: list[dict] = []
-    batches = [sources[index : index + batch_size] for index in range(0, len(sources), batch_size)]
+    batches = [
+        sources[index : index + batch_size]
+        for index in range(0, len(sources), batch_size)
+    ]
 
     for batch_index, batch in enumerate(batches):
         expected_ids = [str(source.get("source_id") or "") for source in batch]
@@ -3798,7 +4213,8 @@ async def _summarize_web_sources(
                 messages=messages,
                 output_mode=output_mode,
                 fallback_modes=fallback_modes,
-                business_validator=lambda parsed, ids=expected_ids: validate_web_source_summary_batch(
+                business_validator=lambda parsed,
+                ids=expected_ids: validate_web_source_summary_batch(
                     parsed,
                     expected_source_ids=ids,
                 ),
@@ -3817,7 +4233,9 @@ async def _summarize_web_sources(
                 structured_output_mode=result.output_mode or output_mode,
                 fallback_modes_attempted=_attempted_modes(result),
                 retry_count=result.retry_count,
-                validation_errors=_validation_errors_from_text(result.business_validation_error or result.validation_error),
+                validation_errors=_validation_errors_from_text(
+                    result.business_validation_error or result.validation_error
+                ),
                 action_taken=WEB_RESEARCH_V2_ACTION_SUMMARIZER_FAILED,
                 developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
                 batch_index=batch_index,
@@ -3826,7 +4244,9 @@ async def _summarize_web_sources(
                 source_count=len(batch),
                 kept_count=raw_trace["kept_count"],
                 rejected_count=raw_trace["rejected_count"],
-                missing_required_reason_count=raw_trace["missing_required_reason_count"],
+                missing_required_reason_count=raw_trace[
+                    "missing_required_reason_count"
+                ],
                 extra_field_names=raw_trace["extra_field_names"],
                 extra_field_count=raw_trace["extra_field_count"],
                 raw_preview=_raw_preview(result.raw_output),
@@ -3867,14 +4287,21 @@ async def _summarize_web_sources(
             if isinstance(parsed, WebSourceSummaryBatch)
             else "parsed result is not WebSourceSummaryBatch"
         )
-        if not structured_result.success or not isinstance(parsed, WebSourceSummaryBatch) or validation_error_text:
-            raw_trace = _trace_parse_web_source_summary_raw(structured_result.raw_output)
+        if (
+            not structured_result.success
+            or not isinstance(parsed, WebSourceSummaryBatch)
+            or validation_error_text
+        ):
+            raw_trace = _trace_parse_web_source_summary_raw(
+                structured_result.raw_output
+            )
             stage = _make_execution_status(
                 node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
                 stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_FAILED,
                 status="failed",
                 error_type=structured_result.error_type or "BusinessValidationError",
-                error_message=structured_result.error_message or "Web source summarizer validation failed.",
+                error_message=structured_result.error_message
+                or "Web source summarizer validation failed.",
                 structured_output_mode=structured_result.output_mode or output_mode,
                 fallback_modes_attempted=_attempted_modes(structured_result),
                 retry_count=structured_result.retry_count,
@@ -3887,7 +4314,8 @@ async def _summarize_web_sources(
                 developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
                 batch_index=batch_index,
                 expected_source_ids=expected_ids,
-                returned_source_ids=raw_trace["returned_source_ids"] or [
+                returned_source_ids=raw_trace["returned_source_ids"]
+                or [
                     str(summary.source_id)
                     for summary in getattr(parsed, "summaries", []) or []
                     if hasattr(summary, "source_id")
@@ -3895,7 +4323,9 @@ async def _summarize_web_sources(
                 source_count=len(batch),
                 kept_count=raw_trace["kept_count"],
                 rejected_count=raw_trace["rejected_count"],
-                missing_required_reason_count=raw_trace["missing_required_reason_count"],
+                missing_required_reason_count=raw_trace[
+                    "missing_required_reason_count"
+                ],
                 extra_field_names=raw_trace["extra_field_names"],
                 extra_field_count=raw_trace["extra_field_count"],
                 raw_preview=_raw_preview(structured_result.raw_output),
@@ -3911,7 +4341,9 @@ async def _summarize_web_sources(
             item = summary.model_dump(mode="json")
             item.setdefault("summary_source", WEB_RESEARCH_V2_LLM_SUMMARY_SOURCE)
             item.setdefault("source_summary_fallback_used", False)
-            item.setdefault("web_research_stage", WEB_RESEARCH_V2_SOURCE_SUMMARIZER_STAGE)
+            item.setdefault(
+                "web_research_stage", WEB_RESEARCH_V2_SOURCE_SUMMARIZER_STAGE
+            )
             summary_dicts.append(item)
         stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
@@ -3967,7 +4399,10 @@ def _build_web_docs_from_summaries(
             "title": source.get("title", ""),
             "domain": source.get("domain", ""),
             "url": source.get("original_url", ""),
-            "source": source.get("original_url") or source.get("title") or source.get("domain") or "web evidence",
+            "source": source.get("original_url")
+            or source.get("title")
+            or source.get("domain")
+            or "web evidence",
             "content": summary.get("summary", ""),
             "source_content_preview": source.get("content_preview", ""),
             "fetch_status": source.get("fetch_status", ""),
@@ -3979,9 +4414,15 @@ def _build_web_docs_from_summaries(
             "tavily_score": source.get("provider_score"),
             "provider_score": source.get("provider_score"),
             "provider_rank": source.get("provider_rank"),
-            "summary_source": summary.get("summary_source", WEB_RESEARCH_V2_LLM_SUMMARY_SOURCE),
-            "source_summary_fallback_used": bool(summary.get("source_summary_fallback_used", False)),
-            "web_research_stage": summary.get("web_research_stage", WEB_RESEARCH_V2_SOURCE_SUMMARIZER_STAGE),
+            "summary_source": summary.get(
+                "summary_source", WEB_RESEARCH_V2_LLM_SUMMARY_SOURCE
+            ),
+            "source_summary_fallback_used": bool(
+                summary.get("source_summary_fallback_used", False)
+            ),
+            "web_research_stage": summary.get(
+                "web_research_stage", WEB_RESEARCH_V2_SOURCE_SUMMARIZER_STAGE
+            ),
             "coverage_points": coverage_points,
             "web_research_summary": summary.get("summary", ""),
             "web_research_reason": summary.get("reason", ""),
@@ -3997,11 +4438,16 @@ def _build_web_docs_from_summaries(
     return docs
 
 
-def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[EvidenceCandidate]:
+def _build_web_evidence_candidates_from_research_docs(
+    docs: list[dict],
+) -> list[EvidenceCandidate]:
     candidates: list[EvidenceCandidate] = []
     for doc in docs:
         subject = str(doc.get("retrieval_subject") or "")
-        source_id = str(doc.get("source_id") or _web_research_hash(doc.get("canonical_url") or doc.get("original_url")))
+        source_id = str(
+            doc.get("source_id")
+            or _web_research_hash(doc.get("canonical_url") or doc.get("original_url"))
+        )
         evidence_id = f"web:{source_id.replace(':', '_')}"
         candidate = EvidenceCandidate(
             evidence_id=evidence_id,
@@ -4011,7 +4457,12 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
             role=str(doc.get("retrieval_role") or ""),
             purpose=str(doc.get("retrieval_purpose") or WEB_RESEARCH_V2_NODE),
             title=str(doc.get("title") or ""),
-            source=str(doc.get("source") or doc.get("url") or doc.get("title") or "web evidence"),
+            source=str(
+                doc.get("source")
+                or doc.get("url")
+                or doc.get("title")
+                or "web evidence"
+            ),
             url=str(doc.get("url") or ""),
             content_preview=_clip_text(doc.get("content", ""), 800),
             tavily_score=doc.get("tavily_score"),
@@ -4029,7 +4480,9 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
                 "provider_score": doc.get("provider_score"),
                 "provider_rank": doc.get("provider_rank"),
                 "summary_source": doc.get("summary_source", ""),
-                "source_summary_fallback_used": bool(doc.get("source_summary_fallback_used", False)),
+                "source_summary_fallback_used": bool(
+                    doc.get("source_summary_fallback_used", False)
+                ),
                 "web_research_stage": doc.get("web_research_stage", ""),
                 "coverage_points": doc.get("coverage_points", []),
                 "web_research_summary": doc.get("web_research_summary", ""),
@@ -4038,7 +4491,9 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
                 "content_chars": doc.get("content_chars", 0),
                 "source_summarizer_used": True,
                 "evidence_boundary_reason": WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-                "covered_roles": [str(doc.get("retrieval_role") or "")] if doc.get("retrieval_role") else [],
+                "covered_roles": [str(doc.get("retrieval_role") or "")]
+                if doc.get("retrieval_role")
+                else [],
                 "source_type": "web",
             },
         )
@@ -4046,7 +4501,9 @@ def _build_web_evidence_candidates_from_research_docs(docs: list[dict]) -> list[
     return candidates
 
 
-def _cap_evidence_candidates(candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
+def _cap_evidence_candidates(
+    candidates: list[EvidenceCandidate],
+) -> list[EvidenceCandidate]:
     duplicate_ids = _duplicate_evidence_ids(candidates)
     if duplicate_ids:
         raise _duplicate_evidence_id_error("candidate capping", duplicate_ids)
@@ -4066,7 +4523,9 @@ def _cap_evidence_candidates(candidates: list[EvidenceCandidate]) -> list[Eviden
     combined = local + web
     if len(combined) <= max_candidates:
         return combined
-    preserve_balance = bool(_retrieval_setting("fusion.preserve_source_type_balance", True))
+    preserve_balance = bool(
+        _retrieval_setting("fusion.preserve_source_type_balance", True)
+    )
     if not preserve_balance:
         return sorted(combined, key=_candidate_rank, reverse=True)[:max_candidates]
     selected: list[EvidenceCandidate] = []
@@ -4169,13 +4628,17 @@ def _select_judged_context(
         candidate = candidate_by_id.get(judge_item.evidence_id)
         if not candidate:
             continue
-        items.append(_context_item_from_evidence(
-            candidate=candidate,
-            judge_item=judge_item,
-            original=originals.get(candidate.evidence_id, {}),
-        ))
+        items.append(
+            _context_item_from_evidence(
+                candidate=candidate,
+                judge_item=judge_item,
+                original=originals.get(candidate.evidence_id, {}),
+            )
+        )
     max_docs = int(_retrieval_setting("fusion.max_context_docs", 8))
-    preserve_balance = bool(_retrieval_setting("fusion.preserve_source_type_balance", True))
+    preserve_balance = bool(
+        _retrieval_setting("fusion.preserve_source_type_balance", True)
+    )
     if len(items) <= max_docs:
         return sorted(items, key=_judge_context_rank, reverse=True)
     sorted_items = sorted(items, key=_judge_context_rank, reverse=True)
@@ -4202,28 +4665,40 @@ def _select_judged_context(
 def _followups_from_coverage_gaps(parsed: EvidenceJudgeOutput) -> list[dict]:
     followups: list[dict] = []
     for gap in parsed.coverage_gaps:
-        followups.append({
-            "subject": gap.subject,
-            "role": gap.role,
-            "gap": gap.gap,
-            "suggested_search_query": gap.suggested_search_query,
-            "purpose": gap.purpose,
-            "priority": gap.priority,
-            "source": "evidence_judge_coverage_gap",
-            "status": "reserved_not_executed",
-        })
+        followups.append(
+            {
+                "subject": gap.subject,
+                "role": gap.role,
+                "gap": gap.gap,
+                "suggested_search_query": gap.suggested_search_query,
+                "purpose": gap.purpose,
+                "priority": gap.priority,
+                "source": "evidence_judge_coverage_gap",
+                "status": "reserved_not_executed",
+            }
+        )
     return followups
 
 
-
 def _source_distribution(items: list[dict]) -> dict:
-    return dict(Counter(str(item.get("source_type") or item.get("type") or "unknown") for item in items))
+    return dict(
+        Counter(
+            str(item.get("source_type") or item.get("type") or "unknown")
+            for item in items
+        )
+    )
 
 
-
-async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+async def _rag_retrieve_dual_source(
+    state: LearningState, branches: list[dict], branch_debug: dict
+) -> dict:
     original_user_query = _last_human_query(state)
-    per_subject_top_k = int(_retrieval_setting("local_rag.per_subject_top_k", get_setting("rag.multi_subject_per_subject_top_k", 3)))
+    per_subject_top_k = int(
+        _retrieval_setting(
+            "local_rag.per_subject_top_k",
+            get_setting("rag.multi_subject_per_subject_top_k", 3),
+        )
+    )
     local_enabled = bool(_retrieval_setting("local_rag.enabled", True))
     local_candidates_all: list[EvidenceCandidate] = []
     originals: dict[str, dict] = {}
@@ -4238,14 +4713,22 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
         for branch_index, branch in enumerate(branches):
             subject = str(branch.get("subject") or "")
             role = str(branch.get("role") or "supporting_context")
-            local_retrieval_query = str(branch.get("local_retrieval_query") or original_user_query)
+            local_retrieval_query = str(
+                branch.get("local_retrieval_query") or original_user_query
+            )
             retrieve_subject = None if subject == "other" else subject
 
             if local_enabled:
-                result = retrieve(query=local_retrieval_query, subject=retrieve_subject, top_k=per_subject_top_k)
+                result = retrieve(
+                    query=local_retrieval_query,
+                    subject=retrieve_subject,
+                    top_k=per_subject_top_k,
+                )
                 raw_docs = result.get("docs", []) or []
                 used_docs = raw_docs[:per_subject_top_k]
-                subject_mismatch_count = _subject_mismatch_count(used_docs, retrieve_subject)
+                subject_mismatch_count = _subject_mismatch_count(
+                    used_docs, retrieve_subject
+                )
                 branch_eval = _evaluate_retrieval_branch(
                     subject=subject,
                     role=role,
@@ -4256,29 +4739,39 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                 )
                 local_docs: list[dict] = []
                 for doc in used_docs:
-                    local_docs.append({
-                        "type": "rag",
-                        **doc,
-                        "retrieval_subject": subject,
-                        "retrieval_role": role,
-                        "retrieval_query": local_retrieval_query,
-                        "retrieval_purpose": branch.get("purpose", ""),
-                        "relation_to_goal": branch.get("relation_to_goal", ""),
-                        "retrieval_priority": _clamp_priority(branch.get("priority", 0.5)),
-                        "branch_status": branch_eval["branch_status"],
-                        "weak_reason": branch_eval["weak_reason"],
-                        "best_rerank_score": branch_eval["best_rerank_score"],
-                        "needs_external_evidence": branch_eval["needs_external_evidence"],
-                        "branch_status_score_source": branch_eval["branch_status_score_source"],
-                        "reranker_failed": branch_eval["reranker_failed"],
-                    })
+                    local_docs.append(
+                        {
+                            "type": "rag",
+                            **doc,
+                            "retrieval_subject": subject,
+                            "retrieval_role": role,
+                            "retrieval_query": local_retrieval_query,
+                            "retrieval_purpose": branch.get("purpose", ""),
+                            "relation_to_goal": branch.get("relation_to_goal", ""),
+                            "retrieval_priority": _clamp_priority(
+                                branch.get("priority", 0.5)
+                            ),
+                            "branch_status": branch_eval["branch_status"],
+                            "weak_reason": branch_eval["weak_reason"],
+                            "best_rerank_score": branch_eval["best_rerank_score"],
+                            "needs_external_evidence": branch_eval[
+                                "needs_external_evidence"
+                            ],
+                            "branch_status_score_source": branch_eval[
+                                "branch_status_score_source"
+                            ],
+                            "reranker_failed": branch_eval["reranker_failed"],
+                        }
+                    )
                 local_candidates = _build_local_evidence_candidates(
                     docs=local_docs,
                     subject=subject,
                     role=role,
                     branch_index=branch_index,
                     branch_status=branch_eval["branch_status"],
-                    branch_status_score_source=branch_eval["branch_status_score_source"],
+                    branch_status_score_source=branch_eval[
+                        "branch_status_score_source"
+                    ],
                 )
                 for candidate, original in zip(local_candidates, local_docs):
                     local_candidates_all.append(candidate)
@@ -4301,8 +4794,12 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                         "branch_status": branch_eval["branch_status"],
                         "weak_reason": branch_eval["weak_reason"],
                         "best_rerank_score": branch_eval["best_rerank_score"],
-                        "needs_external_evidence": branch_eval["needs_external_evidence"],
-                        "branch_status_score_source": branch_eval["branch_status_score_source"],
+                        "needs_external_evidence": branch_eval[
+                            "needs_external_evidence"
+                        ],
+                        "branch_status_score_source": branch_eval[
+                            "branch_status_score_source"
+                        ],
                         "reranker_failed": branch_eval["reranker_failed"],
                         "top_docs": _top_doc_summaries(used_docs),
                     },
@@ -4311,7 +4808,9 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                 )
 
     try:
-        merged_local_candidates, local_merge_debug = _dedupe_and_merge_local_candidates(local_candidates_all)
+        merged_local_candidates, local_merge_debug = _dedupe_and_merge_local_candidates(
+            local_candidates_all
+        )
         duplicate_ids = _duplicate_evidence_ids(merged_local_candidates)
         if duplicate_ids:
             raise _duplicate_evidence_id_error("local candidate build", duplicate_ids)
@@ -4324,7 +4823,9 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
                 "status": "failed",
                 "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
                 "local_candidate_raw_count": len(local_candidates_all),
-                "duplicate_evidence_ids_before_grading": _duplicate_evidence_ids(local_candidates_all),
+                "duplicate_evidence_ids_before_grading": _duplicate_evidence_ids(
+                    local_candidates_all
+                ),
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
             },
@@ -4344,16 +4845,22 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
             **local_merge_debug,
             "duplicate_evidence_ids_before_grading": [],
             "local_candidate_count": len(candidates),
-            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
+            "subjects": sorted(
+                {candidate.subject for candidate in candidates if candidate.subject}
+            ),
             "candidate_preview": [
                 {
                     "evidence_id": candidate.evidence_id,
                     "source_type": candidate.source_type,
                     "subject": candidate.subject,
                     "role": candidate.role,
-                    "covered_roles": (candidate.metadata or {}).get("covered_roles", []),
+                    "covered_roles": (candidate.metadata or {}).get(
+                        "covered_roles", []
+                    ),
                     "source_hash8": (candidate.metadata or {}).get("source_hash8", ""),
-                    "chunk_key_hash8": (candidate.metadata or {}).get("chunk_key_hash8", ""),
+                    "chunk_key_hash8": (candidate.metadata or {}).get(
+                        "chunk_key_hash8", ""
+                    ),
                     "rerank_score": candidate.rerank_score,
                     "tavily_score": candidate.tavily_score,
                 }
@@ -4365,7 +4872,9 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
     )
 
     return {
-        "local_evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "local_evidence_candidates": [
+            candidate.model_dump(mode="json") for candidate in candidates
+        ],
         "local_evidence_originals": {
             candidate.evidence_id: originals[candidate.evidence_id]
             for candidate in candidates
@@ -4373,7 +4882,6 @@ async def _rag_retrieve_dual_source(state: LearningState, branches: list[dict], 
         },
         "retrieval_branch_mode": branch_debug.get("mode", ""),
     }
-
 
 
 def _web_research_empty_result(debug: dict) -> dict:
@@ -4398,7 +4906,9 @@ def _raise_web_research_failure(debug: dict, failed_stage: dict, warning: str) -
     raise error
 
 
-def _raise_web_research_planner_failure(debug: dict, planner_stage: dict, warning: str) -> None:
+def _raise_web_research_planner_failure(
+    debug: dict, planner_stage: dict, warning: str
+) -> None:
     _raise_web_research_failure(debug, planner_stage, warning)
 
 
@@ -4451,7 +4961,9 @@ def _handle_web_research_no_evidence(
     _raise_web_research_failure(debug, final_stage, warning)
 
 
-async def _run_web_research_v2(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+async def _run_web_research_v2(
+    state: LearningState, branches: list[dict], branch_debug: dict
+) -> dict:
     del branch_debug
     original_user_query = _last_human_query(state)
     debug = _new_web_research_debug()
@@ -4479,15 +4991,19 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
     )
     _append_web_research_stage(debug, state, dispatch_stage)
 
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_PLANNER_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_PLAN_START,
-        status="success",
-        action_taken=WEB_RESEARCH_V2_ACTION_START_PLAN,
-        branch_count=len(branches),
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-    ))
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_PLANNER_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_PLAN_START,
+            status="success",
+            action_taken=WEB_RESEARCH_V2_ACTION_START_PLAN,
+            branch_count=len(branches),
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+        ),
+    )
     plan, planner_stage = await _plan_web_research_tasks(
         state=state,
         branches=branches,
@@ -4526,16 +5042,20 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
             warning=WEB_RESEARCH_V2_WARNING_NO_TASKS,
         )
 
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_EXECUTOR_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_SEARCH_START,
-        status="success",
-        action_taken=WEB_RESEARCH_V2_ACTION_START_SEARCH,
-        task_count=len(tasks),
-        provider=_web_research_provider(),
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-    ))
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_EXECUTOR_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_SEARCH_START,
+            status="success",
+            action_taken=WEB_RESEARCH_V2_ACTION_START_SEARCH,
+            task_count=len(tasks),
+            provider=_web_research_provider(),
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+        ),
+    )
     raw_sources, executor_stages = await _execute_web_research_tasks(
         state=state,
         tasks=tasks,
@@ -4543,14 +5063,17 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
     )
     for stage in executor_stages:
         _append_web_research_stage(debug, state, stage)
-    failed_executor_stage = next((stage for stage in executor_stages if stage.get("status") == "failed"), None)
+    failed_executor_stage = next(
+        (stage for stage in executor_stages if stage.get("status") == "failed"), None
+    )
     if failed_executor_stage:
         final_stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_NODE,
             stage=WEB_RESEARCH_V2_STAGE_FAILED,
             status="failed",
             error_type=failed_executor_stage.get("error_type"),
-            error_message=failed_executor_stage.get("error_message_sanitized") or "Web Research task failed",
+            error_message=failed_executor_stage.get("error_message_sanitized")
+            or "Web Research task failed",
             action_taken=WEB_RESEARCH_V2_ACTION_TASK_FAILED,
             developer_warning=WEB_RESEARCH_V2_WARNING_ALL_TASKS_FAILED,
             task_count=len(tasks),
@@ -4592,18 +5115,22 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
 
     deduped_sources, dedupe_debug = _dedupe_web_sources_by_canonical_url(raw_sources)
     debug["duplicate_url_count"] = int(dedupe_debug.get("duplicate_url_count") or 0)
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_DEDUPE,
-        status="success" if deduped_sources else "failed",
-        action_taken=WEB_RESEARCH_V2_ACTION_DEDUPE_SOURCES,
-        task_count=len(tasks),
-        result_count=len(raw_sources),
-        deduped_count=len(deduped_sources),
-        duplicate_url_count=debug["duplicate_url_count"],
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-    ))
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_DEDUPE,
+            status="success" if deduped_sources else "failed",
+            action_taken=WEB_RESEARCH_V2_ACTION_DEDUPE_SOURCES,
+            task_count=len(tasks),
+            result_count=len(raw_sources),
+            deduped_count=len(deduped_sources),
+            duplicate_url_count=debug["duplicate_url_count"],
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+        ),
+    )
 
     if not deduped_sources:
         warning = WEB_RESEARCH_V2_WARNING_NO_DEDUPED_SOURCES
@@ -4628,26 +5155,35 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
             warning=warning,
         )
 
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_FETCHER_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_FETCH_START,
-        status="success",
-        action_taken=WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT,
-        source_count=len(deduped_sources),
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-    ))
-    fetched_sources, fetch_stages = _fetch_web_sources_from_provider_content(deduped_sources)
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_FETCHER_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_FETCH_START,
+            status="success",
+            action_taken=WEB_RESEARCH_V2_ACTION_FETCH_FROM_PROVIDER_CONTENT,
+            source_count=len(deduped_sources),
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+        ),
+    )
+    fetched_sources, fetch_stages = _fetch_web_sources_from_provider_content(
+        deduped_sources
+    )
     for stage in fetch_stages:
         _append_web_research_stage(debug, state, stage)
-    failed_fetch_stage = next((stage for stage in fetch_stages if stage.get("status") == "failed"), None)
+    failed_fetch_stage = next(
+        (stage for stage in fetch_stages if stage.get("status") == "failed"), None
+    )
     if failed_fetch_stage:
         final_stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_NODE,
             stage=WEB_RESEARCH_V2_STAGE_FAILED,
             status="failed",
             error_type=failed_fetch_stage.get("error_type"),
-            error_message=failed_fetch_stage.get("error_message_sanitized") or "web source fetch failed",
+            error_message=failed_fetch_stage.get("error_message_sanitized")
+            or "web source fetch failed",
             action_taken=WEB_RESEARCH_V2_ACTION_FETCH_FAILED,
             developer_warning=WEB_RESEARCH_V2_WARNING_FETCH_FAILED,
             task_count=len(tasks),
@@ -4666,18 +5202,22 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
         )
 
     curated_sources, curate_debug = _curate_web_sources(fetched_sources)
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_CURATOR_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_CURATE,
-        status="success" if curated_sources else "failed",
-        action_taken=WEB_RESEARCH_V2_ACTION_CURATE_SOURCES,
-        source_count=len(fetched_sources),
-        kept_count=len(curated_sources),
-        rejected_count=int(curate_debug.get("rejected_count") or 0),
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-        boundary_note="Web Source Curator and Summarizer prepare structured source summaries; Evidence Judge V2 makes final sufficiency decisions.",
-    ))
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_CURATOR_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_CURATE,
+            status="success" if curated_sources else "failed",
+            action_taken=WEB_RESEARCH_V2_ACTION_CURATE_SOURCES,
+            source_count=len(fetched_sources),
+            kept_count=len(curated_sources),
+            rejected_count=int(curate_debug.get("rejected_count") or 0),
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+            boundary_note="Web Source Curator and Summarizer prepare structured source summaries; Evidence Judge V2 makes final sufficiency decisions.",
+        ),
+    )
     if not curated_sources:
         final_stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_NODE,
@@ -4700,15 +5240,19 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
             warning=WEB_RESEARCH_V2_WARNING_FETCH_FAILED,
         )
 
-    _append_web_research_stage(debug, state, _make_execution_status(
-        node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
-        stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_START,
-        status="success",
-        action_taken=WEB_RESEARCH_V2_ACTION_START_SUMMARIZER,
-        source_count=len(curated_sources),
-        source_summarizer_used=True,
-        evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
-    ))
+    _append_web_research_stage(
+        debug,
+        state,
+        _make_execution_status(
+            node_name=WEB_RESEARCH_V2_SUMMARIZER_NODE,
+            stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_START,
+            status="success",
+            action_taken=WEB_RESEARCH_V2_ACTION_START_SUMMARIZER,
+            source_count=len(curated_sources),
+            source_summarizer_used=True,
+            evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
+        ),
+    )
     summaries, summarizer_stages = await _summarize_web_sources(
         state=state,
         sources=curated_sources,
@@ -4716,14 +5260,17 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
     )
     for stage in summarizer_stages:
         _append_web_research_stage(debug, state, stage)
-    failed_summarizer_stage = next((stage for stage in summarizer_stages if stage.get("status") == "failed"), None)
+    failed_summarizer_stage = next(
+        (stage for stage in summarizer_stages if stage.get("status") == "failed"), None
+    )
     if failed_summarizer_stage:
         final_stage = _make_execution_status(
             node_name=WEB_RESEARCH_V2_NODE,
             stage=WEB_RESEARCH_V2_STAGE_FAILED,
             status="failed",
             error_type=failed_summarizer_stage.get("error_type"),
-            error_message=failed_summarizer_stage.get("error_message_sanitized") or "source summarizer failed",
+            error_message=failed_summarizer_stage.get("error_message_sanitized")
+            or "source summarizer failed",
             action_taken=WEB_RESEARCH_V2_ACTION_SUMMARIZER_FAILED,
             developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
             task_count=len(tasks),
@@ -4769,7 +5316,9 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
         node_name=WEB_RESEARCH_V2_CANDIDATE_BUILD_NODE,
         stage=WEB_RESEARCH_V2_STAGE_CANDIDATE_BUILD,
         status="success" if capped_candidates else "failed",
-        action_taken=WEB_RESEARCH_V2_ACTION_BUILD_CANDIDATES if capped_candidates else WEB_RESEARCH_V2_ACTION_NO_WEB_SOURCES_KEPT,
+        action_taken=WEB_RESEARCH_V2_ACTION_BUILD_CANDIDATES
+        if capped_candidates
+        else WEB_RESEARCH_V2_ACTION_NO_WEB_SOURCES_KEPT,
         task_count=len(tasks),
         result_count=len(curated_sources),
         kept_count=len(capped_candidates),
@@ -4836,20 +5385,26 @@ async def _run_web_research_v2(state: LearningState, branches: list[dict], branc
         source_summarizer_used=True,
         evidence_boundary_reason=WEB_RESEARCH_V2_EVIDENCE_BOUNDARY_REASON,
         developer_warning=all_rejected_warning,
-        source_distribution=_source_distribution([doc for doc in capped_originals.values()]),
+        source_distribution=_source_distribution(
+            [doc for doc in capped_originals.values()]
+        ),
     )
     _append_web_research_stage(debug, state, final_stage)
     _finalize_web_research_debug(debug)
 
     return {
-        "web_evidence_candidates": [candidate.model_dump(mode="json") for candidate in capped_candidates],
+        "web_evidence_candidates": [
+            candidate.model_dump(mode="json") for candidate in capped_candidates
+        ],
         "web_evidence_originals": capped_originals,
         "web_research_debug": debug,
         "web_research_outcome": debug.get("web_research_outcome") or "success",
     }
 
 
-async def _web_search_dual_source(state: LearningState, branches: list[dict], branch_debug: dict) -> dict:
+async def _web_search_dual_source(
+    state: LearningState, branches: list[dict], branch_debug: dict
+) -> dict:
     if not bool(_retrieval_setting("web.enabled", True)):
         debug = _new_web_research_debug(status="skipped", outcome="skipped")
         stage = _make_execution_status(
@@ -4911,14 +5466,22 @@ async def evidence_judge(state: LearningState) -> dict:
                 "status": "failed",
                 "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
                 "candidate_count": len(candidates),
-                "local_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "local_rag"),
-                "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
+                "local_candidate_count": sum(
+                    1
+                    for candidate in candidates
+                    if candidate.source_type == "local_rag"
+                ),
+                "web_candidate_count": sum(
+                    1 for candidate in candidates if candidate.source_type == "web"
+                ),
                 "duplicate_evidence_ids_before_grading": duplicate_ids_before_cap,
             },
             state=state,
             env_flag="LOG_RAG_RESULT",
         )
-        raise _duplicate_evidence_id_error("evidence candidate build", duplicate_ids_before_cap)
+        raise _duplicate_evidence_id_error(
+            "evidence candidate build", duplicate_ids_before_cap
+        )
     candidates = _cap_evidence_candidates(candidates)
     duplicate_ids_before_grading = _duplicate_evidence_ids(candidates)
     if duplicate_ids_before_grading:
@@ -4935,11 +5498,16 @@ async def evidence_judge(state: LearningState) -> dict:
             state=state,
             env_flag="LOG_RAG_RESULT",
         )
-        raise _duplicate_evidence_id_error("evidence candidate build", duplicate_ids_before_grading)
+        raise _duplicate_evidence_id_error(
+            "evidence candidate build", duplicate_ids_before_grading
+        )
     local_originals = dict(state.get("local_evidence_originals") or {})
     web_originals = dict(state.get("web_evidence_originals") or {})
     all_originals = {**local_originals, **web_originals}
-    originals = {candidate.evidence_id: all_originals.get(candidate.evidence_id, {}) for candidate in candidates}
+    originals = {
+        candidate.evidence_id: all_originals.get(candidate.evidence_id, {})
+        for candidate in candidates
+    }
     requested_resource_type = str(state.get("requested_resource_type", ""))
     requested_resource_types = _normalize_requested_resource_types_for_evidence(
         state.get("requested_resource_types") or [],
@@ -4954,11 +5522,19 @@ async def evidence_judge(state: LearningState) -> dict:
             "status": "success",
             "evidence_candidate_id_strategy": _LOCAL_EVIDENCE_ID_STRATEGY,
             "candidate_count": len(candidates),
-            "local_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "local_rag"),
-            "web_candidate_count": sum(1 for candidate in candidates if candidate.source_type == "web"),
+            "local_candidate_count": sum(
+                1 for candidate in candidates if candidate.source_type == "local_rag"
+            ),
+            "web_candidate_count": sum(
+                1 for candidate in candidates if candidate.source_type == "web"
+            ),
             "duplicate_evidence_ids_before_grading": [],
-            "subjects": sorted({candidate.subject for candidate in candidates if candidate.subject}),
-            "source_type_distribution": dict(Counter(candidate.source_type for candidate in candidates)),
+            "subjects": sorted(
+                {candidate.subject for candidate in candidates if candidate.subject}
+            ),
+            "source_type_distribution": dict(
+                Counter(candidate.source_type for candidate in candidates)
+            ),
             "requested_resource_type": requested_resource_type,
             "requested_resource_types": requested_resource_types,
             "candidate_preview": [
@@ -5007,7 +5583,9 @@ async def evidence_judge(state: LearningState) -> dict:
             fallback_modes_attempted=_attempted_modes(result),
             retry_count=result.retry_count,
             validation_errors=_validation_errors_from_text(
-                result.business_validation_error or result.validation_error or result.parsing_error
+                result.business_validation_error
+                or result.validation_error
+                or result.parsing_error
             ),
             action_taken="fail_evidence_judge_without_fallback",
             candidate_count=len(candidates),
@@ -5023,11 +5601,19 @@ async def evidence_judge(state: LearningState) -> dict:
     if parsed is None:
         _raise_evidence_judge_failed(judge_debug)
 
-    context_docs = _select_judged_context(parsed=parsed, candidates=candidates, originals=originals)
+    context_docs = _select_judged_context(
+        parsed=parsed, candidates=candidates, originals=originals
+    )
     followups = _followups_from_coverage_gaps(parsed)
     refinement_needed = bool(parsed.need_more_web_research or followups)
-    refinement_deferred = refinement_needed and bool(_retrieval_setting("evidence_refinement.reserved", True))
-    deferred_reason = "search_optimization_loop_not_implemented_in_this_phase" if refinement_deferred else ""
+    refinement_deferred = refinement_needed and bool(
+        _retrieval_setting("evidence_refinement.reserved", True)
+    )
+    deferred_reason = (
+        "search_optimization_loop_not_implemented_in_this_phase"
+        if refinement_deferred
+        else ""
+    )
     emit_a3_trace(
         logger,
         "evidence_refinement_reserved",
@@ -5045,7 +5631,9 @@ async def evidence_judge(state: LearningState) -> dict:
     )
 
     web_context_docs = _web_evidence_items(context_docs)
-    local_context_docs = [doc for doc in context_docs if doc.get("source_type") == "local_rag"]
+    local_context_docs = [
+        doc for doc in context_docs if doc.get("source_type") == "local_rag"
+    ]
     web_evidence_count = len(web_context_docs)
     web_failed = bool(web_candidate_dicts and not web_context_docs)
     emit_a3_trace(
@@ -5082,6 +5670,57 @@ async def evidence_judge(state: LearningState) -> dict:
         request_id=request_id,
         thread_id=thread_id,
     )
+    workspace_update: dict = {}
+    workspace_events: list[dict] = []
+    try:
+        workspace_update = build_workspace_evidence_update(
+            state,
+            {
+                "evidence_judge_output": parsed.model_dump(mode="json"),
+                "graded_evidence": context_docs,
+                "evidence_candidates": [
+                    candidate.model_dump(mode="json") for candidate in candidates
+                ],
+                "coverage_gaps": [
+                    gap.model_dump(mode="json") for gap in parsed.coverage_gaps
+                ],
+            },
+        )
+        workspace_payload = workspace_trace_payload(workspace_update)
+        emit_a3_trace(
+            logger,
+            "task_workspace.update_planned",
+            workspace_payload,
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        emit_a3_trace(
+            logger,
+            "task_workspace.updated",
+            workspace_payload,
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        workspace_events.append(
+            {"stage": "task_workspace.updated", **workspace_payload}
+        )
+    except Exception as exc:
+        failure_payload = {
+            "thread_id": thread_id,
+            "request_id": request_id,
+            "updated_sources": ["evidence_judge"],
+            "diagnostics": [sanitize_error_message(exc, max_chars=160)],
+        }
+        emit_a3_trace(
+            logger,
+            "task_workspace.update_failed",
+            failure_payload,
+            state=state,
+            env_flag="LOG_A3_TRACE",
+        )
+        workspace_events.append(
+            {"stage": "task_workspace.update_failed", **failure_payload}
+        )
 
     # Controlled stop logic.
     evidence_state = parsed.overall_evidence_state
@@ -5091,7 +5730,11 @@ async def evidence_judge(state: LearningState) -> dict:
             answerability = str(stage_debug.get("answerability") or "")
             break
     if not answerability:
-        answerability = "can_answer_with_caveats" if evidence_state == "partially_sufficient" else "cannot_answer"
+        answerability = (
+            "can_answer_with_caveats"
+            if evidence_state == "partially_sufficient"
+            else "cannot_answer"
+        )
 
     explicit_resource_types = {
         "review_doc",
@@ -5111,8 +5754,7 @@ async def evidence_judge(state: LearningState) -> dict:
     if requested_resource_type:
         requested_resource_set.add(str(requested_resource_type).strip().lower())
     has_explicit_resource_request = bool(
-        requested_resource_types
-        or requested_resource_set & explicit_resource_types
+        requested_resource_types or requested_resource_set & explicit_resource_types
     )
 
     controlled_stop = False
@@ -5121,7 +5763,9 @@ async def evidence_judge(state: LearningState) -> dict:
     degraded_reason = ""
 
     fail_fast_on_insufficient = bool(
-        get_setting("retrieval.evidence_memory.fail_fast_on_insufficient_evidence", False)
+        get_setting(
+            "retrieval.evidence_memory.fail_fast_on_insufficient_evidence", False
+        )
     )
 
     if evidence_state == "insufficient":
@@ -5161,13 +5805,17 @@ async def evidence_judge(state: LearningState) -> dict:
     return {
         "context": context_docs,
         "graded_evidence": context_docs,
-        "evidence_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "evidence_candidates": [
+            candidate.model_dump(mode="json") for candidate in candidates
+        ],
         "evidence_judge_output": parsed.model_dump(mode="json"),
         "evidence_judge_debug": judge_debug,
         "evidence_judge_rounds": 1,
         "evidence_judge_state": evidence_state,
         "evidence_answerability": answerability,
-        "evidence_coverage_gaps": [gap.model_dump(mode="json") for gap in parsed.coverage_gaps],
+        "evidence_coverage_gaps": [
+            gap.model_dump(mode="json") for gap in parsed.coverage_gaps
+        ],
         "search_refinement_needed": refinement_needed,
         "search_refinement_deferred": refinement_deferred,
         "search_refinement_deferred_reason": deferred_reason,
@@ -5182,16 +5830,21 @@ async def evidence_judge(state: LearningState) -> dict:
         "evidence_controlled_stop_reason": controlled_stop_reason,
         "evidence_summary_memory": new_evidence,
         "evidence_gap_memory": new_gaps,
+        "task_workspace": workspace_update,
+        "workspace_events": workspace_events,
         "web_evidence_provider": _web_research_provider(),
         "web_evidence_results": web_context_docs,
         "web_evidence_count": web_evidence_count,
         "web_evidence_failed": web_failed,
-        "web_evidence_failure_reason": "evidence_judge_rejected_all_or_no_web_kept" if web_failed else "",
+        "web_evidence_failure_reason": "evidence_judge_rejected_all_or_no_web_kept"
+        if web_failed
+        else "",
         "web_research_outcome": state.get("web_research_outcome", ""),
     }
 
 
 # Evidence memory builder.
+
 
 def build_evidence_memory_summary(
     *,
@@ -5249,17 +5902,19 @@ def build_evidence_memory_summary(
                 metadata_filled_count += 1
             else:
                 metadata_missing_count += 1
-        kept_evidence_summary.append({
-            "evidence_id": eid,
-            "subject": subject_value,
-            "source_type": source_type_value,
-            "source": source[:300] if source else "",
-            "url": url[:500] if url else "",
-            "final_quality": judge_item.final_quality,
-            "use_case": judge_item.use_case,
-            "coverage_contribution": (judge_item.coverage_contribution or "")[:240],
-            "short_summary": (judge_item.reason or "")[:200],
-        })
+        kept_evidence_summary.append(
+            {
+                "evidence_id": eid,
+                "subject": subject_value,
+                "source_type": source_type_value,
+                "source": source[:300] if source else "",
+                "url": url[:500] if url else "",
+                "final_quality": judge_item.final_quality,
+                "use_case": judge_item.use_case,
+                "coverage_contribution": (judge_item.coverage_contribution or "")[:240],
+                "short_summary": (judge_item.reason or "")[:200],
+            }
+        )
 
     # Followup queries from coverage gaps.
     followup_queries: list[str] = []
@@ -5296,18 +5951,20 @@ def build_evidence_memory_summary(
 
     gap_entries: list[dict] = []
     for gap in parsed.coverage_gaps:
-        gap_entries.append({
-            "memory_id": f"{memory_id}:gap:{gap.subject}:{gap.role}",
-            "created_at": created_at,
-            "request_id": request_id,
-            "thread_id": thread_id,
-            "subject": gap.subject,
-            "role": gap.role,
-            "gap": gap.gap,
-            "suggested_search_query": gap.suggested_search_query,
-            "purpose": gap.purpose,
-            "priority": gap.priority,
-        })
+        gap_entries.append(
+            {
+                "memory_id": f"{memory_id}:gap:{gap.subject}:{gap.role}",
+                "created_at": created_at,
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "subject": gap.subject,
+                "role": gap.role,
+                "gap": gap.gap,
+                "suggested_search_query": gap.suggested_search_query,
+                "purpose": gap.purpose,
+                "priority": gap.priority,
+            }
+        )
 
     emit_a3_trace(
         logger,
@@ -5334,11 +5991,15 @@ def build_evidence_memory_summary(
 
 # Evidence summary output (controlled stop)
 
+
 def _render_evidence_summary_output(state: LearningState) -> str:
     """Render a short Markdown output when evidence is insufficient."""
     gaps = state.get("evidence_coverage_gaps") or []
     judge_output = state.get("evidence_judge_output") or {}
-    decision = judge_output.get("decision_summary", "") or "\u8bc1\u636e\u4e0d\u8db3\uff0c\u6682\u65f6\u65e0\u6cd5\u751f\u6210\u5b8c\u6574\u8d44\u6e90\u3002"
+    decision = (
+        judge_output.get("decision_summary", "")
+        or "\u8bc1\u636e\u4e0d\u8db3\uff0c\u6682\u65f6\u65e0\u6cd5\u751f\u6210\u5b8c\u6574\u8d44\u6e90\u3002"
+    )
 
     lines = [
         "## \u8bc1\u636e\u68c0\u7d22\u6458\u8981",
@@ -5355,14 +6016,18 @@ def _render_evidence_summary_output(state: LearningState) -> str:
             kept_ids.append(eid)
 
     if kept_ids:
-        lines.append(f"**\u5df2\u4fdd\u5b58\u7684\u8bc1\u636e\u6458\u8981**: {len(kept_ids)} \u6761")
+        lines.append(
+            f"**\u5df2\u4fdd\u5b58\u7684\u8bc1\u636e\u6458\u8981**: {len(kept_ids)} \u6761"
+        )
         lines.append("")
 
     if gaps:
         lines.append("### \u53d1\u73b0\u7684\u8986\u76d6\u7f3a\u53e3")
         lines.append("")
         for gap in gaps[:5]:
-            lines.append(f"- **{gap.get('subject', '')}** ({gap.get('role', '')}): {gap.get('gap', '')}")
+            lines.append(
+                f"- **{gap.get('subject', '')}** ({gap.get('role', '')}): {gap.get('gap', '')}"
+            )
         lines.append("")
 
     followups = state.get("proposed_followup_search_queries") or []
@@ -5374,8 +6039,11 @@ def _render_evidence_summary_output(state: LearningState) -> str:
                 lines.append(f"- `{q}`")
         lines.append("")
 
-    lines.append("> \u5df2\u4fdd\u5b58\u5f53\u524d\u8bc1\u636e\u6458\u8981\uff0c\u53ef\u5728\u540e\u7eed\u5bf9\u8bdd\u4e2d\u7ee7\u7eed\u8865\u5145\u68c0\u7d22\u3002")
+    lines.append(
+        "> \u5df2\u4fdd\u5b58\u5f53\u524d\u8bc1\u636e\u6458\u8981\uff0c\u53ef\u5728\u540e\u7eed\u5bf9\u8bdd\u4e2d\u7ee7\u7eed\u8865\u5145\u68c0\u7d22\u3002"
+    )
     return "\n".join(lines)
+
 
 @traced_node
 async def evidence_summary_output(state: LearningState) -> dict:
@@ -5391,11 +6059,14 @@ async def evidence_summary_output(state: LearningState) -> dict:
         "messages": [AIMessage(content=markdown)],
         "evidence_controlled_stop": True,
         "final_response_type": "evidence_summary",
-        "evidence_controlled_stop_reason": state.get("evidence_controlled_stop_reason", "evidence_insufficient"),
+        "evidence_controlled_stop_reason": state.get(
+            "evidence_controlled_stop_reason", "evidence_insufficient"
+        ),
     }
 
 
 # Node 0a: academic router
+
 
 @traced_node
 async def academic_router(state: LearningState) -> dict:
@@ -5418,26 +6089,43 @@ async def memory_use_decider(state: LearningState) -> dict:
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
 
-    raw_selected_memories, memory_selection_debug = _select_relevant_memory_summaries_with_debug(
-        state,
-        current_query=current_query,
-        subject=subject,
-        requested_resource_type=requested_resource_type,
+    raw_selected_memories, memory_selection_debug = (
+        _select_relevant_memory_summaries_with_debug(
+            state,
+            current_query=current_query,
+            subject=subject,
+            requested_resource_type=requested_resource_type,
+        )
     )
     _emit_memory_summary_selection_trace(state, memory_selection_debug)
     selected_memories = [
-        _compact_memory_for_prompt(entry)
-        for entry in raw_selected_memories
+        _compact_memory_for_prompt(entry) for entry in raw_selected_memories
     ]
     selected_memory_count = len(selected_memories)
-    eligible_memory_count = int(memory_selection_debug.get("eligible_memory_count") or 0)
-    current_query_is_ambiguous = _contains_any_pattern(current_query, _MEMORY_AMBIGUOUS_PATTERNS)
-    current_query_explicit_use = _contains_any_pattern(current_query, _MEMORY_USE_PATTERNS)
-    current_query_explicit_ignore = _contains_any_pattern(current_query, _MEMORY_IGNORE_PATTERNS)
+    eligible_memory_count = int(
+        memory_selection_debug.get("eligible_memory_count") or 0
+    )
+    current_query_is_ambiguous = _contains_any_pattern(
+        current_query, _MEMORY_AMBIGUOUS_PATTERNS
+    )
+    current_query_explicit_use = _contains_any_pattern(
+        current_query, _MEMORY_USE_PATTERNS
+    )
+    current_query_explicit_ignore = _contains_any_pattern(
+        current_query, _MEMORY_IGNORE_PATTERNS
+    )
+    task_continuity_resolved = bool(
+        state.get("workspace_continuation_applied")
+        or (
+            isinstance(state.get("workspace_continuation"), dict)
+            and state.get("workspace_continuation", {}).get("continuation_applied")
+        )
+    )
 
     decision = _deterministic_memory_use_decision(
         current_query,
         selected_memory_count=selected_memory_count,
+        task_continuity_resolved=task_continuity_resolved,
     )
     decision_source = "deterministic"
 
@@ -5454,8 +6142,9 @@ async def memory_use_decider(state: LearningState) -> dict:
             "semantic_memories": semantic_for_prompt,
             "requested_resource_type": requested_resource_type,
             "subject": subject,
-            "selected_memory_count": selected_memory_count,
-        }
+                    "selected_memory_count": selected_memory_count,
+                    "task_continuity_resolved": task_continuity_resolved,
+                }
         messages = [
             SystemMessage(
                 content=(
@@ -5497,7 +6186,9 @@ async def memory_use_decider(state: LearningState) -> dict:
             )
         parsed = structured_result.parsed
         if not isinstance(parsed, MemoryUseDecisionOutput):
-            raise TypeError("memory_use_decider parsed result is not MemoryUseDecisionOutput")
+            raise TypeError(
+                "memory_use_decider parsed result is not MemoryUseDecisionOutput"
+            )
         decision = parsed
         decision_source = "llm"
 
@@ -5512,6 +6203,7 @@ async def memory_use_decider(state: LearningState) -> dict:
             "current_query_explicit_use_history": current_query_explicit_use,
             "current_query_explicit_ignore_history": current_query_explicit_ignore,
             "current_query_ambiguous_history_reference": current_query_is_ambiguous,
+            "task_continuity_resolved": task_continuity_resolved,
             "decision": decision.decision,
             "reason": decision.reason,
             "confidence": decision.confidence,
@@ -5519,11 +6211,21 @@ async def memory_use_decider(state: LearningState) -> dict:
             "question_to_user": question if confirmation_required else "",
             "decision_source": decision_source,
             "memory_selection": {
-                "subject_match_count": memory_selection_debug.get("memory_subject_match_count", 0),
-                "resource_match_count": memory_selection_debug.get("memory_resource_match_count", 0),
-                "query_overlap_match_count": memory_selection_debug.get("memory_query_overlap_match_count", 0),
-                "dropped_mismatch_count": memory_selection_debug.get("memory_dropped_mismatch_count", 0),
-                "missing_field_counts": memory_selection_debug.get("missing_field_counts", {}),
+                "subject_match_count": memory_selection_debug.get(
+                    "memory_subject_match_count", 0
+                ),
+                "resource_match_count": memory_selection_debug.get(
+                    "memory_resource_match_count", 0
+                ),
+                "query_overlap_match_count": memory_selection_debug.get(
+                    "memory_query_overlap_match_count", 0
+                ),
+                "dropped_mismatch_count": memory_selection_debug.get(
+                    "memory_dropped_mismatch_count", 0
+                ),
+                "missing_field_counts": memory_selection_debug.get(
+                    "missing_field_counts", {}
+                ),
             },
         },
         state=state,
@@ -5539,7 +6241,10 @@ async def memory_use_decider(state: LearningState) -> dict:
                 "selected_memory_count": selected_memory_count,
                 "options": [
                     {"label": "\u7ed3\u5408\u5386\u53f2", "value": "use"},
-                    {"label": "\u53ea\u770b\u5f53\u524d\u95ee\u9898", "value": "ignore"},
+                    {
+                        "label": "\u53ea\u770b\u5f53\u524d\u95ee\u9898",
+                        "value": "ignore",
+                    },
                 ],
             }
         )
@@ -5571,18 +6276,32 @@ async def memory_use_decider(state: LearningState) -> dict:
             "memory_confirmation_required": False,
             "memory_confirmation_question": question,
             "eligible_evidence_memory_count": eligible_memory_count,
-            "selected_evidence_memory_summaries": selected_memories if choice == "use" else [],
+            "selected_evidence_memory_summaries": selected_memories
+            if choice == "use"
+            else [],
+            "context_continuity": {
+                "type": "long_term_memory_confirmation",
+                "task_continuity_resolved": task_continuity_resolved,
+                "memory_use_policy": choice,
+            },
         }
 
     # Record decision trace (fire-and-forget)
     import asyncio as _asyncio
-    _asyncio.create_task(_record_trace(
-        state, "memory_use_decider",
-        f"policy={decision.decision}",
-        evidence=f"eligible_memory={eligible_memory_count}",
-        steps=[f"deterministic={decision_source == 'deterministic'}", f"reason={decision.reason}"],
-        confidence=decision.confidence,
-    ))
+
+    _asyncio.create_task(
+        _record_trace(
+            state,
+            "memory_use_decider",
+            f"policy={decision.decision}",
+            evidence=f"eligible_memory={eligible_memory_count}",
+            steps=[
+                f"deterministic={decision_source == 'deterministic'}",
+                f"reason={decision.reason}",
+            ],
+            confidence=decision.confidence,
+        )
+    )
 
     return {
         "memory_use_policy": decision.decision,
@@ -5591,23 +6310,46 @@ async def memory_use_decider(state: LearningState) -> dict:
         "memory_confirmation_required": False,
         "memory_confirmation_question": "",
         "eligible_evidence_memory_count": eligible_memory_count,
-        "selected_evidence_memory_summaries": selected_memories if decision.decision == "use" else [],
+        "selected_evidence_memory_summaries": selected_memories
+        if decision.decision == "use"
+        else [],
+        "context_continuity": {
+            "type": "task_continuity"
+            if task_continuity_resolved
+            else "long_term_memory",
+            "task_continuity_resolved": task_continuity_resolved,
+            "memory_use_policy": decision.decision,
+            "confirmation_required": False,
+        },
     }
 
 
-async def _record_trace(state: dict, node: str, decision: str, evidence: str = "", steps: list | None = None, confidence: float = 0.5):
+async def _record_trace(
+    state: dict,
+    node: str,
+    decision: str,
+    evidence: str = "",
+    steps: list | None = None,
+    confidence: float = 0.5,
+):
     """Fire-and-forget decision trace recording."""
     try:
         from src.analytics.explainability_engine import record_decision_from_state
+
         await record_decision_from_state(
-            state, node_name=node, decision=decision,
-            evidence=evidence, reasoning_steps=steps, confidence=confidence,
+            state,
+            node_name=node,
+            decision=decision,
+            evidence=evidence,
+            reasoning_steps=steps,
+            confidence=confidence,
         )
     except Exception:
         pass
 
 
 # Node 0b: query rewriting (retry path only, fail-fast)
+
 
 @traced_node
 async def rewrite_query(state: LearningState) -> dict:
@@ -5634,7 +6376,9 @@ async def rewrite_query(state: LearningState) -> dict:
             node_name="rewrite_query",
             llm_node="supervisor",
             messages=[
-                SystemMessage(content="You are a retrieval query rewrite assistant. Improve the search query based on the hallucination feedback."),
+                SystemMessage(
+                    content="You are a retrieval query rewrite assistant. Improve the search query based on the hallucination feedback."
+                ),
                 HumanMessage(content=rewrite_prompt),
             ],
             state=state,
@@ -5682,6 +6426,7 @@ async def rewrite_query(state: LearningState) -> dict:
 
 # Node 0c: initial search-query rewriting
 
+
 async def _maintain_conversation_summary(state: LearningState) -> str:
     """Update the compact conversation summary before query rewrite.
 
@@ -5693,7 +6438,8 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
 
     # Only summarize if we have enough messages
     human_messages = [
-        m for m in messages
+        m
+        for m in messages
         if isinstance(m, HumanMessage)
         or (isinstance(m, dict) and m.get("type") == "human")
     ]
@@ -5713,7 +6459,14 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
             if m.get("type") == "ai":
                 content = content[:200]
         if content.strip():
-            role = "User" if (isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("type") == "human")) else "Assistant"
+            role = (
+                "User"
+                if (
+                    isinstance(m, HumanMessage)
+                    or (isinstance(m, dict) and m.get("type") == "human")
+                )
+                else "Assistant"
+            )
             recent_texts.append(f"{role}: {content.strip()[:300]}")
 
     if not recent_texts:
@@ -5725,7 +6478,11 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
         prompt = (
             "Summarize the following conversation into concise Chinese within 200 characters. "
             "Preserve the learner's goals and key learning topics, and omit chit-chat.\n\n"
-            + ("Existing summary: " + existing_summary + "\n\n" if existing_summary else "")
+            + (
+                "Existing summary: " + existing_summary + "\n\n"
+                if existing_summary
+                else ""
+            )
             + "\n".join(recent_texts[-8:])
         )
         summary = await invoke_plain_llm_fail_fast(
@@ -5764,7 +6521,9 @@ async def _maintain_conversation_summary(state: LearningState) -> str:
             state=state,
             env_flag="LOG_A3_TRACE",
         )
-        fail_fast = bool(get_setting("development.fail_fast_conversation_summary", False))
+        fail_fast = bool(
+            get_setting("development.fail_fast_conversation_summary", False)
+        )
         if fail_fast:
             raise
         return existing_summary or ""
@@ -5807,6 +6566,7 @@ async def search_query_rewriter(state: LearningState) -> dict:
     requested_resource_type = state.get("requested_resource_type", "")
     subject = state.get("subject", "")
     subject_candidates = state.get("subject_candidates", [])
+    workspace_continuation = _workspace_continuation_prompt_text(state)
     available_subjects = get_available_subjects_from_data()
     memory_use_policy = str(state.get("memory_use_policy") or "unset")
     if memory_use_policy in {"unset", "ask_user"}:
@@ -5834,13 +6594,20 @@ async def search_query_rewriter(state: LearningState) -> dict:
             "keypoints": " / ".join(keypoints) if keypoints else "none",
             "requested_resource_type": requested_resource_type or "none",
             "subject": subject or "other",
-            "subject_candidates": " / ".join(subject_candidates) if subject_candidates else "none",
-            "available_subjects": " / ".join(available_subjects) if available_subjects else "none",
+            "subject_candidates": " / ".join(subject_candidates)
+            if subject_candidates
+            else "none",
+            "workspace_continuation": workspace_continuation,
+            "available_subjects": " / ".join(available_subjects)
+            if available_subjects
+            else "none",
             "conversation_summary": conversation_summary_for_prompt or "none",
             "evidence_memory_summaries": json.dumps(
                 selected_memories,
                 ensure_ascii=False,
-            ) if selected_memories else "none",
+            )
+            if selected_memories
+            else "none",
         },
     )
     messages = [
@@ -5854,7 +6621,9 @@ async def search_query_rewriter(state: LearningState) -> dict:
                 f"Current user query is highest priority. Memory use policy for this turn is {memory_use_policy}. "
                 "If policy is ignore, do not let prior conversation or evidence memory affect retrieval topics. "
                 "If policy is use, selected evidence memory may be used as continuity context, "
-                "but the current user query remains the primary source of retrieval intent."
+                "but the current user query remains the primary source of retrieval intent. "
+                "Task workspace continuation, when provided, is same-thread subject and learning-goal context only; "
+                "it is not factual evidence and must not override an explicit current-query subject."
             )
         ),
         HumanMessage(content=prompt),
@@ -5864,7 +6633,9 @@ async def search_query_rewriter(state: LearningState) -> dict:
     parsing_error = None
     try:
         with traced_llm_call(
-            model_name=get_setting("llm.query_rewrite.model", get_setting("query_rewrite.model", "")),
+            model_name=get_setting(
+                "llm.query_rewrite.model", get_setting("query_rewrite.model", "")
+            ),
             node_name="search_query_rewriter",
             temperature=0.0,
         ):
@@ -5876,8 +6647,12 @@ async def search_query_rewriter(state: LearningState) -> dict:
             )
         parsed = structured_result.parsed
         if not isinstance(parsed, SearchQueryRewriteOutput):
-            raise TypeError("search_query_rewriter parsed result is not SearchQueryRewriteOutput")
-        raw_preview = structured_result.raw_output[:2000] if structured_result.raw_output else ""
+            raise TypeError(
+                "search_query_rewriter parsed result is not SearchQueryRewriteOutput"
+            )
+        raw_preview = (
+            structured_result.raw_output[:2000] if structured_result.raw_output else ""
+        )
 
         result_payload = {
             "local_retrieval_query": parsed.local_retrieval_query.strip(),
@@ -5889,15 +6664,29 @@ async def search_query_rewriter(state: LearningState) -> dict:
             ],
             "reason": parsed.reason.strip(),
         }
-        retrieval_plan, normalize_debug = _normalize_retrieval_plan(parsed.retrieval_plan, state)
-        primary_subject = _normalize_primary_subject(parsed.primary_subject, retrieval_plan)
+        retrieval_plan, normalize_debug = _normalize_retrieval_plan(
+            parsed.retrieval_plan, state
+        )
+        primary_subject = _normalize_primary_subject(
+            parsed.primary_subject, retrieval_plan
+        )
         history_ref = _has_explicit_history_reference(original_query)
         memory_prompt_injected = memory_use_policy == "use" and bool(selected_memories)
-        eligible_memory_count = int(state.get("eligible_evidence_memory_count") or len(selected_memories))
-        retrieval_plan_subjects = [item.get("subject", "") for item in retrieval_plan if item.get("subject")]
-        memory_influence_detected_by_system = bool(memory_prompt_injected and parsed.memory_used_for_retrieval)
+        eligible_memory_count = int(
+            state.get("eligible_evidence_memory_count") or len(selected_memories)
+        )
+        retrieval_plan_subjects = [
+            item.get("subject", "") for item in retrieval_plan if item.get("subject")
+        ]
+        memory_influence_detected_by_system = bool(
+            memory_prompt_injected and parsed.memory_used_for_retrieval
+        )
         if memory_use_policy == "use":
-            action = "allow_memory_context" if memory_prompt_injected else "allow_no_selected_memory"
+            action = (
+                "allow_memory_context"
+                if memory_prompt_injected
+                else "allow_no_selected_memory"
+            )
         elif memory_use_policy == "ignore":
             action = "memory_blocked_by_policy"
         else:
@@ -5949,6 +6738,12 @@ async def search_query_rewriter(state: LearningState) -> dict:
                 "intent": state.get("intent"),
                 "subject": state.get("subject"),
                 "subject_candidates": state.get("subject_candidates", []),
+                "workspace_continuation_applied": bool(
+                    state.get("workspace_continuation_applied")
+                ),
+                "workspace_continuation_reason": state.get(
+                    "workspace_continuation_reason", ""
+                ),
                 "available_subjects": available_subjects,
                 "learning_goal": parsed.learning_goal,
                 "primary_subject": primary_subject,
@@ -6002,7 +6797,6 @@ async def search_query_rewriter(state: LearningState) -> dict:
         )
         raise
 
-
     return {
         "local_retrieval_query": result_payload["local_retrieval_query"],
         "web_research_seed_query": result_payload["web_research_seed_query"],
@@ -6016,6 +6810,7 @@ async def search_query_rewriter(state: LearningState) -> dict:
 
 
 # Node 1: RAG retrieval (parallel branch A)
+
 
 @traced_node
 async def rag_retrieve(state: LearningState) -> dict:
@@ -6042,7 +6837,9 @@ async def rag_retrieve(state: LearningState) -> dict:
     local_docs: list[dict] = []
 
     if branches:
-        subjects = [str(item.get("subject", "")) for item in branches if item.get("subject")]
+        subjects = [
+            str(item.get("subject", "")) for item in branches if item.get("subject")
+        ]
         with traced_retrieval(query=query, subject=branch_mode) as span:
             span.set_attribute("rag.branch_mode", branch_mode)
             span.set_attribute("rag.branch_count", len(branches))
@@ -6063,7 +6860,9 @@ async def rag_retrieve(state: LearningState) -> dict:
                 used_docs = raw_docs[:per_subject_top_k]
                 role = item.get("role", "supporting_context")
                 priority = item.get("priority", 0.5)
-                subject_mismatch_count = _subject_mismatch_count(used_docs, retrieve_subject)
+                subject_mismatch_count = _subject_mismatch_count(
+                    used_docs, retrieve_subject
+                )
                 branch_eval = _evaluate_retrieval_branch(
                     subject=plan_subject,
                     role=role,
@@ -6090,54 +6889,74 @@ async def rag_retrieve(state: LearningState) -> dict:
                         "branch_status": branch_eval["branch_status"],
                         "weak_reason": branch_eval["weak_reason"],
                         "best_rerank_score": branch_eval["best_rerank_score"],
-                        "branch_status_score_source": branch_eval["branch_status_score_source"],
+                        "branch_status_score_source": branch_eval[
+                            "branch_status_score_source"
+                        ],
                         "reranker_failed": branch_eval["reranker_failed"],
-                        "needs_external_evidence": branch_eval["needs_external_evidence"],
+                        "needs_external_evidence": branch_eval[
+                            "needs_external_evidence"
+                        ],
                         "top_docs": _top_doc_summaries(used_docs),
                     },
                     state=state,
                     env_flag="LOG_RAG_RESULT",
                 )
                 if branch_eval["branch_status"] == "missing":
-                    local_docs.append({
-                        "type": "rag_diagnostic",
-                        "retrieval_subject": plan_subject,
-                        "retrieval_role": role,
-                        "retrieval_query": plan_query,
-                        "retrieval_purpose": item.get("purpose", ""),
-                        "relation_to_goal": item.get("relation_to_goal", ""),
-                        "retrieval_priority": priority,
-                        "retrieval_coverage_hint": item.get("retrieval_coverage_hint", ""),
-                        "retrieval_coverage_goals": item.get("retrieval_coverage_goals", []),
-                        "branch_status": "missing",
-                        "weak_reason": "no_docs",
-                        "best_rerank_score": 0.0,
-                        "branch_status_score_source": "fallback_raw_retrieval_signal",
-                        "reranker_failed": bool(result.get("reranker_failed")),
-                        "needs_external_evidence": True,
-                        "content": "No effective local course material was retrieved for this subject branch.",
-                        "source": "local_rag_diagnostic",
-                    })
+                    local_docs.append(
+                        {
+                            "type": "rag_diagnostic",
+                            "retrieval_subject": plan_subject,
+                            "retrieval_role": role,
+                            "retrieval_query": plan_query,
+                            "retrieval_purpose": item.get("purpose", ""),
+                            "relation_to_goal": item.get("relation_to_goal", ""),
+                            "retrieval_priority": priority,
+                            "retrieval_coverage_hint": item.get(
+                                "retrieval_coverage_hint", ""
+                            ),
+                            "retrieval_coverage_goals": item.get(
+                                "retrieval_coverage_goals", []
+                            ),
+                            "branch_status": "missing",
+                            "weak_reason": "no_docs",
+                            "best_rerank_score": 0.0,
+                            "branch_status_score_source": "fallback_raw_retrieval_signal",
+                            "reranker_failed": bool(result.get("reranker_failed")),
+                            "needs_external_evidence": True,
+                            "content": "No effective local course material was retrieved for this subject branch.",
+                            "source": "local_rag_diagnostic",
+                        }
+                    )
                     continue
                 for doc in used_docs:
-                    local_docs.append({
-                        "type": "rag",
-                        "retrieval_subject": plan_subject,
-                        "retrieval_role": role,
-                        "retrieval_query": plan_query,
-                        "retrieval_purpose": item.get("purpose", ""),
-                        "relation_to_goal": item.get("relation_to_goal", ""),
-                        "retrieval_priority": priority,
-                        "retrieval_coverage_hint": item.get("retrieval_coverage_hint", ""),
-                        "retrieval_coverage_goals": item.get("retrieval_coverage_goals", []),
-                        "branch_status": branch_eval["branch_status"],
-                        "weak_reason": branch_eval["weak_reason"],
-                        "best_rerank_score": branch_eval["best_rerank_score"],
-                        "branch_status_score_source": branch_eval["branch_status_score_source"],
-                        "reranker_failed": branch_eval["reranker_failed"],
-                        "needs_external_evidence": branch_eval["needs_external_evidence"],
-                        **doc,
-                    })
+                    local_docs.append(
+                        {
+                            "type": "rag",
+                            "retrieval_subject": plan_subject,
+                            "retrieval_role": role,
+                            "retrieval_query": plan_query,
+                            "retrieval_purpose": item.get("purpose", ""),
+                            "relation_to_goal": item.get("relation_to_goal", ""),
+                            "retrieval_priority": priority,
+                            "retrieval_coverage_hint": item.get(
+                                "retrieval_coverage_hint", ""
+                            ),
+                            "retrieval_coverage_goals": item.get(
+                                "retrieval_coverage_goals", []
+                            ),
+                            "branch_status": branch_eval["branch_status"],
+                            "weak_reason": branch_eval["weak_reason"],
+                            "best_rerank_score": branch_eval["best_rerank_score"],
+                            "branch_status_score_source": branch_eval[
+                                "branch_status_score_source"
+                            ],
+                            "reranker_failed": branch_eval["reranker_failed"],
+                            "needs_external_evidence": branch_eval[
+                                "needs_external_evidence"
+                            ],
+                            **doc,
+                        }
+                    )
             span.set_attribute("rag.doc_count", len(local_docs))
             span.set_attribute("rag.is_hit", bool(local_docs))
     else:
@@ -6169,7 +6988,9 @@ async def rag_retrieve(state: LearningState) -> dict:
                     "branch_status": branch_eval["branch_status"],
                     "weak_reason": branch_eval["weak_reason"],
                     "best_rerank_score": branch_eval["best_rerank_score"],
-                    "branch_status_score_source": branch_eval["branch_status_score_source"],
+                    "branch_status_score_source": branch_eval[
+                        "branch_status_score_source"
+                    ],
                     "reranker_failed": branch_eval["reranker_failed"],
                     "top_docs": _top_doc_summaries(raw_docs),
                 },
@@ -6196,8 +7017,12 @@ async def rag_retrieve(state: LearningState) -> dict:
             "raw_doc_count": len(local_docs),
             "final_doc_count": len(selected_docs),
             "max_docs": max_docs,
-            "subject_doc_distribution": dict(Counter(doc.get("retrieval_subject") for doc in selected_docs)),
-            "role_distribution": dict(Counter(doc.get("retrieval_role") for doc in selected_docs)),
+            "subject_doc_distribution": dict(
+                Counter(doc.get("retrieval_subject") for doc in selected_docs)
+            ),
+            "role_distribution": dict(
+                Counter(doc.get("retrieval_role") for doc in selected_docs)
+            ),
             "web_evidence_count": 0,
             "web_research_outcome": "not_applicable_local_retrieval",
             **quota_debug,
@@ -6218,6 +7043,7 @@ async def web_search(state: LearningState) -> dict:
 
 # Node 3: generate answer
 
+
 def _format_retrieval_score_note(doc: dict) -> str:
     """Format retrieval diagnostics without treating raw Chroma scores as relevance."""
     if doc.get("rerank_score") is not None:
@@ -6225,7 +7051,9 @@ def _format_retrieval_score_note(doc: dict) -> str:
     if doc.get("bm25_score") is not None:
         return f"bm25_score={doc.get('bm25_score')} (higher_is_better)"
     if doc.get("raw_vector_score") is not None:
-        source = doc.get("raw_vector_score_source") or "chroma_similarity_search_with_score"
+        source = (
+            doc.get("raw_vector_score_source") or "chroma_similarity_search_with_score"
+        )
         direction = doc.get("raw_vector_score_direction") or "backend_specific"
         return f"raw_vector_score={doc.get('raw_vector_score')} ({source}; {direction}; not normalized relevance)"
     return "score unavailable"
@@ -6266,6 +7094,7 @@ def _format_web_research_context(results: list[dict]) -> str:
         parts.append(f"[{i}] {source} ({r.get('url', '')})\n{r.get('content', '')}")
     return "\n\n".join(parts)
 
+
 _RESOURCE_OFFER_SECTION = """At the end of the answer, add a short section asking whether the learner wants to continue generating a personalized learning resource. Only ask; do not generate the resource directly.
 
 ---
@@ -6276,6 +7105,7 @@ Based on the current question, I can continue by generating a mindmap, layered e
 """
 
 _NO_RESOURCE_OFFER = "Do not add the optional follow-up resource offer section. Only answer the current explicit resource request or question."
+
 
 def _resource_offer_instruction(state: LearningState) -> str:
     """Return prompt instruction for optional follow-up resource offers."""
@@ -6288,13 +7118,32 @@ def _resource_offer_instruction(state: LearningState) -> str:
 async def generate_answer(state: LearningState) -> dict:
     """Synthesize final answer from merged context (RAG + web) via LLM."""
     question = _last_human_query(state)
-    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+    if (
+        state.get("evidence_judge_failed")
+        and _block_generation_when_evidence_judge_failed()
+    ):
         failure_output = state.get("evidence_judge_output") or {}
         failure_phase = _evidence_failure_phase(state)
-        error_type = failure_output.get("error_type", "") if isinstance(failure_output, dict) else ""
-        status_code = failure_output.get("status_code", "") if isinstance(failure_output, dict) else ""
-        action_needed = failure_output.get("action_needed", "") if isinstance(failure_output, dict) else ""
-        recommendation = failure_output.get("recommendation", "") if isinstance(failure_output, dict) else ""
+        error_type = (
+            failure_output.get("error_type", "")
+            if isinstance(failure_output, dict)
+            else ""
+        )
+        status_code = (
+            failure_output.get("status_code", "")
+            if isinstance(failure_output, dict)
+            else ""
+        )
+        action_needed = (
+            failure_output.get("action_needed", "")
+            if isinstance(failure_output, dict)
+            else ""
+        )
+        recommendation = (
+            failure_output.get("recommendation", "")
+            if isinstance(failure_output, dict)
+            else ""
+        )
 
         if action_needed is None:
             action_needed = ""
@@ -6349,9 +7198,19 @@ async def generate_answer(state: LearningState) -> dict:
             "context_web_evidence_count": len(web_evidence),
             "web_research_outcome": state.get("web_research_outcome", ""),
             "web_evidence_count": len(web_evidence),
-            "web_evidence_provider": state.get("web_evidence_provider", _web_research_provider()),
-            "web_evidence_use_cases": sorted({doc.get("use_case") for doc in web_evidence if doc.get("use_case")}),
-            "web_evidence_types": sorted({doc.get("evidence_type") for doc in web_evidence if doc.get("evidence_type")}),
+            "web_evidence_provider": state.get(
+                "web_evidence_provider", _web_research_provider()
+            ),
+            "web_evidence_use_cases": sorted(
+                {doc.get("use_case") for doc in web_evidence if doc.get("use_case")}
+            ),
+            "web_evidence_types": sorted(
+                {
+                    doc.get("evidence_type")
+                    for doc in web_evidence
+                    if doc.get("evidence_type")
+                }
+            ),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
             "search_refinement_needed": bool(state.get("search_refinement_needed")),
@@ -6359,11 +7218,25 @@ async def generate_answer(state: LearningState) -> dict:
             "subjects_used": _subjects_used(rag_docs),
             "roles_used": _roles_used(rag_docs),
             "branch_mode": state.get("retrieval_branch_mode", ""),
-            "web_evidence_subjects": sorted({doc.get("retrieval_subject") for doc in web_evidence if doc.get("retrieval_subject")}),
-            "web_evidence_purposes": sorted({doc.get("retrieval_purpose") for doc in web_evidence if doc.get("retrieval_purpose")}),
+            "web_evidence_subjects": sorted(
+                {
+                    doc.get("retrieval_subject")
+                    for doc in web_evidence
+                    if doc.get("retrieval_subject")
+                }
+            ),
+            "web_evidence_purposes": sorted(
+                {
+                    doc.get("retrieval_purpose")
+                    for doc in web_evidence
+                    if doc.get("retrieval_purpose")
+                }
+            ),
             "learning_goal": state.get("learning_goal", ""),
             "primary_subject": state.get("primary_subject", ""),
-            "resource_offer": not bool(state.get("requested_resource_type") or state.get("needs_mindmap")),
+            "resource_offer": not bool(
+                state.get("requested_resource_type") or state.get("needs_mindmap")
+            ),
             "model_group": "academic",
         },
         state=state,
@@ -6385,6 +7258,7 @@ async def generate_answer(state: LearningState) -> dict:
     if thread_id:
         try:
             from src.context.context_builder import build_memory_context
+
             memory_injection = await build_memory_context(
                 user_id=thread_id,
                 current_query=question,
@@ -6397,10 +7271,13 @@ async def generate_answer(state: LearningState) -> dict:
                 system_prompt = f"{memory_context_text}\n\n{system_prompt}"
                 logger.debug(
                     "Injected memory context into generate_answer: %d chars, %d estimated tokens",
-                    len(memory_context_text), memory_injection.total_estimated_tokens,
+                    len(memory_context_text),
+                    memory_injection.total_estimated_tokens,
                 )
         except Exception:
-            logger.debug("Failed to build memory context for generate_answer", exc_info=True)
+            logger.debug(
+                "Failed to build memory context for generate_answer", exc_info=True
+            )
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -6432,16 +7309,18 @@ async def generate_answer(state: LearningState) -> dict:
                 content = str(d.get("content", ""))
                 preview = content[:120] + "..." if len(content) > 120 else content
                 reason = str(d.get("match_reason", ""))
-                reason_label = reason.replace("keyword_overlap", "关键词匹配").replace(
-                    "vector_similarity", "语义相似"
-                ).replace("high_importance", "高重要性").replace("fallback", "历史记录")
+                reason_label = (
+                    reason.replace("keyword_overlap", "关键词匹配")
+                    .replace("vector_similarity", "语义相似")
+                    .replace("high_importance", "高重要性")
+                    .replace("fallback", "历史记录")
+                )
                 score = float(d.get("score", 0))
                 items.append(f"- {reason_label} (score={score:.2f}): {preview}")
             if items:
                 memory_footer = (
                     "\n\n---\n"
-                    "*以上回答参考了你的学习记忆:*\n"
-                    + "\n".join(items) + "\n"
+                    "*以上回答参考了你的学习记忆:*\n" + "\n".join(items) + "\n"
                     "*记忆系统帮助 AI 更准确地理解你的学习背景和薄弱点.*"
                 )
                 response = response.rstrip() + memory_footer
@@ -6450,13 +7329,21 @@ async def generate_answer(state: LearningState) -> dict:
 
     # Record decision trace (fire-and-forget)
     import asyncio as _asyncio
-    _asyncio.create_task(_record_trace(
-        state, "generate_answer",
-        f"answer_generated len={len(response)}",
-        evidence=f"context_chunks={len(context)}",
-        steps=["memory_context_injected" if memory_context_text else "no_memory_context"],
-        confidence=0.7,
-    ))
+
+    _asyncio.create_task(
+        _record_trace(
+            state,
+            "generate_answer",
+            f"answer_generated len={len(response)}",
+            evidence=f"context_chunks={len(context)}",
+            steps=[
+                "memory_context_injected"
+                if memory_context_text
+                else "no_memory_context"
+            ],
+            confidence=0.7,
+        )
+    )
 
     return {"messages": [AIMessage(content=response)]}
 
@@ -6473,7 +7360,9 @@ def _coerce_hallucination_evaluation(value: Any) -> HallucinationEvaluation | No
     return None
 
 
-def _hallucination_pack_parts(result_pack: Any) -> tuple[HallucinationEvaluation | None, Any, str]:
+def _hallucination_pack_parts(
+    result_pack: Any,
+) -> tuple[HallucinationEvaluation | None, Any, str]:
     if isinstance(result_pack, HallucinationEvaluation):
         return result_pack, None, ""
     if not isinstance(result_pack, dict):
@@ -6493,7 +7382,10 @@ async def evaluate_hallucination(state: LearningState) -> dict:
     increments retry_count to signal the conditional edge for re-retrieval.
     Structured-output failures are surfaced instead of being treated as faithful.
     """
-    if state.get("evidence_judge_failed") and _block_generation_when_evidence_judge_failed():
+    if (
+        state.get("evidence_judge_failed")
+        and _block_generation_when_evidence_judge_failed()
+    ):
         emit_a3_trace(
             logger,
             "hallucination_eval",
@@ -6515,7 +7407,9 @@ async def evaluate_hallucination(state: LearningState) -> dict:
         }
 
     eval_temp = get_setting("hallucination_eval.temperature", 0.0)
-    eval_model = get_setting("llm.hallucination_eval.model", get_setting("hallucination_eval.model", ""))
+    eval_model = get_setting(
+        "llm.hallucination_eval.model", get_setting("hallucination_eval.model", "")
+    )
 
     # Extract the generated answer (last message) and original question
     answer = state["messages"][-1].content
@@ -6526,7 +7420,9 @@ async def evaluate_hallucination(state: LearningState) -> dict:
     context = "\n".join(d.get("content", "") for d in docs) if docs else ""
 
     eval_prompt = load_prompt("hallucination_eval").format(
-        question=question, context=context, answer=answer,
+        question=question,
+        context=context,
+        answer=answer,
     )
 
     retry_count = state.get("retry_count", 0)
@@ -6580,7 +7476,9 @@ async def evaluate_hallucination(state: LearningState) -> dict:
 
     evaluation = structured_result.parsed
     if not isinstance(evaluation, HallucinationEvaluation):
-        raise TypeError("hallucination_eval parsed result is not HallucinationEvaluation")
+        raise TypeError(
+            "hallucination_eval parsed result is not HallucinationEvaluation"
+        )
     is_faithful = evaluation.is_faithful
     failure_phase = ""
 
@@ -6657,9 +7555,16 @@ async def episodic_memory_retriever(state: LearningState) -> dict:
 
     if not current_query:
         emit_a3_trace(
-            logger, "episodic_memory_retrieval",
-            {"query": "", "episodic_count": 0, "semantic_count": 0, "error": "empty_query"},
-            state=state, env_flag="LOG_A3_TRACE",
+            logger,
+            "episodic_memory_retrieval",
+            {
+                "query": "",
+                "episodic_count": 0,
+                "semantic_count": 0,
+                "error": "empty_query",
+            },
+            state=state,
+            env_flag="LOG_A3_TRACE",
         )
         return {"episodic_memory_results": [], "semantic_memory_results": []}
 
@@ -6676,9 +7581,11 @@ async def episodic_memory_retriever(state: LearningState) -> dict:
     except Exception as exc:
         logger.exception("Episodic memory retrieval failed for thread=%s", thread_id)
         emit_a3_trace(
-            logger, "episodic_memory_retrieval",
+            logger,
+            "episodic_memory_retrieval",
             {"query": current_query[:200], "error": str(exc)},
-            state=state, env_flag="LOG_A3_TRACE",
+            state=state,
+            env_flag="LOG_A3_TRACE",
         )
         raise
 
@@ -6701,7 +7608,9 @@ async def episodic_memory_retriever(state: LearningState) -> dict:
     ]
     semantic_dicts = [
         {
-            "summary_id": r.memory.summary_id if hasattr(r.memory, "summary_id") else "",
+            "summary_id": r.memory.summary_id
+            if hasattr(r.memory, "summary_id")
+            else "",
             "memory_type": r.memory_type,
             "content": r.memory.content[:500] if hasattr(r.memory, "content") else "",
             "weak_knowledge_points": getattr(r.memory, "weak_knowledge_points", []),
@@ -6715,20 +7624,23 @@ async def episodic_memory_retriever(state: LearningState) -> dict:
     ]
 
     emit_a3_trace(
-        logger, "episodic_memory_retrieval",
+        logger,
+        "episodic_memory_retrieval",
         {
             "query": current_query[:200],
             "episodic_count": len(episodic_dicts),
             "semantic_count": len(semantic_dicts),
             "top_scores": [r.score for r in (episodic + semantic)[:3]],
         },
-        state=state, env_flag="LOG_A3_TRACE",
+        state=state,
+        env_flag="LOG_A3_TRACE",
     )
 
     # Fire-and-forget background consolidation
     if get_setting("memory.background_enabled", True):
         try:
             import asyncio as _asyncio
+
             _asyncio.create_task(_background_consolidation(thread_id))
         except Exception:
             logger.debug("Background consolidation task creation failed", exc_info=True)
@@ -6747,10 +7659,13 @@ async def _background_consolidation(user_id: str) -> None:
     """
     try:
         from src.memory.consolidation import run_consolidation_and_forgetting
+
         stats = await run_consolidation_and_forgetting(user_id)
         if stats.get("summaries_created") or stats.get("low_importance_deleted"):
             logger.info(
-                "Background memory maintenance for user=%s: %s", user_id, stats,
+                "Background memory maintenance for user=%s: %s",
+                user_id,
+                stats,
             )
     except Exception as exc:
         logger.debug("Background memory consolidation failed: %s", exc)
@@ -6774,7 +7689,10 @@ async def episodic_memory_writer(state: LearningState) -> dict:
         return {}
 
     try:
-        from src.memory.episodic import compute_importance_from_state, write_episodic_memory
+        from src.memory.episodic import (
+            compute_importance_from_state,
+            write_episodic_memory,
+        )
 
         importance, mem_type, content = compute_importance_from_state(state)
 
@@ -6786,21 +7704,25 @@ async def episodic_memory_writer(state: LearningState) -> dict:
         )
 
         emit_a3_trace(
-            logger, "episodic_memory_write",
+            logger,
+            "episodic_memory_write",
             {
                 "memory_id": record.memory_id,
                 "memory_type": mem_type,
                 "importance": importance,
                 "content_preview": content[:200],
             },
-            state=state, env_flag="LOG_A3_TRACE",
+            state=state,
+            env_flag="LOG_A3_TRACE",
         )
     except Exception as exc:
         logger.exception("Failed to write episodic memory for thread=%s", thread_id)
         emit_a3_trace(
-            logger, "episodic_memory_write",
+            logger,
+            "episodic_memory_write",
             {"error": str(exc)},
-            state=state, env_flag="LOG_A3_TRACE",
+            state=state,
+            env_flag="LOG_A3_TRACE",
         )
         raise
 
@@ -6822,7 +7744,10 @@ async def curriculum_planner(state: LearningState) -> dict:
         return {}
 
     try:
-        from src.curriculum.path_planner import compute_learning_path, build_curriculum_context
+        from src.curriculum.path_planner import (
+            compute_learning_path,
+            build_curriculum_context,
+        )
         from src.profile import get_profile_manager
 
         manager = get_profile_manager()
@@ -6838,7 +7763,8 @@ async def curriculum_planner(state: LearningState) -> dict:
         curriculum_context = build_curriculum_context(learning_path)
 
         emit_a3_trace(
-            logger, "curriculum_planner",
+            logger,
+            "curriculum_planner",
             {
                 "subject": subject,
                 "steps": len(learning_path.steps),
@@ -6849,31 +7775,36 @@ async def curriculum_planner(state: LearningState) -> dict:
                 "blocked": learning_path.blocked_count,
                 "total_hours": learning_path.estimated_total_hours,
             },
-            state=state, env_flag="LOG_A3_TRACE",
+            state=state,
+            env_flag="LOG_A3_TRACE",
         )
 
         # Record decision trace (fire-and-forget)
         import asyncio as _asyncio
-        _asyncio.create_task(_record_trace(
-            state, "curriculum_planner",
-            f"path={len(learning_path.steps)}steps skip={learning_path.skip_count} reinforce={learning_path.reinforce_count}",
-            evidence=f"subject={subject}",
-            steps=[
-                f"skip={learning_path.skip_count} topics mastered",
-                f"reinforce={learning_path.reinforce_count} topics need work",
-                f"repeat={learning_path.repeat_count} topics to retry",
-                f"ready={learning_path.ready_count} topics ready",
-                f"blocked={learning_path.blocked_count} topics blocked",
-            ],
-            confidence=0.7,
-        ))
+
+        _asyncio.create_task(
+            _record_trace(
+                state,
+                "curriculum_planner",
+                f"path={len(learning_path.steps)}steps skip={learning_path.skip_count} reinforce={learning_path.reinforce_count}",
+                evidence=f"subject={subject}",
+                steps=[
+                    f"skip={learning_path.skip_count} topics mastered",
+                    f"reinforce={learning_path.reinforce_count} topics need work",
+                    f"repeat={learning_path.repeat_count} topics to retry",
+                    f"ready={learning_path.ready_count} topics ready",
+                    f"blocked={learning_path.blocked_count} topics blocked",
+                ],
+                confidence=0.7,
+            )
+        )
 
         return {
             "learning_path": path_dict,
             "curriculum_context": curriculum_context,
         }
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Curriculum planner failed for thread=%s", thread_id)
         return {}
 
@@ -6916,7 +7847,7 @@ async def assessment_result_handler(state: LearningState) -> dict:
                 subject=subject,
             )
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Assessment handler failed for thread=%s", thread_id)
 
     return {"quiz_results": quiz_results}
@@ -6971,8 +7902,10 @@ async def recommendation_provider(state: LearningState) -> dict:
             summary_lines: list[str] = ["[个性化学习推荐]"]
             for i, rec in enumerate(rec_list.items[:5], 1):
                 resource_label = {
-                    "quiz": "练习题", "mindmap": "思维导图",
-                    "doc": "学习文档", "review_doc": "复习文档",
+                    "quiz": "练习题",
+                    "mindmap": "思维导图",
+                    "doc": "学习文档",
+                    "review_doc": "复习文档",
                     "case": "案例分析",
                 }.get(rec.resource_type, rec.resource_type)
                 summary_lines.append(
@@ -6982,9 +7915,11 @@ async def recommendation_provider(state: LearningState) -> dict:
             response_text = "\n".join(summary_lines)
 
             emit_a3_trace(
-                logger, "recommendation_provider",
+                logger,
+                "recommendation_provider",
                 {"count": len(recommendations)},
-                state=state, env_flag="LOG_A3_TRACE",
+                state=state,
+                env_flag="LOG_A3_TRACE",
             )
 
             return {
@@ -6992,7 +7927,7 @@ async def recommendation_provider(state: LearningState) -> dict:
                 "messages": [AIMessage(content=response_text)],
             }
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Recommendation provider failed for thread=%s", thread_id)
 
     return {"recommendations": []}

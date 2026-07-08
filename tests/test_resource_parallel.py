@@ -192,6 +192,11 @@ async def test_resource_worker_failure_is_captured(monkeypatch):
 async def test_resource_bundle_output_partial_success_sets_artifacts_and_message():
     result = await resource_bundle_output(
         {
+            "thread_id": "thread-1",
+            "session_id": "thread-1",
+            "request_id": "request-1",
+            "subject": "math",
+            "learning_goal": "review functions",
             "requested_resource_types": ["mindmap", "quiz"],
             "resource_generation_debug": {"stages": []},
             "resource_branch_results": [
@@ -238,6 +243,10 @@ async def test_resource_bundle_output_partial_success_sets_artifacts_and_message
     assert result["resource_bundle_artifact"]["success_count"] == 1
     assert result["resource_bundle_artifact"]["failed_count"] == 1
     assert result["mindmap_artifact"]["title"] == "Mock Map"
+    assert result["resource_artifacts_by_type"]["mindmap"]["title"] == "Mock Map"
+    assert len(result["last_generated_artifacts"]) == 1
+    assert len(result["task_workspace"]["artifacts_by_id"]) == 1
+    assert result["task_workspace"]["latest_artifact_by_resource_type"]["mindmap"]
     assert isinstance(result["messages"][0], AIMessage)
     assert "部分资源已生成" in result["messages"][0].content
 

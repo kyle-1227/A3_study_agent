@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -131,6 +130,7 @@ class TestInputValidation:
         req = ResumeRequest(thread_id="t-1", memory_use_choice="use")
         assert req.memory_use_choice == "use"
 
+
 class TestResourceFinalPayloadCore:
     """Verify final resource payload shaping."""
 
@@ -168,7 +168,12 @@ class TestResourceFinalPayloadCore:
                     "type": "resource_bundle",
                     "status": "partial_success",
                     "resources": [{"resource_type": "mindmap", "title": "Mock Map"}],
-                    "errors": [{"resource_type": "quiz", "error_message_sanitized": "quiz failed"}],
+                    "errors": [
+                        {
+                            "resource_type": "quiz",
+                            "error_message_sanitized": "quiz failed",
+                        }
+                    ],
                 },
                 "messages": [type("Msg", (), {"content": "bundle summary"})()],
             }
@@ -178,10 +183,14 @@ class TestResourceFinalPayloadCore:
         assert payload["type"] == "resource_final"
         assert payload["resource_type"] == "bundle"
         assert payload["resource_generation_status"] == "partial_success"
-        assert payload["resources"] == [{"resource_type": "mindmap", "title": "Mock Map"}]
+        assert payload["resources"] == [
+            {"resource_type": "mindmap", "title": "Mock Map"}
+        ]
         assert payload["errors"][0]["resource_type"] == "quiz"
 
-    def test_resource_bundle_payload_uses_bundle_message_when_last_message_missing(self):
+    def test_resource_bundle_payload_uses_bundle_message_when_last_message_missing(
+        self,
+    ):
         from app import _resource_final_payload
 
         payload = _resource_final_payload(
@@ -210,9 +219,18 @@ class TestDevMemoryClear:
     """Verify development-only persistent memory clearing."""
 
     @pytest.mark.anyio
-    async def test_clear_persistent_memory_for_thread_updates_memory_fields(self, monkeypatch):
+    async def test_clear_persistent_memory_for_thread_updates_memory_fields(
+        self, monkeypatch
+    ):
         from app import clear_persistent_memory_for_thread
-        from src.graph.state import MEMORY_CLEAR
+        from src.graph.state import (
+            DICT_CLEAR,
+            GENERATED_ARTIFACTS_CLEAR,
+            MEMORY_CLEAR,
+            TASK_WORKSPACE_CLEAR,
+            WORKSPACE_EVENTS_CLEAR,
+            LLM_INPUT_MANIFESTS_CLEAR,
+        )
 
         graph = AsyncMock()
         monkeypatch.delenv("APP_ENV", raising=False)
@@ -228,6 +246,15 @@ class TestDevMemoryClear:
         assert values["evidence_gap_memory"] is MEMORY_CLEAR
         assert values["episodic_memory_results"] == []
         assert values["semantic_memory_results"] == []
+        assert values["task_workspace"] is TASK_WORKSPACE_CLEAR
+        assert values["workspace_events"] is WORKSPACE_EVENTS_CLEAR
+        assert values["resource_artifacts_by_type"] is DICT_CLEAR
+        assert values["last_generated_artifacts"] is GENERATED_ARTIFACTS_CLEAR
+        assert values["llm_input_manifest"] == {}
+        assert values["llm_input_manifests"] is LLM_INPUT_MANIFESTS_CLEAR
+        assert values["thread_context_ledger"] is DICT_CLEAR
+        assert values["background_context_window"] == {}
+        assert values["context_continuity"] == {}
         assert result == {
             "ok": True,
             "thread_id": "thread-1",
@@ -237,11 +264,22 @@ class TestDevMemoryClear:
                 "evidence_gap_memory",
                 "episodic_memory_results",
                 "semantic_memory_results",
+                "task_workspace",
+                "workspace_events",
+                "resource_artifacts_by_type",
+                "last_generated_artifacts",
+                "llm_input_manifest",
+                "llm_input_manifests",
+                "thread_context_ledger",
+                "background_context_window",
+                "context_continuity",
             ],
         }
 
     @pytest.mark.anyio
-    async def test_clear_persistent_memory_for_thread_rejects_production(self, monkeypatch):
+    async def test_clear_persistent_memory_for_thread_rejects_production(
+        self, monkeypatch
+    ):
         from app import clear_persistent_memory_for_thread
 
         graph = AsyncMock()
@@ -255,7 +293,9 @@ class TestDevMemoryClear:
         graph.aupdate_state.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_clear_persistent_memory_for_thread_rejects_a3_production(self, monkeypatch):
+    async def test_clear_persistent_memory_for_thread_rejects_a3_production(
+        self, monkeypatch
+    ):
         from app import clear_persistent_memory_for_thread
 
         graph = AsyncMock()
@@ -270,7 +310,9 @@ class TestDevMemoryClear:
         graph.aupdate_state.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_clear_persistent_memory_for_thread_rejects_disabled_config(self, monkeypatch):
+    async def test_clear_persistent_memory_for_thread_rejects_disabled_config(
+        self, monkeypatch
+    ):
         from app import clear_persistent_memory_for_thread
 
         graph = AsyncMock()
@@ -291,15 +333,96 @@ class TestDevMemoryClear:
         helper_result = {
             "ok": True,
             "thread_id": "thread-1",
-            "cleared_fields": ["conversation_summary", "evidence_summary_memory", "evidence_gap_memory"],
+            "cleared_fields": [
+                "conversation_summary",
+                "evidence_summary_memory",
+                "evidence_gap_memory",
+            ],
         }
 
-        with patch("app.clear_persistent_memory_for_thread", new_callable=AsyncMock, return_value=helper_result):
+        with patch(
+            "app.clear_persistent_memory_for_thread",
+            new_callable=AsyncMock,
+            return_value=helper_result,
+        ):
             with TestClient(app) as client:
                 response = client.post("/dev/threads/thread-1/memory/clear")
 
         assert response.status_code == 200
         assert response.json() == helper_result
+
+
+def test_context_window_status_includes_workspace_counts():
+    from app import _context_window_status
+
+    _request_window, thread_window = _context_window_status(
+        {
+            "task_workspace": {
+                "schema_version": 1,
+                "workspace_id": "workspace:v1:one",
+                "active_subject": "math",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "evidence_summaries": [{"evidence_id": "e1"}],
+                "coverage_gaps": [{"gap_id": "g1"}],
+                "artifacts_by_id": {
+                    "artifact:v1:one": {"artifact_id": "artifact:v1:one"}
+                },
+            }
+        }
+    )
+
+    assert thread_window["workspace_present"] is True
+    assert thread_window["workspace_active_subject"] == "math"
+    assert thread_window["workspace_evidence_summary_count"] == 1
+    assert thread_window["workspace_gap_count"] == 1
+    assert thread_window["workspace_artifact_count"] == 1
+    assert thread_window["workspace_updated_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_new_request_status_values_preserve_thread_workspace_counts():
+    from app import _context_window_status, _new_request_status_values
+
+    values = _new_request_status_values(
+        {
+            "request_context_window": {
+                "current_request_id": "old-request",
+                "current_node": "mindmap_agent",
+                "last_event_count": 12,
+            },
+            "context_usage_history": [{"node_name": "mindmap_agent"}],
+            "task_workspace": {
+                "schema_version": 1,
+                "workspace_id": "workspace:v1:ml",
+                "active_subject": "machine_learning",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "evidence_summaries": [{"evidence_id": "e1"}],
+                "coverage_gaps": [],
+                "artifacts_by_id": {
+                    "artifact:v1:one": {"artifact_id": "artifact:v1:one"}
+                },
+            },
+        },
+        {
+            "request_context_window": {
+                "current_request_id": "new-request",
+                "current_node": "",
+                "last_event_count": 0,
+            },
+            "context_usage_history": [],
+            "request_id": "new-request",
+            "thread_id": "thread-1",
+        },
+    )
+
+    request_window, thread_window = _context_window_status(values)
+
+    assert request_window["current_request_id"] == "new-request"
+    assert request_window["last_event_count"] == 0
+    assert thread_window["context_usage_history_count"] == 1
+    assert thread_window["workspace_present"] is True
+    assert thread_window["workspace_active_subject"] == "machine_learning"
+    assert thread_window["workspace_evidence_summary_count"] == 1
+    assert thread_window["workspace_artifact_count"] == 1
 
 
 class TestMindmapArtifacts:
@@ -340,7 +463,9 @@ class TestResourceFinalPayloadArtifacts:
         payload = _resource_final_payload(
             {
                 "requested_resource_type": "",
-                "messages": [SimpleNamespace(content="Python list 和 tuple 的区别是...")],
+                "messages": [
+                    SimpleNamespace(content="Python list 和 tuple 的区别是...")
+                ],
             }
         )
 
@@ -460,7 +585,10 @@ class TestResourceFinalPayloadArtifacts:
         assert payload["code_practice_artifact"]["source_url"].endswith("main.py")
         assert payload["video_script_artifact"]["srt_url"].endswith("script.srt")
         assert payload["video_animation_artifact"]["html_url"].endswith("preview.html")
-        assert payload["study_plan"]["markdown_url"] == "/artifacts/review-docs/s1/python-plan.md"
+        assert (
+            payload["study_plan"]["markdown_url"]
+            == "/artifacts/review-docs/s1/python-plan.md"
+        )
         assert payload["study_plan"]["markdown"] == "# Python Study Plan"
         assert "multi_resource_results" not in payload
         assert "multi_resource_summary" not in payload
@@ -502,5 +630,10 @@ class TestResourceFinalPayloadArtifacts:
         )
 
         assert review_doc_payload and review_doc_payload["review_doc_artifacts"]
-        assert quiz_payload and quiz_payload["exercise_artifact"]["title"] == "Python 练习题"
-        assert mindmap_payload and mindmap_payload["mindmap"]["title"] == "Python 思维导图"
+        assert (
+            quiz_payload
+            and quiz_payload["exercise_artifact"]["title"] == "Python 练习题"
+        )
+        assert (
+            mindmap_payload and mindmap_payload["mindmap"]["title"] == "Python 思维导图"
+        )

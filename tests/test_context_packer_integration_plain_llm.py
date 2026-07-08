@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.context_engineering.packing.orchestrator import ContextPreparedMessages
 from src.context_engineering.schema import ContextItem
 
 
@@ -38,11 +39,11 @@ async def test_plain_llm_runs_packing_shadow_without_modifying_messages(monkeypa
     from src.graph.llm import invoke_plain_llm_fail_fast
 
     messages = [{"role": "user", "content": "question"}]
-    context_items = [_item()]
-    packing_calls: list[dict] = []
+    prepare_calls: list[dict] = []
     mock_llm = MagicMock()
     mock_llm.model_name = "deepseek-v4-pro"
     mock_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content="answer"))
+    prepared_messages = list(messages)
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(
@@ -50,15 +51,22 @@ async def test_plain_llm_runs_packing_shadow_without_modifying_messages(monkeypa
         "get_llm_call_max_retries",
         lambda node_name=None, default=0: 0,
     )
+
+    def _prepare_messages(_logger, **kwargs):
+        prepare_calls.append(kwargs)
+        return ContextPreparedMessages(
+            messages_for_llm=prepared_messages,
+            original_messages=list(kwargs["messages"]),
+            trace_call_id="trace-1",
+            next_trace_seq=0,
+            context_apply_applied=False,
+            context_apply_fallback_used=False,
+        )
+
     monkeypatch.setattr(
         llm_module,
-        "emit_context_items_shadow",
-        lambda *_, **__: context_items,
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "emit_context_packing_shadow",
-        lambda *_, **kwargs: packing_calls.append(kwargs),
+        "prepare_messages_with_context_policy",
+        _prepare_messages,
     )
 
     result = await invoke_plain_llm_fail_fast(
@@ -69,6 +77,7 @@ async def test_plain_llm_runs_packing_shadow_without_modifying_messages(monkeypa
     )
 
     assert result == "answer"
-    assert packing_calls[0]["items"] is context_items
-    mock_llm.ainvoke.assert_awaited_once_with(messages)
+    assert prepare_calls[0]["node_name"] == "generate_answer"
+    assert prepare_calls[0]["messages"] == messages
+    mock_llm.ainvoke.assert_awaited_once_with(prepared_messages)
     assert messages == [{"role": "user", "content": "question"}]

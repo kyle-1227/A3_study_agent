@@ -129,7 +129,7 @@ context_engineering:
   packer:
     enabled: true
     shadow_mode: false
-    apply_to_llm: true
+    apply_to_llm: false
     strategy: priority_budget
     max_context_block_tokens: 120000
     trace_selected_items: 10
@@ -146,11 +146,13 @@ context_engineering:
       - curriculum
     apply:
       enabled: true
-      apply_enabled_nodes:
-        - review_doc_planner
-        - review_doc_agent
+      apply_enabled_nodes: []
       fallback_on_error: false
       allow_structured_output: false
+      structured_output_context:
+        enabled: true
+        mode: observe_only
+        active_nodes: []
       role: system
       position: after_system
       exclude_message_source: true
@@ -227,7 +229,8 @@ context_engineering:
           min_priority: 0
           min_relevance_score: 0.45
           require_user_match: true
-          require_task_match: true
+          require_thread_match: true
+          require_task_match: false
           stale_policy: downrank
           allowed_purposes:
             - continuity
@@ -238,7 +241,8 @@ context_engineering:
           min_priority: 0
           min_relevance_score: 0.45
           require_user_match: true
-          require_task_match: true
+          require_thread_match: true
+          require_task_match: false
           stale_policy: downrank
           allowed_purposes:
             - learning_state
@@ -248,7 +252,10 @@ context_engineering:
           max_tokens: 1600
           min_priority: 0
           min_relevance_score: 0.4
-          require_task_match: true
+          require_thread_match: true
+          require_subject_match: false
+          require_task_match: false
+          stale_policy: downrank
           allowed_purposes:
             - artifact_reference
         message:
@@ -434,12 +441,14 @@ context_engineering:
             - curriculum
             - memory
             - profile
+            - artifact
           injectable_sources:
             - evidence
             - rules
             - curriculum
             - memory
             - profile
+            - artifact
           source_overrides:
             evidence:
               max_items: 4
@@ -448,6 +457,8 @@ context_engineering:
             curriculum:
               max_items: 2
             memory:
+              max_items: 2
+            artifact:
               max_items: 2
         review_doc_reviewer:
           inherit: reviewer_nodes
@@ -472,12 +483,14 @@ context_engineering:
             - trajectory
             - memory
             - curriculum
+            - artifact
           injectable_sources:
             - evidence
             - rules
             - trajectory
             - memory
             - curriculum
+            - artifact
           source_overrides:
             trajectory:
               max_items: 3
@@ -485,6 +498,8 @@ context_engineering:
               max_items: 2
             evidence:
               max_items: 3
+            artifact:
+              max_items: 2
         exercise_reviewer:
           inherit: reviewer_nodes
           injectable_sources:
@@ -501,10 +516,12 @@ context_engineering:
           optional_sources:
             - rules
             - curriculum
+            - artifact
           injectable_sources:
             - evidence
             - rules
             - curriculum
+            - artifact
         mindmap_reviewer:
           inherit: reviewer_nodes
           injectable_sources:
@@ -549,11 +566,13 @@ context_engineering:
             - rules
             - curriculum
             - profile
+            - artifact
           injectable_sources:
             - evidence
             - rules
             - curriculum
             - profile
+            - artifact
         video_script_reviewer:
           inherit: reviewer_nodes
           injectable_sources:
@@ -568,10 +587,12 @@ context_engineering:
           optional_sources:
             - rules
             - curriculum
+            - artifact
           injectable_sources:
             - evidence
             - rules
             - curriculum
+            - artifact
         video_animation_reviewer:
           inherit: reviewer_nodes
           injectable_sources:
@@ -588,12 +609,14 @@ context_engineering:
             - trajectory
             - memory
             - curriculum
+            - artifact
           injectable_sources:
             - profile
             - rules
             - trajectory
             - memory
             - curriculum
+            - artifact
         adaptive_practice_responder:
           inherit: agent_nodes
           required_sources:
@@ -648,9 +671,7 @@ context_engineering:
       route_rollout:
         enabled: true
         route_name: single_resource_generation
-        apply_enabled_nodes:
-          - review_doc_planner
-          - review_doc_agent
+        apply_enabled_nodes: []
         require_single_resource_request: true
         sample_rate: 1.0
         min_injectable_items: 1

@@ -11,6 +11,16 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ## Observed Legacy Risk Areas
 
+### 2026-07-08 LLM Input Manifest enforcement
+
+- Added manifest enforcement for active provider transport paths before any
+  generated/chat-completion LLM request is sent.
+- Existing `invoke_with_fallback()` and `async_invoke_with_fallback()` remain
+  report-only legacy helpers because they are covered by historical tests and
+  are not used by production graph call sites.
+- New production LLM paths must not call these legacy fallback helpers; direct
+  provider invocation should stay behind manifest-guarded transport.
+
 ### 2026-06-29 Context Engineering Phase 0
 
 - Phase 0 target fallback cleanup and deferred findings are recorded in `docs/reports/context_engineering_phase0_audit.md`.

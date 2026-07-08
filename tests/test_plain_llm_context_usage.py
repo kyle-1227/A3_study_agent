@@ -38,6 +38,8 @@ async def test_plain_llm_emits_context_usage_before_call(monkeypatch):
 
     assert result == "usable answer"
     stages = [event.get("stage") for event in sink]
+    assert "llm_input_manifest.built" in stages
+    assert stages.index("context_usage") < stages.index("llm_input_manifest.built")
     assert stages.index("context_usage") < stages.index("plain_llm_output")
     assert mock_llm.ainvoke.await_count == 1
 

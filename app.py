@@ -24,6 +24,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 
 from src.context_engineering.schema import sanitize_error_message
+from src.context_engineering.input_manifest import (
+    background_context_status_payload,
+    build_background_context_window,
+    build_thread_context_ledger_update,
+    llm_input_manifest_trace_payload,
+    merge_llm_input_manifest_history,
+)
+from src.context_engineering.workspace import workspace_status_payload
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -38,7 +46,12 @@ from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import (
     CONTEXT_CLEAR,
+    DICT_CLEAR,
+    GENERATED_ARTIFACTS_CLEAR,
+    LLM_INPUT_MANIFESTS_CLEAR,
     MEMORY_CLEAR,
+    TASK_WORKSPACE_CLEAR,
+    WORKSPACE_EVENTS_CLEAR,
     initial_request_reset_transient_state,
 )
 from src.profile import get_profile_manager
@@ -89,6 +102,16 @@ PROVIDER_RETRY_TRACE_STAGES = {
     "provider_transport_retry_attempt",
     "provider_transport_error",
     "final_failure_after_retries",
+}
+WORKSPACE_TRACE_STAGES = {
+    "task_workspace.update_planned",
+    "task_workspace.updated",
+    "task_workspace.update_failed",
+    "task_workspace.continuation_checked",
+    "task_workspace.continuation_applied",
+    "task_workspace.continuation_skipped",
+    "resource_artifacts.indexed",
+    "workspace_context.collected",
 }
 CONTEXT_TOP_ITEM_FIELDS = {
     "id",
@@ -194,6 +217,54 @@ def _safe_context_event_summary(event: dict) -> dict:
         if isinstance(event.get("trace_seq"), int)
         and not isinstance(event.get("trace_seq"), bool)
         else 0,
+    }
+
+
+def _safe_workspace_event_summary(event: dict) -> dict:
+    return {
+        "stage": sanitize_error_message(event.get("stage", ""), max_chars=120),
+        "request_id": sanitize_error_message(
+            event.get("request_id", ""),
+            max_chars=80,
+        ),
+        "thread_id": sanitize_error_message(
+            event.get("thread_id", ""),
+            max_chars=120,
+        ),
+        "workspace_id": sanitize_error_message(
+            event.get("workspace_id", ""),
+            max_chars=160,
+        ),
+        "active_subject": sanitize_error_message(
+            event.get("active_subject", ""),
+            max_chars=120,
+        ),
+        "active_learning_goal_present": bool(
+            event.get("active_learning_goal_present", False)
+        ),
+        "evidence_summary_count": _safe_int(
+            event.get("evidence_summary_count"),
+            default=0,
+        ),
+        "coverage_gap_count": _safe_int(event.get("coverage_gap_count"), default=0),
+        "artifact_count": _safe_int(event.get("artifact_count"), default=0),
+        "constraint_count": _safe_int(event.get("constraint_count"), default=0),
+        "updated_sources": _safe_warning_list(event.get("updated_sources")),
+        "rotation_action": sanitize_error_message(
+            event.get("rotation_action", ""),
+            max_chars=80,
+        ),
+        "can_continue": bool(event.get("can_continue", False)),
+        "continuation_applied": bool(event.get("continuation_applied", False)),
+        "skip_reason": sanitize_error_message(
+            event.get("skip_reason", ""),
+            max_chars=120,
+        ),
+        "normalized_subject": sanitize_error_message(
+            event.get("normalized_subject", ""),
+            max_chars=120,
+        ),
+        "diagnostics": _safe_warning_list(event.get("diagnostics")),
     }
 
 
@@ -497,13 +568,23 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
                 ),
             }
         )
-    usage_history = (
-        values.get("context_usage_history")
-        if isinstance(values.get("context_usage_history"), list)
-        else []
+    raw_usage_history = values.get("context_usage_history")
+    usage_history: list = (
+        raw_usage_history if isinstance(raw_usage_history, list) else []
     )
     resource_artifacts_by_type = values.get("resource_artifacts_by_type")
     last_generated_artifacts = values.get("last_generated_artifacts")
+    workspace_status = workspace_status_payload(values.get("task_workspace"))
+    raw_manifest_history = values.get("llm_input_manifests")
+    manifest_history: list = (
+        raw_manifest_history if isinstance(raw_manifest_history, list) else []
+    )
+    background_window = (
+        values.get("background_context_window")
+        if isinstance(values.get("background_context_window"), dict)
+        else {}
+    )
+    background_status = background_context_status_payload(background_window)
     thread_context_window = {
         "context_usage_history_count": len(usage_history),
         "artifact_count": _artifact_count(
@@ -528,8 +609,24 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         "last_resource_subnodes_count": len(values.get("last_resource_subnodes") or [])
         if isinstance(values.get("last_resource_subnodes"), list)
         else 0,
+        "background_context_window": background_window,
+        **background_status,
+        "llm_input_manifest_count": len(manifest_history),
+        **workspace_status,
     }
     return request_context_window, thread_context_window
+
+
+def _last_llm_input_manifest(values: dict) -> dict:
+    manifest = values.get("llm_input_manifest")
+    if isinstance(manifest, dict) and manifest:
+        return manifest
+    history = values.get("llm_input_manifests")
+    if isinstance(history, list) and history:
+        latest = history[0]
+        if isinstance(latest, dict):
+            return latest
+    return {}
 
 
 def _dict_keys(value: object) -> list[str]:
@@ -542,6 +639,28 @@ def _artifact_count(by_type: object, generated: object) -> int:
     total = len(by_type) if isinstance(by_type, dict) else 0
     total += len(generated) if isinstance(generated, list) else 0
     return total
+
+
+def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) -> dict:
+    """Combine current run control with persistent thread context for status UI."""
+    values = dict(snapshot_values or {})
+    previous_history = values.get("context_usage_history")
+    previous_manifests = values.get("llm_input_manifests")
+    previous_manifest = values.get("llm_input_manifest")
+    previous_ledger = values.get("thread_context_ledger")
+    previous_background = values.get("background_context_window")
+    values.update(initial_run_values or {})
+    if isinstance(previous_history, list):
+        values["context_usage_history"] = previous_history
+    if isinstance(previous_manifests, list):
+        values["llm_input_manifests"] = previous_manifests
+    if isinstance(previous_manifest, dict):
+        values["llm_input_manifest"] = previous_manifest
+    if isinstance(previous_ledger, dict):
+        values["thread_context_ledger"] = previous_ledger
+    if isinstance(previous_background, dict):
+        values["background_context_window"] = previous_background
+    return values
 
 
 def _thread_status_from_snapshot(
@@ -566,6 +685,13 @@ def _thread_status_from_snapshot(
             context_usage_history=values.get("context_usage_history")
             if isinstance(values.get("context_usage_history"), list)
             else [],
+            last_llm_input_manifest=_last_llm_input_manifest(values),
+            llm_input_manifest_count=len(values.get("llm_input_manifests") or [])
+            if isinstance(values.get("llm_input_manifests"), list)
+            else 0,
+            background_context_window=values.get("background_context_window")
+            if isinstance(values.get("background_context_window"), dict)
+            else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
             missing_run_control_fields=missing_fields,
@@ -600,13 +726,22 @@ def _thread_status_from_snapshot(
         context_usage_history=values.get("context_usage_history")
         if isinstance(values.get("context_usage_history"), list)
         else [],
+        last_llm_input_manifest=_last_llm_input_manifest(values),
+        llm_input_manifest_count=len(values.get("llm_input_manifests") or [])
+        if isinstance(values.get("llm_input_manifests"), list)
+        else 0,
+        background_context_window=values.get("background_context_window")
+        if isinstance(values.get("background_context_window"), dict)
+        else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
         missing_run_control_fields=[],
     )
 
 
-def _thread_status_from_active_run(thread_id: str, active_run: dict) -> ThreadStatusResponse:
+def _thread_status_from_active_run(
+    thread_id: str, active_run: dict
+) -> ThreadStatusResponse:
     request_context_window = active_run.get("request_context_window")
     thread_context_window = active_run.get("thread_context_window")
     return ThreadStatusResponse(
@@ -625,6 +760,15 @@ def _thread_status_from_active_run(thread_id: str, active_run: dict) -> ThreadSt
         context_usage_history=active_run.get("context_usage_history")
         if isinstance(active_run.get("context_usage_history"), list)
         else [],
+        last_llm_input_manifest=active_run.get("llm_input_manifest")
+        if isinstance(active_run.get("llm_input_manifest"), dict)
+        else {},
+        llm_input_manifest_count=len(active_run.get("llm_input_manifests") or [])
+        if isinstance(active_run.get("llm_input_manifests"), list)
+        else 0,
+        background_context_window=active_run.get("background_context_window")
+        if isinstance(active_run.get("background_context_window"), dict)
+        else {},
         request_context_window=request_context_window
         if isinstance(request_context_window, dict)
         else {"current_request_id": "", "current_node": "", "last_event_count": 0},
@@ -639,6 +783,19 @@ def _thread_status_from_active_run(thread_id: str, active_run: dict) -> ThreadSt
             "last_context_selection_by_node_keys": [],
             "last_context_applied_by_node_keys": [],
             "last_resource_subnodes_count": 0,
+            "llm_input_manifest_count": 0,
+            "background_context_window": {},
+            "background_context_window_present": False,
+            "background_context_window_used_tokens": 0,
+            "background_context_window_max_tokens": 0,
+            "background_context_window_used_ratio": 0.0,
+            "background_context_window_updated_at": "",
+            "workspace_present": False,
+            "workspace_active_subject": "",
+            "workspace_evidence_summary_count": 0,
+            "workspace_gap_count": 0,
+            "workspace_artifact_count": 0,
+            "workspace_updated_at": "",
         },
         missing_run_control_fields=[],
     )
@@ -691,16 +848,24 @@ async def _update_run_state(
 
 
 async def _try_update_run_state(
-    graph, config: dict, values: dict, *, state: dict | None = None
+    graph,
+    config: dict,
+    values: dict,
+    *,
+    state: dict | None = None,
+    persist_checkpoint: bool = True,
 ) -> bool:
+    thread_id = _thread_id_from_update(config=config, values=values, state=state)
+    if not persist_checkpoint:
+        if thread_id and get_active_run(thread_id) is not None:
+            update_active_run(thread_id, values)
+        return True
     try:
         await _update_run_state(graph, config, values, state=state)
-        thread_id = _thread_id_from_update(config=config, values=values, state=state)
         if thread_id and get_active_run(thread_id) is not None:
             update_active_run(thread_id, values)
         return True
     except Exception as exc:
-        thread_id = _thread_id_from_update(config=config, values=values, state=state)
         if thread_id and get_active_run(thread_id) is not None:
             update_active_run(thread_id, values)
         emit_a3_trace(
@@ -769,6 +934,25 @@ async def _update_context_window_state_from_trace(
         "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
         "last_resource_subnodes": list(last_resource_subnodes),
     }
+    active_run = get_active_run(thread_id)
+    active_thread_window = (
+        dict(active_run.get("thread_context_window") or {})
+        if isinstance(active_run, dict)
+        else {}
+    )
+    active_thread_window.update(
+        {
+            "context_usage_history_count": len(context_usage_history),
+            "last_context_policy_by_node_keys": sorted(last_context_policy_by_node),
+            "last_provider_supply_by_node_keys": sorted(last_provider_supply_by_node),
+            "last_context_selection_by_node_keys": sorted(
+                last_context_selection_by_node
+            ),
+            "last_context_applied_by_node_keys": sorted(last_context_applied_by_node),
+            "last_resource_subnodes_count": len(last_resource_subnodes),
+        }
+    )
+    values["thread_context_window"] = active_thread_window
     updated = await _try_update_run_state(
         graph,
         config,
@@ -778,6 +962,7 @@ async def _update_context_window_state_from_trace(
             "session_id": thread_id,
             "current_node": current_node,
         },
+        persist_checkpoint=False,
     )
     emit_a3_trace(
         logger,
@@ -797,6 +982,66 @@ async def _update_context_window_state_from_trace(
         state={"thread_id": thread_id, "session_id": thread_id},
         env_flag="LOG_A3_TRACE",
     )
+
+
+async def _update_llm_manifest_state_from_trace(
+    graph,
+    config: dict,
+    *,
+    thread_id: str,
+    event: dict,
+    llm_input_manifests: list[dict],
+    state_context: dict,
+) -> tuple[dict, dict, dict, list[dict]]:
+    payload = llm_input_manifest_trace_payload(event)
+    llm_input_manifests[:] = merge_llm_input_manifest_history(
+        llm_input_manifests,
+        [payload],
+    )
+    active_run = get_active_run(thread_id)
+    existing_ledger = (
+        active_run.get("thread_context_ledger")
+        if isinstance(active_run, dict)
+        and isinstance(active_run.get("thread_context_ledger"), dict)
+        else state_context.get("thread_context_ledger")
+        if isinstance(state_context.get("thread_context_ledger"), dict)
+        else {}
+    )
+    ledger_update = build_thread_context_ledger_update(
+        existing=existing_ledger,
+        manifest=payload,
+    )
+    background_window = build_background_context_window(
+        manifest=payload,
+        state=state_context,
+        manifest_count=len(llm_input_manifests),
+    )
+    active_thread_window = (
+        dict(active_run.get("thread_context_window") or {})
+        if isinstance(active_run, dict)
+        else {}
+    )
+    active_thread_window.update(
+        {
+            "llm_input_manifest_count": len(llm_input_manifests),
+            "background_context_window": background_window,
+            **background_context_status_payload(background_window),
+        }
+    )
+    await _try_update_run_state(
+        graph,
+        config,
+        {
+            "llm_input_manifest": payload,
+            "llm_input_manifests": [payload],
+            "thread_context_ledger": ledger_update,
+            "background_context_window": background_window,
+            "thread_context_window": active_thread_window,
+        },
+        state={"thread_id": thread_id, "session_id": thread_id},
+        persist_checkpoint=False,
+    )
+    return dict(payload), dict(ledger_update), dict(background_window), llm_input_manifests
 
 
 def _last_ai_message_content(final_state: dict) -> str:
@@ -980,7 +1225,7 @@ def _resource_final_payload(final_state: dict) -> dict | None:
             return None
 
     answer = _last_ai_message_content(final_state)
-    payload: dict = {
+    payload = {
         "type": "resource_final",
         "resource_type": resource_type,
         "answer": answer,
@@ -1098,6 +1343,15 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "evidence_gap_memory",
         "episodic_memory_results",
         "semantic_memory_results",
+        "task_workspace",
+        "workspace_events",
+        "resource_artifacts_by_type",
+        "last_generated_artifacts",
+        "llm_input_manifest",
+        "llm_input_manifests",
+        "thread_context_ledger",
+        "background_context_window",
+        "context_continuity",
     ]
     values = {
         "conversation_summary": "",
@@ -1105,6 +1359,15 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "evidence_gap_memory": MEMORY_CLEAR,
         "episodic_memory_results": [],
         "semantic_memory_results": [],
+        "task_workspace": TASK_WORKSPACE_CLEAR,
+        "workspace_events": WORKSPACE_EVENTS_CLEAR,
+        "resource_artifacts_by_type": DICT_CLEAR,
+        "last_generated_artifacts": GENERATED_ARTIFACTS_CLEAR,
+        "llm_input_manifest": {},
+        "llm_input_manifests": LLM_INPUT_MANIFESTS_CLEAR,
+        "thread_context_ledger": DICT_CLEAR,
+        "background_context_window": {},
+        "context_continuity": {},
     }
     await safe_update_thread_state(
         graph,
@@ -1150,6 +1413,8 @@ async def _stream_graph_events(
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
     context_usage_history: list[dict] = []
+    llm_input_manifests: list[dict] = []
+    manifest_state_context: dict = {}
     request_context_events: list[dict] = []
     last_context_policy_by_node: dict[str, dict] = {}
     last_provider_supply_by_node: dict[str, dict] = {}
@@ -1161,17 +1426,23 @@ async def _stream_graph_events(
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
-            existing_history = _state_values(existing_snapshot).get(
-                "context_usage_history"
-            )
+            existing_values = _state_values(existing_snapshot)
+            manifest_state_context = dict(existing_values)
+            existing_history = existing_values.get("context_usage_history")
             if isinstance(existing_history, list):
                 context_usage_history = trim_context_usage_history(existing_history)
+            existing_manifests = existing_values.get("llm_input_manifests")
+            if isinstance(existing_manifests, list):
+                llm_input_manifests = merge_llm_input_manifest_history(
+                    existing_manifests,
+                    [],
+                )
         except Exception as exc:
             emit_a3_trace(
                 logger,
                 "run_state_read_failed",
                 {
-                    "operation": "load_context_usage_history",
+                    "operation": "load_context_history",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                 },
@@ -1180,12 +1451,38 @@ async def _stream_graph_events(
             )
 
     async def _drain_trace_events() -> list[str]:
+        nonlocal llm_input_manifests, manifest_state_context
         drained: list[str] = []
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
             if isinstance(stage, str) and stage.startswith("context_"):
                 request_context_events.append(_safe_context_event_summary(event))
+            if stage in WORKSPACE_TRACE_STAGES:
+                payload = {
+                    "type": "workspace_context",
+                    **_safe_workspace_event_summary(event),
+                }
+                request_context_events.append(_safe_workspace_event_summary(event))
+                await _update_context_window_state_from_trace(
+                    graph,
+                    config,
+                    thread_id=thread_id,
+                    request_context_events=request_context_events,
+                    context_usage_history=context_usage_history,
+                    last_context_policy_by_node=last_context_policy_by_node,
+                    last_provider_supply_by_node=last_provider_supply_by_node,
+                    last_context_selection_by_node=last_context_selection_by_node,
+                    last_context_applied_by_node=last_context_applied_by_node,
+                    last_drop_reasons_by_node=last_drop_reasons_by_node,
+                    last_resource_subnodes=last_resource_subnodes,
+                    current_node=sanitize_error_message(
+                        event.get("node_name", ""),
+                        max_chars=120,
+                    ),
+                )
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
             if stage in PROVIDER_RETRY_TRACE_STAGES:
                 payload = {
                     "type": "provider_retry",
@@ -1278,6 +1575,66 @@ async def _stream_graph_events(
                 }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
+            if stage == "llm_input_manifest.built":
+                payload, ledger_update, background_window, llm_input_manifests = (
+                    await _update_llm_manifest_state_from_trace(
+                        graph,
+                        config,
+                        thread_id=thread_id,
+                        event=event,
+                        llm_input_manifests=llm_input_manifests,
+                        state_context=manifest_state_context,
+                    )
+                )
+                request_context_events.append(
+                    {
+                        "stage": "llm_input_manifest.built",
+                        "node_name": payload.get("node_name", ""),
+                        "llm_node": payload.get("llm_node", ""),
+                        "request_id": payload.get("request_id", ""),
+                        "manifest_id": payload.get("manifest_id", ""),
+                        "section_count": len(payload.get("section_names") or []),
+                    }
+                )
+                manifest_state_context.update(
+                    {
+                        "llm_input_manifest": payload,
+                        "llm_input_manifests": list(llm_input_manifests),
+                        "thread_context_ledger": ledger_update,
+                        "background_context_window": background_window,
+                    }
+                )
+                sse_payload = {
+                    "type": "llm_input_manifest",
+                    **payload,
+                    "background_context_window": background_window,
+                }
+                drained.append(
+                    f"data: {json.dumps(sse_payload, ensure_ascii=False)}\n\n"
+                )
+                continue
+            if stage == "llm_input_manifest.failed":
+                payload = {
+                    "type": "llm_input_manifest_error",
+                    "node": sanitize_error_message(
+                        event.get("node_name", ""),
+                        max_chars=120,
+                    ),
+                    "llm_node": sanitize_error_message(
+                        event.get("llm_node", ""),
+                        max_chars=120,
+                    ),
+                    "reason": sanitize_error_message(
+                        event.get("reason", ""),
+                        max_chars=160,
+                    ),
+                    "error_type": sanitize_error_message(
+                        event.get("error_type", ""),
+                        max_chars=120,
+                    ),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
             if stage == "context_usage":
                 payload = {
                     "type": "context_usage",
@@ -1306,14 +1663,54 @@ async def _stream_graph_events(
                 context_usage_history[:] = trim_context_usage_history(
                     context_usage_history
                 )
+                active_run = get_active_run(thread_id)
+                active_thread_window = (
+                    dict(active_run.get("thread_context_window") or {})
+                    if isinstance(active_run, dict)
+                    else {}
+                )
+                active_thread_window["context_usage_history_count"] = len(
+                    context_usage_history
+                )
+                background_window = (
+                    dict(active_run.get("background_context_window") or {})
+                    if isinstance(active_run, dict)
+                    else {}
+                )
+                if background_window:
+                    max_context_tokens = _safe_int(event.get("max_context_tokens"))
+                    used_tokens = _safe_int(event.get("used_tokens"))
+                    background_window.update(
+                        {
+                            "used_tokens": used_tokens,
+                            "max_context_tokens": max_context_tokens,
+                            "used_ratio": round(
+                                used_tokens / max_context_tokens,
+                                4,
+                            )
+                            if max_context_tokens > 0
+                            else 0.0,
+                        }
+                    )
+                    active_thread_window.update(
+                        {
+                            "background_context_window": background_window,
+                            **background_context_status_payload(background_window),
+                        }
+                    )
                 failed_update_ok = await _try_update_run_state(
                     graph,
                     config,
                     {
                         "context_usage": payload,
                         "context_usage_history": [payload],
+                        "thread_context_window": active_thread_window,
+                        "background_context_window": background_window
+                        if background_window
+                        else {},
                     },
                     state={"thread_id": thread_id, "session_id": thread_id},
+                    persist_checkpoint=False,
                 )
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
@@ -1797,6 +2194,7 @@ async def _stream_graph_events(
                                 "pending_interrupt_type": "",
                             },
                             state={"thread_id": thread_id, "session_id": thread_id},
+                            persist_checkpoint=False,
                         )
                         payload = json.dumps(
                             {
@@ -1844,6 +2242,7 @@ async def _stream_graph_events(
                                 "current_node": "",
                             },
                             state={"thread_id": thread_id, "session_id": thread_id},
+                            persist_checkpoint=False,
                         )
                     yield f"data: {payload}\n\n"
 
@@ -2044,6 +2443,7 @@ async def _stream_graph_events(
                             "pending_interrupt_type": "memory_confirmation",
                         },
                         state=final_state,
+                        persist_checkpoint=False,
                     )
                     payload_data = {
                         "type": "interrupt",
@@ -2065,6 +2465,7 @@ async def _stream_graph_events(
                             "pending_interrupt_type": "plan_review",
                         },
                         state=final_state,
+                        persist_checkpoint=False,
                     )
                     payload_data = {
                         "type": "interrupt",
@@ -2078,16 +2479,58 @@ async def _stream_graph_events(
                     finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
                 return
 
+    final_request_context_window = {
+        "current_request_id": request_context_events[-1].get("request_id", "")
+        if request_context_events
+        else str(final_state.get("request_id") or ""),
+        "current_node": "",
+        "last_event_count": len(request_context_events),
+    }
+    completed_values = {
+        "run_status": RUN_STATUS_COMPLETED,
+        "resume_available": False,
+        "pending_interrupt_type": "",
+        "current_node": "",
+        "stop_requested": False,
+        "request_context_window": final_request_context_window,
+        "context_window_events": list(request_context_events),
+        "last_context_policy_by_node": dict(last_context_policy_by_node),
+        "last_provider_supply_by_node": dict(last_provider_supply_by_node),
+        "last_context_selection_by_node": dict(last_context_selection_by_node),
+        "last_context_applied_by_node": dict(last_context_applied_by_node),
+        "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
+        "last_resource_subnodes": list(last_resource_subnodes),
+    }
+    if context_usage_history:
+        completed_values["context_usage"] = context_usage_history[-1]
+        completed_values["context_usage_history"] = list(context_usage_history)
+    if llm_input_manifests:
+        completed_values["llm_input_manifest"] = llm_input_manifests[0]
+        completed_values["llm_input_manifests"] = list(llm_input_manifests)
+        background_window = manifest_state_context.get("background_context_window")
+        if isinstance(background_window, dict):
+            completed_values["background_context_window"] = background_window
+            active_thread_window = (
+                dict(completed_values.get("thread_context_window") or {})
+                if isinstance(completed_values.get("thread_context_window"), dict)
+                else {}
+            )
+            active_thread_window.update(
+                {
+                    "llm_input_manifest_count": len(llm_input_manifests),
+                    "background_context_window": background_window,
+                    **background_context_status_payload(background_window),
+                }
+            )
+            completed_values["thread_context_window"] = active_thread_window
+        ledger = manifest_state_context.get("thread_context_ledger")
+        if isinstance(ledger, dict):
+            completed_values["thread_context_ledger"] = ledger
+
     completed_update_ok = await _try_update_run_state(
         graph,
         config,
-        {
-            "run_status": RUN_STATUS_COMPLETED,
-            "resume_available": False,
-            "pending_interrupt_type": "",
-            "current_node": "",
-            "stop_requested": False,
-        },
+        completed_values,
         state=final_state,
     )
     run_control_registry.clear_stop_signal(thread_id)
@@ -2245,8 +2688,13 @@ async def generate_sse(
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return
 
+    run_state_snapshot = await graph.aget_state(config)
+    status_values = _new_request_status_values(
+        _state_values(run_state_snapshot),
+        initial_run_values,
+    )
     request_context_window, thread_context_window = _context_window_status(
-        initial_run_values
+        status_values
     )
     start_active_run(
         thread_id,
@@ -2260,7 +2708,19 @@ async def generate_sse(
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
             "context_usage": {},
-            "context_usage_history": [],
+            "context_usage_history": status_values.get("context_usage_history")
+            if isinstance(status_values.get("context_usage_history"), list)
+            else [],
+            "llm_input_manifest": _last_llm_input_manifest(status_values),
+            "llm_input_manifests": status_values.get("llm_input_manifests")
+            if isinstance(status_values.get("llm_input_manifests"), list)
+            else [],
+            "thread_context_ledger": status_values.get("thread_context_ledger")
+            if isinstance(status_values.get("thread_context_ledger"), dict)
+            else {},
+            "background_context_window": status_values.get("background_context_window")
+            if isinstance(status_values.get("background_context_window"), dict)
+            else {},
         },
     )
 
@@ -2296,7 +2756,7 @@ async def generate_sse(
             logger.exception("Failed to record user input episodic memory")
 
     async for chunk in _stream_graph_events(
-        graph, state_input, config, thread_id, preserve_context_history=False
+        graph, state_input, config, thread_id, preserve_context_history=True
     ):
         yield chunk
 
@@ -2343,6 +2803,7 @@ async def generate_resume_sse(
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return
 
+    resume_value: object
     if memory_use_choice:
         resume_value = {"type": "memory_confirmation", "choice": memory_use_choice}
     elif feedback:
@@ -2361,8 +2822,9 @@ async def generate_resume_sse(
             "thread_id": thread_id,
         },
     )
+    status_values = _state_values(state_snapshot)
     request_context_window, thread_context_window = _context_window_status(
-        _state_values(state_snapshot)
+        status_values
     )
     if not request_context_window.get("current_request_id"):
         request_context_window["current_request_id"] = resume_request_id
@@ -2377,6 +2839,22 @@ async def generate_resume_sse(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
+            "context_usage": status_values.get("context_usage")
+            if isinstance(status_values.get("context_usage"), dict)
+            else {},
+            "context_usage_history": status_values.get("context_usage_history")
+            if isinstance(status_values.get("context_usage_history"), list)
+            else [],
+            "llm_input_manifest": _last_llm_input_manifest(status_values),
+            "llm_input_manifests": status_values.get("llm_input_manifests")
+            if isinstance(status_values.get("llm_input_manifests"), list)
+            else [],
+            "thread_context_ledger": status_values.get("thread_context_ledger")
+            if isinstance(status_values.get("thread_context_ledger"), dict)
+            else {},
+            "background_context_window": status_values.get("background_context_window")
+            if isinstance(status_values.get("background_context_window"), dict)
+            else {},
         },
     )
 
@@ -2475,8 +2953,9 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
         return
 
     run_control_registry.clear_stop_signal(thread_id)
+    status_values = _state_values(state_snapshot)
     request_context_window, thread_context_window = _context_window_status(
-        _state_values(state_snapshot)
+        status_values
     )
     start_active_run(
         thread_id,
@@ -2489,6 +2968,22 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
+            "context_usage": status_values.get("context_usage")
+            if isinstance(status_values.get("context_usage"), dict)
+            else {},
+            "context_usage_history": status_values.get("context_usage_history")
+            if isinstance(status_values.get("context_usage_history"), list)
+            else [],
+            "llm_input_manifest": _last_llm_input_manifest(status_values),
+            "llm_input_manifests": status_values.get("llm_input_manifests")
+            if isinstance(status_values.get("llm_input_manifests"), list)
+            else [],
+            "thread_context_ledger": status_values.get("thread_context_ledger")
+            if isinstance(status_values.get("thread_context_ledger"), dict)
+            else {},
+            "background_context_window": status_values.get("background_context_window")
+            if isinstance(status_values.get("background_context_window"), dict)
+            else {},
         },
     )
     await _update_run_state(

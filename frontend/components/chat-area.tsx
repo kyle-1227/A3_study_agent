@@ -73,6 +73,21 @@ export interface ContextUsageError {
   warning: string
 }
 
+export interface BackgroundContextWindow {
+  present: boolean
+  usedTokens: number
+  maxContextTokens: number
+  usedRatio: number
+  updatedAt: string
+  manifestCount: number
+  sectionNames: string[]
+  workspacePresent: boolean
+  workspaceActiveSubject: string
+  workspaceEvidenceSummaryCount: number
+  workspaceGapCount: number
+  workspaceArtifactCount: number
+}
+
 export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review" | "stopping" | "stopped"
 export type ResourceGenerationStepState = "running" | "done" | "error"
 
@@ -919,7 +934,7 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
           {status.contextUsage && (
             <div className="rounded-md border border-border bg-card px-2 py-1.5 text-[11px] text-muted-foreground">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-primary">Context window</span>
+              <span className="font-medium text-primary">LLM call usage</span>
                 <span>{Math.round(status.contextUsage.usedRatio * 100)}%</span>
               </div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">

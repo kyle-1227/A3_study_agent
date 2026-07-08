@@ -280,6 +280,99 @@ async def test_stream_initializes_checkpoint_before_thread_id():
 
 
 @pytest.mark.anyio
+async def test_stream_active_status_preserves_checkpoint_workspace():
+    from app import generate_sse
+    from src.run_control import finish_active_run, get_active_run
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aupdate_state = AsyncMock()
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(
+            values={
+                "task_workspace": {
+                    "schema_version": 1,
+                    "workspace_id": "workspace:v1:ml",
+                    "thread_id": "thread-1",
+                    "active_subject": "machine_learning",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "evidence_summaries": [{"evidence_id": "evidence:v1:one"}],
+                    "coverage_gaps": [],
+                    "artifacts_by_id": {
+                        "artifact:v1:one": {"artifact_id": "artifact:v1:one"}
+                    },
+                },
+            }
+        )
+    )
+
+    stream = generate_sse("another mindmap", graph, thread_id="thread-1")
+    try:
+        await stream.__anext__()
+        active_snapshot = get_active_run("thread-1")
+    finally:
+        await stream.aclose()
+        finish_active_run("thread-1")
+
+    assert active_snapshot is not None
+    thread_window = active_snapshot["thread_context_window"]
+    assert thread_window["workspace_present"] is True
+    assert thread_window["workspace_active_subject"] == "machine_learning"
+    assert thread_window["workspace_evidence_summary_count"] == 1
+    assert thread_window["workspace_artifact_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_live_context_window_update_is_active_run_only():
+    from app import _update_context_window_state_from_trace
+    from src.run_control import finish_active_run, get_active_run, start_active_run
+
+    graph = MagicMock()
+    graph.aupdate_state = AsyncMock()
+    start_active_run(
+        "thread-1",
+        {
+            "schema_version": "run_control_v1",
+            "run_status": "running",
+            "request_context_window": {
+                "current_request_id": "",
+                "current_node": "",
+                "last_event_count": 0,
+            },
+            "thread_context_window": {},
+        },
+    )
+
+    try:
+        await _update_context_window_state_from_trace(
+            graph,
+            {"configurable": {"thread_id": "thread-1"}},
+            thread_id="thread-1",
+            request_context_events=[{"request_id": "req-1", "stage": "context_usage"}],
+            context_usage_history=[],
+            last_context_policy_by_node={"supervisor": {"node": "supervisor"}},
+            last_provider_supply_by_node={},
+            last_context_selection_by_node={},
+            last_context_applied_by_node={},
+            last_drop_reasons_by_node={},
+            last_resource_subnodes=[],
+            current_node="supervisor",
+        )
+        active_snapshot = get_active_run("thread-1")
+    finally:
+        finish_active_run("thread-1")
+
+    graph.aupdate_state.assert_not_called()
+    assert active_snapshot is not None
+    assert active_snapshot["request_context_window"]["current_request_id"] == "req-1"
+    assert active_snapshot["request_context_window"]["current_node"] == "supervisor"
+    assert active_snapshot["request_context_window"]["last_event_count"] == 1
+    assert active_snapshot["thread_context_window"][
+        "last_context_policy_by_node_keys"
+    ] == ["supervisor"]
+
+
+@pytest.mark.anyio
 async def test_stream_checkpoint_init_failure_does_not_emit_thread_id():
     from app import generate_sse
 
@@ -410,6 +503,46 @@ async def test_continue_requires_pending_user_stop_interrupt():
         }
     ]
     graph.astream_events.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_resume_memory_confirmation_sends_choice_command():
+    from app import generate_resume_sse
+
+    final_snapshot = _snapshot(values={"schema_version": "run_control_v1"})
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aget_state = AsyncMock(
+        side_effect=[
+            _snapshot(
+                values={"schema_version": "run_control_v1"},
+                interrupt_value={"type": "memory_confirmation", "question": "Use?"},
+                next_nodes=("memory_use_decider",),
+            ),
+            final_snapshot,
+            final_snapshot,
+        ]
+    )
+    graph.aupdate_state = AsyncMock()
+
+    collected = []
+    async for sse in generate_resume_sse(
+        "",
+        None,
+        graph,
+        "thread-1",
+        memory_use_choice="use",
+    ):
+        collected.append(sse)
+
+    payloads = _payloads(collected)
+    resume_input = graph.astream_events.call_args.args[0]
+    assert getattr(resume_input, "resume") == {
+        "type": "memory_confirmation",
+        "choice": "use",
+    }
+    assert payloads[0]["run_status"] == "continuing"
+    assert payloads[-1] == {"type": "done"}
 
 
 @pytest.mark.anyio

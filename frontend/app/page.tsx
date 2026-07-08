@@ -7,6 +7,7 @@ import { useUser } from "@/hooks/use-user"
 import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
+  BackgroundContextWindow,
   ContextUsage,
   ContextUsageError,
   Message,
@@ -155,6 +156,29 @@ function mapContextUsageError(data: any): ContextUsageError {
   }
 }
 
+function mapBackgroundContextWindow(data: any): BackgroundContextWindow | null {
+  if (!data || typeof data !== "object") return null
+  const lastManifestId = typeof data.last_manifest_id === "string" ? data.last_manifest_id : ""
+  const usedTokens = numberField(data, "used_tokens")
+  const maxContextTokens = numberField(data, "max_context_tokens")
+  const present = Boolean(lastManifestId || usedTokens > 0 || data.background_context_window_present)
+  if (!present) return null
+  return {
+    present,
+    usedTokens,
+    maxContextTokens,
+    usedRatio: numberField(data, "used_ratio"),
+    updatedAt: typeof data.updated_at === "string" ? data.updated_at : "",
+    manifestCount: numberField(data, "manifest_count", "llm_input_manifest_count"),
+    sectionNames: Array.isArray(data.section_names) ? data.section_names.filter((item: any) => typeof item === "string") : [],
+    workspacePresent: Boolean(data.workspace_present),
+    workspaceActiveSubject: typeof data.workspace_active_subject === "string" ? data.workspace_active_subject : "",
+    workspaceEvidenceSummaryCount: numberField(data, "workspace_evidence_summary_count"),
+    workspaceGapCount: numberField(data, "workspace_gap_count"),
+    workspaceArtifactCount: numberField(data, "workspace_artifact_count"),
+  }
+}
+
 function getAuthHeaders(): Record<string, string> {
   if (typeof window !== "undefined") {
     const token = localStorage.getItem("demo_access_token")
@@ -250,6 +274,7 @@ export default function Home() {
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
   const [contextUsageError, setContextUsageError] = useState<ContextUsageError | null>(null)
+  const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
   const [canContinue, setCanContinue] = useState(false)
   const [stopPending, setStopPending] = useState(false)
 
@@ -368,6 +393,7 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsage(null)
     setContextUsageError(null)
+    setBackgroundContextWindow(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -385,6 +411,7 @@ export default function Home() {
     setNodeEvents([])
     setContextUsage(null)
     setContextUsageError(null)
+    setBackgroundContextWindow(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -413,6 +440,7 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsage(null)
     setContextUsageError(null)
+    setBackgroundContextWindow(null)
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -596,6 +624,20 @@ export default function Home() {
         {
           type: "context",
           message: `[CONTEXT] ${usage.node || usage.llmNode}: ${Math.round(usage.usedRatio * 100)}% used, ${usage.availableTokens} available`,
+          ts: timestamp(),
+        },
+      ])
+      return
+    }
+
+    if (data.type === "llm_input_manifest") {
+      const background = mapBackgroundContextWindow(data.background_context_window)
+      if (background) setBackgroundContextWindow(background)
+      setLogs((prev) => [
+        ...prev,
+        {
+          type: "context",
+          message: `[CE] LLM input manifest ${data.node_name || data.node || "unknown"} sections=${Array.isArray(data.section_names) ? data.section_names.length : 0}`,
           ts: timestamp(),
         },
       ])
@@ -1205,7 +1247,11 @@ export default function Home() {
       const usage = status.context_usage && Object.keys(status.context_usage).length > 0
         ? mapContextUsage(status.context_usage)
         : null
+      const background = mapBackgroundContextWindow(
+        status.background_context_window || status.thread_context_window?.background_context_window,
+      )
       setContextUsage(usage)
+      setBackgroundContextWindow(background)
       if (usage) setContextUsageError(null)
       setCanContinue(Boolean(status.resume_available && status.pending_interrupt_type === "user_stop"))
       if (status.schema_version === "legacy") {
@@ -1658,6 +1704,7 @@ export default function Home() {
         tokenUsage={tokenUsage}
         contextUsage={contextUsage}
         contextUsageError={contextUsageError}
+        backgroundContextWindow={backgroundContextWindow}
         isInterrupted={isInterrupted}
       />
     </div>

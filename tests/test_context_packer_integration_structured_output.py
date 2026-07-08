@@ -129,7 +129,7 @@ async def test_structured_output_runnable_receives_schema_messages_without_conte
         fake_transport_retry,
     )
 
-    parsed, raw_output, _metrics = await _invoke_one_mode(
+    parsed, raw_output, metrics = await _invoke_one_mode(
         node_name="study_plan_agent",
         llm_node="study_plan",
         schema=_TinySchema,
@@ -140,6 +140,8 @@ async def test_structured_output_runnable_receives_schema_messages_without_conte
 
     assert parsed.answer == "ok"
     assert raw_output == '{"answer": "ok"}'
+    assert metrics.extra_debug["structured_context_apply_status"] == "observed"
+    assert metrics.extra_debug["structured_context_apply_skip_reason"] == "observe_only"
     assert len(captured_runnable_messages) == 1
     serialized_messages = repr(captured_runnable_messages[0])
     assert "<CONTEXT_PACK>" not in serialized_messages

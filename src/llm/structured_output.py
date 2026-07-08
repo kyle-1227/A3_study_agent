@@ -15,7 +15,7 @@ import time
 
 import httpx
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
@@ -48,6 +48,10 @@ from src.llm.schema_manifest import (
     render_manifest_text,
 )
 from src.context_engineering.packing import emit_context_packing_shadow
+from src.context_engineering.input_manifest import (
+    build_llm_input_manifest,
+    llm_input_manifest_trace_payload,
+)
 from src.context_engineering.providers import emit_context_items_shadow
 from src.context_engineering.tokenizer import count_schema_chars
 from src.observability.context_usage import emit_context_usage_trace
@@ -605,6 +609,127 @@ def _refresh_parse_validate_total(metrics: _InvokeMetrics) -> None:
     )
 
 
+def _structured_context_apply_config() -> dict[str, Any]:
+    context_config = get_setting("context_engineering")
+    if not isinstance(context_config, dict):
+        return {"enabled": False, "mode": "disabled", "diagnostics": []}
+    packer_config = context_config.get("packer")
+    if not isinstance(packer_config, dict):
+        return {"enabled": False, "mode": "disabled", "diagnostics": []}
+    apply_config = packer_config.get("apply")
+    if not isinstance(apply_config, dict):
+        return {"enabled": False, "mode": "disabled", "diagnostics": []}
+    raw = apply_config.get("structured_output_context")
+    if not isinstance(raw, dict):
+        return {"enabled": False, "mode": "disabled", "diagnostics": []}
+    diagnostics: list[str] = []
+    mode = str(raw.get("mode") or "disabled").strip()
+    if mode not in {"disabled", "observe_only", "active"}:
+        diagnostics.append("invalid_structured_context_mode")
+        mode = "disabled"
+    return {
+        "enabled": raw.get("enabled") is True,
+        "mode": mode,
+        "active_nodes": _string_tuple(raw.get("active_nodes")),
+        "diagnostics": diagnostics,
+    }
+
+
+def _emit_structured_context_apply_observe(
+    *,
+    node_name: str,
+    llm_node: str,
+    context_item_count: int,
+    messages: list,
+    state: dict,
+) -> dict[str, Any]:
+    config = _structured_context_apply_config()
+    enabled = bool(config.get("enabled"))
+    mode = str(config.get("mode") or "disabled")
+    active_nodes = set(config.get("active_nodes") or ())
+    diagnostics = list(config.get("diagnostics") or [])
+    status = "skipped"
+    skip_reason = "structured_context_apply_disabled"
+    if enabled and mode == "observe_only":
+        status = "observed"
+        skip_reason = "observe_only"
+    elif enabled and mode == "active":
+        if node_name in active_nodes or llm_node in active_nodes:
+            skip_reason = "active_structured_context_apply_not_enabled"
+        else:
+            skip_reason = "node_not_in_active_structured_context_rollout"
+    emit_a3_trace(
+        logger,
+        "structured_context_apply",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            "mode": mode,
+            "status": status,
+            "skip_reason": skip_reason,
+            "context_item_count": context_item_count,
+            "message_count": len(messages or []),
+            "provider_bound_messages_mutated": False,
+            "schema_contract_first": True,
+            "diagnostics": [_sanitize(item, max_chars=120) for item in diagnostics],
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return {
+        "structured_context_apply_mode": mode,
+        "structured_context_apply_status": status,
+        "structured_context_apply_skip_reason": skip_reason,
+    }
+
+
+def _emit_llm_input_manifest_built(
+    manifest: Mapping[str, Any],
+    *,
+    state: dict | None,
+) -> None:
+    emit_a3_trace(
+        logger,
+        "llm_input_manifest.built",
+        llm_input_manifest_trace_payload(manifest),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def _emit_llm_input_manifest_failed(
+    *,
+    node_name: str,
+    llm_node: str,
+    state: dict | None,
+    exc: BaseException,
+) -> None:
+    emit_a3_trace(
+        logger,
+        "llm_input_manifest.failed",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            "reason": "manifest_build_or_validation_failed",
+            "error_type": type(exc).__name__,
+            "error_message": _sanitize(exc, max_chars=200),
+        },
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    result: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return tuple(result)
+
+
 def _extract_structured_json_payload(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -1156,7 +1281,7 @@ def _deepseek_raise_for_status(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
     err = RuntimeError(f"Error code: {response.status_code} - {response.text}")
-    err.response = response  # for _extract_status_code / _extract_provider_error_body
+    setattr(err, "response", response)  # for _extract_status_code / _extract_provider_error_body
     raise err
 
 
@@ -1168,6 +1293,7 @@ async def _deepseek_chat_completion(
     node_name: str,
     llm_node: str,
     state: dict | None,
+    llm_input_manifest: Mapping[str, Any],
 ) -> tuple[httpx.Response, int]:
     async def _post_request():
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
@@ -1199,6 +1325,7 @@ async def _deepseek_chat_completion(
         llm_node=llm_node,
         provider=_provider(llm_node),
         model=_model(llm_node),
+        llm_input_manifest=llm_input_manifest,
         output_mode="deepseek_tool_call_strict" if base_url.endswith("/beta") else "deepseek_json_object",
         trace_stage_prefix="structured_llm_transport",
         state=state or {},
@@ -1212,6 +1339,7 @@ async def _invoke_openrouter_native(
     llm_node: str,
     node_name: str,
     state: dict | None = None,
+    llm_input_manifest: Mapping[str, Any] | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     """Direct httpx call for OpenRouter native json_schema.
 
@@ -1286,6 +1414,7 @@ async def _invoke_openrouter_native(
             llm_node=llm_node,
             provider=_provider(llm_node),
             model=_model(llm_node),
+            llm_input_manifest=llm_input_manifest or {},
             state=state or {},
         )
         metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -1332,6 +1461,7 @@ async def _invoke_deepseek_tool_call_strict(
     llm_node: str,
     node_name: str,
     state: dict | None = None,
+    llm_input_manifest: Mapping[str, Any] | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     """Direct DeepSeek official strict tool-call invocation."""
     metrics.using_direct_openrouter_http = False
@@ -1408,6 +1538,7 @@ async def _invoke_deepseek_tool_call_strict(
             node_name=node_name,
             llm_node=llm_node,
             state=state,
+            llm_input_manifest=llm_input_manifest or {},
         )
         metrics.llm_elapsed_ms = _round_ms(llm_started)
     except Exception as exc:
@@ -1464,7 +1595,8 @@ async def _invoke_deepseek_tool_call_strict(
         )
 
     tool_call = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
-    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    function_raw = tool_call.get("function")
+    function: Mapping[str, Any] = function_raw if isinstance(function_raw, Mapping) else {}
     returned_name = str(function.get("name") or "")
     if returned_name != tool_name:
         raise _InvokeOneModeError(
@@ -1516,6 +1648,7 @@ async def _invoke_deepseek_json_object(
     llm_node: str,
     node_name: str,
     state: dict | None = None,
+    llm_input_manifest: Mapping[str, Any] | None = None,
 ) -> tuple[BaseModel, str, _InvokeMetrics]:
     """Direct DeepSeek official JSON object invocation."""
     metrics.using_direct_openrouter_http = False
@@ -1579,6 +1712,7 @@ async def _invoke_deepseek_json_object(
             node_name=node_name,
             llm_node=llm_node,
             state=state,
+            llm_input_manifest=llm_input_manifest or {},
         )
         metrics.llm_elapsed_ms = _round_ms(llm_started)
     except Exception as exc:
@@ -1702,6 +1836,42 @@ async def _invoke_one_mode(
         items=context_items,
         state=state or {},
     )
+    structured_context_debug = _emit_structured_context_apply_observe(
+        node_name=node_name,
+        llm_node=llm_node,
+        context_item_count=len(context_items),
+        messages=messages,
+        state=state or {},
+    )
+    metrics.extra_debug.update(structured_context_debug)
+    try:
+        llm_input_manifest = build_llm_input_manifest(
+            node_name=node_name,
+            llm_node=llm_node,
+            provider=_provider(llm_node),
+            model=_model(llm_node),
+            messages=messages,
+            state=state or {},
+            call_purpose="structured_llm",
+            output_mode=mode,
+            schema_name=schema.__name__,
+            schema_size_chars=_safe_schema_size_chars(schema),
+            context_apply_applied=False,
+            schema_contract_first=True,
+            provider_bound_messages_mutated=False,
+        )
+        _emit_llm_input_manifest_built(
+            llm_input_manifest,
+            state=state or {},
+        )
+    except Exception as exc:
+        _emit_llm_input_manifest_failed(
+            node_name=node_name,
+            llm_node=llm_node,
+            state=state or {},
+            exc=exc,
+        )
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
     # ── constrained_decoding (reserved) ──
     if mode == "constrained_decoding":
@@ -1720,6 +1890,7 @@ async def _invoke_one_mode(
             llm_node,
             node_name=node_name,
             state=state,
+            llm_input_manifest=llm_input_manifest,
         )
 
     if mode == "deepseek_json_object":
@@ -1730,6 +1901,7 @@ async def _invoke_one_mode(
             llm_node,
             node_name=node_name,
             state=state,
+            llm_input_manifest=llm_input_manifest,
         )
 
     llm = get_node_llm(llm_node)
@@ -1745,6 +1917,7 @@ async def _invoke_one_mode(
                 llm_node,
                 node_name=node_name,
                 state=state,
+                llm_input_manifest=llm_input_manifest,
             )
 
         metrics.using_direct_openrouter_http = False
@@ -1767,6 +1940,7 @@ async def _invoke_one_mode(
                 llm_node=llm_node,
                 provider=_provider(llm_node),
                 model=_model(llm_node),
+                llm_input_manifest=llm_input_manifest,
                 state=state or {},
             )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -1802,6 +1976,7 @@ async def _invoke_one_mode(
                 llm_node=llm_node,
                 provider=_provider(llm_node),
                 model=_model(llm_node),
+                llm_input_manifest=llm_input_manifest,
                 state=state or {},
             )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -1837,6 +2012,7 @@ async def _invoke_one_mode(
                 llm_node=llm_node,
                 provider=_provider(llm_node),
                 model=_model(llm_node),
+                llm_input_manifest=llm_input_manifest,
                 state=state or {},
             )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -1884,6 +2060,7 @@ async def _invoke_one_mode(
                 llm_node=llm_node,
                 provider=_provider(llm_node),
                 model=_model(llm_node),
+                llm_input_manifest=llm_input_manifest,
                 state=state or {},
             )
             metrics.llm_elapsed_ms = _round_ms(llm_started)
@@ -2259,15 +2436,15 @@ async def invoke_structured_llm(
             return result
 
         except _InvokeOneModeError as wrapper:
-            exc = wrapper.cause
+            cause = wrapper.cause
             metrics = wrapper.metrics
             last_raw_output = wrapper.raw_output
             if metrics.total_elapsed_ms <= 0:
                 metrics.total_elapsed_ms = _round_ms(attempt_started)
 
-            status_code = _extract_status_code(exc)
-            provider_error_body = _extract_provider_error_body(exc)
-            phase = _classify_failure_phase(exc, mode, metrics)
+            status_code = _extract_status_code(cause)
+            provider_error_body = _extract_provider_error_body(cause)
+            phase = _classify_failure_phase(cause, mode, metrics)
             if _is_semantic_retryable_failure(
                 phase,
                 include_business_validation=_reask_business_validation_enabled(node_name),
@@ -2284,8 +2461,8 @@ async def invoke_structured_llm(
                 output_mode=mode,
                 success=False,
                 failure_phase=phase,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_type=type(cause).__name__,
+                error_message=str(cause),
                 status_code=status_code,
                 provider_error_body=provider_error_body,
                 total_elapsed_ms=metrics.total_elapsed_ms,
@@ -2315,12 +2492,12 @@ async def invoke_structured_llm(
                 attempts=attempts,
                 provider_error_body=provider_error_body,
                 failure_phase=phase,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_type=type(cause).__name__,
+                error_message=str(cause),
                 status_code=status_code,
                 raw_output=last_raw_output,
-                parsing_error=str(exc) if phase == "parsing_error" else "",
-                validation_error=str(exc) if phase == "validation_error" else "",
+                parsing_error=str(cause) if phase == "parsing_error" else "",
+                validation_error=str(cause) if phase == "validation_error" else "",
                 business_validation_error="",
                 total_elapsed_ms=metrics.total_elapsed_ms,
                 llm_elapsed_ms=metrics.llm_elapsed_ms,
@@ -2340,7 +2517,7 @@ async def invoke_structured_llm(
                 http_messages_preview=metrics.http_messages_preview,
                 extra_debug=dict(metrics.extra_debug),
             )
-            _emit_and_maybe_raise(result, exc=exc)
+            _emit_and_maybe_raise(result, exc=cause)
             continue
 
         except StructuredOutputError:

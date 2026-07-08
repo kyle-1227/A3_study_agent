@@ -44,6 +44,9 @@ class ThreadStatusResponse(BaseModel):
     stop_reason: str = ""
     context_usage: dict[str, Any] = Field(default_factory=dict)
     context_usage_history: list[dict[str, Any]] = Field(default_factory=list)
+    last_llm_input_manifest: dict[str, Any] = Field(default_factory=dict)
+    llm_input_manifest_count: int = 0
+    background_context_window: dict[str, Any] = Field(default_factory=dict)
     request_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)

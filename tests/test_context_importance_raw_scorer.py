@@ -22,7 +22,7 @@ def _mock_llm(
 
 
 @pytest.mark.anyio
-async def test_raw_scorer_does_not_call_plain_llm_or_emit_plain_usage(monkeypatch):
+async def test_raw_scorer_uses_manifest_guard_without_plain_llm(monkeypatch):
     from src.graph import llm as llm_module
 
     mock_llm = _mock_llm()
@@ -31,17 +31,18 @@ async def test_raw_scorer_does_not_call_plain_llm_or_emit_plain_usage(monkeypatc
     async def fail_plain(*_args, **_kwargs):
         raise AssertionError("raw scorer must not call invoke_plain_llm_fail_fast")
 
-    async def fail_transport_retry(*_args, **_kwargs):
-        raise AssertionError(
-            "Phase 3B-2A shadow scorer must not require transport retry"
-        )
+    transport_kwargs: dict = {}
+
+    async def fake_transport_retry(operation, **kwargs):
+        transport_kwargs.update(kwargs)
+        return await operation(), 0
 
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     monkeypatch.setattr(llm_module, "invoke_plain_llm_fail_fast", fail_plain)
     monkeypatch.setattr(
         llm_module,
         "invoke_with_provider_transport_retry",
-        fail_transport_retry,
+        fake_transport_retry,
     )
     monkeypatch.setattr(
         llm_module,
@@ -57,8 +58,12 @@ async def test_raw_scorer_does_not_call_plain_llm_or_emit_plain_usage(monkeypatc
 
     assert scores.scores[0].item_id == "i1"
     mock_llm.ainvoke.assert_awaited_once()
+    assert transport_kwargs["llm_input_manifest"]["call_purpose"] == (
+        "context_importance_scoring"
+    )
     assert "plain_llm_output" not in traces
     assert "context_usage" not in traces
+    assert "llm_input_manifest.built" in traces
 
 
 def test_parse_importance_scorer_output_is_strict():

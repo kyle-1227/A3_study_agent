@@ -399,6 +399,14 @@ def _collect_for_policy(
         state=state,
         trace_fields=sequencer.next_fields(),
     )
+    _emit_workspace_context_collected(
+        logger,
+        node_name=node_name,
+        llm_node=llm_node,
+        collection=collection,
+        state=state,
+        trace_fields=sequencer.next_fields(),
+    )
     return plan, collection
 
 
@@ -687,6 +695,50 @@ def _emit_context_source_filter(
         },
         state=state,
         env_flag="LOG_A3_TRACE",
+    )
+
+
+def _emit_workspace_context_collected(
+    logger: logging.Logger,
+    *,
+    node_name: str,
+    llm_node: str,
+    collection: ContextCollectionResult,
+    state: dict[str, Any],
+    trace_fields: dict[str, Any],
+) -> None:
+    workspace_items = [
+        item for item in collection.items if _item_from_workspace(item)
+    ]
+    if not workspace_items:
+        return
+    source_counts: dict[str, int] = {}
+    for item in workspace_items:
+        source = str(item.source_type)
+        source_counts[source] = source_counts.get(source, 0) + 1
+    emit_a3_trace(
+        logger,
+        "workspace_context.collected",
+        {
+            **trace_fields,
+            "node_name": node_name,
+            "llm_node": llm_node,
+            "workspace_item_count": len(workspace_items),
+            "workspace_source_counts": source_counts,
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+def _item_from_workspace(item: ContextItem) -> bool:
+    metadata = item.metadata or {}
+    retrieval_mode = str(metadata.get("retrieval_mode") or "")
+    artifact_source = str(metadata.get("artifact_source") or "")
+    return bool(
+        metadata.get("workspace_id")
+        or retrieval_mode.startswith("task_workspace")
+        or artifact_source.startswith("task_workspace")
     )
 
 
