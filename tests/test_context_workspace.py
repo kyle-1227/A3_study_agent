@@ -15,6 +15,7 @@ from src.context_engineering.workspace import (
     stable_gap_id,
     stable_workspace_id,
     workspace_continuation_context,
+    workspace_continuation_trace_payload,
     workspace_status_payload,
     workspace_trace_payload,
 )
@@ -260,8 +261,31 @@ def test_workspace_continuation_allows_same_thread_resource_without_subject():
     )
 
     assert context["can_continue"] is True
+    assert context["thread_id"] == "thread-1"
+    assert context["current_thread_id"] == "thread-1"
+    assert context["workspace_thread_id"] == "thread-1"
     assert context["normalized_subject"] == "machine_learning"
     assert context["active_learning_goal"] == "Review core concepts"
+
+
+def test_workspace_continuation_trace_uses_current_thread_when_workspace_missing():
+    context = workspace_continuation_context(
+        {
+            "session_id": "thread-1",
+            "request_id": "request-2",
+            "subject": "other",
+            "subject_candidates": [],
+            "requested_resource_type": "mindmap",
+            "requested_resource_types": ["mindmap"],
+        }
+    )
+    payload = workspace_continuation_trace_payload(context)
+
+    assert context["can_continue"] is False
+    assert context["skip_reason"] == "workspace_unavailable"
+    assert payload["thread_id"] == "thread-1"
+    assert payload["current_thread_id"] == "thread-1"
+    assert payload["workspace_thread_id"] == ""
 
 
 def test_workspace_continuation_skips_explicit_new_subject():
@@ -310,5 +334,8 @@ def test_workspace_continuation_skips_thread_mismatch_and_corruption():
 
     assert mismatch["can_continue"] is False
     assert mismatch["skip_reason"] == "thread_mismatch"
+    mismatch_payload = workspace_continuation_trace_payload(mismatch)
+    assert mismatch_payload["thread_id"] == "thread-2"
+    assert mismatch_payload["workspace_thread_id"] == "thread-1"
     assert corrupt["can_continue"] is False
     assert corrupt["skip_reason"] == "workspace_unavailable"

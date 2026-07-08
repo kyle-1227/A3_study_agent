@@ -231,6 +231,14 @@ def _safe_workspace_event_summary(event: dict) -> dict:
             event.get("thread_id", ""),
             max_chars=120,
         ),
+        "current_thread_id": sanitize_error_message(
+            event.get("current_thread_id", ""),
+            max_chars=120,
+        ),
+        "workspace_thread_id": sanitize_error_message(
+            event.get("workspace_thread_id", ""),
+            max_chars=120,
+        ),
         "workspace_id": sanitize_error_message(
             event.get("workspace_id", ""),
             max_chars=160,
@@ -918,11 +926,14 @@ async def _update_context_window_state_from_trace(
     last_resource_subnodes: list[dict],
     current_node: str,
 ) -> None:
+    current_request_id = (
+        str(request_context_events[-1].get("request_id", "") or "")
+        if request_context_events
+        else ""
+    )
     values = {
         "request_context_window": {
-            "current_request_id": request_context_events[-1].get("request_id", "")
-            if request_context_events
-            else "",
+            "current_request_id": current_request_id,
             "current_node": current_node,
             "last_event_count": len(request_context_events),
         },
@@ -943,6 +954,7 @@ async def _update_context_window_state_from_trace(
     active_thread_window.update(
         {
             "context_usage_history_count": len(context_usage_history),
+            "context_usage_history_kind": "llm_call_history",
             "last_context_policy_by_node_keys": sorted(last_context_policy_by_node),
             "last_provider_supply_by_node_keys": sorted(last_provider_supply_by_node),
             "last_context_selection_by_node_keys": sorted(
@@ -958,6 +970,7 @@ async def _update_context_window_state_from_trace(
         config,
         values,
         state={
+            "request_id": current_request_id,
             "thread_id": thread_id,
             "session_id": thread_id,
             "current_node": current_node,
@@ -970,16 +983,22 @@ async def _update_context_window_state_from_trace(
         if updated
         else "context_window_state_update_failed",
         {
+            "request_id": current_request_id,
             "current_node": current_node,
             "request_event_count": len(request_context_events),
             "context_usage_history_count": len(context_usage_history),
+            "context_usage_history_kind": "llm_call_history",
             "policy_node_count": len(last_context_policy_by_node),
             "supply_node_count": len(last_provider_supply_by_node),
             "selection_node_count": len(last_context_selection_by_node),
             "applied_node_count": len(last_context_applied_by_node),
             "resource_subnode_count": len(last_resource_subnodes),
         },
-        state={"thread_id": thread_id, "session_id": thread_id},
+        state={
+            "request_id": current_request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
         env_flag="LOG_A3_TRACE",
     )
 
@@ -1041,7 +1060,12 @@ async def _update_llm_manifest_state_from_trace(
         state={"thread_id": thread_id, "session_id": thread_id},
         persist_checkpoint=False,
     )
-    return dict(payload), dict(ledger_update), dict(background_window), llm_input_manifests
+    return (
+        dict(payload),
+        dict(ledger_update),
+        dict(background_window),
+        llm_input_manifests,
+    )
 
 
 def _last_ai_message_content(final_state: dict) -> str:
@@ -1559,6 +1583,10 @@ async def _stream_graph_events(
             }:
                 payload = {
                     "type": stage,
+                    "request_id": sanitize_error_message(
+                        event.get("request_id", ""),
+                        max_chars=120,
+                    ),
                     "current_node": sanitize_error_message(
                         event.get("current_node", ""),
                         max_chars=120,
@@ -1566,6 +1594,10 @@ async def _stream_graph_events(
                     "request_event_count": event.get("request_event_count", 0),
                     "context_usage_history_count": event.get(
                         "context_usage_history_count", 0
+                    ),
+                    "context_usage_history_kind": sanitize_error_message(
+                        event.get("context_usage_history_kind", "llm_call_history"),
+                        max_chars=80,
                     ),
                     "policy_node_count": event.get("policy_node_count", 0),
                     "supply_node_count": event.get("supply_node_count", 0),
@@ -1576,15 +1608,18 @@ async def _stream_graph_events(
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
             if stage == "llm_input_manifest.built":
-                payload, ledger_update, background_window, llm_input_manifests = (
-                    await _update_llm_manifest_state_from_trace(
-                        graph,
-                        config,
-                        thread_id=thread_id,
-                        event=event,
-                        llm_input_manifests=llm_input_manifests,
-                        state_context=manifest_state_context,
-                    )
+                (
+                    payload,
+                    ledger_update,
+                    background_window,
+                    llm_input_manifests,
+                ) = await _update_llm_manifest_state_from_trace(
+                    graph,
+                    config,
+                    thread_id=thread_id,
+                    event=event,
+                    llm_input_manifests=llm_input_manifests,
+                    state_context=manifest_state_context,
                 )
                 request_context_events.append(
                     {

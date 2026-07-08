@@ -82,9 +82,11 @@ from src.context_engineering.packing.source_policy import (
 from src.context_engineering.packing.trace import (
     build_context_packed_event,
     build_context_packing_error_event,
+    build_context_packing_observed_event,
     build_context_packing_plan_event,
     emit_context_packed,
     emit_context_packing_error,
+    emit_context_packing_observed,
     emit_context_packing_plan,
     emit_context_packing_shadow,
 )
@@ -130,6 +132,7 @@ __all__ = [
     "build_context_importance_scored_event",
     "build_context_packed_event",
     "build_context_packing_error_event",
+    "build_context_packing_observed_event",
     "build_context_packing_plan_event",
     "build_importance_scorer_messages",
     "detect_single_resource_request",
@@ -141,6 +144,7 @@ __all__ = [
     "emit_context_importance_scored",
     "emit_context_packed",
     "emit_context_packing_error",
+    "emit_context_packing_observed",
     "emit_context_packing_plan",
     "emit_context_packing_shadow",
     "evaluate_context_apply_route",

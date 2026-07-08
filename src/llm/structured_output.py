@@ -47,7 +47,11 @@ from src.llm.schema_manifest import (
     manifest_summary,
     render_manifest_text,
 )
-from src.context_engineering.packing import emit_context_packing_shadow
+from src.context_engineering.packing import (
+    ContextApplyError,
+    emit_context_packing_shadow,
+    prepare_messages_with_context_policy,
+)
 from src.context_engineering.input_manifest import (
     build_llm_input_manifest,
     llm_input_manifest_trace_payload,
@@ -131,6 +135,7 @@ class DeepSeekProviderResponseJSONError(RuntimeError):
 @dataclass
 class _InvokeMetrics:
     """Diagnostics for one structured output attempt."""
+
     total_elapsed_ms: float = 0.0
     llm_elapsed_ms: float = 0.0
     json_pydantic_elapsed_ms: float = 0.0
@@ -220,20 +225,31 @@ class StructuredLLMResult:
     extra_debug: dict[str, Any] = field(default_factory=dict)
 
     def to_debug_payload(self, *, max_raw_chars: int = 4000) -> dict[str, Any]:
-        using_direct_openrouter_http = (
-            self.using_direct_openrouter_http
-            or any(attempt.using_direct_openrouter_http for attempt in self.attempts)
+        using_direct_openrouter_http = self.using_direct_openrouter_http or any(
+            attempt.using_direct_openrouter_http for attempt in self.attempts
         )
         provider_request_mode = self.provider_request_mode or next(
-            (attempt.provider_request_mode for attempt in reversed(self.attempts) if attempt.provider_request_mode),
+            (
+                attempt.provider_request_mode
+                for attempt in reversed(self.attempts)
+                if attempt.provider_request_mode
+            ),
             "",
         )
         http_messages_preview = self.http_messages_preview or next(
-            (attempt.http_messages_preview for attempt in reversed(self.attempts) if attempt.http_messages_preview),
+            (
+                attempt.http_messages_preview
+                for attempt in reversed(self.attempts)
+                if attempt.http_messages_preview
+            ),
             [],
         )
         extra_debug = self.extra_debug or next(
-            (attempt.extra_debug for attempt in reversed(self.attempts) if attempt.extra_debug),
+            (
+                attempt.extra_debug
+                for attempt in reversed(self.attempts)
+                if attempt.extra_debug
+            ),
             {},
         )
         payload = {
@@ -267,10 +283,14 @@ class StructuredLLMResult:
             "error_message": _sanitize(self.error_message, max_chars=2000),
             "status_code": self.status_code,
             "raw_output": _sanitize(self.raw_output, max_chars=max_raw_chars),
-            "provider_error_body": _sanitize(self.provider_error_body, max_chars=max_raw_chars),
+            "provider_error_body": _sanitize(
+                self.provider_error_body, max_chars=max_raw_chars
+            ),
             "parsing_error": _sanitize(self.parsing_error, max_chars=2000),
             "validation_error": _sanitize(self.validation_error, max_chars=4000),
-            "business_validation_error": _sanitize(self.business_validation_error, max_chars=4000),
+            "business_validation_error": _sanitize(
+                self.business_validation_error, max_chars=4000
+            ),
             "attempts": [
                 {
                     "output_mode": attempt.output_mode,
@@ -279,7 +299,9 @@ class StructuredLLMResult:
                     "error_type": attempt.error_type,
                     "error_message": _sanitize(attempt.error_message, max_chars=1200),
                     "status_code": attempt.status_code,
-                    "provider_error_body": _sanitize(attempt.provider_error_body, max_chars=3000),
+                    "provider_error_body": _sanitize(
+                        attempt.provider_error_body, max_chars=3000
+                    ),
                     # diagnostics
                     "total_elapsed_ms": attempt.total_elapsed_ms,
                     "llm_elapsed_ms": attempt.llm_elapsed_ms,
@@ -355,7 +377,9 @@ def _fail_fast_enabled() -> bool:
 
 def get_llm_output_mode(node_name: str) -> str:
     """Return the configured provider-neutral output mode for a structured node."""
-    mode = str(_output_setting(node_name, "output_mode", "native_json_schema_pydantic") or "")
+    mode = str(
+        _output_setting(node_name, "output_mode", "native_json_schema_pydantic") or ""
+    )
     _validate_mode(mode)
     return mode
 
@@ -392,7 +416,10 @@ def _reask_business_validation_enabled(node_name: str) -> bool:
 
 
 def _provider(node_name: str) -> str:
-    return str(_setting(node_name, "provider", DEFAULT_DEEPSEEK_PROVIDER) or DEFAULT_DEEPSEEK_PROVIDER)
+    return str(
+        _setting(node_name, "provider", DEFAULT_DEEPSEEK_PROVIDER)
+        or DEFAULT_DEEPSEEK_PROVIDER
+    )
 
 
 def _model(node_name: str) -> str:
@@ -441,7 +468,9 @@ def _compute_prompt_chars(messages: list) -> int:
     for msg in messages or []:
         try:
             if hasattr(msg, "model_dump"):
-                total += len(json.dumps(msg.model_dump(), ensure_ascii=False, default=str))
+                total += len(
+                    json.dumps(msg.model_dump(), ensure_ascii=False, default=str)
+                )
             elif isinstance(msg, dict):
                 total += len(json.dumps(msg, ensure_ascii=False, default=str))
             else:
@@ -507,7 +536,9 @@ _DEEPSEEK_UNSUPPORTED_SCHEMA_KEYS = {
 }
 
 
-def compile_pydantic_schema_for_deepseek_tool(schema_model: type[BaseModel]) -> dict[str, Any]:
+def compile_pydantic_schema_for_deepseek_tool(
+    schema_model: type[BaseModel],
+) -> dict[str, Any]:
     """Compile a Pydantic JSON schema for DeepSeek strict tool calling.
 
     DeepSeek strict mode validates a narrower subset of JSON Schema than
@@ -631,33 +662,36 @@ def _structured_context_apply_config() -> dict[str, Any]:
         "enabled": raw.get("enabled") is True,
         "mode": mode,
         "active_nodes": _string_tuple(raw.get("active_nodes")),
+        "allow_structured_output": apply_config.get("allow_structured_output") is True,
         "diagnostics": diagnostics,
     }
 
 
-def _emit_structured_context_apply_observe(
+@dataclass(frozen=True)
+class _StructuredContextApplyResult:
+    messages: list
+    debug: dict[str, Any]
+
+
+def _emit_structured_context_apply_event(
     *,
     node_name: str,
     llm_node: str,
-    context_item_count: int,
+    mode: str,
+    status: str,
+    skip_reason: str,
     messages: list,
     state: dict,
+    context_item_count: int = 0,
+    provider_bound_messages_mutated: bool = False,
+    context_apply_applied: bool = False,
+    diagnostics: list[str] | None = None,
+    trace_call_id: str = "",
+    trace_seq: int = 0,
+    injected_items_count: int = 0,
+    injected_context_tokens: int = 0,
 ) -> dict[str, Any]:
-    config = _structured_context_apply_config()
-    enabled = bool(config.get("enabled"))
-    mode = str(config.get("mode") or "disabled")
-    active_nodes = set(config.get("active_nodes") or ())
-    diagnostics = list(config.get("diagnostics") or [])
-    status = "skipped"
-    skip_reason = "structured_context_apply_disabled"
-    if enabled and mode == "observe_only":
-        status = "observed"
-        skip_reason = "observe_only"
-    elif enabled and mode == "active":
-        if node_name in active_nodes or llm_node in active_nodes:
-            skip_reason = "active_structured_context_apply_not_enabled"
-        else:
-            skip_reason = "node_not_in_active_structured_context_rollout"
+    diagnostics = diagnostics or []
     emit_a3_trace(
         logger,
         "structured_context_apply",
@@ -669,9 +703,14 @@ def _emit_structured_context_apply_observe(
             "skip_reason": skip_reason,
             "context_item_count": context_item_count,
             "message_count": len(messages or []),
-            "provider_bound_messages_mutated": False,
+            "provider_bound_messages_mutated": provider_bound_messages_mutated,
+            "context_apply_applied": context_apply_applied,
             "schema_contract_first": True,
             "diagnostics": [_sanitize(item, max_chars=120) for item in diagnostics],
+            "trace_call_id": trace_call_id,
+            "trace_seq": trace_seq,
+            "injected_items_count": injected_items_count,
+            "injected_context_tokens": injected_context_tokens,
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -680,7 +719,177 @@ def _emit_structured_context_apply_observe(
         "structured_context_apply_mode": mode,
         "structured_context_apply_status": status,
         "structured_context_apply_skip_reason": skip_reason,
+        "provider_bound_messages_mutated": provider_bound_messages_mutated,
+        "context_apply_applied": context_apply_applied,
+        "structured_context_apply_trace_call_id": trace_call_id,
+        "structured_context_apply_trace_seq": trace_seq,
+        "structured_context_apply_injected_items_count": injected_items_count,
+        "structured_context_apply_injected_context_tokens": injected_context_tokens,
     }
+
+
+def _prepare_structured_messages_with_context(
+    *,
+    node_name: str,
+    llm_node: str,
+    messages: list,
+    state: dict | None,
+) -> _StructuredContextApplyResult:
+    """Resolve structured CE apply without mutating provider messages in observe mode."""
+    state_payload = state or {}
+    config = _structured_context_apply_config()
+    enabled = bool(config.get("enabled"))
+    mode = str(config.get("mode") or "disabled")
+    active_nodes = set(config.get("active_nodes") or ())
+    diagnostics = list(config.get("diagnostics") or [])
+    active_for_node = node_name in active_nodes or llm_node in active_nodes
+
+    if not enabled or mode == "disabled":
+        debug = _emit_structured_context_apply_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            mode=mode,
+            status="skipped",
+            skip_reason="structured_context_apply_disabled",
+            context_item_count=0,
+            messages=messages,
+            state=state_payload,
+            diagnostics=diagnostics,
+        )
+        return _StructuredContextApplyResult(messages=messages, debug=debug)
+
+    if mode == "observe_only" or not active_for_node:
+        context_items = emit_context_items_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=messages,
+            state=state_payload,
+        )
+        emit_context_packing_shadow(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            items=context_items,
+            state=state_payload,
+        )
+        skip_reason = (
+            "observe_only"
+            if mode == "observe_only"
+            else "node_not_in_active_structured_context_rollout"
+        )
+        debug = _emit_structured_context_apply_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            mode=mode,
+            status="observed",
+            skip_reason=skip_reason,
+            context_item_count=len(context_items),
+            messages=messages,
+            state=state_payload,
+            diagnostics=diagnostics,
+        )
+        return _StructuredContextApplyResult(messages=messages, debug=debug)
+
+    if not bool(config.get("allow_structured_output")):
+        error = ContextApplyError(
+            reason="structured_context_apply_not_allowed",
+            warning=(
+                "context_engineering.packer.apply.allow_structured_output must be "
+                "true before structured output context can be applied"
+            ),
+            node_name=node_name,
+            llm_node=llm_node,
+            error_scope="policy",
+            recoverable=False,
+        )
+        _emit_structured_context_apply_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            mode=mode,
+            status="failed",
+            skip_reason=error.reason,
+            context_item_count=0,
+            messages=messages,
+            state=state_payload,
+            diagnostics=diagnostics,
+        )
+        raise error
+
+    try:
+        prepared = prepare_messages_with_context_policy(
+            logger,
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=messages,
+            state=state_payload,
+        )
+    except ContextApplyError as exc:
+        _emit_structured_context_apply_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            mode=mode,
+            status="failed",
+            skip_reason=exc.reason,
+            context_item_count=0,
+            messages=messages,
+            state=state_payload,
+            diagnostics=diagnostics,
+        )
+        raise
+    if not prepared.context_apply_applied:
+        reason = "structured_context_apply_not_applied"
+        if prepared.selection is not None and prepared.selection.skip_reason:
+            reason = prepared.selection.skip_reason
+        error = ContextApplyError(
+            reason=reason,
+            warning="active structured context apply did not inject context",
+            node_name=node_name,
+            llm_node=llm_node,
+            error_scope="policy",
+            recoverable=False,
+        )
+        _emit_structured_context_apply_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            mode=mode,
+            status="failed",
+            skip_reason=error.reason,
+            context_item_count=0,
+            messages=messages,
+            state=state_payload,
+            diagnostics=diagnostics,
+            trace_call_id=prepared.trace_call_id,
+            trace_seq=prepared.next_trace_seq,
+        )
+        raise error
+
+    apply_result = prepared.apply_result
+    injected_items_count = (
+        int(apply_result.injected_items_count) if apply_result is not None else 0
+    )
+    injected_context_tokens = (
+        int(apply_result.injected_context_tokens) if apply_result is not None else 0
+    )
+    final_messages = prepared.messages_for_llm
+    debug = _emit_structured_context_apply_event(
+        node_name=node_name,
+        llm_node=llm_node,
+        mode=mode,
+        status="applied",
+        skip_reason="",
+        context_item_count=injected_items_count,
+        messages=final_messages,
+        state=state_payload,
+        provider_bound_messages_mutated=True,
+        context_apply_applied=True,
+        diagnostics=diagnostics,
+        trace_call_id=prepared.trace_call_id,
+        trace_seq=prepared.next_trace_seq + 1,
+        injected_items_count=injected_items_count,
+        injected_context_tokens=injected_context_tokens,
+    )
+    return _StructuredContextApplyResult(messages=final_messages, debug=debug)
 
 
 def _emit_llm_input_manifest_built(
@@ -763,7 +972,9 @@ def _extract_provider_error_body(exc: Exception) -> str:
         return ""
 
 
-def _classify_failure_phase(exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None) -> str:
+def _classify_failure_phase(
+    exc: Exception, mode: str, _metrics: _InvokeMetrics | None = None
+) -> str:
     """Classify failure phase for a structured output attempt."""
     explicit_phase = getattr(exc, "failure_phase", "")
     if explicit_phase:
@@ -814,9 +1025,13 @@ def _is_provider_transport_error(exc: Exception, *, status_code: Any = None) -> 
         numeric_status = int(status_code) if status_code is not None else None
     except Exception:
         numeric_status = None
-    if numeric_status == 429 or (numeric_status is not None and 500 <= numeric_status <= 599):
+    if numeric_status == 429 or (
+        numeric_status is not None and 500 <= numeric_status <= 599
+    ):
         return True
-    if isinstance(exc, (TimeoutError, ConnectionError, httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(
+        exc, (TimeoutError, ConnectionError, httpx.ConnectError, httpx.TimeoutException)
+    ):
         return True
     return type(exc).__name__ in {
         "APIConnectionError",
@@ -829,7 +1044,9 @@ def _is_provider_transport_error(exc: Exception, *, status_code: Any = None) -> 
 def _semantic_retry_count(attempts: list[StructuredLLMAttempt]) -> int:
     attempts_by_mode: dict[str, int] = {}
     for attempt in attempts:
-        attempts_by_mode[attempt.output_mode] = attempts_by_mode.get(attempt.output_mode, 0) + 1
+        attempts_by_mode[attempt.output_mode] = (
+            attempts_by_mode.get(attempt.output_mode, 0) + 1
+        )
     return sum(max(0, count - 1) for count in attempts_by_mode.values())
 
 
@@ -862,7 +1079,9 @@ def _schema_manifest_context(
         ) from exc
 
     try:
-        manifest = build_canonical_manifest(schema, node_name=node_name, output_mode=mode)
+        manifest = build_canonical_manifest(
+            schema, node_name=node_name, output_mode=mode
+        )
     except Exception as exc:
         raise _StructuredManifestError(
             "schema_manifest_error",
@@ -927,10 +1146,12 @@ def _attach_schema_drift_debug(
     if "schema_drift_report" in metrics.extra_debug:
         return
     try:
-        manifest, drift_guard, _manifest_text, manifest_debug = _schema_manifest_context(
-            schema=schema,
-            node_name=node_name,
-            mode=mode,
+        manifest, drift_guard, _manifest_text, manifest_debug = (
+            _schema_manifest_context(
+                schema=schema,
+                node_name=node_name,
+                mode=mode,
+            )
         )
         _drift_text, drift_debug = _schema_drift_report_debug(
             raw_output=raw_output,
@@ -941,7 +1162,9 @@ def _attach_schema_drift_debug(
         metrics.extra_debug.update(manifest_debug)
         metrics.extra_debug["schema_drift_report"] = drift_debug
     except Exception as exc:
-        metrics.extra_debug["schema_drift_report_error"] = _sanitize(str(exc), max_chars=800)
+        metrics.extra_debug["schema_drift_report_error"] = _sanitize(
+            str(exc), max_chars=800
+        )
 
 
 def _build_reask_instruction(
@@ -1021,12 +1244,12 @@ def _build_reask_instruction(
         "- Do not explain the error.\n"
         "- Do not output markdown, code fences, comments, or extra prose.\n"
         "- Do not change the schema, omit fields, invent fields, or use non-schema enum values.\n"
-        "- If the previous error says \"Extra inputs are not permitted\", remove all fields not defined in the schema.\n"
+        '- If the previous error says "Extra inputs are not permitted", remove all fields not defined in the schema.\n'
         "- Do not include input-only metadata fields unless they are explicitly present in the schema.\n"
-        "- If the previous error says \"Field required\", add that exact required field to every affected object.\n"
+        '- If the previous error says "Field required", add that exact required field to every affected object.\n'
         "- Do not fix one validation error by introducing extra fields.\n"
         "- If a field is missing and the schema permits an empty value, you may use a "
-        "schema-compatible empty value such as \"\", [], false, or 0. However, if the "
+        'schema-compatible empty value such as "", [], false, or 0. However, if the '
         "validation error says non-empty or the business validation error says a field "
         "must be non-empty, you must provide a valid non-empty value. Do not use an "
         "empty value to satisfy a field that failed a non-empty business rule."
@@ -1056,14 +1279,18 @@ def _build_reask_context(
         "deepseek_tool_call_truncated",
     }:
         return None
-    if phase == "business_validation_error" and not _reask_business_validation_enabled(node_name):
+    if phase == "business_validation_error" and not _reask_business_validation_enabled(
+        node_name
+    ):
         return None
 
     previous_error_summary = _structured_error_summary(result)
-    manifest, drift_guard, schema_manifest_text, manifest_debug = _schema_manifest_context(
-        schema=schema,
-        node_name=node_name,
-        mode=result.output_mode,
+    manifest, drift_guard, schema_manifest_text, manifest_debug = (
+        _schema_manifest_context(
+            schema=schema,
+            node_name=node_name,
+            mode=result.output_mode,
+        )
     )
     drift_report_text, drift_debug = _schema_drift_report_debug(
         raw_output=result.raw_output,
@@ -1088,7 +1315,9 @@ def _build_reask_context(
         schema_manifest_summary=manifest_debug["schema_manifest"],
         schema_drift_report=drift_debug,
         drift_guard_source=manifest_debug["drift_guard_source"],
-        drift_guard_config_validated=bool(manifest_debug["drift_guard_config_validated"]),
+        drift_guard_config_validated=bool(
+            manifest_debug["drift_guard_config_validated"]
+        ),
     )
 
 
@@ -1142,9 +1371,7 @@ def _structured_json_contract_with_debug(
         "- If unsure, still return the best schema-valid JSON object; never answer in prose."
     )
     if mode == "deepseek_tool_call_strict":
-        contract += (
-            "\n- Do not omit any field. If empty, use \"\", [], false, or 0 according to the schema."
-        )
+        contract += '\n- Do not omit any field. If empty, use "", [], false, or 0 according to the schema.'
     elif mode == "deepseek_json_object":
         contract += (
             "\n- The response_format is json_object, so the response must be valid json."
@@ -1158,16 +1385,22 @@ def _structured_json_contract_with_debug(
     if manifest_text:
         contract += f"\n\n{manifest_text}"
     elif not debug.get("manifest_enabled", True):
-        contract += "\n\nCanonical schema manifest injection is disabled by configuration."
+        contract += (
+            "\n\nCanonical schema manifest injection is disabled by configuration."
+        )
     return contract, debug
 
 
-def _structured_json_contract(schema: type[BaseModel], node_name: str, mode: str) -> str:
+def _structured_json_contract(
+    schema: type[BaseModel], node_name: str, mode: str
+) -> str:
     contract, _debug = _structured_json_contract_with_debug(schema, node_name, mode)
     return contract
 
 
-def _inject_json_contract(messages: list, *, schema: type[BaseModel], node_name: str, mode: str) -> list:
+def _inject_json_contract(
+    messages: list, *, schema: type[BaseModel], node_name: str, mode: str
+) -> list:
     contract, _debug = _structured_json_contract_with_debug(schema, node_name, mode)
     if messages and isinstance(messages[0], dict):
         return [{"role": "system", "content": contract}, *messages]
@@ -1227,7 +1460,9 @@ def _deepseek_tool_name(node_name: str, schema: type[BaseModel]) -> str:
 
 
 def _deepseek_api_key(llm_node: str) -> tuple[str, str]:
-    api_key_env = str(_setting(llm_node, "api_key_env", "DEEPSEEK_API_KEY") or "DEEPSEEK_API_KEY")
+    api_key_env = str(
+        _setting(llm_node, "api_key_env", "DEEPSEEK_API_KEY") or "DEEPSEEK_API_KEY"
+    )
     return api_key_env, os.getenv(api_key_env, "").strip()
 
 
@@ -1281,7 +1516,9 @@ def _deepseek_raise_for_status(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
     err = RuntimeError(f"Error code: {response.status_code} - {response.text}")
-    setattr(err, "response", response)  # for _extract_status_code / _extract_provider_error_body
+    setattr(
+        err, "response", response
+    )  # for _extract_status_code / _extract_provider_error_body
     raise err
 
 
@@ -1326,7 +1563,9 @@ async def _deepseek_chat_completion(
         provider=_provider(llm_node),
         model=_model(llm_node),
         llm_input_manifest=llm_input_manifest,
-        output_mode="deepseek_tool_call_strict" if base_url.endswith("/beta") else "deepseek_json_object",
+        output_mode="deepseek_tool_call_strict"
+        if base_url.endswith("/beta")
+        else "deepseek_json_object",
         trace_stage_prefix="structured_llm_transport",
         state=state or {},
     )
@@ -1347,7 +1586,9 @@ async def _invoke_openrouter_native(
     """
     metrics.using_direct_openrouter_http = True
     metrics.provider_request_mode = "openrouter_direct_http"
-    base_url = str(_setting(llm_node, "base_url", "https://openrouter.ai/api/v1")).rstrip("/")
+    base_url = str(
+        _setting(llm_node, "base_url", "https://openrouter.ai/api/v1")
+    ).rstrip("/")
     api_key_env = str(_setting(llm_node, "api_key_env", "OPENROUTER_API_KEY"))
     api_key = os.getenv(api_key_env, "")
     if not api_key:
@@ -1393,6 +1634,7 @@ async def _invoke_openrouter_native(
 
     llm_started = time.perf_counter()
     try:
+
         async def _post_request():
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
                 response = await client.post(
@@ -1404,7 +1646,9 @@ async def _invoke_openrouter_native(
                 err = RuntimeError(
                     f"Error code: {response.status_code} - {response.text}"
                 )
-                err.response = response  # for _extract_status_code / _extract_provider_error_body
+                err.response = (
+                    response  # for _extract_status_code / _extract_provider_error_body
+                )
                 raise err
             return response
 
@@ -1468,16 +1712,18 @@ async def _invoke_deepseek_tool_call_strict(
     metrics.provider_request_mode = "deepseek_tool_call_strict"
     tool_name = _deepseek_tool_name(node_name, schema)
     base_url = _deepseek_base_url(llm_node, beta=True)
-    metrics.extra_debug.update({
-        "using_deepseek_official_http": True,
-        "base_url_type": "beta",
-        "resolved_base_url": base_url,
-        "deepseek_schema_size_chars": 0,
-        "tool_name": tool_name,
-        "tool_call_present": False,
-        "tool_arguments_chars": 0,
-        "finish_reason": "",
-    })
+    metrics.extra_debug.update(
+        {
+            "using_deepseek_official_http": True,
+            "base_url_type": "beta",
+            "resolved_base_url": base_url,
+            "deepseek_schema_size_chars": 0,
+            "tool_name": tool_name,
+            "tool_call_present": False,
+            "tool_arguments_chars": 0,
+            "finish_reason": "",
+        }
+    )
 
     api_key_env, api_key = _deepseek_api_key(llm_node)
     if not api_key:
@@ -1596,7 +1842,9 @@ async def _invoke_deepseek_tool_call_strict(
 
     tool_call = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
     function_raw = tool_call.get("function")
-    function: Mapping[str, Any] = function_raw if isinstance(function_raw, Mapping) else {}
+    function: Mapping[str, Any] = (
+        function_raw if isinstance(function_raw, Mapping) else {}
+    )
     returned_name = str(function.get("name") or "")
     if returned_name != tool_name:
         raise _InvokeOneModeError(
@@ -1654,16 +1902,18 @@ async def _invoke_deepseek_json_object(
     metrics.using_direct_openrouter_http = False
     metrics.provider_request_mode = "deepseek_json_object"
     base_url = _deepseek_base_url(llm_node, beta=False)
-    metrics.extra_debug.update({
-        "using_deepseek_official_http": True,
-        "base_url_type": "stable",
-        "resolved_base_url": base_url,
-        "deepseek_schema_size_chars": 0,
-        "tool_name": "",
-        "tool_call_present": False,
-        "tool_arguments_chars": 0,
-        "finish_reason": "",
-    })
+    metrics.extra_debug.update(
+        {
+            "using_deepseek_official_http": True,
+            "base_url_type": "stable",
+            "resolved_base_url": base_url,
+            "deepseek_schema_size_chars": 0,
+            "tool_name": "",
+            "tool_call_present": False,
+            "tool_arguments_chars": 0,
+            "finish_reason": "",
+        }
+    )
     try:
         deepseek_schema = compile_pydantic_schema_for_deepseek_tool(schema)
         metrics.extra_debug["deepseek_schema_size_chars"] = len(
@@ -1808,10 +2058,21 @@ async def _invoke_one_mode(
             f"Failed to inject structured output schema manifest: {exc}",
         )
         raise _InvokeOneModeError(wrapped, metrics, raw_output="") from exc
-    metrics.prompt_chars = _compute_prompt_chars(messages)
     metrics.extra_debug.update(contract_debug)
     if reask_context is not None:
         metrics.extra_debug.update(reask_context.to_debug())
+    try:
+        structured_context_result = _prepare_structured_messages_with_context(
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=messages,
+            state=state or {},
+        )
+    except ContextApplyError as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
+    messages = structured_context_result.messages
+    metrics.extra_debug.update(structured_context_result.debug)
+    metrics.prompt_chars = _compute_prompt_chars(messages)
     emit_context_usage_trace(
         logger,
         node_name=node_name,
@@ -1822,28 +2083,12 @@ async def _invoke_one_mode(
         state=state or {},
         schema_size_chars=_safe_schema_size_chars(schema),
     )
-    context_items = emit_context_items_shadow(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        messages=messages,
-        state=state or {},
+    context_apply_applied = bool(
+        structured_context_result.debug.get("context_apply_applied")
     )
-    emit_context_packing_shadow(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        items=context_items,
-        state=state or {},
+    provider_bound_messages_mutated = bool(
+        structured_context_result.debug.get("provider_bound_messages_mutated")
     )
-    structured_context_debug = _emit_structured_context_apply_observe(
-        node_name=node_name,
-        llm_node=llm_node,
-        context_item_count=len(context_items),
-        messages=messages,
-        state=state or {},
-    )
-    metrics.extra_debug.update(structured_context_debug)
     try:
         llm_input_manifest = build_llm_input_manifest(
             node_name=node_name,
@@ -1856,9 +2101,23 @@ async def _invoke_one_mode(
             output_mode=mode,
             schema_name=schema.__name__,
             schema_size_chars=_safe_schema_size_chars(schema),
-            context_apply_applied=False,
+            context_apply_applied=context_apply_applied,
             schema_contract_first=True,
-            provider_bound_messages_mutated=False,
+            provider_bound_messages_mutated=provider_bound_messages_mutated,
+            trace_call_id=str(
+                structured_context_result.debug.get(
+                    "structured_context_apply_trace_call_id",
+                    "",
+                )
+                or ""
+            ),
+            trace_seq=int(
+                structured_context_result.debug.get(
+                    "structured_context_apply_trace_seq",
+                    0,
+                )
+                or 0
+            ),
         )
         _emit_llm_input_manifest_built(
             llm_input_manifest,
@@ -1934,7 +2193,10 @@ async def _invoke_one_mode(
         )
         llm_started = time.perf_counter()
         try:
-            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+            (
+                response,
+                _transport_retry_count,
+            ) = await invoke_with_provider_transport_retry(
                 lambda: runnable.ainvoke(messages),
                 node_name=node_name,
                 llm_node=llm_node,
@@ -1970,7 +2232,10 @@ async def _invoke_one_mode(
         runnable = llm.bind(response_format={"type": "json_object"})
         llm_started = time.perf_counter()
         try:
-            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+            (
+                response,
+                _transport_retry_count,
+            ) = await invoke_with_provider_transport_retry(
                 lambda: runnable.ainvoke(messages),
                 node_name=node_name,
                 llm_node=llm_node,
@@ -2003,10 +2268,16 @@ async def _invoke_one_mode(
     if mode == "tool_call_pydantic":
         metrics.using_direct_openrouter_http = False
         metrics.provider_request_mode = "langchain_tool_call"
-        runnable = llm.bind(tools=[_tool_schema(schema)], tool_choice={"type": "function", "function": {"name": schema.__name__}})
+        runnable = llm.bind(
+            tools=[_tool_schema(schema)],
+            tool_choice={"type": "function", "function": {"name": schema.__name__}},
+        )
         llm_started = time.perf_counter()
         try:
-            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+            (
+                response,
+                _transport_retry_count,
+            ) = await invoke_with_provider_transport_retry(
                 lambda: runnable.ainvoke(messages),
                 node_name=node_name,
                 llm_node=llm_node,
@@ -2034,7 +2305,11 @@ async def _invoke_one_mode(
                     tool_calls.append({"name": function.get("name", ""), "args": args})
             if not tool_calls:
                 raise ValueError("No tool call returned")
-            args = tool_calls[0].get("args") if isinstance(tool_calls[0], dict) else getattr(tool_calls[0], "args", None)
+            args = (
+                tool_calls[0].get("args")
+                if isinstance(tool_calls[0], dict)
+                else getattr(tool_calls[0], "args", None)
+            )
             parsed_args = json.loads(args) if isinstance(args, str) else args
             if not isinstance(parsed_args, dict):
                 raise ValueError("Tool call arguments must be a JSON object")
@@ -2043,10 +2318,21 @@ async def _invoke_one_mode(
         except Exception as exc:
             metrics.json_pydantic_elapsed_ms = _round_ms(parse_started)
             _refresh_parse_validate_total(metrics)
-            raise _InvokeOneModeError(exc, metrics, raw_output=raw_output or json.dumps(parsed_args if 'parsed_args' in dir() else {}, ensure_ascii=False)) from exc
+            raise _InvokeOneModeError(
+                exc,
+                metrics,
+                raw_output=raw_output
+                or json.dumps(
+                    parsed_args if "parsed_args" in dir() else {}, ensure_ascii=False
+                ),
+            ) from exc
 
         _refresh_parse_validate_total(metrics)
-        return parsed, raw_output or json.dumps(parsed_args, ensure_ascii=False), metrics
+        return (
+            parsed,
+            raw_output or json.dumps(parsed_args, ensure_ascii=False),
+            metrics,
+        )
 
     # ── prompt_json_pydantic ──
     if mode == "prompt_json_pydantic":
@@ -2054,7 +2340,10 @@ async def _invoke_one_mode(
         metrics.provider_request_mode = "langchain_prompt_json"
         llm_started = time.perf_counter()
         try:
-            response, _transport_retry_count = await invoke_with_provider_transport_retry(
+            (
+                response,
+                _transport_retry_count,
+            ) = await invoke_with_provider_transport_retry(
                 lambda: llm.ainvoke(messages),
                 node_name=node_name,
                 llm_node=llm_node,
@@ -2139,7 +2428,9 @@ async def invoke_structured_llm(
             extra_debug=dict(attempt.extra_debug),
         )
 
-    def _emit_and_maybe_raise(result: StructuredLLMResult, *, exc: Exception | None = None) -> None:
+    def _emit_and_maybe_raise(
+        result: StructuredLLMResult, *, exc: Exception | None = None
+    ) -> None:
         result.retry_count = _semantic_retry_count(attempts)
         emit_a3_trace(
             logger,
@@ -2149,10 +2440,12 @@ async def invoke_structured_llm(
             env_flag="LOG_STRUCTURED_LLM_OUTPUT",
             max_chars=raw_limit,
         )
-        attempts_for_mode = sum(1 for attempt in attempts if attempt.output_mode == result.output_mode)
-        include_business_validation_retry = (
-            _reask_enabled(node_name) and _reask_business_validation_enabled(node_name)
+        attempts_for_mode = sum(
+            1 for attempt in attempts if attempt.output_mode == result.output_mode
         )
+        include_business_validation_retry = _reask_enabled(
+            node_name
+        ) and _reask_business_validation_enabled(node_name)
         should_retry = (
             not result.success
             and _is_semantic_retryable_failure(
@@ -2173,13 +2466,17 @@ async def invoke_structured_llm(
             else None
         )
         if should_retry:
-            reask_debug = reask_context.to_debug() if reask_context is not None else {
-                "reask_used": False,
-                "reask_reason": "",
-                "reask_attempt_number": 0,
-                "previous_failure_phase": "",
-                "previous_error_summary": "",
-            }
+            reask_debug = (
+                reask_context.to_debug()
+                if reask_context is not None
+                else {
+                    "reask_used": False,
+                    "reask_reason": "",
+                    "reask_attempt_number": 0,
+                    "previous_failure_phase": "",
+                    "previous_error_summary": "",
+                }
+            )
             if reask_context is not None:
                 pending_reasks[result.output_mode] = reask_context
                 emit_a3_trace(
@@ -2194,7 +2491,9 @@ async def invoke_structured_llm(
                         "output_mode": result.output_mode,
                         "failure_phase": result.failure_phase,
                         "error_type": result.error_type,
-                        "error_message": _sanitize(result.error_message, max_chars=1200),
+                        "error_message": _sanitize(
+                            result.error_message, max_chars=1200
+                        ),
                         "max_retries": max_retries,
                         "next_attempt": attempts_for_mode + 1,
                         "fallback_used": result.fallback_used,
@@ -2313,7 +2612,9 @@ async def invoke_structured_llm(
                 except Exception as exc:
                     validation_result = str(exc)
                 if isinstance(validation_result, list):
-                    business_error = "; ".join(str(item) for item in validation_result if item)
+                    business_error = "; ".join(
+                        str(item) for item in validation_result if item
+                    )
                 elif validation_result:
                     business_error = str(validation_result)
             metrics.business_validate_elapsed_ms = _round_ms(business_started)
@@ -2381,7 +2682,9 @@ async def invoke_structured_llm(
                     http_messages_preview=metrics.http_messages_preview,
                     extra_debug=dict(metrics.extra_debug),
                 )
-                _emit_and_maybe_raise(result, exc=_BusinessValidationError(business_error))
+                _emit_and_maybe_raise(
+                    result, exc=_BusinessValidationError(business_error)
+                )
                 continue
 
             # success
@@ -2447,7 +2750,9 @@ async def invoke_structured_llm(
             phase = _classify_failure_phase(cause, mode, metrics)
             if _is_semantic_retryable_failure(
                 phase,
-                include_business_validation=_reask_business_validation_enabled(node_name),
+                include_business_validation=_reask_business_validation_enabled(
+                    node_name
+                ),
             ):
                 _attach_schema_drift_debug(
                     metrics,
@@ -2531,7 +2836,9 @@ async def invoke_structured_llm(
             raw_output = getattr(exc, "raw_output", "")
             if _is_semantic_retryable_failure(
                 phase,
-                include_business_validation=_reask_business_validation_enabled(node_name),
+                include_business_validation=_reask_business_validation_enabled(
+                    node_name
+                ),
             ):
                 _attach_schema_drift_debug(
                     metrics,
@@ -2600,7 +2907,11 @@ async def invoke_structured_llm(
             _emit_and_maybe_raise(result, exc=exc)
             continue
 
-    last = attempts[-1] if attempts else StructuredLLMAttempt(output_mode=output_mode, failure_phase="no_attempts")
+    last = (
+        attempts[-1]
+        if attempts
+        else StructuredLLMAttempt(output_mode=output_mode, failure_phase="no_attempts")
+    )
     result = StructuredLLMResult(
         success=False,
         parsed=None,

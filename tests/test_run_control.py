@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.observability.a3_trace import emit_a3_trace
+from src.observability.a3_trace import (
+    emit_a3_trace,
+    reset_trace_event_sink,
+    set_trace_event_sink,
+)
 
 
 class AsyncIteratorMock:
@@ -342,6 +346,8 @@ async def test_live_context_window_update_is_active_run_only():
             "thread_context_window": {},
         },
     )
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
 
     try:
         await _update_context_window_state_from_trace(
@@ -360,6 +366,7 @@ async def test_live_context_window_update_is_active_run_only():
         )
         active_snapshot = get_active_run("thread-1")
     finally:
+        reset_trace_event_sink(token)
         finish_active_run("thread-1")
 
     graph.aupdate_state.assert_not_called()
@@ -370,6 +377,16 @@ async def test_live_context_window_update_is_active_run_only():
     assert active_snapshot["thread_context_window"][
         "last_context_policy_by_node_keys"
     ] == ["supervisor"]
+    assert (
+        active_snapshot["thread_context_window"]["context_usage_history_kind"]
+        == "llm_call_history"
+    )
+    trace_events = [
+        event for event in sink if event["stage"] == "context_window_state_updated"
+    ]
+    assert trace_events
+    assert trace_events[-1]["request_id"] == "req-1"
+    assert trace_events[-1]["context_usage_history_kind"] == "llm_call_history"
 
 
 @pytest.mark.anyio

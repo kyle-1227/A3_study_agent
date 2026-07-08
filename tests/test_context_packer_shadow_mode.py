@@ -106,7 +106,7 @@ def test_packer_enabled_false_minimal_config_sends_no_events(monkeypatch):
     assert sink == []
 
 
-def test_emit_context_packing_shadow_apply_to_llm_error_does_not_escape(monkeypatch):
+def test_emit_context_packing_shadow_apply_to_llm_observed_does_not_escape(monkeypatch):
     monkeypatch.setattr(
         packing_trace,
         "get_packing_policy",
@@ -126,8 +126,32 @@ def test_emit_context_packing_shadow_apply_to_llm_error_does_not_escape(monkeypa
         reset_trace_event_sink(token)
 
     assert result is None
-    assert sink[0]["stage"] == "context_packing_error"
+    assert sink[0]["stage"] == "context_packing_observed"
     assert sink[0]["reason"] == "apply_to_llm_unsupported"
+
+
+def test_emit_context_packing_shadow_shadow_mode_required_is_non_error(monkeypatch):
+    monkeypatch.setattr(
+        packing_trace,
+        "get_packing_policy",
+        lambda **_: _enabled_policy(shadow_mode=False),
+    )
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        result = emit_context_packing_shadow(
+            logging.getLogger("test_context_packer_shadow_mode"),
+            node_name="node",
+            llm_node="llm",
+            items=[_item()],
+            state={"request_id": "r1", "thread_id": "t1"},
+        )
+    finally:
+        reset_trace_event_sink(token)
+
+    assert result is None
+    assert sink[0]["stage"] == "context_packing_observed"
+    assert sink[0]["reason"] == "shadow_mode_required"
 
 
 def test_emit_context_packing_shadow_packer_error_does_not_escape(monkeypatch):
@@ -207,6 +231,7 @@ def test_emit_context_packing_shadow_required_source_disabled_is_trace_only(
 
 def _enabled_policy(
     *,
+    shadow_mode: bool = True,
     apply_to_llm: bool = False,
     max_context_block_tokens: int = 1000,
     enabled_sources: tuple[str, ...] = ("message",),
@@ -215,7 +240,7 @@ def _enabled_policy(
 
     return PackingPolicy(
         enabled=True,
-        shadow_mode=True,
+        shadow_mode=shadow_mode,
         apply_to_llm=apply_to_llm,
         strategy="priority_budget",
         max_context_block_tokens=max_context_block_tokens,

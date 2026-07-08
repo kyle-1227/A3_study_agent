@@ -99,6 +99,26 @@ def build_context_packing_error_event(error: ContextPackingError) -> dict[str, A
     }
 
 
+def build_context_packing_observed_event(
+    *,
+    node_name: str,
+    llm_node: str,
+    reason: str,
+    warning: object,
+    budget_tokens: int,
+) -> dict[str, Any]:
+    """Build a safe non-error observed/skipped packing event."""
+    return {
+        "node_name": str(node_name or ""),
+        "llm_node": str(llm_node or ""),
+        "status": "observed",
+        "reason": str(reason or "context_packing_observed"),
+        "warning": sanitize_error_message(warning, max_chars=300),
+        "selected_tokens": 0,
+        "budget_tokens": int(budget_tokens or 0),
+    }
+
+
 def emit_context_packing_plan(
     logger: logging.Logger,
     *,
@@ -161,6 +181,32 @@ def emit_context_packing_error(
     )
 
 
+def emit_context_packing_observed(
+    logger: logging.Logger,
+    *,
+    node_name: str,
+    llm_node: str,
+    reason: str,
+    warning: object,
+    budget_tokens: int,
+    state: dict | None,
+) -> None:
+    """Emit safe non-error context_packing_observed telemetry."""
+    emit_a3_trace(
+        logger,
+        "context_packing_observed",
+        build_context_packing_observed_event(
+            node_name=node_name,
+            llm_node=llm_node,
+            reason=reason,
+            warning=warning,
+            budget_tokens=budget_tokens,
+        ),
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
+
+
 def emit_context_packing_shadow(
     logger: logging.Logger,
     *,
@@ -176,21 +222,27 @@ def emit_context_packing_shadow(
         if not policy.enabled or not node_enabled(policy, node_name=node_name):
             return None
         if policy.apply_to_llm:
-            raise ContextPackingError(
+            emit_context_packing_observed(
+                logger,
                 reason="apply_to_llm_unsupported",
                 warning="context_engineering.packer.apply_to_llm must be false in Phase 3A",
                 node_name=node_name,
                 llm_node=llm_node_text,
                 budget_tokens=policy.max_context_block_tokens,
+                state=state,
             )
+            return None
         if not policy.shadow_mode:
-            raise ContextPackingError(
+            emit_context_packing_observed(
+                logger,
                 reason="shadow_mode_required",
                 warning="context_engineering.packer.shadow_mode must be true in Phase 3A",
                 node_name=node_name,
                 llm_node=llm_node_text,
                 budget_tokens=policy.max_context_block_tokens,
+                state=state,
             )
+            return None
         emit_context_packing_plan(
             logger,
             node_name=node_name,

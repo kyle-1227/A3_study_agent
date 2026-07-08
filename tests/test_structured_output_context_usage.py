@@ -14,11 +14,25 @@ class _TinySchema(BaseModel):
 
 
 @pytest.mark.anyio
-async def test_structured_output_counts_after_schema_contract_injection_without_leaking_schema():
+async def test_structured_output_counts_after_schema_contract_injection_without_leaking_schema(
+    monkeypatch,
+):
+    from src.llm import structured_output
     from src.llm.structured_output import _invoke_one_mode
 
     original_messages = [{"role": "user", "content": "question"}]
     original_count = count_messages_tokens(original_messages).value
+    monkeypatch.setattr(
+        structured_output,
+        "_structured_context_apply_config",
+        lambda: {
+            "enabled": True,
+            "mode": "observe_only",
+            "active_nodes": (),
+            "allow_structured_output": False,
+            "diagnostics": [],
+        },
+    )
     sink: list[dict] = []
     token = set_trace_event_sink(sink)
     try:

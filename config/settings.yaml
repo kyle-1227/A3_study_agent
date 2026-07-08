@@ -148,11 +148,18 @@ context_engineering:
       enabled: true
       apply_enabled_nodes: []
       fallback_on_error: false
-      allow_structured_output: false
+      allow_structured_output: true
       structured_output_context:
         enabled: true
-        mode: observe_only
-        active_nodes: []
+        mode: active
+        active_nodes:
+          - review_doc_agent
+          - study_plan_agent
+          - mindmap_agent
+          - exercise_agent
+          - code_practice_agent
+          - video_script_agent
+          - video_animation_agent
       role: system
       position: after_system
       exclude_message_source: true

@@ -45,7 +45,12 @@ def test_profile_provider_bad_state_fails_fast():
         ProfileContextProvider().collect(_context({"profile": "bad"}))
 
 
-def test_rules_provider_objectizes_existing_rule_summaries():
+def test_rules_provider_objectizes_existing_rule_summaries(monkeypatch):
+    import src.context_engineering.providers.rules_provider as rules_provider
+
+    monkeypatch.setattr(
+        rules_provider, "get_setting", lambda _key, default=None: default
+    )
     items = RulesContextProvider().collect(
         _context(
             {

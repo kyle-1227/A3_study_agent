@@ -189,6 +189,8 @@ class WorkspaceContinuationContext(TypedDict, total=False):
     skip_reason: str
     workspace_id: str
     thread_id: str
+    current_thread_id: str
+    workspace_thread_id: str
     request_id: str
     active_subject: str
     normalized_subject: str
@@ -849,7 +851,9 @@ def workspace_continuation_context(
             max_chars=160,
             fallback="",
         ),
-        "thread_id": workspace_thread,
+        "thread_id": current_thread,
+        "current_thread_id": current_thread,
+        "workspace_thread_id": workspace_thread,
         "request_id": request_id,
         "active_subject": active_subject,
         "normalized_subject": normalized_subject,
@@ -889,6 +893,16 @@ def workspace_continuation_trace_payload(
     context: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return compact continuation diagnostics suitable for A3_TRACE."""
+    current_thread = sanitize_workspace_text(
+        context.get("current_thread_id") or context.get("thread_id"),
+        max_chars=120,
+        fallback="",
+    )
+    workspace_thread = sanitize_workspace_text(
+        context.get("workspace_thread_id"),
+        max_chars=120,
+        fallback="",
+    )
     return {
         "can_continue": bool(context.get("can_continue")),
         "continuation_applied": bool(context.get("continuation_applied")),
@@ -903,10 +917,12 @@ def workspace_continuation_trace_payload(
             fallback="",
         ),
         "thread_id": sanitize_workspace_text(
-            context.get("thread_id"),
+            current_thread,
             max_chars=120,
             fallback="",
         ),
+        "current_thread_id": current_thread,
+        "workspace_thread_id": workspace_thread,
         "request_id": sanitize_workspace_text(
             context.get("request_id"),
             max_chars=120,

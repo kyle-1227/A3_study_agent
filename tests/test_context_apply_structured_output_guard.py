@@ -37,7 +37,7 @@ def _item() -> ContextItem:
 
 
 @pytest.mark.anyio
-async def test_structured_output_never_calls_apply_even_when_config_would_allow(
+async def test_structured_output_observe_only_never_mutates_provider_messages(
     monkeypatch,
 ):
     from src.context_engineering.packing import apply as apply_module
@@ -95,6 +95,17 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
         "emit_context_packing_shadow",
         lambda *_, **__: None,
     )
+    monkeypatch.setattr(
+        structured_output,
+        "_structured_context_apply_config",
+        lambda: {
+            "enabled": True,
+            "mode": "observe_only",
+            "active_nodes": (),
+            "allow_structured_output": False,
+            "diagnostics": [],
+        },
+    )
     monkeypatch.setattr(structured_output, "_provider", lambda _node: "deepseek")
     monkeypatch.setattr(
         structured_output,
@@ -127,3 +138,72 @@ async def test_structured_output_never_calls_apply_even_when_config_would_allow(
     assert scorer_calls == []
     assert "context_importance_scored" not in trace_stages
     assert "llm_input_manifest.built" in trace_stages
+
+
+@pytest.mark.parametrize(
+    ("node_name", "llm_node"),
+    [
+        ("supervisor", "supervisor"),
+        ("search_query_rewriter", "search_query_rewriter"),
+        ("evidence_sufficiency_judge", "evidence_sufficiency_judge"),
+        ("resource_bundle_output", "resource_bundle_output"),
+    ],
+)
+def test_structured_output_active_rollout_skips_non_resource_agent_nodes(
+    monkeypatch,
+    node_name,
+    llm_node,
+):
+    from src.llm import structured_output
+
+    messages = [{"role": "user", "content": "question"}]
+    shadow_calls: list[str] = []
+
+    monkeypatch.setattr(
+        structured_output,
+        "_structured_context_apply_config",
+        lambda: {
+            "enabled": True,
+            "mode": "active",
+            "active_nodes": ("mindmap_agent",),
+            "allow_structured_output": True,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "prepare_messages_with_context_policy",
+        lambda *_, **__: pytest.fail("non-active structured node must not apply CE"),
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_context_items_shadow",
+        lambda *_, **__: shadow_calls.append("items") or [_item()],
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_context_packing_shadow",
+        lambda *_, **__: shadow_calls.append("packing"),
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_a3_trace",
+        lambda *_, **__: None,
+    )
+
+    result = structured_output._prepare_structured_messages_with_context(
+        node_name=node_name,
+        llm_node=llm_node,
+        messages=messages,
+        state={"request_id": "r1", "thread_id": "t1"},
+    )
+
+    assert result.messages == messages
+    assert result.debug["structured_context_apply_status"] == "observed"
+    assert (
+        result.debug["structured_context_apply_skip_reason"]
+        == "node_not_in_active_structured_context_rollout"
+    )
+    assert result.debug["provider_bound_messages_mutated"] is False
+    assert result.debug["context_apply_applied"] is False
+    assert shadow_calls == ["items", "packing"]
