@@ -51,6 +51,20 @@ _WINDOWS_DRIVE_PREFIXES = tuple(
     f"{chr(code)}:" for code in range(ord("a"), ord("z") + 1)
 )
 
+STRUCTURED_RESOURCE_TYPES: frozenset[str] = frozenset(
+    {
+        "mindmap",
+        "quiz",
+        "study_plan",
+        "review_doc",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "bundle",
+    }
+)
+_ANSWER_ONLY_RESOURCE_TYPES: frozenset[str] = frozenset({"evidence_summary"})
+
 
 def normalize_resource_final_payload(
     legacy_payload: Mapping[str, Any] | None,
@@ -87,6 +101,9 @@ def normalize_resource_final_payload(
         fallback="",
     )
     resource = _build_resource_object(safe_payload, resource_type=resource_type)
+    # Reject structured resource types whose normalized payload is empty.
+    if resource_type in STRUCTURED_RESOURCE_TYPES and not resource.get("payload"):
+        return None
     payload_hash = stable_payload_hash(resource)
     resource_id = stable_resource_id(
         thread_id=thread_id,
@@ -270,7 +287,11 @@ def _extract_render_payload(
     }
     keys = keys_by_type.get(resource_type, ())
     render_payload = {key: payload[key] for key in keys if key in payload}
-    if not render_payload and payload.get("answer"):
+    if (
+        not render_payload
+        and payload.get("answer")
+        and resource_type in _ANSWER_ONLY_RESOURCE_TYPES
+    ):
         render_payload = {"answer": payload.get("answer")}
     sanitized = _sanitize_render_value(render_payload)
     return sanitized if isinstance(sanitized, dict) else {}

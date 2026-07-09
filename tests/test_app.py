@@ -654,3 +654,168 @@ class TestResourceFinalPayloadArtifacts:
         assert (
             mindmap_payload and mindmap_payload["mindmap"]["title"] == "Python 思维导图"
         )
+
+
+class TestStructuredResourceArtifactGuard:
+    """_legacy_resource_final_payload must return None for structured types
+    when no renderable artifact exists in state."""
+
+    def test_study_plan_without_artifact_returns_none(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "study_plan",
+                "study_plan_artifact": {},
+                "study_plan_document_artifact": {},
+            }
+        )
+        assert payload is None
+
+    def test_study_plan_with_artifact_returns_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "study_plan",
+                "study_plan_artifact": {"title": "My Study Plan"},
+                "study_plan_document_artifact": {
+                    "filename": "plan.md",
+                    "markdown": "# Plan",
+                },
+            }
+        )
+        assert payload is not None
+        assert payload["resource_type"] == "study_plan"
+
+    def test_study_plan_with_markdown_and_document_returns_payload(self):
+        from app import _resource_final_payload
+
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "study_plan",
+                "study_plan_document_artifact": {
+                    "filename": "plan.md",
+                    "markdown": "# Full study plan markdown",
+                },
+            }
+        )
+        assert payload is not None
+        assert payload["resource_type"] == "study_plan"
+
+    @pytest.mark.parametrize(
+        "resource_type,artifact_keys",
+        [
+            ("mindmap", ("mindmap_artifact", "mindmap_tree")),
+            ("quiz", ("exercise_artifact", "exercise_items")),
+            ("review_doc", ("review_doc_artifact", "review_doc_artifacts")),
+            ("code_practice", ("code_practice_artifact",)),
+            ("video_script", ("video_script_artifact",)),
+            ("video_animation", ("video_animation_artifact",)),
+        ],
+    )
+    def test_each_structured_type_without_artifact_returns_none(
+        self, resource_type, artifact_keys
+    ):
+        from app import _resource_final_payload
+
+        state = {"requested_resource_type": resource_type}
+        for key in artifact_keys:
+            if key.endswith("s"):
+                state[key] = []
+            else:
+                state[key] = {}
+        payload = _resource_final_payload(state)
+        assert payload is None, f"{resource_type} without artifact should return None"
+
+    def test_artifact_keys_constant_excludes_bundle_and_evidence_summary(self):
+        from app import STRUCTURED_RESOURCE_ARTIFACT_KEYS
+
+        assert "bundle" not in STRUCTURED_RESOURCE_ARTIFACT_KEYS
+        assert "evidence_summary" not in STRUCTURED_RESOURCE_ARTIFACT_KEYS
+
+
+class TestThreadStatusProfileCompletion:
+    """_thread_status_from_snapshot must derive profile_completion_request
+    from pending task interrupts when checkpoint values are empty."""
+
+    def test_derives_profile_completion_from_task_interrupt(self):
+        from app import _thread_status_from_snapshot
+
+        request_payload = {
+            "title": "Need profile before study plan",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "Learning goal",
+                    "required": True,
+                    "max_chars": 400,
+                },
+                {
+                    "key": "current_foundation",
+                    "label": "Current foundation",
+                    "required": True,
+                    "max_chars": 400,
+                },
+                {
+                    "key": "daily_study_time",
+                    "label": "Daily study time",
+                    "required": True,
+                    "max_chars": 200,
+                },
+            ],
+        }
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "profile_completion_required",
+                "profile_completion_request": request_payload,
+                "resume_available": True,
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        snapshot = SimpleNamespace(
+            # No pending_interrupt_type or profile_completion_request in values
+            values={
+                "run_status": "running",
+                "schema_version": "run_control_v1",
+                "pending_interrupt_type": "",
+                "profile_completion_request": {},
+                "current_node": "",
+                "last_completed_node": "",
+                "stopped_at": "",
+                "stop_reason": "",
+            },
+            tasks=[task],
+            next=(),
+        )
+
+        response = _thread_status_from_snapshot("t-1", snapshot)
+
+        assert response.resume_available is True
+        assert response.pending_interrupt_type == "profile_completion_required"
+        assert response.profile_completion_request
+        assert response.profile_completion_request["title"] == request_payload["title"]
+        assert len(response.profile_completion_request["fields"]) == 3
+
+    def test_profile_completion_sanitizer_consistent_with_sse(self):
+        """_safe_profile_completion_request produces identical output for
+        both SSE emission and status response paths."""
+        from app import _safe_profile_completion_request
+
+        interrupt_value = {
+            "type": "profile_completion_required",
+            "profile_completion_request": {
+                "title": "Need profile",
+                "fields": [
+                    {"key": "learning_goal", "label": "Goal", "required": True},
+                ],
+            },
+            "resume_available": True,
+        }
+
+        first = _safe_profile_completion_request(interrupt_value)
+        second = _safe_profile_completion_request(dict(interrupt_value))
+
+        assert first == second
+        assert first["title"] == "Need profile"
+        assert first["fields"][0]["key"] == "learning_goal"

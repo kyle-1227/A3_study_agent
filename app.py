@@ -567,6 +567,27 @@ def _safe_profile_completion_request(value: object) -> dict:
     return {"title": title, "fields": fields} if title or fields else {}
 
 
+def _complete_profile_completion_request(value: object) -> dict:
+    request = _safe_profile_completion_request(value)
+    fields = request.get("fields")
+    if not request.get("title"):
+        return {}
+    if not isinstance(fields, list) or not fields:
+        return {}
+    return request
+
+
+def _profile_completion_request_from_trace_event(event: object) -> dict:
+    if not isinstance(event, dict):
+        return {}
+    direct_request = _complete_profile_completion_request(
+        event.get("profile_completion_request")
+    )
+    if direct_request:
+        return direct_request
+    return _complete_profile_completion_request(event)
+
+
 def _pending_profile_completion_request(
     state_snapshot, values: dict | None = None
 ) -> dict:
@@ -1145,6 +1166,25 @@ def _last_ai_message_content(final_state: dict) -> str:
     return ""
 
 
+# Structured resource types require at least one of these state artifact keys
+# before _legacy_resource_final_payload can emit a resource_final for that type.
+# Interrupted runs leave resource_type set but produce no artifact; the guard
+# below prevents a misleading answer-only resource_final from being emitted.
+STRUCTURED_RESOURCE_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
+    "mindmap": ("mindmap_artifact", "mindmap_tree"),
+    "quiz": ("exercise_artifact", "exercise_items"),
+    "review_doc": ("review_doc_artifact", "review_doc_artifacts"),
+    "code_practice": ("code_practice_artifact",),
+    "video_script": ("video_script_artifact",),
+    "video_animation": ("video_animation_artifact",),
+    "study_plan": (
+        "study_plan_artifact",
+        "study_plan_document_artifact",
+        "study_plan_markdown",
+    ),
+}
+
+
 def _legacy_resource_final_payload(final_state: dict) -> dict | None:
     has_generated_resource_artifact = any(
         bool(final_state.get(key))
@@ -1316,6 +1356,16 @@ def _legacy_resource_final_payload(final_state: dict) -> dict | None:
             resource_type = "study_plan"
         else:
             return None
+
+    # Require at least one renderable artifact for structured resource types.
+    # Interrupted runs (e.g. GraphInterrupt from study_plan_profile_gate) leave
+    # resource_type set but produce no artifact; return None to prevent a
+    # misleading answer-only resource_final from being emitted.
+    required_keys = STRUCTURED_RESOURCE_ARTIFACT_KEYS.get(resource_type)
+    if required_keys is not None and not any(
+        final_state.get(key) for key in required_keys
+    ):
+        return None
 
     answer = _last_ai_message_content(final_state)
     payload = {
@@ -1524,6 +1574,8 @@ async def _stream_graph_events(
     last_drop_reasons_by_node: dict[str, dict] = {}
     last_resource_subnodes: list[dict] = []
     terminal_resource_output: dict | None = None
+    worker_interrupted_seen = False
+    recovered_profile_completion_request: dict = {}
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
@@ -1553,10 +1605,22 @@ async def _stream_graph_events(
 
     async def _drain_trace_events() -> list[str]:
         nonlocal llm_input_manifests, manifest_state_context
+        nonlocal worker_interrupted_seen, recovered_profile_completion_request
         drained: list[str] = []
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
+            recovered_from_trace = _profile_completion_request_from_trace_event(event)
+            if recovered_from_trace:
+                recovered_profile_completion_request = recovered_from_trace
+            if stage == "resource_generation.worker.interrupted":
+                worker_interrupted_seen = True
+            elif (
+                stage == "resource_subnode.end"
+                and str(event.get("status") or "") == "interrupted"
+                and str(event.get("error_type") or "") == "GraphInterrupt"
+            ):
+                worker_interrupted_seen = True
             if isinstance(stage, str) and stage.startswith("context_"):
                 request_context_events.append(_safe_context_event_summary(event))
             if stage in WORKSPACE_TRACE_STAGES:
@@ -2466,6 +2530,29 @@ async def _stream_graph_events(
         logger.exception("Failed to read graph state snapshot after stream")
         raise
 
+    interrupt_values = _pending_interrupt_values(state_snapshot)
+    snapshot_tasks = list(getattr(state_snapshot, "tasks", ()) or ())
+    snapshot_next = getattr(state_snapshot, "next", ()) or ()
+    task_interrupt_counts = [
+        len(list(getattr(task, "interrupts", ()) or ())) for task in snapshot_tasks
+    ]
+    emit_a3_trace(
+        logger,
+        "sse_pending_interrupt_probe",
+        {
+            "pending_interrupt_count": len(interrupt_values),
+            "state_snapshot_next": [str(item) for item in snapshot_next],
+            "task_count": len(snapshot_tasks),
+            "task_interrupt_counts": task_interrupt_counts,
+            "pending_interrupt_types": [
+                str(value.get("type") or "")
+                for value in interrupt_values
+                if isinstance(value, dict)
+            ],
+        },
+        env_flag="LOG_A3_TRACE",
+    )
+
     final_state = _state_values(state_snapshot)
     # TEMP A3_TRACE: remove after state snapshot validation.
     emit_a3_trace(
@@ -2489,132 +2576,205 @@ async def _stream_graph_events(
         env_flag="LOG_A3_TRACE",
     )
 
-    if state_snapshot.next:
-        for task in state_snapshot.tasks:
-            if hasattr(task, "interrupts") and task.interrupts:
-                interrupt_value = task.interrupts[0].value
-                if (
-                    isinstance(interrupt_value, dict)
-                    and interrupt_value.get("type") == "user_stop"
-                ):
-                    stopped_at = utc_now_iso()
-                    stopped_node = str(interrupt_value.get("node") or "")
-                    stopped_update_ok = await _try_update_run_state(
-                        graph,
-                        config,
-                        {
-                            "schema_version": RUN_CONTROL_SCHEMA_VERSION,
-                            "run_status": RUN_STATUS_STOPPED,
-                            "resume_available": True,
-                            "pending_interrupt_type": "user_stop",
-                            "stopped_at": stopped_at,
-                            "current_node": stopped_node,
-                            "stop_reason": str(
-                                interrupt_value.get("reason") or "user_stop"
-                            ),
-                        },
-                        state=final_state,
-                    )
-                    emit_a3_trace(
-                        logger,
-                        "run_stopped_at_checkpoint",
-                        {
-                            "thread_id": thread_id,
-                            "node": stopped_node,
-                            "stopped_at": stopped_at,
-                            "resume_available": True,
-                        },
-                        state=final_state,
-                        env_flag="LOG_A3_TRACE",
-                    )
-                    payload = json.dumps(
-                        {
-                            "type": "run_status",
-                            "run_status": RUN_STATUS_STOPPED,
-                            "thread_id": thread_id,
-                            "resume_available": True,
-                            "pending_interrupt_type": "user_stop",
-                            "node": stopped_node,
-                            "stopped_at": stopped_at,
-                        },
-                        ensure_ascii=False,
-                    )
-                    yield f"data: {payload}\n\n"
-                    if stopped_update_ok:
-                        finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
-                    return
-                if (
-                    isinstance(interrupt_value, dict)
-                    and interrupt_value.get("type") == "memory_confirmation"
-                ):
-                    interrupt_update_ok = await _try_update_run_state(
-                        graph,
-                        config,
-                        {
-                            "resume_available": False,
-                            "pending_interrupt_type": "memory_confirmation",
-                        },
-                        state=final_state,
-                        persist_checkpoint=False,
-                    )
-                    payload_data = {
-                        "type": "interrupt",
-                        "interrupt_type": "memory_confirmation",
-                        "question": interrupt_value.get("question", ""),
-                        "reason": interrupt_value.get("reason", ""),
-                        "selected_memory_count": interrupt_value.get(
-                            "selected_memory_count", 0
-                        ),
-                        "options": interrupt_value.get("options", []),
-                        "thread_id": thread_id,
-                    }
-                elif (
-                    isinstance(interrupt_value, dict)
-                    and interrupt_value.get("type") == "profile_completion_required"
-                ):
-                    profile_request = _safe_profile_completion_request(interrupt_value)
-                    interrupt_update_ok = await _try_update_run_state(
-                        graph,
-                        config,
-                        {
-                            "resume_available": True,
-                            "pending_interrupt_type": "profile_completion_required",
-                            "profile_completion_request": profile_request,
-                        },
-                        state=final_state,
-                        persist_checkpoint=False,
-                    )
-                    payload_data = {
-                        "type": "interrupt",
-                        "interrupt_type": "profile_completion_required",
-                        "title": profile_request.get("title", ""),
-                        "fields": profile_request.get("fields", []),
-                        "profile_completion_request": profile_request,
-                        "resume_available": True,
-                        "thread_id": thread_id,
-                    }
-                else:
-                    interrupt_update_ok = await _try_update_run_state(
-                        graph,
-                        config,
-                        {
-                            "resume_available": False,
-                            "pending_interrupt_type": "plan_review",
-                        },
-                        state=final_state,
-                        persist_checkpoint=False,
-                    )
-                    payload_data = {
-                        "type": "interrupt",
-                        "interrupt_type": "plan_review",
-                        "draft": interrupt_value,
-                        "thread_id": thread_id,
-                    }
-                payload = json.dumps(payload_data, ensure_ascii=False)
-                yield f"data: {payload}\n\n"
-                if interrupt_update_ok:
-                    finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
-                return
+    if interrupt_values:
+        interrupt_value = interrupt_values[0]
+        if (
+            isinstance(interrupt_value, dict)
+            and interrupt_value.get("type") == "user_stop"
+        ):
+            stopped_at = utc_now_iso()
+            stopped_node = str(interrupt_value.get("node") or "")
+            stopped_update_ok = await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+                    "run_status": RUN_STATUS_STOPPED,
+                    "resume_available": True,
+                    "pending_interrupt_type": "user_stop",
+                    "stopped_at": stopped_at,
+                    "current_node": stopped_node,
+                    "stop_reason": str(interrupt_value.get("reason") or "user_stop"),
+                },
+                state=final_state,
+            )
+            emit_a3_trace(
+                logger,
+                "run_stopped_at_checkpoint",
+                {
+                    "thread_id": thread_id,
+                    "node": stopped_node,
+                    "stopped_at": stopped_at,
+                    "resume_available": True,
+                },
+                state=final_state,
+                env_flag="LOG_A3_TRACE",
+            )
+            payload = json.dumps(
+                {
+                    "type": "run_status",
+                    "run_status": RUN_STATUS_STOPPED,
+                    "thread_id": thread_id,
+                    "resume_available": True,
+                    "pending_interrupt_type": "user_stop",
+                    "node": stopped_node,
+                    "stopped_at": stopped_at,
+                },
+                ensure_ascii=False,
+            )
+            yield f"data: {payload}\n\n"
+            if stopped_update_ok:
+                finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
+            return
+        if (
+            isinstance(interrupt_value, dict)
+            and interrupt_value.get("type") == "memory_confirmation"
+        ):
+            interrupt_update_ok = await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "resume_available": False,
+                    "pending_interrupt_type": "memory_confirmation",
+                },
+                state=final_state,
+                persist_checkpoint=False,
+            )
+            payload_data = {
+                "type": "interrupt",
+                "interrupt_type": "memory_confirmation",
+                "question": interrupt_value.get("question", ""),
+                "reason": interrupt_value.get("reason", ""),
+                "selected_memory_count": interrupt_value.get(
+                    "selected_memory_count", 0
+                ),
+                "options": interrupt_value.get("options", []),
+                "thread_id": thread_id,
+            }
+        elif (
+            isinstance(interrupt_value, dict)
+            and interrupt_value.get("type") == "profile_completion_required"
+        ):
+            profile_request = _safe_profile_completion_request(interrupt_value)
+            interrupt_update_ok = await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "resume_available": True,
+                    "pending_interrupt_type": "profile_completion_required",
+                    "profile_completion_request": profile_request,
+                },
+                state=final_state,
+                persist_checkpoint=True,
+            )
+            payload_data = {
+                "type": "interrupt",
+                "interrupt_type": "profile_completion_required",
+                "title": profile_request.get("title", ""),
+                "fields": profile_request.get("fields", []),
+                "profile_completion_request": profile_request,
+                "resume_available": True,
+                "thread_id": thread_id,
+            }
+        else:
+            interrupt_update_ok = await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "resume_available": False,
+                    "pending_interrupt_type": "plan_review",
+                },
+                state=final_state,
+                persist_checkpoint=False,
+            )
+            payload_data = {
+                "type": "interrupt",
+                "interrupt_type": "plan_review",
+                "draft": interrupt_value.get("value", interrupt_value),
+                "thread_id": thread_id,
+            }
+        payload = json.dumps(payload_data, ensure_ascii=False)
+        yield f"data: {payload}\n\n"
+        if interrupt_update_ok:
+            finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
+        return
+
+    if worker_interrupted_seen:
+        recovered_request = _complete_profile_completion_request(
+            recovered_profile_completion_request
+        ) or _complete_profile_completion_request(
+            final_state.get("profile_completion_request")
+        )
+        if recovered_request:
+            interrupt_update_ok = await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "resume_available": True,
+                    "pending_interrupt_type": "profile_completion_required",
+                    "profile_completion_request": recovered_request,
+                },
+                state=final_state,
+                persist_checkpoint=True,
+            )
+            payload_data = {
+                "type": "interrupt",
+                "interrupt_type": "profile_completion_required",
+                "title": recovered_request.get("title", ""),
+                "fields": recovered_request.get("fields", []),
+                "profile_completion_request": recovered_request,
+                "resume_available": True,
+                "thread_id": thread_id,
+            }
+            emit_a3_trace(
+                logger,
+                "sse_pending_interrupt_recovered",
+                {
+                    "thread_id": thread_id,
+                    "interrupt_type": "profile_completion_required",
+                    "worker_interrupted_seen": True,
+                    "pending_interrupt_count": 0,
+                    "profile_field_count": len(recovered_request.get("fields") or []),
+                },
+                state=final_state,
+                env_flag="LOG_A3_TRACE",
+            )
+            yield f"data: {json.dumps(payload_data, ensure_ascii=False)}\n\n"
+            if interrupt_update_ok:
+                finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
+            return
+
+        interrupt_lost_payload = {
+            "type": "error",
+            "error_type": "interrupt_lost",
+            "message": (
+                "Resource worker was interrupted, but no checkpoint interrupt was "
+                "available. Completion was blocked."
+            ),
+            "terminal_non_completed": True,
+            "thread_id": thread_id,
+        }
+        emit_a3_trace(
+            logger,
+            "sse_interrupt_lost",
+            {
+                "thread_id": thread_id,
+                "worker_interrupted_seen": True,
+                "pending_interrupt_count": 0,
+                "has_recoverable_profile_completion_request": False,
+            },
+            state=final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield f"data: {json.dumps(interrupt_lost_payload, ensure_ascii=False)}\n\n"
+        finish_active_run(
+            thread_id,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "error_type": "interrupt_lost",
+            },
+        )
+        return
 
     final_request_context_window = {
         "current_request_id": request_context_events[-1].get("request_id", "")
@@ -2630,7 +2790,9 @@ async def _stream_graph_events(
             resource_payload = terminal_resource_payload
     diagnostic_state = terminal_resource_output or final_state
     resource_diagnostic_payload = (
-        completed_without_resource_payload(diagnostic_state) if not resource_payload else None
+        completed_without_resource_payload(diagnostic_state)
+        if not resource_payload
+        else None
     )
     completed_values = {
         "run_status": RUN_STATUS_COMPLETED,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from src.graph.resource_final import (
+    STRUCTURED_RESOURCE_TYPES,
     completed_without_resource_payload,
     normalize_resource_final_payload,
 )
@@ -78,3 +81,65 @@ def test_completed_without_resource_only_for_resource_runs():
     assert diagnostic["type"] == "resource_final_diagnostic"
     assert diagnostic["status"] == "completed_without_resource"
     assert diagnostic["requested_resource_types"] == ["mindmap"]
+
+
+# ---------------------------------------------------------------------------
+# Structured resource type empty-payload rejection
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_returns_none_for_structured_type_answer_only():
+    """resource_type=study_plan with only answer text must return None."""
+    payload = {
+        "type": "resource_final",
+        "resource_type": "study_plan",
+        "answer": "Here is a detailed analysis of your study needs.",
+    }
+    result = normalize_resource_final_payload(payload)
+    assert result is None
+
+
+def test_normalize_returns_valid_for_evidence_summary_answer_only():
+    """resource_type=evidence_summary with answer text must return a valid payload."""
+    payload = {
+        "type": "resource_final",
+        "resource_type": "evidence_summary",
+        "answer": "Evidence is insufficient for resource generation.",
+        "controlled_stop": True,
+        "controlled_stop_reason": "evidence_insufficient",
+    }
+    result = normalize_resource_final_payload(payload)
+    assert result is not None
+    assert result["resource_type"] == "evidence_summary"
+    assert result["resource"]["kind"] == "evidence_summary"
+    assert result["resource"]["payload"]  # non-empty
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    sorted(STRUCTURED_RESOURCE_TYPES),
+)
+def test_all_structured_types_rejected_when_payload_empty(resource_type: str):
+    """Every structured type with only answer text must return None."""
+    payload = {
+        "type": "resource_final",
+        "resource_type": resource_type,
+        "answer": "generic answer text",
+    }
+    result = normalize_resource_final_payload(payload)
+    assert result is None, f"{resource_type} should be rejected"
+
+
+def test_structured_resource_types_includes_bundle():
+    assert "bundle" in STRUCTURED_RESOURCE_TYPES
+
+
+def test_structured_resource_types_consistent_with_artifact_keys():
+    """Every key in STRUCTURED_RESOURCE_ARTIFACT_KEYS must be in STRUCTURED_RESOURCE_TYPES."""
+    from app import STRUCTURED_RESOURCE_ARTIFACT_KEYS
+
+    for key in STRUCTURED_RESOURCE_ARTIFACT_KEYS:
+        assert key in STRUCTURED_RESOURCE_TYPES, (
+            f"{key} in STRUCTURED_RESOURCE_ARTIFACT_KEYS but missing from "
+            f"STRUCTURED_RESOURCE_TYPES"
+        )

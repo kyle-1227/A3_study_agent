@@ -68,6 +68,18 @@ def _parse_all_payloads(collected):
     return [json.loads(s.removeprefix("data: ").strip()) for s in collected]
 
 
+async def _trace_only_events(stage: str, payload: dict | None = None):
+    emit_a3_trace(
+        logging.getLogger(__name__),
+        stage,
+        payload or {},
+        state={},
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
+    if False:
+        yield {}
+
+
 # ---------------------------------------------------------------------------
 # Helpers: build mock events matching astream_events v2 format
 # ---------------------------------------------------------------------------
@@ -782,7 +794,9 @@ class TestSSETextEvent:
             and payload.get("run_status") == "completed"
         )
         done_index = next(
-            index for index, payload in enumerate(all_payloads) if payload.get("type") == "done"
+            index
+            for index, payload in enumerate(all_payloads)
+            if payload.get("type") == "done"
         )
         assert resource_index < completed_index < done_index
         payload = resource_events[0]
@@ -863,7 +877,9 @@ class TestSSEEvidenceSummaryResourceFinal:
             and payload.get("run_status") == "completed"
         )
         done_index = next(
-            index for index, payload in enumerate(all_payloads) if payload.get("type") == "done"
+            index
+            for index, payload in enumerate(all_payloads)
+            if payload.get("type") == "done"
         )
         assert resource_index < completed_index < done_index
         assert resource_events[0]["resource_type"] == "evidence_summary"
@@ -899,7 +915,11 @@ class TestSSEResourceFinalDiagnostics:
             for payload in all_payloads
             if payload.get("type") == "resource_final_diagnostic"
         ]
-        assert not [payload for payload in all_payloads if payload.get("type") == "resource_final"]
+        assert not [
+            payload
+            for payload in all_payloads
+            if payload.get("type") == "resource_final"
+        ]
         assert all_payloads[-1] == {"type": "done"}
 
 
@@ -1286,4 +1306,335 @@ class TestSSEDoneEvent:
             }
         ]
         assert not [p for p in all_payloads if p.get("type") == "done"]
-        assert mock_graph.aupdate_state.await_count == 1
+        # persist_checkpoint=True for profile_completion_required now causes
+        # an additional aupdate_state call (initial + interrupt).
+        assert mock_graph.aupdate_state.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Interrupt from Send-dispatched worker with empty state_snapshot.next
+# ---------------------------------------------------------------------------
+
+
+class TestSSEInterruptWithEmptyNext:
+    """When GraphInterrupt is raised inside a Send-dispatched worker,
+    state_snapshot.next is () but tasks[].interrupts[] still holds the
+    interrupt value.  The SSE stream must emit the interrupt event, not
+    resource_final / completed / done."""
+
+    @pytest.mark.anyio
+    async def test_profile_completion_interrupt_empty_next_emits_interrupt_only(self):
+        """next=() with profile_completion_required interrupt must emit
+        interrupt SSE and MUST NOT emit resource_final, completed, or done."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+
+        request_payload = {
+            "title": "Need profile before study plan",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "Learning goal",
+                    "required": True,
+                    "max_chars": 400,
+                }
+            ],
+        }
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "profile_completion_required",
+                "profile_completion_request": request_payload,
+                "resume_available": True,
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        # KEY: next is empty tuple (Send-dispatched worker interrupt)
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert len(interrupt_events) == 1, (
+            f"Expected 1 interrupt event, got {len(interrupt_events)}"
+        )
+        assert interrupt_events[0]["interrupt_type"] == "profile_completion_required"
+        assert interrupt_events[0]["title"] == "Need profile before study plan"
+
+        resource_final_events = [
+            p for p in all_payloads if p.get("type") == "resource_final"
+        ]
+        assert resource_final_events == []
+        completed_events = [
+            p
+            for p in all_payloads
+            if p.get("type") == "run_status" and p.get("run_status") == "completed"
+        ]
+        assert completed_events == []
+        done_events = [p for p in all_payloads if p.get("type") == "done"]
+        assert done_events == []
+        # persist_checkpoint=True for profile_completion causes an additional
+        # aupdate_state call (initial running state + interrupt state).
+        assert mock_graph.aupdate_state.await_count == 2
+
+    @pytest.mark.anyio
+    async def test_user_stop_interrupt_empty_next_emits_stopped_only(self):
+        """next=() with user_stop interrupt must emit stopped status
+        and MUST NOT emit resource_final, completed, or done."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "user_stop",
+                "node": "resource_worker",
+                "reason": "user requested stop",
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        stopped_events = [
+            p
+            for p in all_payloads
+            if p.get("type") == "run_status" and p.get("run_status") == "stopped"
+        ]
+        assert len(stopped_events) == 1
+        resource_final_events = [
+            p for p in all_payloads if p.get("type") == "resource_final"
+        ]
+        assert resource_final_events == []
+        done_events = [p for p in all_payloads if p.get("type") == "done"]
+        assert done_events == []
+
+    @pytest.mark.anyio
+    async def test_interrupt_prevents_completed_without_resource(self):
+        """When an interrupt is pending, completed_without_resource diagnostic
+        must NOT be emitted even if resource was requested."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "profile_completion_required",
+                "profile_completion_request": {
+                    "title": "Need profile",
+                    "fields": [
+                        {"key": "learning_goal", "label": "Goal", "required": True}
+                    ],
+                },
+                "resume_available": True,
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[task],
+                values={
+                    "requested_resource_type": "study_plan",
+                    "requested_resource_types": ["study_plan"],
+                    "resource_generation_plan": {
+                        "tasks": [{"resource_type": "study_plan"}]
+                    },
+                    "resource_generation_status": "running",
+                },
+            ),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        diagnostic_events = [
+            p for p in all_payloads if p.get("type") == "resource_final_diagnostic"
+        ]
+        assert diagnostic_events == [], (
+            "completed_without_resource must not be emitted when interrupt is pending"
+        )
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert len(interrupt_events) == 1
+
+    @pytest.mark.anyio
+    async def test_lost_interrupt_emits_terminal_error_without_completion_events(self):
+        """If worker interrupt evidence exists but checkpoint interrupts are empty,
+        SSE must fail closed with a terminal non-completed error."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(
+            return_value=_trace_only_events(
+                "resource_generation.worker.interrupted",
+                {"resource_type": "study_plan", "elapsed_ms": 42},
+            )
+        )
+        mock_graph.aupdate_state = AsyncMock()
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "requested_resource_type": "study_plan",
+                    "requested_resource_types": ["study_plan"],
+                    "resource_generation_plan": {
+                        "tasks": [{"resource_type": "study_plan"}]
+                    },
+                },
+            )
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = _parse_all_payloads(collected)
+        error_events = [p for p in all_payloads if p.get("type") == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["error_type"] == "interrupt_lost"
+        assert error_events[0]["terminal_non_completed"] is True
+        assert "Completion was blocked" in error_events[0]["message"]
+        assert [p for p in all_payloads if p.get("type") == "resource_final"] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "resource_final_diagnostic"
+            and p.get("status") == "completed_without_resource"
+        ] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "run_status" and p.get("run_status") == "completed"
+        ] == []
+        assert [p for p in all_payloads if p.get("type") == "done"] == []
+
+    @pytest.mark.anyio
+    async def test_lost_interrupt_recovers_profile_completion_interrupt_from_state(
+        self,
+    ):
+        """If checkpoint interrupt is missing but a complete request exists in state,
+        SSE should emit recovered profile_completion_required interrupt."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(
+            return_value=_trace_only_events(
+                "resource_subnode.end",
+                {
+                    "resource_type": "study_plan",
+                    "subnode": "study_plan_profile_gate",
+                    "status": "interrupted",
+                    "error_type": "GraphInterrupt",
+                },
+            )
+        )
+        mock_graph.aupdate_state = AsyncMock()
+        recovered_request = {
+            "title": "Need profile before study plan",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "Learning goal",
+                    "required": True,
+                    "max_chars": 400,
+                }
+            ],
+        }
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "requested_resource_type": "study_plan",
+                    "requested_resource_types": ["study_plan"],
+                    "resource_generation_plan": {
+                        "tasks": [{"resource_type": "study_plan"}]
+                    },
+                    "profile_completion_request": recovered_request,
+                },
+            )
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = _parse_all_payloads(collected)
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert len(interrupt_events) == 1
+        assert interrupt_events[0]["interrupt_type"] == "profile_completion_required"
+        assert interrupt_events[0]["profile_completion_request"] == recovered_request
+        assert interrupt_events[0]["resume_available"] is True
+        assert [p for p in all_payloads if p.get("type") == "resource_final"] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "resource_final_diagnostic"
+            and p.get("status") == "completed_without_resource"
+        ] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "run_status" and p.get("run_status") == "completed"
+        ] == []
+        assert [p for p in all_payloads if p.get("type") == "done"] == []
+
+        run_state_updates = [
+            call.args[1]
+            for call in mock_graph.aupdate_state.await_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        assert any(
+            update.get("pending_interrupt_type") == "profile_completion_required"
+            and update.get("resume_available") is True
+            and update.get("profile_completion_request") == recovered_request
+            for update in run_state_updates
+        )
+
+    @pytest.mark.anyio
+    async def test_plan_review_interrupt_empty_next_draft_is_raw_value(self):
+        """plan_review with a raw string interrupt must emit draft as
+        the raw value, not the normalized wrapper dict."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+
+        raw_text = "## Please confirm whether to continue"
+        interrupt_obj = SimpleNamespace(value=raw_text)
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert len(interrupt_events) == 1
+        assert interrupt_events[0]["interrupt_type"] == "plan_review"
+        # draft must be the raw string, not {"type": "plan_review", "value": ...}
+        assert interrupt_events[0]["draft"] == raw_text
