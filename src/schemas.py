@@ -61,6 +61,7 @@ class ThreadStatusResponse(BaseModel):
     background_context_window: dict[str, Any] = Field(default_factory=dict)
     request_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
+    last_resource_final_payload: dict[str, Any] = Field(default_factory=dict)
     profile_completion_request: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)
     message: str = ""

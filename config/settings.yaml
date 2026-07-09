@@ -1079,8 +1079,9 @@ llm_outputs:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
     failure_policy: block
-    max_retries: 2
+    max_retries: 1
     max_raw_chars: 12000
+    reask_business_validation: true
   study_plan_reviewer_academic:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []

@@ -774,8 +774,22 @@ class TestSSETextEvent:
         resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
 
         assert len(resource_events) == 1
+        resource_index = all_payloads.index(resource_events[0])
+        completed_index = next(
+            index
+            for index, payload in enumerate(all_payloads)
+            if payload.get("type") == "run_status"
+            and payload.get("run_status") == "completed"
+        )
+        done_index = next(
+            index for index, payload in enumerate(all_payloads) if payload.get("type") == "done"
+        )
+        assert resource_index < completed_index < done_index
         payload = resource_events[0]
         assert payload["resource_type"] == "bundle"
+        assert payload["resource_id"].startswith("resource:v1:")
+        assert payload["payload_hash"].startswith("payload:v1:")
+        assert payload["resource"]["kind"] == "bundle"
         assert payload["resource_generation_status"] == "partial_success"
         assert payload["answer"] == "# 已生成多类学习资源"
         assert payload["mindmap"]["xmind_url"] == "/artifacts/mindmaps/m1/map.xmind"
@@ -841,9 +855,51 @@ class TestSSEEvidenceSummaryResourceFinal:
         all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
         resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
         assert len(resource_events) == 1
+        resource_index = all_payloads.index(resource_events[0])
+        completed_index = next(
+            index
+            for index, payload in enumerate(all_payloads)
+            if payload.get("type") == "run_status"
+            and payload.get("run_status") == "completed"
+        )
+        done_index = next(
+            index for index, payload in enumerate(all_payloads) if payload.get("type") == "done"
+        )
+        assert resource_index < completed_index < done_index
         assert resource_events[0]["resource_type"] == "evidence_summary"
+        assert resource_events[0]["resource_id"].startswith("resource:v1:")
         assert resource_events[0]["controlled_stop"] is True
         assert "study_plan" not in resource_events[0]
+        assert all_payloads[-1] == {"type": "done"}
+
+
+class TestSSEResourceFinalDiagnostics:
+    @pytest.mark.anyio
+    async def test_plain_answer_does_not_emit_completed_without_resource(self):
+        from langchain_core.messages import AIMessage
+        from app import generate_sse
+
+        final_state = {
+            "requested_resource_type": "",
+            "resource_generation_status": "",
+            "messages": [AIMessage(content="plain answer")],
+        }
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values=final_state),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        assert not [
+            payload
+            for payload in all_payloads
+            if payload.get("type") == "resource_final_diagnostic"
+        ]
+        assert not [payload for payload in all_payloads if payload.get("type") == "resource_final"]
         assert all_payloads[-1] == {"type": "done"}
 
 

@@ -44,6 +44,8 @@ export interface Message {
   videoScript?: VideoScriptResult
   videoAnimation?: VideoAnimationResult
   studyPlan?: StudyPlanResult
+  resourceFinalPayload?: Record<string, unknown>
+  resourceFinalDedupeKey?: string
 }
 
 export interface ContextUsage {
@@ -88,7 +90,18 @@ export interface BackgroundContextWindow {
   workspaceArtifactCount: number
 }
 
-export type ResourceGenerationState = "running" | "done" | "error" | "waiting_review" | "stopping" | "stopped"
+export type ResourceGenerationState =
+  | "running"
+  | "done"
+  | "completed_with_resource"
+  | "completed_without_resource"
+  | "error"
+  | "failed"
+  | "waiting_review"
+  | "waiting_for_profile_completion"
+  | "interrupted"
+  | "stopping"
+  | "stopped"
 export type ResourceGenerationStepState = "running" | "done" | "error"
 
 export interface ResourceGenerationStep {
@@ -110,6 +123,9 @@ export interface ResourceGenerationStatus {
   contextUsage?: ContextUsage | null
   error?: string
   waitingForReview?: boolean
+  hasReceivedResourceFinal?: boolean
+  completionKind?: "with_resource" | "without_resource"
+  lastResourceType?: string
 }
 
 export interface MindmapNode {
@@ -878,7 +894,7 @@ function SmallButton({ onClick, label, icon }: { onClick: () => void; label: str
 }
 
 function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationStatus }) {
-  const [isExpanded, setIsExpanded] = useState(status.state !== "done")
+  const [isExpanded, setIsExpanded] = useState(!isCompletedResourceState(status.state))
   const previousStateRef = useRef(status.state)
   const completedCount = status.steps.filter((step) => step.state === "done").length
   const currentStep = [...status.steps].reverse().find((step) => step.state === "running")
@@ -886,10 +902,10 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
   const progressText = hasSteps ? `${completedCount}/${status.steps.length} 个阶段完成` : "等待多智能体调度"
 
   useEffect(() => {
-    if (status.state === "done" && previousStateRef.current !== "done") {
+    if (isCompletedResourceState(status.state) && !isCompletedResourceState(previousStateRef.current)) {
       setIsExpanded(false)
     }
-    if (status.state !== "done" && previousStateRef.current === "done") {
+    if (!isCompletedResourceState(status.state) && isCompletedResourceState(previousStateRef.current)) {
       setIsExpanded(true)
     }
     previousStateRef.current = status.state
@@ -963,6 +979,10 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
   )
 }
 
+function isCompletedResourceState(state: ResourceGenerationState): boolean {
+  return state === "done" || state === "completed_with_resource" || state === "completed_without_resource"
+}
+
 function ResourceGenerationStepRow({ step }: { step: ResourceGenerationStep }) {
   return (
     <div className="flex gap-2 text-xs">
@@ -996,10 +1016,15 @@ function ResourceGenerationStepRow({ step }: { step: ResourceGenerationStep }) {
 
 function StatusIcon({ state }: { state: ResourceGenerationState }) {
   const className = "h-4 w-4 mt-0.5 shrink-0"
-  if (state === "done") return <CheckCircle2 className={cn(className, "text-[var(--success)]")} />
-  if (state === "error") return <CircleAlert className={cn(className, "text-[var(--danger)]")} />
+  if (state === "done" || state === "completed_with_resource") {
+    return <CheckCircle2 className={cn(className, "text-[var(--success)]")} />
+  }
+  if (state === "completed_without_resource") return <CircleAlert className={cn(className, "text-[var(--warning)]")} />
+  if (state === "error" || state === "failed") return <CircleAlert className={cn(className, "text-[var(--danger)]")} />
   if (state === "stopped") return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
-  if (state === "waiting_review") return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
+  if (state === "waiting_review" || state === "waiting_for_profile_completion" || state === "interrupted") {
+    return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
+  }
   return <Loader2 className={cn(className, "animate-spin text-primary")} />
 }
 

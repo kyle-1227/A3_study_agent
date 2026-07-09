@@ -15,6 +15,13 @@ import {
   ResourceGenerationStep,
 } from "@/components/chat-area"
 import { PlanReview } from "@/components/plan-review"
+import {
+  isCompletedWithoutResourceDiagnostic,
+  mergeResourceFinalIntoMessage,
+  resourceFinalDedupeKey,
+  resourceMessageIdFromDedupeKey,
+  type ResourceFinalEvent,
+} from "@/lib/resource-final"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -35,6 +42,18 @@ type MemoryConfirmationState = {
   question: string
   reason?: string
   selectedMemoryCount?: number
+}
+
+type ProfileCompletionField = {
+  key: string
+  label: string
+  required?: boolean
+  max_chars?: number
+}
+
+type ProfileCompletionState = {
+  title: string
+  fields: ProfileCompletionField[]
 }
 
 const initialChatHistory: ChatHistoryItem[] = []
@@ -179,6 +198,28 @@ function mapBackgroundContextWindow(data: any): BackgroundContextWindow | null {
   }
 }
 
+function mapProfileCompletionRequest(data: any): ProfileCompletionState | null {
+  if (!data || typeof data !== "object") return null
+  const fields = Array.isArray(data.fields)
+    ? data.fields
+        .filter((field: any) => field && typeof field.key === "string")
+        .map((field: any) => ({
+          key: field.key,
+          label: typeof field.label === "string" && field.label.trim() ? field.label : field.key,
+          required: field.required === true,
+          max_chars: typeof field.max_chars === "number" ? field.max_chars : undefined,
+        }))
+    : []
+  if (fields.length === 0) return null
+  return {
+    title:
+      typeof data.title === "string" && data.title.trim()
+        ? data.title
+        : "生成学习计划前需要补充学习信息",
+    fields,
+  }
+}
+
 function getAuthHeaders(): Record<string, string> {
   if (typeof window !== "undefined") {
     const token = localStorage.getItem("demo_access_token")
@@ -260,6 +301,76 @@ function findLastRunningStepIndex(steps: ResourceGenerationStep[], node: string)
   return -1
 }
 
+function ProfileCompletionDialog({
+  request,
+  isSubmitting,
+  onSubmit,
+}: {
+  request: ProfileCompletionState
+  isSubmitting: boolean
+  onSubmit: (completion: Record<string, string>) => void
+}) {
+  const [values, setValues] = useState<Record<string, string>>({})
+  const requiredMissing = request.fields.some((field) => field.required && !values[field.key]?.trim())
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(36,48,39,0.22)] px-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="profile-completion-title"
+    >
+      <form
+        className="w-full max-w-[560px] rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-[0_12px_30px_rgba(36,48,39,0.12)]"
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSubmit(values)
+        }}
+      >
+        <div className="mb-4">
+          <p id="profile-completion-title" className="text-base font-semibold text-foreground">
+            {request.title}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            请补充必要学习信息，提交后会从当前节点继续生成学习计划。
+          </p>
+        </div>
+        <div className="max-h-[56vh] space-y-3 overflow-y-auto pr-1">
+          {request.fields.map((field) => (
+            <label key={field.key} className="block">
+              <span className="mb-1 flex items-center justify-between gap-2 text-sm font-medium text-foreground">
+                <span>{field.label}</span>
+                <span className="text-xs text-muted-foreground">{field.required ? "必填" : "可选"}</span>
+              </span>
+              <textarea
+                value={values[field.key] || ""}
+                onChange={(event) =>
+                  setValues((prev) => ({
+                    ...prev,
+                    [field.key]: event.target.value.slice(0, field.max_chars || 512),
+                  }))
+                }
+                required={field.required}
+                rows={2}
+                className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
+              />
+            </label>
+          ))}
+        </div>
+        <div className="mt-5 flex justify-end">
+          <button
+            type="submit"
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-[var(--primary-deep)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isSubmitting || requiredMissing}
+          >
+            继续生成
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 export default function Home() {
   const [chatHistory, setChatHistory] = useState(initialChatHistory)
   const [selectedChatId, setSelectedChatId] = useState<string | undefined>()
@@ -284,6 +395,8 @@ export default function Home() {
   const [isResuming, setIsResuming] = useState(false)
   const [memoryConfirmation, setMemoryConfirmation] = useState<MemoryConfirmationState | null>(null)
   const [isMemoryConfirming, setIsMemoryConfirming] = useState(false)
+  const [profileCompletion, setProfileCompletion] = useState<ProfileCompletionState | null>(null)
+  const [isProfileCompleting, setIsProfileCompleting] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const router = useRouter()
   const { userId, nickname, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
@@ -298,6 +411,7 @@ export default function Home() {
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
+  const resourceFinalDedupeRef = useRef<Set<string>>(new Set())
   const abortControllerRef = useRef<AbortController | null>(null)
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -385,6 +499,38 @@ export default function Home() {
     )
   }, [])
 
+  const attachResourceFinalToAssistant = useCallback((event: ResourceFinalEvent) => {
+    const dedupeKey = resourceFinalDedupeKey(event)
+    if (resourceFinalDedupeRef.current.has(dedupeKey)) {
+      return { attached: false, dedupeKey }
+    }
+    resourceFinalDedupeRef.current.add(dedupeKey)
+
+    const existingAssistantId = assistantMessageIdRef.current
+    const messageId = existingAssistantId || resourceMessageIdFromDedupeKey(dedupeKey)
+    if (!existingAssistantId) assistantMessageIdRef.current = messageId
+
+    setMessages((prev) => {
+      if (prev.some((msg) => msg.resourceFinalDedupeKey === dedupeKey)) return prev
+      const baseMessage: Message = {
+        id: messageId,
+        role: "assistant",
+        content: "",
+        resourceStatus: createInitialResourceStatus(),
+      }
+      let foundTarget = false
+      const nextMessages = prev.map((msg) => {
+        if (msg.id !== messageId) return msg
+        foundTarget = true
+        return mergeResourceFinalIntoMessage(msg, event, API_BASE_URL)
+      })
+      if (foundTarget) return nextMessages
+      return [...nextMessages, mergeResourceFinalIntoMessage(baseMessage, event, API_BASE_URL)]
+    })
+
+    return { attached: true, dedupeKey, messageId }
+  }, [])
+
   const handleNewChat = useCallback(() => {
     setSelectedChatId(undefined)
     setMessages([])
@@ -399,6 +545,9 @@ export default function Home() {
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
+    setProfileCompletion(null)
+    resourceFinalDedupeRef.current.clear()
+    assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
   }, [setActiveThreadId])
@@ -417,6 +566,9 @@ export default function Home() {
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
+    setProfileCompletion(null)
+    resourceFinalDedupeRef.current.clear()
+    assistantMessageIdRef.current = ""
     setActiveThreadId(threadId)
     setLogs((prev) => [
       ...prev,
@@ -446,6 +598,9 @@ export default function Home() {
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
+    setProfileCompletion(null)
+    resourceFinalDedupeRef.current.clear()
+    assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
     setLogs([{ type: "info", message: "[INFO] 对话历史已清空。", ts: timestamp() }])
@@ -473,6 +628,9 @@ export default function Home() {
       setIsInterrupted(false)
       setInterruptDraft("")
       setMemoryConfirmation(null)
+      setProfileCompletion(null)
+      resourceFinalDedupeRef.current.clear()
+      assistantMessageIdRef.current = ""
       setActiveThreadId(null)
       pendingChatTitleRef.current = ""
     }
@@ -660,6 +818,30 @@ export default function Home() {
     }
 
     if (data.type === "interrupt") {
+      if (data.interrupt_type === "profile_completion_required") {
+        const request =
+          data.profile_completion_request && typeof data.profile_completion_request === "object"
+            ? data.profile_completion_request
+            : data
+        setProfileCompletion(mapProfileCompletionRequest(request))
+        setMemoryConfirmation(null)
+        setIsInterrupted(false)
+        setInterruptDraft("")
+        if (data.thread_id) setActiveThreadId(data.thread_id)
+        setIsLoading(false)
+        updateAssistantResourceStatus(asstId, (status) => ({
+          ...status,
+          state: "waiting_for_profile_completion",
+          summary: "等待补充生成学习计划所需的学习信息。",
+          waitingForReview: true,
+        }))
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[HIL] 等待补充学习计划画像信息。", ts: timestamp() },
+        ])
+        return
+      }
+
       if (data.interrupt_type === "memory_confirmation") {
         setMemoryConfirmation({
           question:
@@ -682,6 +864,7 @@ export default function Home() {
           ...prev,
           { type: "warning", message: "[HIL] 等待确认是否结合历史学习记录。", ts: timestamp() },
         ])
+        setIsLoading(false)
         return
       }
 
@@ -690,7 +873,7 @@ export default function Home() {
       if (data.thread_id) setActiveThreadId(data.thread_id)
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
-        state: "waiting_review",
+        state: "interrupted",
         summary: "个性化学习资源生成状态已更新。",
         waitingForReview: true,
       }))
@@ -698,6 +881,7 @@ export default function Home() {
         ...prev,
         { type: "warning", message: "[HIL] 图执行已暂停，等待你审核学习计划。", ts: timestamp() },
       ])
+      setIsLoading(false)
       return
     }
 
@@ -796,225 +980,48 @@ export default function Home() {
       return
     }
 
+    if (isCompletedWithoutResourceDiagnostic(data)) {
+      updateAssistantResourceStatus(asstId, (status) => ({
+        ...status,
+        state: "completed_without_resource",
+        summary: "资源流程已完成，但没有收到可渲染的资源 payload。",
+        waitingForReview: false,
+        completionKind: "without_resource",
+      }))
+      return
+    }
+
     if (data.type === "resource_final") {
-      const finalAnswer = typeof data.answer === "string" ? data.answer : ""
-      if (data.resource_type === "evidence_summary" && data.controlled_stop === true) {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === asstId
-              ? {
-                  ...msg,
-                  content: finalAnswer || msg.content,
-                }
-              : msg
-          )
-        )
-        updateAssistantResourceStatus(asstId, (status) => ({
-          ...status,
-          state: "done",
-          summary: CONTROLLED_STOP_SUMMARY,
-          waitingForReview: false,
-          error: undefined,
-        }))
-        return
-      }
-
-      const mindmap = data.mindmap ?? null
-      const reviewDoc = data.review_doc ?? null
-      const reviewDocArtifacts = Array.isArray(data.review_doc_artifacts) ? data.review_doc_artifacts : []
-      const exerciseArtifact = data.exercise_artifact ?? null
-      const codePracticeArtifact = data.code_practice_artifact ?? null
-      const videoScriptArtifact = data.video_script_artifact ?? null
-      const videoAnimationArtifact = data.video_animation_artifact ?? null
-      const studyPlan = data.study_plan ?? null
-      const xmindUrl =
-        mindmap && typeof mindmap.xmind_url === "string" && mindmap.xmind_url.startsWith("/")
-          ? `${API_BASE_URL}${mindmap.xmind_url}`
-          : mindmap?.xmind_url
-      const markdownUrl =
-        reviewDoc && typeof reviewDoc.markdown_url === "string" && reviewDoc.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${reviewDoc.markdown_url}`
-          : reviewDoc?.markdown_url
-      const docxUrl =
-        reviewDoc && typeof reviewDoc.docx_url === "string" && reviewDoc.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${reviewDoc.docx_url}`
-          : reviewDoc?.docx_url
-      const reviewDocs = reviewDocArtifacts.map((artifact: any) => {
-        const artifactMarkdownUrl =
-          typeof artifact.markdown_url === "string" && artifact.markdown_url.startsWith("/")
-            ? `${API_BASE_URL}${artifact.markdown_url}`
-            : artifact.markdown_url
-        const artifactDocxUrl =
-          typeof artifact.docx_url === "string" && artifact.docx_url.startsWith("/")
-            ? `${API_BASE_URL}${artifact.docx_url}`
-            : artifact.docx_url
-        return {
-          subject: artifact.subject || "",
-          title: artifact.title || "Review Document",
-          filename: artifact.filename || "",
-          markdownUrl: artifactMarkdownUrl || "",
-          docxFilename: artifact.docx_filename || "",
-          docxUrl: artifactDocxUrl || "",
-          markdown: artifact.markdown || "",
-        }
-      })
-      const exerciseMarkdownUrl =
-        exerciseArtifact && typeof exerciseArtifact.markdown_url === "string" && exerciseArtifact.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${exerciseArtifact.markdown_url}`
-          : exerciseArtifact?.markdown_url
-      const exerciseDocxUrl =
-        exerciseArtifact && typeof exerciseArtifact.docx_url === "string" && exerciseArtifact.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${exerciseArtifact.docx_url}`
-          : exerciseArtifact?.docx_url
-      const codePracticeMarkdownUrl =
-        codePracticeArtifact && typeof codePracticeArtifact.markdown_url === "string" && codePracticeArtifact.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${codePracticeArtifact.markdown_url}`
-          : codePracticeArtifact?.markdown_url
-      const codePracticeDocxUrl =
-        codePracticeArtifact && typeof codePracticeArtifact.docx_url === "string" && codePracticeArtifact.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${codePracticeArtifact.docx_url}`
-          : codePracticeArtifact?.docx_url
-      const codePracticePythonUrl =
-        codePracticeArtifact && typeof codePracticeArtifact.python_url === "string" && codePracticeArtifact.python_url.startsWith("/")
-          ? `${API_BASE_URL}${codePracticeArtifact.python_url}`
-          : codePracticeArtifact?.python_url
-      const videoScriptMarkdownUrl =
-        videoScriptArtifact && typeof videoScriptArtifact.markdown_url === "string" && videoScriptArtifact.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${videoScriptArtifact.markdown_url}`
-          : videoScriptArtifact?.markdown_url
-      const videoScriptDocxUrl =
-        videoScriptArtifact && typeof videoScriptArtifact.docx_url === "string" && videoScriptArtifact.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${videoScriptArtifact.docx_url}`
-          : videoScriptArtifact?.docx_url
-      const videoScriptSrtUrl =
-        videoScriptArtifact && typeof videoScriptArtifact.srt_url === "string" && videoScriptArtifact.srt_url.startsWith("/")
-          ? `${API_BASE_URL}${videoScriptArtifact.srt_url}`
-          : videoScriptArtifact?.srt_url
-      const videoAnimationHtmlUrl =
-        videoAnimationArtifact && typeof videoAnimationArtifact.html_url === "string" && videoAnimationArtifact.html_url.startsWith("/")
-          ? `${API_BASE_URL}${videoAnimationArtifact.html_url}`
-          : videoAnimationArtifact?.html_url
-      const videoAnimationMp4Url =
-        videoAnimationArtifact && typeof videoAnimationArtifact.mp4_url === "string" && videoAnimationArtifact.mp4_url.startsWith("/")
-          ? `${API_BASE_URL}${videoAnimationArtifact.mp4_url}`
-          : videoAnimationArtifact?.mp4_url
-      const videoAnimationSrtUrl =
-        videoAnimationArtifact && typeof videoAnimationArtifact.srt_url === "string" && videoAnimationArtifact.srt_url.startsWith("/")
-          ? `${API_BASE_URL}${videoAnimationArtifact.srt_url}`
-          : videoAnimationArtifact?.srt_url
-      const videoAnimationJsonUrl =
-        videoAnimationArtifact && typeof videoAnimationArtifact.json_url === "string" && videoAnimationArtifact.json_url.startsWith("/")
-          ? `${API_BASE_URL}${videoAnimationArtifact.json_url}`
-          : videoAnimationArtifact?.json_url
-      const studyPlanMarkdownUrl =
-        studyPlan && typeof studyPlan.markdown_url === "string" && studyPlan.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${studyPlan.markdown_url}`
-          : studyPlan?.markdown_url
-      const studyPlanDocxUrl =
-        studyPlan && typeof studyPlan.docx_url === "string" && studyPlan.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${studyPlan.docx_url}`
-          : studyPlan?.docx_url
-
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === asstId
-            ? {
-                ...msg,
-                content: finalAnswer || msg.content,
-                mindmap: mindmap
-                  ? {
-                      title: mindmap.title || "Knowledge Mindmap",
-                      tree: mindmap.tree,
-                      xmindUrl: xmindUrl || "",
-                    }
-                  : msg.mindmap,
-                reviewDoc: reviewDocs.length > 0
-                  ? undefined
-                  : reviewDoc
-                  ? {
-                      subject: reviewDoc.subject || "",
-                      title: reviewDoc.title || "Review Document",
-                      filename: reviewDoc.filename || "",
-                      markdownUrl: markdownUrl || "",
-                      docxFilename: reviewDoc.docx_filename || "",
-                      docxUrl: docxUrl || "",
-                      markdown: reviewDoc.markdown || "",
-                    }
-                  : msg.reviewDoc,
-                reviewDocs: reviewDocs.length > 0 ? reviewDocs : msg.reviewDocs,
-                exercise: exerciseArtifact
-                  ? {
-                      title: exerciseArtifact.title || "Exercise Resource",
-                      filename: exerciseArtifact.filename || "",
-                      markdownUrl: exerciseMarkdownUrl || "",
-                      docxFilename: exerciseArtifact.docx_filename || "",
-                      docxUrl: exerciseDocxUrl || "",
-                    }
-                  : msg.exercise,
-                codePractice: codePracticeArtifact
-                  ? {
-                      title: codePracticeArtifact.title || "代码实操案例",
-                      filename: codePracticeArtifact.filename || "",
-                      markdownUrl: codePracticeMarkdownUrl || "",
-                      docxFilename: codePracticeArtifact.docx_filename || "",
-                      docxUrl: codePracticeDocxUrl || "",
-                      pythonFilename: codePracticeArtifact.python_filename || "",
-                      pythonUrl: codePracticePythonUrl || "",
-                      markdown: codePracticeArtifact.markdown || "",
-                    }
-                  : msg.codePractice,
-                videoScript: videoScriptArtifact
-                  ? {
-                      title: videoScriptArtifact.title || "教学视频 / 动画脚本",
-                      filename: videoScriptArtifact.filename || "",
-                      markdownUrl: videoScriptMarkdownUrl || "",
-                      docxFilename: videoScriptArtifact.docx_filename || "",
-                      docxUrl: videoScriptDocxUrl || "",
-                      srtFilename: videoScriptArtifact.srt_filename || "",
-                      srtUrl: videoScriptSrtUrl || "",
-                      markdown: videoScriptArtifact.markdown || "",
-                      srt: videoScriptArtifact.srt || "",
-                    }
-                  : msg.videoScript,
-                videoAnimation: videoAnimationArtifact
-                  ? {
-                      title: videoAnimationArtifact.title || "教学动画 / MP4 视频",
-                      htmlUrl: videoAnimationHtmlUrl || "",
-                      mp4Url: videoAnimationMp4Url || "",
-                      srtUrl: videoAnimationSrtUrl || "",
-                      jsonUrl: videoAnimationJsonUrl || "",
-                      durationSeconds: videoAnimationArtifact.duration_seconds,
-                      fullDurationSeconds: videoAnimationArtifact.full_duration_seconds,
-                      renderDurationSeconds: videoAnimationArtifact.render_duration_seconds,
-                      renderMode: videoAnimationArtifact.render_mode || "",
-                      renderSuccess: videoAnimationArtifact.render_success === true,
-                      mp4Available: videoAnimationArtifact.mp4_available === true,
-                      isPreviewVideo: videoAnimationArtifact.is_preview_video === true,
-                      videoValidForTeaching: videoAnimationArtifact.video_valid_for_teaching === true,
-                      renderLog: videoAnimationArtifact.render_log || "",
-                    }
-                  : msg.videoAnimation,
-                studyPlan: studyPlan
-                  ? {
-                      title: studyPlan.title || "Personalized Study Plan",
-                      filename: studyPlan.filename || "",
-                      markdownUrl: studyPlanMarkdownUrl || "",
-                      docxFilename: studyPlan.docx_filename || "",
-                      docxUrl: studyPlanDocxUrl || "",
-                      markdown: studyPlan.markdown || "",
-                    }
-                  : msg.studyPlan,
-              }
-            : msg
-        )
-      )
+      const result = attachResourceFinalToAssistant(data as ResourceFinalEvent)
+      if (!result.attached) return
+      const targetMessageId = result.messageId || asstId
+      const resourceType = typeof data.resource_type === "string" ? data.resource_type : ""
+      const isEvidenceControlledStop = resourceType === "evidence_summary" && data.controlled_stop === true
+      updateAssistantResourceStatus(targetMessageId, (status) => ({
+        ...status,
+        state: "completed_with_resource",
+        summary: isEvidenceControlledStop ? CONTROLLED_STOP_SUMMARY : "个性化学习资源已生成。",
+        waitingForReview: false,
+        error: undefined,
+        hasReceivedResourceFinal: true,
+        completionKind: "with_resource",
+        lastResourceType: resourceType,
+      }))
       return
     }
 
     if (data.type === "done") {
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
-        state: status.state === "error" || status.state === "stopped" || status.state === "stopping" ? status.state : "done",
+        state:
+          status.state === "error" ||
+          status.state === "failed" ||
+          status.state === "stopped" ||
+          status.state === "stopping" ||
+          status.state === "completed_with_resource" ||
+          status.state === "completed_without_resource"
+            ? status.state
+            : "done",
         summary: status.summary === CONTROLLED_STOP_SUMMARY ? status.summary : "个性化学习资源生成状态已更新。",
         waitingForReview: false,
       }))
@@ -1025,11 +1032,12 @@ export default function Home() {
       streamHadErrorRef.current = true
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
-        state: "error",
+        state: "failed",
         summary: "个性化学习资源生成状态已更新。",
         error: data.message,
         waitingForReview: false,
       }))
+      setIsLoading(false)
       setLogs((prev) => [
         ...prev,
         { type: "error", message: `[ERROR] Server: ${data.message}`, ts: timestamp() },
@@ -1169,7 +1177,7 @@ export default function Home() {
         { type: "usage", message: `[USAGE] ${data.node}: 输入 ${data.input_tokens} / 输出 ${data.output_tokens}`, ts: now },
       ])
     }
-  }, [clearStopTimeout, setActiveThreadId, updateAssistantResourceStatus])
+  }, [attachResourceFinalToAssistant, clearStopTimeout, setActiveThreadId, updateAssistantResourceStatus])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
@@ -1253,7 +1261,24 @@ export default function Home() {
       setContextUsage(usage)
       setBackgroundContextWindow(background)
       if (usage) setContextUsageError(null)
-      setCanContinue(Boolean(status.resume_available && status.pending_interrupt_type === "user_stop"))
+      if (status.last_resource_final_payload?.type === "resource_final") {
+        attachResourceFinalToAssistant(status.last_resource_final_payload as ResourceFinalEvent)
+      }
+      const pendingInterruptType =
+        typeof status.pending_interrupt_type === "string" ? status.pending_interrupt_type : ""
+      if (pendingInterruptType === "profile_completion_required") {
+        const request = mapProfileCompletionRequest(status.profile_completion_request)
+        if (request) {
+          setProfileCompletion(request)
+          updateAssistantResourceStatus(assistantMessageIdRef.current, (resourceStatus) => ({
+            ...resourceStatus,
+            state: "waiting_for_profile_completion",
+            summary: "等待补充生成学习计划所需的学习信息。",
+            waitingForReview: true,
+          }))
+        }
+      }
+      setCanContinue(Boolean(status.resume_available && pendingInterruptType === "user_stop"))
       if (status.schema_version === "legacy") {
         setLogs((prev) => [
           ...prev,
@@ -1267,7 +1292,7 @@ export default function Home() {
         { type: "warning", message: `[RUN] Status unavailable: ${error.message}`, ts: timestamp() },
       ])
     }
-  }, [])
+  }, [attachResourceFinalToAssistant])
 
   useEffect(() => {
     if (!storageReady || !currentThreadId) return
@@ -1276,6 +1301,7 @@ export default function Home() {
 
   const handleSendMessage = useCallback(async (content: string) => {
     const threadId = threadIdRef.current
+    assistantMessageIdRef.current = ""
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
@@ -1294,6 +1320,7 @@ export default function Home() {
     setIsInterrupted(false)
     setInterruptDraft("")
     setMemoryConfirmation(null)
+    setProfileCompletion(null)
     setLogs((prev) => [
       ...prev,
       { type: "info" as const, message: `[INFO] 用户问题：${content.slice(0, 60)}`, ts: timestamp() },
@@ -1616,6 +1643,53 @@ export default function Home() {
     }
   }, [fetchWithErrorHandling, consumeSSEStream])
 
+  const handleProfileCompletion = useCallback(async (completion: Record<string, string>) => {
+    const threadId = threadIdRef.current
+    if (!threadId) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: "[ERROR] 缺少 thread_id，无法继续生成学习计划。", ts: timestamp() },
+      ])
+      return
+    }
+
+    const nonEmptyCompletion = Object.fromEntries(
+      Object.entries(completion).filter(([, value]) => value.trim().length > 0),
+    )
+    setIsProfileCompleting(true)
+    setIsLoading(true)
+    setLogs((prev) => [
+      ...prev,
+      { type: "info", message: "[INFO] 已提交学习计划画像信息，继续生成。", ts: timestamp() },
+    ])
+
+    try {
+      const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ thread_id: threadId, profile_completion: nonEmptyCompletion }),
+      })
+
+      if (!body) return
+
+      setProfileCompletion(null)
+      await consumeSSEStream(body)
+
+      setLogs((prev) => [
+        ...prev,
+        { type: "info", message: "[INFO] 学习计划画像补充后已继续执行。", ts: timestamp() },
+      ])
+    } catch (error: any) {
+      setLogs((prev) => [
+        ...prev,
+        { type: "error", message: `[ERROR] Profile completion failed: ${error.message}`, ts: timestamp() },
+      ])
+    } finally {
+      setIsProfileCompleting(false)
+      setIsLoading(false)
+    }
+  }, [consumeSSEStream, fetchWithErrorHandling])
+
   return (
     <div className="a3-app-shell flex overflow-hidden">
       <LeftSidebar
@@ -1696,6 +1770,13 @@ export default function Home() {
               </div>
             </div>
           </div>
+        )}
+        {profileCompletion && (
+          <ProfileCompletionDialog
+            request={profileCompletion}
+            isSubmitting={isProfileCompleting}
+            onSubmit={handleProfileCompletion}
+          />
         )}
       </div>
       <RightPanel

@@ -9,15 +9,19 @@ from langchain_core.messages import HumanMessage
 
 from src.graph.study_plan import (
     StudyPlanArtifact,
+    StudyPlanPhasesArtifact,
     StudyPlanPhase,
     StudyPlanReviewVerdict,
+    StudyPlanScheduleArtifact,
     route_after_study_plan_consensus,
     study_plan_consensus,
+    study_plan_agent,
     study_plan_output,
     study_plan_planner,
     study_plan_profile_gate,
     validate_study_plan_artifact,
 )
+from src.llm.structured_output import StructuredLLMResult
 
 
 def _valid_artifact() -> StudyPlanArtifact:
@@ -119,8 +123,11 @@ async def test_study_plan_profile_gate_interrupts_when_profile_missing():
     assert interrupt_payload["type"] == "profile_completion_required"
     assert interrupt_payload["resume_available"] is True
     assert interrupt_payload["profile_completion_request"]["fields"]
+    assert "learning_goal" not in interrupt_payload["profile_completion_request"][
+        "missing_required_keys"
+    ]
     assert result["learner_profile"]["learning_goal"] == "Master ML basics"
-    assert "学习目标: Master ML basics" in result["learner_profile_summary"]
+    assert "Master ML basics" in result["learner_profile_summary"]
     assert result["profile_summary"] == result["learner_profile_summary"]
     assert result["task_workspace"]["profile_requirements"]
     assert result["task_workspace"]["constraints"]
@@ -131,14 +138,155 @@ async def test_study_plan_profile_gate_skips_when_profile_present():
     with patch("src.graph.study_plan.interrupt") as mock_interrupt:
         result = await study_plan_profile_gate(
             {
-                "profile_summary": "Goal: master ML basics",
+                "learner_profile": {
+                    "learning_goal": "Master ML basics",
+                    "current_foundation": "Knows Python",
+                    "daily_study_time": "2 hours",
+                },
                 "thread_id": "t1",
                 "request_id": "r1",
             }
         )
 
     mock_interrupt.assert_not_called()
-    assert result == {"profile_completion_request": {}}
+    assert result == {"profile_completion_request": {}, "learner_profile_inferred": {}}
+
+
+@pytest.mark.anyio
+async def test_study_plan_profile_summary_does_not_satisfy_required_gate():
+    resume_value = {
+        "type": "profile_completion_required",
+        "profile_completion": {
+            "learning_goal": "Master ML basics",
+            "current_foundation": "Knows Python",
+            "daily_study_time": "2 hours",
+        },
+    }
+
+    with patch(
+        "src.graph.study_plan.interrupt", return_value=resume_value
+    ) as mock_interrupt:
+        result = await study_plan_profile_gate(
+            {
+                "profile_summary": "Goal: master ML basics",
+                "thread_id": "t1",
+                "request_id": "r1",
+            }
+        )
+
+    mock_interrupt.assert_called_once()
+    assert result["learner_profile"]["learning_goal"] == "Master ML basics"
+
+
+@pytest.mark.anyio
+async def test_study_plan_profile_inferred_fields_do_not_overwrite_confirmed():
+    with patch("src.graph.study_plan.interrupt") as mock_interrupt:
+        result = await study_plan_profile_gate(
+            {
+                "learning_goal": "ML basics from current request",
+                "learner_profile": {
+                    "current_foundation": "Knows Python",
+                    "daily_study_time": "2 hours",
+                },
+                "thread_id": "t1",
+                "request_id": "r1",
+            }
+        )
+
+    mock_interrupt.assert_not_called()
+    assert result["learner_profile_inferred"] == {
+        "learning_goal": "ML basics from current request"
+    }
+    assert "learner_profile" not in result
+
+
+@pytest.mark.anyio
+async def test_study_plan_agent_runs_staged_structured_generation():
+    artifact = _valid_artifact()
+    phases = StudyPlanPhasesArtifact(
+        title=artifact.title,
+        learner_profile_summary=artifact.learner_profile_summary,
+        overall_goal=artifact.overall_goal,
+        phases=artifact.phases,
+        evidence_usage=artifact.evidence_usage,
+    )
+    schedule = StudyPlanScheduleArtifact(
+        weekly_schedule=artifact.weekly_schedule,
+        milestones=artifact.milestones,
+        practice_tasks=artifact.practice_tasks,
+        risk_warnings=artifact.risk_warnings,
+    )
+    results = [
+        StructuredLLMResult(
+            success=True,
+            parsed=phases,
+            node_name="study_plan_agent",
+            llm_node="study_plan",
+            schema_name="StudyPlanPhasesArtifact",
+            provider="test",
+            model="test",
+            output_mode="native_json_schema_pydantic",
+        ),
+        StructuredLLMResult(
+            success=True,
+            parsed=schedule,
+            node_name="study_plan_agent",
+            llm_node="study_plan",
+            schema_name="StudyPlanScheduleArtifact",
+            provider="test",
+            model="test",
+            output_mode="native_json_schema_pydantic",
+        ),
+        StructuredLLMResult(
+            success=True,
+            parsed=artifact,
+            node_name="study_plan_agent",
+            llm_node="study_plan",
+            schema_name="StudyPlanArtifact",
+            provider="test",
+            model="test",
+            output_mode="native_json_schema_pydantic",
+        ),
+    ]
+    calls = []
+
+    async def fake_invoke_structured_llm(**kwargs):
+        calls.append(kwargs)
+        return results.pop(0)
+
+    with patch(
+        "src.graph.study_plan.invoke_structured_llm",
+        side_effect=fake_invoke_structured_llm,
+    ):
+        result = await study_plan_agent(
+            {
+                "study_plan_outline": "Two-phase ML plan",
+                "messages": [HumanMessage(content="make a study plan")],
+                "learner_profile": {
+                    "learning_goal": "Master ML basics",
+                    "current_foundation": "Knows Python",
+                    "daily_study_time": "2 hours",
+                },
+                "context": [
+                    {
+                        "title": "Judged evidence 1",
+                        "content": "Course evidence summary",
+                    }
+                ],
+                "thread_id": "t1",
+                "request_id": "r1",
+            }
+        )
+
+    assert [call["schema"].__name__ for call in calls] == [
+        "StudyPlanPhasesArtifact",
+        "StudyPlanScheduleArtifact",
+        "StudyPlanArtifact",
+    ]
+    assert all(call["fallback_modes"] == [] for call in calls)
+    assert all(call["business_validator"] is not None for call in calls)
+    assert result["study_plan_artifact"]["title"] == artifact.title
+    assert result["study_plan_round"] == 1
 
 
 @pytest.mark.anyio

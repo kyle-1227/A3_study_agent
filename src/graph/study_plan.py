@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from src.config import get_setting
-from src.context_engineering.providers.profile_provider import (
-    profile_summary_from_state,
-)
 from src.context_engineering.workspace import (
     build_workspace_profile_completion_update,
     sanitize_workspace_text,
@@ -21,6 +18,8 @@ from src.context_engineering.workspace import (
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
+    StructuredLLMResult,
+    StructuredOutputError,
     get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
@@ -113,6 +112,25 @@ class StudyPlanArtifact(BaseModel):
     evidence_usage: list[str] = Field(..., min_length=1)
 
 
+class StudyPlanPhasesArtifact(BaseModel):
+    """First-stage study-plan phase structure."""
+
+    title: str = Field(..., min_length=1)
+    learner_profile_summary: str = Field(..., min_length=1)
+    overall_goal: str = Field(..., min_length=1)
+    phases: list[StudyPlanPhase] = Field(..., min_length=2)
+    evidence_usage: list[str] = Field(..., min_length=1)
+
+
+class StudyPlanScheduleArtifact(BaseModel):
+    """Second-stage study-plan execution schedule."""
+
+    weekly_schedule: list[str] = Field(..., min_length=1)
+    milestones: list[str] = Field(..., min_length=1)
+    practice_tasks: list[str] = Field(..., min_length=1)
+    risk_warnings: list[str] = Field(default_factory=list)
+
+
 class StudyPlanReviewVerdict(BaseModel):
     """Structured study-plan reviewer verdict."""
 
@@ -163,19 +181,134 @@ def _format_context(context: list[dict]) -> str:
     )
 
 
-def _has_profile_context(state: LearningState) -> bool:
-    try:
-        summary, _metadata = profile_summary_from_state(dict(state))
-    except Exception:
-        return False
-    return bool(summary.strip())
+def _format_profile_context(state: LearningState) -> str:
+    confirmed = _confirmed_profile_values(state)
+    inferred = dict(state.get("learner_profile_inferred") or {})
+    if not inferred:
+        inferred = _inferred_profile_values(state)
+    lines: list[str] = []
+    for field in PROFILE_COMPLETION_FIELDS:
+        key = str(field["key"])
+        label = str(field["label"])
+        if confirmed.get(key):
+            lines.append(f"- {label} (user_confirmed): {confirmed[key]}")
+        elif inferred.get(key):
+            lines.append(f"- {label} (inferred_current_request): {inferred[key]}")
+    return "\n".join(lines) or "No structured learner profile fields are available."
 
 
-def _profile_completion_request_payload(state: LearningState) -> dict[str, Any]:
+def _profile_field_by_key() -> dict[str, dict[str, Any]]:
+    return {str(field["key"]): dict(field) for field in PROFILE_COMPLETION_FIELDS}
+
+
+def _profile_text(value: object, *, max_chars: int = 512) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("value") or value.get("text") or value.get("content")
+    return sanitize_workspace_text(value, max_chars=max_chars, fallback="")
+
+
+def _confirmed_profile_values(state: LearningState) -> dict[str, str]:
+    """Collect user-confirmed profile facts only."""
+    fields = _profile_field_by_key()
+    result: dict[str, str] = {}
+    profile = state.get("learner_profile")
+    if isinstance(profile, Mapping):
+        for key, field in fields.items():
+            text = _profile_text(profile.get(key), max_chars=int(field["max_chars"]))
+            if text:
+                result[key] = text
+    workspace = state.get("task_workspace")
+    requirements = (
+        workspace.get("profile_requirements")
+        if isinstance(workspace, Mapping)
+        else []
+    )
+    if isinstance(requirements, list):
+        for item in requirements:
+            if not isinstance(item, Mapping):
+                continue
+            key = sanitize_workspace_text(item.get("field"), max_chars=80)
+            if key not in fields or result.get(key):
+                continue
+            text = _profile_text(
+                item.get("value_preview"),
+                max_chars=int(fields[key]["max_chars"]),
+            )
+            if text:
+                result[key] = text
+    return result
+
+
+def _inferred_profile_values(state: LearningState) -> dict[str, str]:
+    """Collect current-request inferred facts without making them persistent."""
+    fields = _profile_field_by_key()
+    result: dict[str, str] = {}
+    raw_inferred = state.get("learner_profile_inferred")
+    if isinstance(raw_inferred, Mapping):
+        for key, field in fields.items():
+            text = _profile_text(
+                raw_inferred.get(key),
+                max_chars=int(field["max_chars"]),
+            )
+            if text:
+                result[key] = text
+    learning_goal = _profile_text(
+        state.get("learning_goal"),
+        max_chars=int(fields["learning_goal"]["max_chars"]),
+    )
+    if learning_goal:
+        result.setdefault("learning_goal", learning_goal)
+    return result
+
+
+def missing_profile_fields_for_resource(
+    state: LearningState,
+    resource_type: str,
+) -> dict[str, Any]:
+    """Return profile requirement status for the requested resource."""
+    if resource_type != "study_plan":
+        return {
+            "missing_required_fields": [],
+            "confirmed_values": {},
+            "inferred_values": {},
+            "field_sources": {},
+        }
+    confirmed = _confirmed_profile_values(state)
+    inferred = _inferred_profile_values(state)
+    field_sources: dict[str, str] = {}
+    missing: list[dict[str, Any]] = []
+    for field in PROFILE_COMPLETION_FIELDS:
+        key = str(field["key"])
+        if confirmed.get(key):
+            field_sources[key] = "user_confirmed"
+        elif inferred.get(key):
+            field_sources[key] = "inferred"
+        elif field.get("required") is True:
+            missing.append(dict(field))
+            field_sources[key] = "missing"
+    return {
+        "missing_required_fields": missing,
+        "confirmed_values": confirmed,
+        "inferred_values": inferred,
+        "field_sources": field_sources,
+    }
+
+
+def _profile_completion_request_payload(
+    state: LearningState,
+    missing_required_fields: list[dict[str, Any]],
+) -> dict[str, Any]:
+    field_keys = {str(field["key"]) for field in missing_required_fields}
+    fields = [
+        dict(field)
+        for field in PROFILE_COMPLETION_FIELDS
+        if str(field["key"]) in field_keys or field.get("required") is not True
+    ]
     return {
         "type": "profile_completion_required",
         "title": "生成学习计划前需要补充学习信息",
-        "fields": [dict(field) for field in PROFILE_COMPLETION_FIELDS],
+        "fields": fields,
+        "missing_required_keys": sorted(field_keys),
         "node": "study_plan_profile_gate",
         "resource_type": "study_plan",
         "thread_id": sanitize_workspace_text(
@@ -192,7 +325,11 @@ def _profile_completion_request_payload(state: LearningState) -> dict[str, Any]:
     }
 
 
-def _profile_completion_from_resume(value: object) -> dict[str, str]:
+def _profile_completion_from_resume(
+    value: object,
+    *,
+    required_keys: tuple[str, ...],
+) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError("profile_completion resume payload must be an object")
     if value.get("type") != "profile_completion_required":
@@ -204,7 +341,7 @@ def _profile_completion_from_resume(value: object) -> dict[str, str]:
         )
 
     completion: dict[str, str] = {}
-    field_by_key = {str(field["key"]): field for field in PROFILE_COMPLETION_FIELDS}
+    field_by_key = _profile_field_by_key()
     for key, field in field_by_key.items():
         max_chars = int(field.get("max_chars") or 400)
         text = sanitize_workspace_text(
@@ -215,12 +352,29 @@ def _profile_completion_from_resume(value: object) -> dict[str, str]:
         if text:
             completion[key] = text
 
-    missing = [key for key in PROFILE_COMPLETION_REQUIRED_KEYS if key not in completion]
+    missing = [key for key in required_keys if key not in completion]
     if missing:
         raise ValueError(
             "profile_completion missing required fields: " + ", ".join(missing)
         )
     return completion
+
+
+def _merge_confirmed_profile(
+    existing: Mapping[str, Any] | None,
+    completion: Mapping[str, str],
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    fields = _profile_field_by_key()
+    if isinstance(existing, Mapping):
+        for key, field in fields.items():
+            text = _profile_text(existing.get(key), max_chars=int(field["max_chars"]))
+            if text:
+                merged[key] = text
+    for key, value in completion.items():
+        if key in fields and value:
+            merged[key] = value
+    return merged
 
 
 def _profile_completion_summary(completion: Mapping[str, str]) -> str:
@@ -233,11 +387,154 @@ def _profile_completion_summary(completion: Mapping[str, str]) -> str:
     return "\n".join(lines)
 
 
+def _emit_study_plan_repair_trace(
+    state: LearningState,
+    *,
+    stage: str,
+    result: StructuredLLMResult,
+    status: Literal["succeeded", "failed"],
+) -> None:
+    if int(result.retry_count or 0) <= 0:
+        return
+    base_payload = {
+        "node_name": "study_plan_agent",
+        "stage": stage,
+        "schema_name": result.schema_name,
+        "retry_count": int(result.retry_count or 0),
+        "failure_phase": sanitize_workspace_text(
+            result.failure_phase,
+            max_chars=120,
+            fallback="",
+        ),
+        "error_type": sanitize_workspace_text(
+            result.error_type,
+            max_chars=120,
+            fallback="",
+        ),
+    }
+    emit_a3_trace(
+        logger,
+        "study_plan.schema_repair_started",
+        base_payload,
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    emit_a3_trace(
+        logger,
+        f"study_plan.schema_repair_{status}",
+        base_payload,
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+
+
+async def _invoke_study_plan_stage(
+    state: LearningState,
+    *,
+    stage: str,
+    schema: type[BaseModel],
+    system_prompt: str,
+    user_prompt: str,
+    business_validator: Callable[[BaseModel], str],
+) -> BaseModel:
+    emit_a3_trace(
+        logger,
+        "study_plan.stage_started",
+        {
+            "node_name": "study_plan_agent",
+            "stage": stage,
+            "schema_name": schema.__name__,
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    try:
+        structured_result = await invoke_structured_llm(
+            node_name="study_plan_agent",
+            llm_node="study_plan",
+            schema=schema,
+            messages=[
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ],
+            output_mode=get_llm_output_mode("study_plan_agent"),
+            fallback_modes=get_fallback_modes("study_plan_agent"),
+            business_validator=business_validator,
+            state=state,
+            max_raw_chars=get_max_raw_chars("study_plan_agent"),
+        )
+    except StructuredOutputError as exc:
+        _emit_study_plan_repair_trace(
+            state,
+            stage=stage,
+            result=exc.result,
+            status="failed",
+        )
+        raise
+    _emit_study_plan_repair_trace(
+        state,
+        stage=stage,
+        result=structured_result,
+        status="succeeded",
+    )
+    emit_a3_trace(
+        logger,
+        "study_plan.stage_succeeded",
+        {
+            "node_name": "study_plan_agent",
+            "stage": stage,
+            "schema_name": schema.__name__,
+            "retry_count": int(structured_result.retry_count or 0),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    if structured_result.parsed is None:
+        raise TypeError(f"{stage} returned no parsed result")
+    return structured_result.parsed
+
+
 def validate_emotional_profile(parsed: BaseModel) -> str:
     if not isinstance(parsed, StudyPlanEmotionalProfile):
         return "root expected StudyPlanEmotionalProfile"
     if not parsed.summary.strip():
         return "summary must be non-empty"
+    return ""
+
+
+def validate_study_plan_phases(parsed: BaseModel) -> str:
+    if not isinstance(parsed, StudyPlanPhasesArtifact):
+        return "root expected StudyPlanPhasesArtifact"
+    if len(parsed.phases or []) < 2:
+        return "phases must contain at least 2 items"
+    for idx, phase in enumerate(parsed.phases or []):
+        prefix = f"phases.{idx}"
+        if not phase.duration.strip():
+            return f"{prefix}.duration must be non-empty"
+        if not phase.goals:
+            return f"{prefix}.goals must be non-empty"
+        if not phase.tasks:
+            return f"{prefix}.tasks must be non-empty"
+        if not phase.resources:
+            return f"{prefix}.resources must be non-empty"
+        if not phase.practice:
+            return f"{prefix}.practice must be non-empty"
+        if not phase.checkpoints:
+            return f"{prefix}.checkpoints must be non-empty"
+    if not parsed.evidence_usage:
+        return "evidence_usage must be non-empty"
+    return ""
+
+
+def validate_study_plan_schedule(parsed: BaseModel) -> str:
+    if not isinstance(parsed, StudyPlanScheduleArtifact):
+        return "root expected StudyPlanScheduleArtifact"
+    if not parsed.weekly_schedule:
+        return "weekly_schedule must be non-empty"
+    if not parsed.milestones:
+        return "milestones must be non-empty"
+    if not parsed.practice_tasks:
+        return "practice_tasks must be non-empty"
     return ""
 
 
@@ -454,18 +751,27 @@ async def study_plan_planner(state: LearningState) -> dict:
 @traced_node
 async def study_plan_profile_gate(state: LearningState) -> dict:
     """Pause study-plan generation until minimum learner profile facts exist."""
-    if _has_profile_context(state):
-        return {"profile_completion_request": {}}
+    requirement_status = missing_profile_fields_for_resource(state, "study_plan")
+    missing_required_fields = list(
+        requirement_status.get("missing_required_fields") or []
+    )
+    inferred_values = dict(requirement_status.get("inferred_values") or {})
+    if not missing_required_fields:
+        return {
+            "profile_completion_request": {},
+            "learner_profile_inferred": inferred_values,
+        }
 
-    request_payload = _profile_completion_request_payload(state)
+    request_payload = _profile_completion_request_payload(state, missing_required_fields)
     emit_a3_trace(
         logger,
         "profile_completion.required",
         {
             "node_name": "study_plan_profile_gate",
             "resource_type": "study_plan",
-            "field_count": len(PROFILE_COMPLETION_FIELDS),
-            "required_field_count": len(PROFILE_COMPLETION_REQUIRED_KEYS),
+            "field_count": len(request_payload.get("fields") or []),
+            "required_field_count": len(missing_required_fields),
+            "inferred_field_count": len(inferred_values),
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -476,11 +782,20 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
             "profile_completion_request": {
                 "title": request_payload["title"],
                 "fields": request_payload["fields"],
+                "missing_required_keys": request_payload["missing_required_keys"],
             },
         }
     )
-    completion = _profile_completion_from_resume(resume_value)
-    summary = _profile_completion_summary(completion)
+    required_keys = tuple(str(field["key"]) for field in missing_required_fields)
+    completion = _profile_completion_from_resume(
+        resume_value,
+        required_keys=required_keys,
+    )
+    confirmed_profile = _merge_confirmed_profile(
+        state.get("learner_profile"),
+        completion,
+    )
+    summary = _profile_completion_summary(confirmed_profile)
     workspace_update = build_workspace_profile_completion_update(
         dict(state),
         completion,
@@ -501,7 +816,8 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
     )
     return {
         "profile_completion_request": {},
-        "learner_profile": dict(completion),
+        "learner_profile": confirmed_profile,
+        "learner_profile_inferred": inferred_values,
         "learner_profile_summary": summary,
         "profile_summary": summary,
         "task_workspace": workspace_update,
@@ -521,37 +837,69 @@ async def study_plan_agent(state: LearningState) -> dict:
     if not outline.strip():
         raise ValueError("study_plan outline is empty")
     round_no = int(state.get("study_plan_round", 0) or 0) + 1
-    prompt = (
-        "Generate a personalized study plan as structured JSON.\n"
-        "Avoid inventing unavailable resources. Use evidence_usage to explain how judged evidence informed the plan.\n\n"
-        f"User query:\n{_last_human_query(state)}\n\nOutline:\n{outline}\n\n"
-        f"Revision notes:\n{state.get('study_plan_revision_notes', '') or 'None'}\n\n"
-        f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}\n\n"
-        f"Judged evidence:\n{_format_context(state.get('context', []))}"
-    )
     model_name = get_setting(
         "llm.study_plan.model", get_setting("study_plan.model", "")
     )
     with traced_llm_call(
         model_name=model_name, node_name="study_plan_agent", temperature=0.2
     ):
-        structured_result = await invoke_structured_llm(
-            node_name="study_plan_agent",
-            llm_node="study_plan",
-            schema=StudyPlanArtifact,
-            messages=[
-                SystemMessage(
-                    content="You generate structured personalized study plans. Return only JSON."
-                ),
-                HumanMessage(content=prompt),
-            ],
-            output_mode=get_llm_output_mode("study_plan_agent"),
-            fallback_modes=get_fallback_modes("study_plan_agent"),
-            business_validator=validate_study_plan_artifact,
-            state=state,
-            max_raw_chars=get_max_raw_chars("study_plan_agent"),
+        phases_model = await _invoke_study_plan_stage(
+            state,
+            stage="phases",
+            schema=StudyPlanPhasesArtifact,
+            system_prompt=(
+                "You design the phase structure for a personalized study plan. "
+                "Return only JSON matching the schema."
+            ),
+            user_prompt=(
+                "Generate the phase structure for this study plan.\n"
+                "Use only judged evidence and clearly available learner facts.\n\n"
+                f"User query:\n{_last_human_query(state)}\n\n"
+                f"Outline:\n{outline}\n\n"
+                f"Revision notes:\n{state.get('study_plan_revision_notes', '') or 'None'}\n\n"
+                f"Learner profile facts:\n{_format_profile_context(state)}\n\n"
+                f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}\n\n"
+                f"Judged evidence:\n{_format_context(state.get('context', []))}"
+            ),
+            business_validator=validate_study_plan_phases,
         )
-    result = structured_result.parsed
+        phases = _model_to_dict(phases_model)
+        schedule_model = await _invoke_study_plan_stage(
+            state,
+            stage="schedule",
+            schema=StudyPlanScheduleArtifact,
+            system_prompt=(
+                "You design the execution schedule for a personalized study plan. "
+                "Return only JSON matching the schema."
+            ),
+            user_prompt=(
+                "Generate weekly schedule, milestones, practice tasks, and risk warnings "
+                "for the phase structure below.\n\n"
+                f"Learner profile facts:\n{_format_profile_context(state)}\n\n"
+                f"Phase structure:\n{phases}"
+            ),
+            business_validator=validate_study_plan_schedule,
+        )
+        schedule = _model_to_dict(schedule_model)
+        final_model = await _invoke_study_plan_stage(
+            state,
+            stage="final_artifact",
+            schema=StudyPlanArtifact,
+            system_prompt=(
+                "You assemble the final structured personalized study plan. "
+                "Return only JSON matching the schema."
+            ),
+            user_prompt=(
+                "Assemble a final StudyPlanArtifact from the staged outputs. "
+                "Preserve the phase structure and schedule facts; do not invent unavailable resources.\n\n"
+                f"Learner profile facts:\n{_format_profile_context(state)}\n\n"
+                f"Phase structure:\n{phases}\n\n"
+                f"Schedule structure:\n{schedule}\n\n"
+                f"Judged evidence:\n{_format_context(state.get('context', []))}"
+            ),
+            business_validator=validate_study_plan_artifact,
+        )
+    result = final_model
     if not isinstance(result, StudyPlanArtifact):
         raise TypeError("study_plan_agent parsed result is not StudyPlanArtifact")
     return {

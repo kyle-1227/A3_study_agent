@@ -24,7 +24,7 @@ _ALLOWED_SOURCES = {
 
 @dataclass(frozen=True)
 class PackingPolicy:
-    """Explicit Phase 3A packing policy."""
+    """Explicit context-packing policy."""
 
     enabled: bool
     shadow_mode: bool

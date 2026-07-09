@@ -265,6 +265,7 @@ class TestDevMemoryClear:
         assert values["workspace_events"] is WORKSPACE_EVENTS_CLEAR
         assert values["resource_artifacts_by_type"] is DICT_CLEAR
         assert values["last_generated_artifacts"] is GENERATED_ARTIFACTS_CLEAR
+        assert values["last_resource_final_payload"] is DICT_CLEAR
         assert values["llm_input_manifest"] == {}
         assert values["llm_input_manifests"] is LLM_INPUT_MANIFESTS_CLEAR
         assert values["thread_context_ledger"] is DICT_CLEAR
@@ -283,6 +284,7 @@ class TestDevMemoryClear:
                 "workspace_events",
                 "resource_artifacts_by_type",
                 "last_generated_artifacts",
+                "last_resource_final_payload",
                 "llm_input_manifest",
                 "llm_input_manifests",
                 "thread_context_ledger",
@@ -359,7 +361,7 @@ class TestDevMemoryClear:
             "app.clear_persistent_memory_for_thread",
             new_callable=AsyncMock,
             return_value=helper_result,
-        ):
+        ), patch("app.checkpointer_enabled", return_value=False):
             with TestClient(app) as client:
                 response = client.post("/dev/threads/thread-1/memory/clear")
 

@@ -54,6 +54,10 @@ from src.graph.state import (
     WORKSPACE_EVENTS_CLEAR,
     initial_request_reset_transient_state,
 )
+from src.graph.resource_final import (
+    completed_without_resource_payload,
+    normalize_resource_final_payload,
+)
 from src.profile import get_profile_manager
 from src.run_control import (
     RUN_CONTROL_FIELDS,
@@ -616,6 +620,11 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
     )
     resource_artifacts_by_type = values.get("resource_artifacts_by_type")
     last_generated_artifacts = values.get("last_generated_artifacts")
+    last_resource_payload = (
+        values.get("last_resource_final_payload")
+        if isinstance(values.get("last_resource_final_payload"), dict)
+        else {}
+    )
     workspace_status = workspace_status_payload(values.get("task_workspace"))
     raw_manifest_history = values.get("llm_input_manifests")
     manifest_history: list = (
@@ -651,6 +660,10 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         "last_resource_subnodes_count": len(values.get("last_resource_subnodes") or [])
         if isinstance(values.get("last_resource_subnodes"), list)
         else 0,
+        "last_resource_final_payload_present": bool(last_resource_payload),
+        "last_resource_final_resource_type": str(
+            last_resource_payload.get("resource_type") or ""
+        ),
         "background_context_window": background_window,
         **background_status,
         "llm_input_manifest_count": len(manifest_history),
@@ -691,6 +704,7 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
     previous_manifest = values.get("llm_input_manifest")
     previous_ledger = values.get("thread_context_ledger")
     previous_background = values.get("background_context_window")
+    previous_resource_payload = values.get("last_resource_final_payload")
     values.update(initial_run_values or {})
     if isinstance(previous_history, list):
         values["context_usage_history"] = previous_history
@@ -702,6 +716,8 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
         values["thread_context_ledger"] = previous_ledger
     if isinstance(previous_background, dict):
         values["background_context_window"] = previous_background
+    if isinstance(previous_resource_payload, dict):
+        values["last_resource_final_payload"] = previous_resource_payload
     return values
 
 
@@ -737,6 +753,9 @@ def _thread_status_from_snapshot(
             else 0,
             background_context_window=values.get("background_context_window")
             if isinstance(values.get("background_context_window"), dict)
+            else {},
+            last_resource_final_payload=values.get("last_resource_final_payload")
+            if isinstance(values.get("last_resource_final_payload"), dict)
             else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
@@ -780,6 +799,9 @@ def _thread_status_from_snapshot(
         background_context_window=values.get("background_context_window")
         if isinstance(values.get("background_context_window"), dict)
         else {},
+        last_resource_final_payload=values.get("last_resource_final_payload")
+        if isinstance(values.get("last_resource_final_payload"), dict)
+        else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
         profile_completion_request=profile_completion_request,
@@ -817,6 +839,9 @@ def _thread_status_from_active_run(
         else 0,
         background_context_window=active_run.get("background_context_window")
         if isinstance(active_run.get("background_context_window"), dict)
+        else {},
+        last_resource_final_payload=active_run.get("last_resource_final_payload")
+        if isinstance(active_run.get("last_resource_final_payload"), dict)
         else {},
         request_context_window=request_context_window
         if isinstance(request_context_window, dict)
@@ -1120,7 +1145,7 @@ def _last_ai_message_content(final_state: dict) -> str:
     return ""
 
 
-def _resource_final_payload(final_state: dict) -> dict | None:
+def _legacy_resource_final_payload(final_state: dict) -> dict | None:
     has_generated_resource_artifact = any(
         bool(final_state.get(key))
         for key in (
@@ -1388,6 +1413,12 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     return payload
 
 
+def _resource_final_payload(final_state: dict) -> dict | None:
+    """Build a stable resource_final event while preserving legacy fields."""
+    legacy_payload = _legacy_resource_final_payload(final_state)
+    return normalize_resource_final_payload(legacy_payload, final_state)
+
+
 def _dev_memory_clear_enabled() -> bool:
     """Return whether the dev-only persistent-memory clear endpoint is enabled."""
     env_values = {
@@ -1415,6 +1446,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "workspace_events",
         "resource_artifacts_by_type",
         "last_generated_artifacts",
+        "last_resource_final_payload",
         "llm_input_manifest",
         "llm_input_manifests",
         "thread_context_ledger",
@@ -1431,6 +1463,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "workspace_events": WORKSPACE_EVENTS_CLEAR,
         "resource_artifacts_by_type": DICT_CLEAR,
         "last_generated_artifacts": GENERATED_ARTIFACTS_CLEAR,
+        "last_resource_final_payload": DICT_CLEAR,
         "llm_input_manifest": {},
         "llm_input_manifests": LLM_INPUT_MANIFESTS_CLEAR,
         "thread_context_ledger": DICT_CLEAR,
@@ -2590,6 +2623,15 @@ async def _stream_graph_events(
         "current_node": "",
         "last_event_count": len(request_context_events),
     }
+    resource_payload = _resource_final_payload(final_state)
+    if terminal_resource_output:
+        terminal_resource_payload = _resource_final_payload(terminal_resource_output)
+        if terminal_resource_payload:
+            resource_payload = terminal_resource_payload
+    diagnostic_state = terminal_resource_output or final_state
+    resource_diagnostic_payload = (
+        completed_without_resource_payload(diagnostic_state) if not resource_payload else None
+    )
     completed_values = {
         "run_status": RUN_STATUS_COMPLETED,
         "resume_available": False,
@@ -2606,6 +2648,8 @@ async def _stream_graph_events(
         "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
         "last_resource_subnodes": list(last_resource_subnodes),
     }
+    if resource_payload:
+        completed_values["last_resource_final_payload"] = resource_payload
     if context_usage_history:
         completed_values["context_usage"] = context_usage_history[-1]
         completed_values["context_usage_history"] = list(context_usage_history)
@@ -2639,25 +2683,14 @@ async def _stream_graph_events(
         state=final_state,
     )
     run_control_registry.clear_stop_signal(thread_id)
-    completed_payload = {
-        "type": "run_status",
-        "run_status": RUN_STATUS_COMPLETED,
-        "thread_id": thread_id,
-    }
-    yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n"
-
-    resource_payload = _resource_final_payload(final_state)
-    if terminal_resource_output:
-        terminal_resource_payload = _resource_final_payload(terminal_resource_output)
-        if terminal_resource_payload:
-            resource_payload = terminal_resource_payload
     if resource_payload:
-        # TEMP A3_TRACE: remove after resource final payload validation.
         emit_a3_trace(
             logger,
             "sse_resource_final",
             {
                 "sent": True,
+                "resource_id": resource_payload.get("resource_id", ""),
+                "payload_hash": resource_payload.get("payload_hash", ""),
                 "resource_type": resource_payload.get("resource_type", ""),
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
@@ -2690,6 +2723,31 @@ async def _stream_graph_events(
             env_flag="LOG_A3_TRACE",
         )
         yield f"data: {json.dumps(resource_payload, ensure_ascii=False)}\n\n"
+    elif resource_diagnostic_payload:
+        emit_a3_trace(
+            logger,
+            "sse_resource_final",
+            {
+                "sent": False,
+                "status": "completed_without_resource",
+                "resource_generation_status": resource_diagnostic_payload.get(
+                    "resource_generation_status", ""
+                ),
+                "requested_resource_types": resource_diagnostic_payload.get(
+                    "requested_resource_types", []
+                ),
+            },
+            state=final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield f"data: {json.dumps(resource_diagnostic_payload, ensure_ascii=False)}\n\n"
+
+    completed_payload = {
+        "type": "run_status",
+        "run_status": RUN_STATUS_COMPLETED,
+        "thread_id": thread_id,
+    }
+    yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
     if completed_update_ok:
@@ -2836,6 +2894,11 @@ async def generate_sse(
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
             else {},
+            "last_resource_final_payload": status_values.get(
+                "last_resource_final_payload"
+            )
+            if isinstance(status_values.get("last_resource_final_payload"), dict)
+            else {},
         },
     )
 
@@ -2977,6 +3040,11 @@ async def generate_resume_sse(
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
             else {},
+            "last_resource_final_payload": status_values.get(
+                "last_resource_final_payload"
+            )
+            if isinstance(status_values.get("last_resource_final_payload"), dict)
+            else {},
         },
     )
 
@@ -3105,6 +3173,11 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
             else {},
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
+            else {},
+            "last_resource_final_payload": status_values.get(
+                "last_resource_final_payload"
+            )
+            if isinstance(status_values.get("last_resource_final_payload"), dict)
             else {},
         },
     )

@@ -225,7 +225,10 @@ def emit_context_packing_shadow(
             emit_context_packing_observed(
                 logger,
                 reason="apply_to_llm_unsupported",
-                warning="context_engineering.packer.apply_to_llm must be false in Phase 3A",
+                warning=(
+                    "context_engineering.packer.apply_to_llm is ignored by "
+                    "observe-only packing; active injection is controlled by node policy"
+                ),
                 node_name=node_name,
                 llm_node=llm_node_text,
                 budget_tokens=policy.max_context_block_tokens,
@@ -236,7 +239,10 @@ def emit_context_packing_shadow(
             emit_context_packing_observed(
                 logger,
                 reason="shadow_mode_required",
-                warning="context_engineering.packer.shadow_mode must be true in Phase 3A",
+                warning=(
+                    "context_engineering.packer.shadow_mode is disabled; "
+                    "observe-only shadow packing was skipped"
+                ),
                 node_name=node_name,
                 llm_node=llm_node_text,
                 budget_tokens=policy.max_context_block_tokens,

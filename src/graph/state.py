@@ -178,6 +178,7 @@ def initial_request_reset_transient_state() -> dict:
         "workspace_continuation": {},
         "workspace_continuation_applied": False,
         "workspace_continuation_reason": "",
+        "learner_profile_inferred": {},
         # memory use policy for current query rewrite
         "memory_use_policy": "unset",
         "memory_use_reason": "",
@@ -410,6 +411,7 @@ class LearningState(TypedDict):
     profile_summary: str  # Compact learner profile summary for CE profile source
     learner_profile_summary: str  # User-supplied compact learner profile summary
     learner_profile: dict  # User-supplied learner profile facts
+    learner_profile_inferred: dict  # Current-request inferred learner facts
     context_usage: dict  # Most recent LLM context window usage
     context_usage_history: Annotated[
         list[dict], bounded_context_window_reducer
@@ -459,6 +461,9 @@ class LearningState(TypedDict):
     last_generated_artifacts: Annotated[
         list[dict], generated_artifacts_reducer
     ]  # Bounded generated artifact summaries
+    last_resource_final_payload: Annotated[
+        dict, merge_dict_reducer
+    ]  # Last sanitized renderable resource_final payload
     intent: Literal["academic", "emotional", "unknown"]  # User intent
     subject: str  # The topic being discussed
     subject_candidates: list[str]  # Ordered available-subject candidates
