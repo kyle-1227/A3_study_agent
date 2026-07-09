@@ -1611,6 +1611,122 @@ class TestSSEInterruptWithEmptyNext:
             for update in run_state_updates
         )
 
+    def test_profile_completion_trace_event_recovers_complete_request(self):
+        from app import _profile_completion_request_from_trace_event
+
+        event = {
+            "stage": "profile_completion.required",
+            "profile_completion_request": {
+                "title": "生成学习计划前需要补充学习信息",
+                "fields": [
+                    {
+                        "key": "learning_goal",
+                        "label": "学习目标",
+                        "required": True,
+                        "max_chars": 400,
+                    }
+                ],
+                "missing_required_keys": ["current_foundation"],
+            },
+        }
+
+        recovered = _profile_completion_request_from_trace_event(event)
+        assert recovered == {
+            "title": "生成学习计划前需要补充学习信息",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "学习目标",
+                    "required": True,
+                    "max_chars": 400,
+                }
+            ],
+        }
+
+    @pytest.mark.anyio
+    async def test_lost_interrupt_recovers_profile_completion_interrupt_from_trace(
+        self,
+    ):
+        """When checkpoint interrupt is missing but trace carries a complete
+        profile_completion_request, SSE should recover to profile completion interrupt."""
+        from app import generate_sse
+
+        async def trace_events():
+            emit_a3_trace(
+                logging.getLogger(__name__),
+                "profile_completion.required",
+                {
+                    "profile_completion_request": {
+                        "title": "Need profile before study plan",
+                        "fields": [
+                            {
+                                "key": "learning_goal",
+                                "label": "Learning goal",
+                                "required": True,
+                                "max_chars": 400,
+                            }
+                        ],
+                        "missing_required_keys": ["current_foundation"],
+                    }
+                },
+                state={},
+                env_flag="LOG_GENERATION_SUMMARY",
+            )
+            emit_a3_trace(
+                logging.getLogger(__name__),
+                "resource_generation.worker.interrupted",
+                {"resource_type": "study_plan", "elapsed_ms": 42},
+                state={},
+                env_flag="LOG_GENERATION_SUMMARY",
+            )
+            if False:
+                yield {}
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=trace_events())
+        mock_graph.aupdate_state = AsyncMock()
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "requested_resource_type": "study_plan",
+                    "requested_resource_types": ["study_plan"],
+                    "resource_generation_plan": {
+                        "tasks": [{"resource_type": "study_plan"}]
+                    },
+                },
+            )
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = _parse_all_payloads(collected)
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert len(interrupt_events) == 1
+        assert interrupt_events[0]["interrupt_type"] == "profile_completion_required"
+        assert interrupt_events[0]["profile_completion_request"]["title"] == (
+            "Need profile before study plan"
+        )
+        assert [
+            p for p in all_payloads if p.get("error_type") == "interrupt_lost"
+        ] == []
+        assert [p for p in all_payloads if p.get("type") == "resource_final"] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "resource_final_diagnostic"
+            and p.get("status") == "completed_without_resource"
+        ] == []
+        assert [
+            p
+            for p in all_payloads
+            if p.get("type") == "run_status" and p.get("run_status") == "completed"
+        ] == []
+        assert [p for p in all_payloads if p.get("type") == "done"] == []
+
     @pytest.mark.anyio
     async def test_plan_review_interrupt_empty_next_draft_is_raw_value(self):
         """plan_review with a raw string interrupt must emit draft as

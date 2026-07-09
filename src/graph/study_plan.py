@@ -219,9 +219,7 @@ def _confirmed_profile_values(state: LearningState) -> dict[str, str]:
                 result[key] = text
     workspace = state.get("task_workspace")
     requirements = (
-        workspace.get("profile_requirements")
-        if isinstance(workspace, Mapping)
-        else []
+        workspace.get("profile_requirements") if isinstance(workspace, Mapping) else []
     )
     if isinstance(requirements, list):
         for item in requirements:
@@ -762,7 +760,14 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
             "learner_profile_inferred": inferred_values,
         }
 
-    request_payload = _profile_completion_request_payload(state, missing_required_fields)
+    request_payload = _profile_completion_request_payload(
+        state, missing_required_fields
+    )
+    safe_profile_request = {
+        "title": request_payload["title"],
+        "fields": request_payload["fields"],
+        "missing_required_keys": request_payload["missing_required_keys"],
+    }
     emit_a3_trace(
         logger,
         "profile_completion.required",
@@ -772,6 +777,7 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
             "field_count": len(request_payload.get("fields") or []),
             "required_field_count": len(missing_required_fields),
             "inferred_field_count": len(inferred_values),
+            "profile_completion_request": safe_profile_request,
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -779,11 +785,7 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
     resume_value = interrupt(
         {
             **request_payload,
-            "profile_completion_request": {
-                "title": request_payload["title"],
-                "fields": request_payload["fields"],
-                "missing_required_keys": request_payload["missing_required_keys"],
-            },
+            "profile_completion_request": safe_profile_request,
         }
     )
     required_keys = tuple(str(field["key"]) for field in missing_required_fields)

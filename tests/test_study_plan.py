@@ -106,9 +106,12 @@ async def test_study_plan_profile_gate_interrupts_when_profile_missing():
         },
     }
 
-    with patch(
-        "src.graph.study_plan.interrupt", return_value=resume_value
-    ) as mock_interrupt:
+    with (
+        patch(
+            "src.graph.study_plan.interrupt", return_value=resume_value
+        ) as mock_interrupt,
+        patch("src.graph.study_plan.emit_a3_trace") as mock_emit_trace,
+    ):
         result = await study_plan_profile_gate(
             {
                 "request_id": "r1",
@@ -123,9 +126,21 @@ async def test_study_plan_profile_gate_interrupts_when_profile_missing():
     assert interrupt_payload["type"] == "profile_completion_required"
     assert interrupt_payload["resume_available"] is True
     assert interrupt_payload["profile_completion_request"]["fields"]
-    assert "learning_goal" not in interrupt_payload["profile_completion_request"][
-        "missing_required_keys"
-    ]
+    assert (
+        "learning_goal"
+        not in interrupt_payload["profile_completion_request"]["missing_required_keys"]
+    )
+    required_trace_payload = next(
+        call.args[2]
+        for call in mock_emit_trace.call_args_list
+        if len(call.args) >= 3 and call.args[1] == "profile_completion.required"
+    )
+    assert required_trace_payload["profile_completion_request"]["title"]
+    assert required_trace_payload["profile_completion_request"]["fields"]
+    assert (
+        required_trace_payload["profile_completion_request"]
+        == interrupt_payload["profile_completion_request"]
+    )
     assert result["learner_profile"]["learning_goal"] == "Master ML basics"
     assert "Master ML basics" in result["learner_profile_summary"]
     assert result["profile_summary"] == result["learner_profile_summary"]
