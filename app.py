@@ -415,32 +415,27 @@ async def lifespan(app: FastAPI):
         ckp_type = checkpointer_type()
         db_uri = get_db_uri()
 
-        if enabled and ckp_type == "postgres" and db_uri:
-            try:
-                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-                checkpointer = await stack.enter_async_context(
-                    AsyncPostgresSaver.from_conn_string(db_uri)
+        if enabled and ckp_type == "postgres":
+            if not db_uri:
+                raise RuntimeError(
+                    "PostgreSQL checkpointer requires DB_URI when CHECKPOINTER_TYPE=postgres"
                 )
-                await checkpointer.setup()
-                logger.info("PostgreSQL checkpointer initialized")
-            except Exception:
-                logger.exception(
-                    "Failed to initialize PostgreSQL checkpointer, falling back to MemorySaver"
-                )
-                from langgraph.checkpoint.memory import MemorySaver
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-                checkpointer = MemorySaver()
-                ckp_type = "memory"
-        elif enabled:
+            checkpointer = await stack.enter_async_context(
+                AsyncPostgresSaver.from_conn_string(db_uri)
+            )
+            await checkpointer.setup()
+            logger.info("PostgreSQL checkpointer initialized")
+        elif enabled and ckp_type == "memory":
             from langgraph.checkpoint.memory import MemorySaver
 
             checkpointer = MemorySaver()
             ckp_type = "memory"
-            if db_uri and checkpointer_type() == "postgres":
-                logger.warning(
-                    "DB_URI is set but PostgreSQL checkpointer was unavailable; using MemorySaver"
-                )
+        elif enabled:
+            raise RuntimeError(
+                f"Unsupported LangGraph checkpointer type: {sanitize_error_message(ckp_type, max_chars=80)}"
+            )
         else:
             logger.warning("LangGraph checkpointer disabled by configuration")
             ckp_type = "disabled"
@@ -537,6 +532,45 @@ def _pending_interrupt_type(state_snapshot) -> str:
         if value_type:
             return value_type
     return ""
+
+
+def _safe_profile_completion_request(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    raw_request = value.get("profile_completion_request")
+    if not isinstance(raw_request, dict):
+        raw_request = value
+    title = sanitize_error_message(raw_request.get("title", ""), max_chars=160)
+    fields: list[dict] = []
+    for raw_field in raw_request.get("fields") or []:
+        if not isinstance(raw_field, dict):
+            continue
+        key = sanitize_error_message(raw_field.get("key", ""), max_chars=80)
+        label = sanitize_error_message(raw_field.get("label", ""), max_chars=120)
+        if not key or not label:
+            continue
+        max_chars = _safe_int(raw_field.get("max_chars"), default=400)
+        fields.append(
+            {
+                "key": key,
+                "label": label,
+                "required": raw_field.get("required") is True,
+                "max_chars": max(1, min(max_chars, 1000)),
+            }
+        )
+        if len(fields) >= 12:
+            break
+    return {"title": title, "fields": fields} if title or fields else {}
+
+
+def _pending_profile_completion_request(
+    state_snapshot, values: dict | None = None
+) -> dict:
+    for interrupt_value in _pending_interrupt_values(state_snapshot):
+        if interrupt_value.get("type") == "profile_completion_required":
+            return _safe_profile_completion_request(interrupt_value)
+    saved = (values or {}).get("profile_completion_request")
+    return _safe_profile_completion_request(saved) if isinstance(saved, dict) else {}
 
 
 def _has_checkpoint_state(state_snapshot) -> bool:
@@ -676,6 +710,10 @@ def _thread_status_from_snapshot(
 ) -> ThreadStatusResponse:
     values = _state_values(state_snapshot)
     pending_type = _pending_interrupt_type(state_snapshot)
+    profile_completion_request = _pending_profile_completion_request(
+        state_snapshot,
+        values,
+    )
     missing_fields = _missing_run_control_fields(values)
     request_context_window, thread_context_window = _context_window_status(values)
     if missing_fields:
@@ -683,7 +721,7 @@ def _thread_status_from_snapshot(
             thread_id=thread_id,
             schema_version="legacy",
             run_status=RUN_STATUS_IDLE,
-            resume_available=False,
+            resume_available=pending_type == "profile_completion_required",
             pending_interrupt_type=pending_type,
             current_node=str(values.get("current_node") or ""),
             last_completed_node=str(values.get("last_completed_node") or ""),
@@ -702,6 +740,7 @@ def _thread_status_from_snapshot(
             else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
+            profile_completion_request=profile_completion_request,
             missing_run_control_fields=missing_fields,
             message="legacy checkpoint does not include run-control fields",
         )
@@ -721,7 +760,7 @@ def _thread_status_from_snapshot(
         thread_id=thread_id,
         schema_version=RUN_CONTROL_SCHEMA_VERSION,
         run_status=run_status,
-        resume_available=pending_type == "user_stop",
+        resume_available=pending_type in {"user_stop", "profile_completion_required"},
         pending_interrupt_type=pending_type
         or str(values.get("pending_interrupt_type") or ""),
         current_node=str(values.get("current_node") or ""),
@@ -743,6 +782,7 @@ def _thread_status_from_snapshot(
         else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
+        profile_completion_request=profile_completion_request,
         missing_run_control_fields=[],
     )
 
@@ -752,6 +792,7 @@ def _thread_status_from_active_run(
 ) -> ThreadStatusResponse:
     request_context_window = active_run.get("request_context_window")
     thread_context_window = active_run.get("thread_context_window")
+    profile_completion_request = active_run.get("profile_completion_request")
     return ThreadStatusResponse(
         thread_id=thread_id,
         schema_version=RUN_CONTROL_SCHEMA_VERSION,
@@ -805,6 +846,9 @@ def _thread_status_from_active_run(
             "workspace_artifact_count": 0,
             "workspace_updated_at": "",
         },
+        profile_completion_request=profile_completion_request
+        if isinstance(profile_completion_request, dict)
+        else {},
         missing_run_control_fields=[],
     )
 
@@ -1058,7 +1102,7 @@ async def _update_llm_manifest_state_from_trace(
             "thread_context_window": active_thread_window,
         },
         state={"thread_id": thread_id, "session_id": thread_id},
-        persist_checkpoint=False,
+        persist_checkpoint=True,
     )
     return (
         dict(payload),
@@ -2491,6 +2535,31 @@ async def _stream_graph_events(
                         "options": interrupt_value.get("options", []),
                         "thread_id": thread_id,
                     }
+                elif (
+                    isinstance(interrupt_value, dict)
+                    and interrupt_value.get("type") == "profile_completion_required"
+                ):
+                    profile_request = _safe_profile_completion_request(interrupt_value)
+                    interrupt_update_ok = await _try_update_run_state(
+                        graph,
+                        config,
+                        {
+                            "resume_available": True,
+                            "pending_interrupt_type": "profile_completion_required",
+                            "profile_completion_request": profile_request,
+                        },
+                        state=final_state,
+                        persist_checkpoint=False,
+                    )
+                    payload_data = {
+                        "type": "interrupt",
+                        "interrupt_type": "profile_completion_required",
+                        "title": profile_request.get("title", ""),
+                        "fields": profile_request.get("fields", []),
+                        "profile_completion_request": profile_request,
+                        "resume_available": True,
+                        "thread_id": thread_id,
+                    }
                 else:
                     interrupt_update_ok = await _try_update_run_state(
                         graph,
@@ -2525,6 +2594,7 @@ async def _stream_graph_events(
         "run_status": RUN_STATUS_COMPLETED,
         "resume_available": False,
         "pending_interrupt_type": "",
+        "profile_completion_request": {},
         "current_node": "",
         "stop_requested": False,
         "request_context_window": final_request_context_window,
@@ -2659,12 +2729,17 @@ async def generate_sse(
 
     # Inject profile context as a SystemMessage if a user profile exists
     messages = [HumanMessage(content=query)]
+    profile_summary = ""
     if user_id:
         try:
             manager = get_profile_manager()
             profile_ctx = await manager.build_profile_context(user_id)
             if profile_ctx:
                 messages.insert(0, SystemMessage(content=profile_ctx))
+                profile_summary = sanitize_error_message(
+                    profile_ctx,
+                    max_chars=2000,
+                )
                 logger.info(
                     "Injected profile context user=%s (%d chars)",
                     user_id,
@@ -2681,6 +2756,9 @@ async def generate_sse(
         "context": CONTEXT_CLEAR,
         **initial_request_reset_transient_state(),
     }
+    if profile_summary:
+        state_input["profile_summary"] = profile_summary
+        state_input["learner_profile_summary"] = profile_summary
     _emit_graph_config_trace(graph, config, state_input)
 
     initial_request_context_window = {
@@ -2698,6 +2776,7 @@ async def generate_sse(
         "resume_available": False,
         "stopped_at": "",
         "pending_interrupt_type": "",
+        "profile_completion_request": {},
         "context_usage": {},
         "context_usage_history": [],
         "request_context_window": initial_request_context_window,
@@ -2738,6 +2817,7 @@ async def generate_sse(
             "run_status": RUN_STATUS_RUNNING,
             "resume_available": False,
             "pending_interrupt_type": "",
+            "profile_completion_request": {},
             "current_node": "",
             "last_completed_node": "",
             "request_context_window": request_context_window,
@@ -2814,6 +2894,7 @@ async def generate_resume_sse(
     graph,
     thread_id: str,
     memory_use_choice: str | None = None,
+    profile_completion: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Resume an interrupted graph and stream remaining events as SSE.
 
@@ -2841,6 +2922,11 @@ async def generate_resume_sse(
     resume_value: object
     if memory_use_choice:
         resume_value = {"type": "memory_confirmation", "choice": memory_use_choice}
+    elif profile_completion is not None:
+        resume_value = {
+            "type": "profile_completion_required",
+            "profile_completion": profile_completion,
+        }
     elif feedback:
         resume_value = {"action": "feedback", "text": feedback}
     else:
@@ -2870,6 +2956,7 @@ async def generate_resume_sse(
             "run_status": RUN_STATUS_CONTINUING,
             "resume_available": False,
             "pending_interrupt_type": "",
+            "profile_completion_request": {},
             "current_node": "",
             "last_completed_node": "",
             "request_context_window": request_context_window,
@@ -3081,6 +3168,11 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
 
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
+    profile_completion = (
+        req.profile_completion.model_dump()
+        if req.profile_completion is not None
+        else None
+    )
     return StreamingResponse(
         generate_resume_sse(
             req.edited_plan,
@@ -3088,6 +3180,7 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
             request.app.state.graph,
             req.thread_id,
             memory_use_choice=req.memory_use_choice,
+            profile_completion=profile_completion,
         ),
         media_type="text/event-stream",
     )

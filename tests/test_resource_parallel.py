@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
 
 from src.graph import resource_generation as rg
@@ -187,6 +189,24 @@ async def test_resource_worker_failure_is_captured(monkeypatch):
     assert branch["status"] == "failed"
     assert branch["error_type"] == "RuntimeError"
     assert "quiz failed" in branch["error_message_sanitized"]
+
+
+async def test_resource_worker_reraises_graph_interrupt(monkeypatch):
+    async def interrupting_runner(_local_state):
+        raise GraphInterrupt(())
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "study_plan", interrupting_runner)
+
+    with pytest.raises(GraphInterrupt):
+        await resource_worker(
+            {
+                "messages": [HumanMessage(content="make a study plan")],
+                "resource_task": {
+                    "task_id": "resource:study_plan",
+                    "resource_type": "study_plan",
+                },
+            }
+        )
 
 
 async def test_resource_bundle_output_partial_success_sets_artifacts_and_message():

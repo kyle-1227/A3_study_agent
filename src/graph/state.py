@@ -316,6 +316,7 @@ def initial_request_reset_transient_state() -> dict:
         "resume_available": False,
         "stopped_at": "",
         "pending_interrupt_type": "",
+        "profile_completion_request": {},
         # context window telemetry
         "context_usage": {},
         "llm_input_manifest": {},
@@ -405,6 +406,10 @@ class LearningState(TypedDict):
     resume_available: bool  # True only when a real checkpoint interrupt can continue
     stopped_at: str  # UTC timestamp for saved stop checkpoint
     pending_interrupt_type: str  # user_stop / plan_review / memory_confirmation
+    profile_completion_request: dict  # Profile-completion interrupt payload
+    profile_summary: str  # Compact learner profile summary for CE profile source
+    learner_profile_summary: str  # User-supplied compact learner profile summary
+    learner_profile: dict  # User-supplied learner profile facts
     context_usage: dict  # Most recent LLM context window usage
     context_usage_history: Annotated[
         list[dict], bounded_context_window_reducer

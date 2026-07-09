@@ -9,6 +9,7 @@ from src.context_engineering.workspace import (
     WORKSPACE_ID_PREFIX,
     build_workspace_artifact_update,
     build_workspace_evidence_update,
+    build_workspace_profile_completion_update,
     merge_task_workspace,
     stable_artifact_id,
     stable_evidence_id,
@@ -111,6 +112,33 @@ def test_workspace_reducer_is_idempotent_and_bounds_sections():
     assert len(twice["coverage_gaps"]) == 1
     assert twice["workspace_id"] == once["workspace_id"]
     assert workspace_status_payload(twice)["workspace_evidence_summary_count"] == 1
+
+
+def test_workspace_profile_completion_update_is_idempotent_and_bounded():
+    update = build_workspace_profile_completion_update(
+        _state(),
+        {
+            "learning_goal": "Master machine learning basics",
+            "current_foundation": "Python",
+            "daily_study_time": "2 hours",
+        },
+        field_labels={
+            "learning_goal": "学习目标",
+            "current_foundation": "当前基础",
+            "daily_study_time": "每天可学习时间",
+        },
+    )
+
+    once = merge_task_workspace({}, update)
+    twice = merge_task_workspace(once, update)
+
+    assert len(twice["constraints"]) == 3
+    assert len(twice["profile_requirements"]) == 3
+    assert twice["constraints"][0]["constraint_id"].startswith("constraint:v1:")
+    assert twice["profile_requirements"][0]["requirement_id"].startswith(
+        "profile_requirement:v1:"
+    )
+    assert workspace_trace_payload(twice)["constraint_count"] == 3
 
 
 def test_workspace_rotates_on_clear_subject_change():

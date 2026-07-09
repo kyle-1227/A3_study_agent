@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from src.config import get_setting
+from src.context_engineering.providers.profile_provider import (
+    profile_summary_from_state,
+)
+from src.context_engineering.workspace import (
+    build_workspace_profile_completion_update,
+    sanitize_workspace_text,
+    workspace_trace_payload,
+)
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
@@ -22,6 +31,51 @@ from src.tools.document_tool import create_markdown_artifact
 from src.tracing import traced_llm_call, traced_node
 
 logger = logging.getLogger(__name__)
+
+PROFILE_COMPLETION_FIELDS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "learning_goal",
+        "label": "学习目标",
+        "required": True,
+        "max_chars": 400,
+    },
+    {
+        "key": "current_foundation",
+        "label": "当前基础",
+        "required": True,
+        "max_chars": 400,
+    },
+    {
+        "key": "daily_study_time",
+        "label": "每天可学习时间",
+        "required": True,
+        "max_chars": 200,
+    },
+    {
+        "key": "deadline",
+        "label": "考试/截止时间",
+        "required": False,
+        "max_chars": 200,
+    },
+    {
+        "key": "preferred_learning_style",
+        "label": "偏好的学习方式",
+        "required": False,
+        "max_chars": 400,
+    },
+    {
+        "key": "weak_points",
+        "label": "薄弱点",
+        "required": False,
+        "max_chars": 500,
+    },
+)
+PROFILE_COMPLETION_LABELS = {
+    str(field["key"]): str(field["label"]) for field in PROFILE_COMPLETION_FIELDS
+}
+PROFILE_COMPLETION_REQUIRED_KEYS = tuple(
+    str(field["key"]) for field in PROFILE_COMPLETION_FIELDS if field["required"]
+)
 
 
 class StudyPlanEmotionalProfile(BaseModel):
@@ -81,7 +135,10 @@ def _model_to_dict(model: BaseModel) -> dict:
 
 def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
-    return ", ".join(str(item) for item in keypoints if str(item).strip()) or "No explicit keypoints extracted."
+    return (
+        ", ".join(str(item) for item in keypoints if str(item).strip())
+        or "No explicit keypoints extracted."
+    )
 
 
 def _format_context(context: list[dict]) -> str:
@@ -89,11 +146,91 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations or course materials."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:900]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:900]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
-    return "\n\n".join(parts) or "Judged evidence exists but has no readable body. Use only general learning-planning guidance."
+    return (
+        "\n\n".join(parts)
+        or "Judged evidence exists but has no readable body. Use only general learning-planning guidance."
+    )
+
+
+def _has_profile_context(state: LearningState) -> bool:
+    try:
+        summary, _metadata = profile_summary_from_state(dict(state))
+    except Exception:
+        return False
+    return bool(summary.strip())
+
+
+def _profile_completion_request_payload(state: LearningState) -> dict[str, Any]:
+    return {
+        "type": "profile_completion_required",
+        "title": "生成学习计划前需要补充学习信息",
+        "fields": [dict(field) for field in PROFILE_COMPLETION_FIELDS],
+        "node": "study_plan_profile_gate",
+        "resource_type": "study_plan",
+        "thread_id": sanitize_workspace_text(
+            state.get("thread_id") or state.get("session_id"),
+            max_chars=120,
+            fallback="",
+        ),
+        "request_id": sanitize_workspace_text(
+            state.get("request_id"),
+            max_chars=120,
+            fallback="",
+        ),
+        "resume_available": True,
+    }
+
+
+def _profile_completion_from_resume(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("profile_completion resume payload must be an object")
+    if value.get("type") != "profile_completion_required":
+        raise ValueError("profile_completion resume payload has wrong type")
+    raw_completion = value.get("profile_completion")
+    if not isinstance(raw_completion, Mapping):
+        raise ValueError(
+            "profile_completion resume payload is missing profile_completion"
+        )
+
+    completion: dict[str, str] = {}
+    field_by_key = {str(field["key"]): field for field in PROFILE_COMPLETION_FIELDS}
+    for key, field in field_by_key.items():
+        max_chars = int(field.get("max_chars") or 400)
+        text = sanitize_workspace_text(
+            raw_completion.get(key),
+            max_chars=max_chars,
+            fallback="",
+        )
+        if text:
+            completion[key] = text
+
+    missing = [key for key in PROFILE_COMPLETION_REQUIRED_KEYS if key not in completion]
+    if missing:
+        raise ValueError(
+            "profile_completion missing required fields: " + ", ".join(missing)
+        )
+    return completion
+
+
+def _profile_completion_summary(completion: Mapping[str, str]) -> str:
+    lines = []
+    for field in PROFILE_COMPLETION_FIELDS:
+        key = str(field["key"])
+        value = completion.get(key, "")
+        if value:
+            lines.append(f"{PROFILE_COMPLETION_LABELS[key]}: {value}")
+    return "\n".join(lines)
 
 
 def validate_emotional_profile(parsed: BaseModel) -> str:
@@ -168,13 +305,37 @@ def _render_artifact_markdown(artifact: dict) -> str:
                 *[f"  - {item}" for item in phase.get("checkpoints") or []],
             ]
         )
-    lines.extend(["", "## Weekly Schedule", *[f"- {item}" for item in artifact.get("weekly_schedule") or []]])
-    lines.extend(["", "## Milestones", *[f"- {item}" for item in artifact.get("milestones") or []]])
-    lines.extend(["", "## Practice Tasks", *[f"- {item}" for item in artifact.get("practice_tasks") or []]])
+    lines.extend(
+        [
+            "",
+            "## Weekly Schedule",
+            *[f"- {item}" for item in artifact.get("weekly_schedule") or []],
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Milestones",
+            *[f"- {item}" for item in artifact.get("milestones") or []],
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Practice Tasks",
+            *[f"- {item}" for item in artifact.get("practice_tasks") or []],
+        ]
+    )
     risks = artifact.get("risk_warnings") or []
     if risks:
         lines.extend(["", "## Risk Warnings", *[f"- {item}" for item in risks]])
-    lines.extend(["", "## Evidence Usage", *[f"- {item}" for item in artifact.get("evidence_usage") or []]])
+    lines.extend(
+        [
+            "",
+            "## Evidence Usage",
+            *[f"- {item}" for item in artifact.get("evidence_usage") or []],
+        ]
+    )
     return "\n".join(lines).strip()
 
 
@@ -182,20 +343,28 @@ def _render_artifact_markdown(artifact: dict) -> str:
 async def study_plan_emotional_intel(state: LearningState) -> dict:
     """Analyze learner workload and emotional context for study-plan generation."""
     query = _last_human_query(state)
-    history = "\n".join(str(getattr(msg, "content", msg)) for msg in state.get("messages", [])[-8:])
+    history = "\n".join(
+        str(getattr(msg, "content", msg)) for msg in state.get("messages", [])[-8:]
+    )
     prompt = (
         "Analyze the learner's emotional state and workload risk for a personalized university study plan.\n"
         "Do not provide therapy or medical diagnosis. Focus on study burden, motivation, pacing, and support needs.\n\n"
         f"User query:\n{query}\n\nConversation excerpt:\n{history}"
     )
-    model_name = get_setting("llm.study_plan.model", get_setting("study_plan.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="study_plan_emotional_intel", temperature=0.0):
+    model_name = get_setting(
+        "llm.study_plan.model", get_setting("study_plan.model", "")
+    )
+    with traced_llm_call(
+        model_name=model_name, node_name="study_plan_emotional_intel", temperature=0.0
+    ):
         structured_result = await invoke_structured_llm(
             node_name="study_plan_emotional_intel",
             llm_node="study_plan",
             schema=StudyPlanEmotionalProfile,
             messages=[
-                SystemMessage(content="You analyze learner workload for a study-plan agent. Return only JSON."),
+                SystemMessage(
+                    content="You analyze learner workload for a study-plan agent. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("study_plan_emotional_intel"),
@@ -206,12 +375,18 @@ async def study_plan_emotional_intel(state: LearningState) -> dict:
         )
     result = structured_result.parsed
     if not isinstance(result, StudyPlanEmotionalProfile):
-        raise TypeError("study_plan_emotional_intel parsed result is not StudyPlanEmotionalProfile")
+        raise TypeError(
+            "study_plan_emotional_intel parsed result is not StudyPlanEmotionalProfile"
+        )
     profile = _model_to_dict(result)
     emit_a3_trace(
         logger,
         "study_plan_emotional_intel",
-        {"success": True, "workload_risk": profile.get("workload_risk"), "summary_chars": len(result.summary)},
+        {
+            "success": True,
+            "workload_risk": profile.get("workload_risk"),
+            "summary_chars": len(result.summary),
+        },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
     )
@@ -248,12 +423,16 @@ async def study_plan_planner(state: LearningState) -> dict:
         node_name="study_plan_planner",
         llm_node="study_plan",
         messages=[
-            SystemMessage(content="You plan personalized university study resources. Return a concrete outline only."),
+            SystemMessage(
+                content="You plan personalized university study resources. Return a concrete outline only."
+            ),
             HumanMessage(content=prompt),
         ],
         state=state,
         temperature=get_setting("llm.study_plan.temperature", 0.2),
-        max_raw_chars=get_setting("llm_outputs.study_plan_planner.max_raw_chars", 12000),
+        max_raw_chars=get_setting(
+            "llm_outputs.study_plan_planner.max_raw_chars", 12000
+        ),
     )
     if not outline.strip():
         raise ValueError("study_plan_planner produced empty outline")
@@ -273,6 +452,69 @@ async def study_plan_planner(state: LearningState) -> dict:
 
 
 @traced_node
+async def study_plan_profile_gate(state: LearningState) -> dict:
+    """Pause study-plan generation until minimum learner profile facts exist."""
+    if _has_profile_context(state):
+        return {"profile_completion_request": {}}
+
+    request_payload = _profile_completion_request_payload(state)
+    emit_a3_trace(
+        logger,
+        "profile_completion.required",
+        {
+            "node_name": "study_plan_profile_gate",
+            "resource_type": "study_plan",
+            "field_count": len(PROFILE_COMPLETION_FIELDS),
+            "required_field_count": len(PROFILE_COMPLETION_REQUIRED_KEYS),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    resume_value = interrupt(
+        {
+            **request_payload,
+            "profile_completion_request": {
+                "title": request_payload["title"],
+                "fields": request_payload["fields"],
+            },
+        }
+    )
+    completion = _profile_completion_from_resume(resume_value)
+    summary = _profile_completion_summary(completion)
+    workspace_update = build_workspace_profile_completion_update(
+        dict(state),
+        completion,
+        field_labels=PROFILE_COMPLETION_LABELS,
+    )
+    trace_payload = workspace_trace_payload(workspace_update)
+    emit_a3_trace(
+        logger,
+        "profile_completion.completed",
+        {
+            "node_name": "study_plan_profile_gate",
+            "resource_type": "study_plan",
+            "field_count": len(completion),
+            "workspace_id": trace_payload.get("workspace_id", ""),
+        },
+        state=state,
+        env_flag="LOG_A3_TRACE",
+    )
+    return {
+        "profile_completion_request": {},
+        "learner_profile": dict(completion),
+        "learner_profile_summary": summary,
+        "profile_summary": summary,
+        "task_workspace": workspace_update,
+        "workspace_events": [
+            {
+                "stage": "profile_completion.indexed",
+                **trace_payload,
+            }
+        ],
+    }
+
+
+@traced_node
 async def study_plan_agent(state: LearningState) -> dict:
     """Generate a structured study-plan artifact from the outline."""
     outline = state.get("study_plan_outline", "")
@@ -287,14 +529,20 @@ async def study_plan_agent(state: LearningState) -> dict:
         f"Emotional/workload intel:\n{state.get('study_plan_emotional_intel', '')}\n\n"
         f"Judged evidence:\n{_format_context(state.get('context', []))}"
     )
-    model_name = get_setting("llm.study_plan.model", get_setting("study_plan.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="study_plan_agent", temperature=0.2):
+    model_name = get_setting(
+        "llm.study_plan.model", get_setting("study_plan.model", "")
+    )
+    with traced_llm_call(
+        model_name=model_name, node_name="study_plan_agent", temperature=0.2
+    ):
         structured_result = await invoke_structured_llm(
             node_name="study_plan_agent",
             llm_node="study_plan",
             schema=StudyPlanArtifact,
             messages=[
-                SystemMessage(content="You generate structured personalized study plans. Return only JSON."),
+                SystemMessage(
+                    content="You generate structured personalized study plans. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("study_plan_agent"),
@@ -330,13 +578,19 @@ async def _review_study_plan(state: LearningState, *, reviewer_kind: str) -> dic
         f"Plan:\n{artifact}\n\nEmotional intel:\n{state.get('study_plan_emotional_intel', '')}"
     )
     node_name = f"study_plan_reviewer_{reviewer_kind}"
-    with traced_llm_call(model_name=get_setting("llm.study_plan.model", ""), node_name=node_name, temperature=0.0):
+    with traced_llm_call(
+        model_name=get_setting("llm.study_plan.model", ""),
+        node_name=node_name,
+        temperature=0.0,
+    ):
         structured_result = await invoke_structured_llm(
             node_name=node_name,
             llm_node="study_plan",
             schema=StudyPlanReviewVerdict,
             messages=[
-                SystemMessage(content="You are a strict study-plan quality reviewer. Return only JSON."),
+                SystemMessage(
+                    content="You are a strict study-plan quality reviewer. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode(node_name),
@@ -399,7 +653,9 @@ async def study_plan_rewrite(state: LearningState) -> dict:
     notes = state.get("study_plan_revision_notes", "")
     if not notes.strip():
         raise ValueError("study_plan rewrite requested without revision notes")
-    return {"study_plan_revision_notes": f"Revise the study plan according to reviewer feedback:\n{notes}"}
+    return {
+        "study_plan_revision_notes": f"Revise the study plan according to reviewer feedback:\n{notes}"
+    }
 
 
 @traced_node
@@ -410,7 +666,9 @@ async def study_plan_output(state: LearningState) -> dict:
     markdown = _render_artifact_markdown(artifact)
     if not markdown.strip():
         raise ValueError("study_plan markdown is empty")
-    document = create_markdown_artifact(markdown, str(artifact.get("title") or "Personalized Study Plan"))
+    document = create_markdown_artifact(
+        markdown, str(artifact.get("title") or "Personalized Study Plan")
+    )
     return {
         "study_plan_markdown": markdown,
         "study_plan_document_artifact": document,

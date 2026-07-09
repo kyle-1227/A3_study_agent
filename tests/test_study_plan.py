@@ -15,6 +15,7 @@ from src.graph.study_plan import (
     study_plan_consensus,
     study_plan_output,
     study_plan_planner,
+    study_plan_profile_gate,
     validate_study_plan_artifact,
 )
 
@@ -56,7 +57,9 @@ def _valid_artifact() -> StudyPlanArtifact:
 async def test_study_plan_planner_empty_outline_raises():
     with patch("src.graph.study_plan.invoke_plain_llm_fail_fast", return_value="   "):
         with pytest.raises(ValueError, match="empty outline"):
-            await study_plan_planner({"messages": [HumanMessage(content="make a plan")]})
+            await study_plan_planner(
+                {"messages": [HumanMessage(content="make a plan")]}
+            )
 
 
 def test_validate_study_plan_artifact_rejects_missing_evidence_usage():
@@ -80,7 +83,62 @@ async def test_study_plan_consensus_max_rounds_rejected_raises():
 
 def test_route_after_study_plan_consensus():
     assert route_after_study_plan_consensus({"study_plan_consensus": True}) == "output"
-    assert route_after_study_plan_consensus({"study_plan_consensus": False}) == "rewrite"
+    assert (
+        route_after_study_plan_consensus({"study_plan_consensus": False}) == "rewrite"
+    )
+
+
+@pytest.mark.anyio
+async def test_study_plan_profile_gate_interrupts_when_profile_missing():
+    resume_value = {
+        "type": "profile_completion_required",
+        "profile_completion": {
+            "learning_goal": "Master ML basics",
+            "current_foundation": "Knows Python",
+            "daily_study_time": "2 hours",
+            "deadline": "8 weeks",
+            "preferred_learning_style": "Examples first",
+            "weak_points": "Math notation",
+        },
+    }
+
+    with patch(
+        "src.graph.study_plan.interrupt", return_value=resume_value
+    ) as mock_interrupt:
+        result = await study_plan_profile_gate(
+            {
+                "request_id": "r1",
+                "thread_id": "t1",
+                "subject": "machine learning",
+                "learning_goal": "ML basics",
+            }
+        )
+
+    mock_interrupt.assert_called_once()
+    interrupt_payload = mock_interrupt.call_args.args[0]
+    assert interrupt_payload["type"] == "profile_completion_required"
+    assert interrupt_payload["resume_available"] is True
+    assert interrupt_payload["profile_completion_request"]["fields"]
+    assert result["learner_profile"]["learning_goal"] == "Master ML basics"
+    assert "学习目标: Master ML basics" in result["learner_profile_summary"]
+    assert result["profile_summary"] == result["learner_profile_summary"]
+    assert result["task_workspace"]["profile_requirements"]
+    assert result["task_workspace"]["constraints"]
+
+
+@pytest.mark.anyio
+async def test_study_plan_profile_gate_skips_when_profile_present():
+    with patch("src.graph.study_plan.interrupt") as mock_interrupt:
+        result = await study_plan_profile_gate(
+            {
+                "profile_summary": "Goal: master ML basics",
+                "thread_id": "t1",
+                "request_id": "r1",
+            }
+        )
+
+    mock_interrupt.assert_not_called()
+    assert result == {"profile_completion_request": {}}
 
 
 @pytest.mark.anyio

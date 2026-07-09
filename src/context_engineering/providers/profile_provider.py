@@ -88,6 +88,11 @@ def _profile_summary_from_state(state: dict[str, Any]) -> tuple[str, dict[str, A
     return "", {}
 
 
+def profile_summary_from_state(state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return compact profile content using the provider's state contract."""
+    return _profile_summary_from_state(state)
+
+
 def _score(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None

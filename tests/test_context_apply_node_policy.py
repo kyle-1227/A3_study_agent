@@ -693,7 +693,8 @@ def test_settings_agent_required_sources_are_node_specific():
         llm_node="study_plan",
         state={},
     )
-    assert study_plan.injection_policy.required_sources == ("profile",)
+    assert study_plan.injection_policy.required_sources == ()
+    assert "profile" in study_plan.injection_policy.optional_sources
 
     adaptive = resolve_context_policy(
         node_name="adaptive_practice_responder",
@@ -769,8 +770,15 @@ def test_agent_injectable_sources_are_node_specific():
             "excluded": ("trajectory", "memory", "profile"),
         },
         "study_plan_agent": {
-            "required": ("profile",),
-            "optional": ("rules", "trajectory", "memory", "curriculum", "artifact"),
+            "required": (),
+            "optional": (
+                "profile",
+                "rules",
+                "trajectory",
+                "memory",
+                "curriculum",
+                "artifact",
+            ),
             "injectable": (
                 "profile",
                 "rules",
@@ -838,6 +846,49 @@ def test_settings_reviewer_sources_are_explicit_and_injectable():
         assert set(resolved.injection_policy.optional_sources).issubset(
             set(injectable_sources)
         )
+
+
+def test_structured_active_rollout_includes_selected_resource_subnodes():
+    from src.config import clear_cache, get_setting
+
+    clear_cache()
+    active_nodes = set(
+        get_setting(
+            "context_engineering.packer.apply.structured_output_context.active_nodes",
+            [],
+        )
+    )
+    expected_active = {
+        "review_doc_planner",
+        "exercise_planner",
+        "mindmap_planner",
+        "code_practice_planner",
+        "video_script_planner",
+        "video_animation_planner",
+        "study_plan_planner",
+        "review_doc_agent",
+        "exercise_agent",
+        "mindmap_agent",
+        "code_practice_agent",
+        "video_script_agent",
+        "video_animation_agent",
+        "study_plan_agent",
+        "review_doc_reviewer",
+        "exercise_reviewer",
+        "mindmap_reviewer",
+        "code_practice_reviewer",
+        "video_script_reviewer",
+        "video_animation_reviewer",
+        "study_plan_reviewer_academic",
+        "study_plan_reviewer_emotional",
+        "study_plan_consensus",
+    }
+
+    assert expected_active.issubset(active_nodes)
+    assert "supervisor" not in active_nodes
+    assert "search_query_rewriter" not in active_nodes
+    assert "evidence_judge" not in active_nodes
+    assert "resource_bundle_output" not in active_nodes
 
 
 def test_conversation_summary_allows_message_but_generation_nodes_still_exclude():

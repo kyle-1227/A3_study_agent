@@ -23,16 +23,22 @@ WORKSPACE_ID_PREFIX = "workspace:v1"
 ARTIFACT_ID_PREFIX = "artifact:v1"
 EVIDENCE_ID_PREFIX = "evidence:v1"
 GAP_ID_PREFIX = "gap:v1"
+CONSTRAINT_ID_PREFIX = "constraint:v1"
+PROFILE_REQUIREMENT_ID_PREFIX = "profile_requirement:v1"
 
 WORKSPACE_EVIDENCE_LIMIT = 20
 WORKSPACE_GAP_LIMIT = 20
 WORKSPACE_ARTIFACT_LIMIT = 20
+WORKSPACE_CONSTRAINT_LIMIT = 12
+WORKSPACE_PROFILE_REQUIREMENT_LIMIT = 12
 WORKSPACE_EVENT_LIMIT = 120
 
 WORKSPACE_TEXT_BUDGET = 18_000
 WORKSPACE_ARTIFACT_TEXT_BUDGET = 18_000
 WORKSPACE_EVIDENCE_TEXT_BUDGET = 14_000
 WORKSPACE_GAP_TEXT_BUDGET = 8_000
+WORKSPACE_CONSTRAINT_TEXT_BUDGET = 6_000
+WORKSPACE_PROFILE_REQUIREMENT_TEXT_BUDGET = 6_000
 
 TASK_WORKSPACE_CLEAR = {"__task_workspace_clear__": True}
 
@@ -147,6 +153,28 @@ class WorkspaceArtifactSummary(TypedDict, total=False):
     artifact_refs: dict[str, str]
 
 
+class WorkspaceConstraint(TypedDict, total=False):
+    constraint_id: str
+    field: str
+    label: str
+    value_preview: str
+    purpose: Literal["profile_completion"]
+    created_at: str
+    request_id: str
+    thread_id: str
+
+
+class WorkspaceProfileRequirement(TypedDict, total=False):
+    requirement_id: str
+    field: str
+    label: str
+    value_preview: str
+    purpose: Literal["profile_completion"]
+    created_at: str
+    request_id: str
+    thread_id: str
+
+
 class WorkspaceUpdate(TypedDict, total=False):
     schema_version: int
     workspace_id: str
@@ -165,6 +193,8 @@ class WorkspaceUpdate(TypedDict, total=False):
     artifacts_by_id: dict[str, WorkspaceArtifactSummary]
     latest_artifact_by_resource_type: dict[str, str]
     artifacts: list[WorkspaceArtifactSummary]
+    constraints: list[WorkspaceConstraint]
+    profile_requirements: list[WorkspaceProfileRequirement]
     diagnostics: list[str]
 
 
@@ -275,6 +305,42 @@ def stable_gap_id(
             "subject": subject,
             "role": role,
             "thread_id": thread_id,
+        },
+    )
+
+
+def stable_constraint_id(
+    *,
+    field: str,
+    value_preview: str,
+    thread_id: str,
+    request_id: str,
+) -> str:
+    return _stable_id(
+        CONSTRAINT_ID_PREFIX,
+        {
+            "field": field,
+            "value_preview": value_preview,
+            "thread_id": thread_id,
+            "request_id": request_id,
+        },
+    )
+
+
+def stable_profile_requirement_id(
+    *,
+    field: str,
+    value_preview: str,
+    thread_id: str,
+    request_id: str,
+) -> str:
+    return _stable_id(
+        PROFILE_REQUIREMENT_ID_PREFIX,
+        {
+            "field": field,
+            "value_preview": value_preview,
+            "thread_id": thread_id,
+            "request_id": request_id,
         },
     )
 
@@ -621,6 +687,79 @@ def build_workspace_artifact_update(
     }
 
 
+def build_workspace_profile_completion_update(
+    state: dict[str, Any],
+    profile_completion: Mapping[str, Any],
+    *,
+    field_labels: Mapping[str, str] | None = None,
+) -> WorkspaceUpdate:
+    """Build a compact workspace update from user-supplied profile facts."""
+    now = utc_now_iso()
+    scope = workspace_scope_from_state(state)
+    request_id = sanitize_workspace_text(state.get("request_id"), max_chars=120)
+    thread_id = scope["thread_id"]
+    labels = dict(field_labels or {})
+    constraints: list[WorkspaceConstraint] = []
+    requirements: list[WorkspaceProfileRequirement] = []
+    if isinstance(profile_completion, Mapping):
+        for field, value in sorted(profile_completion.items()):
+            field_key = sanitize_workspace_text(field, max_chars=80)
+            value_preview = sanitize_workspace_text(value, max_chars=360)
+            if not field_key or not value_preview:
+                continue
+            label = sanitize_workspace_text(
+                labels.get(field_key) or field_key,
+                max_chars=120,
+                fallback=field_key,
+            )
+            constraint_id = stable_constraint_id(
+                field=field_key,
+                value_preview=value_preview,
+                thread_id=thread_id,
+                request_id=request_id,
+            )
+            requirement_id = stable_profile_requirement_id(
+                field=field_key,
+                value_preview=value_preview,
+                thread_id=thread_id,
+                request_id=request_id,
+            )
+            constraints.append(
+                {
+                    "constraint_id": constraint_id,
+                    "field": field_key,
+                    "label": label,
+                    "value_preview": value_preview,
+                    "purpose": "profile_completion",
+                    "created_at": now,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                }
+            )
+            requirements.append(
+                {
+                    "requirement_id": requirement_id,
+                    "field": field_key,
+                    "label": label,
+                    "value_preview": value_preview,
+                    "purpose": "profile_completion",
+                    "created_at": now,
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                }
+            )
+
+    update: WorkspaceUpdate = _base_workspace_update(state, now=now)
+    update.update(
+        {
+            "constraints": constraints,
+            "profile_requirements": requirements,
+            "updated_sources": ["profile_completion"],
+        }
+    )
+    return update
+
+
 def merge_task_workspace(
     existing: dict[str, Any] | None,
     update: dict[str, Any] | None,
@@ -687,6 +826,20 @@ def merge_task_workspace(
         },
         artifacts_by_id,
     )
+    constraints = _merge_list_by_id(
+        existing_workspace.get("constraints"),
+        update_workspace.get("constraints"),
+        id_key="constraint_id",
+        limit=WORKSPACE_CONSTRAINT_LIMIT,
+        text_budget=WORKSPACE_CONSTRAINT_TEXT_BUDGET,
+    )
+    profile_requirements = _merge_list_by_id(
+        existing_workspace.get("profile_requirements"),
+        update_workspace.get("profile_requirements"),
+        id_key="requirement_id",
+        limit=WORKSPACE_PROFILE_REQUIREMENT_LIMIT,
+        text_budget=WORKSPACE_PROFILE_REQUIREMENT_TEXT_BUDGET,
+    )
 
     merged.update(
         {
@@ -695,6 +848,8 @@ def merge_task_workspace(
             "artifacts_by_id": artifacts_by_id,
             "latest_artifact_by_resource_type": latest_by_type,
             "artifacts": list(artifact_items),
+            "constraints": constraints,
+            "profile_requirements": profile_requirements,
         }
     )
     return _enforce_workspace_text_budget(merged)
@@ -1386,6 +1541,8 @@ def _enforce_workspace_text_budget(workspace: dict[str, Any]) -> dict[str, Any]:
     workspace = dict(workspace)
     workspace["evidence_summaries"] = workspace.get("evidence_summaries", [])[:10]
     workspace["coverage_gaps"] = workspace.get("coverage_gaps", [])[:10]
+    workspace["constraints"] = workspace.get("constraints", [])[:8]
+    workspace["profile_requirements"] = workspace.get("profile_requirements", [])[:8]
     artifacts = list(workspace.get("artifacts", []))[:10]
     workspace["artifacts"] = artifacts
     workspace["artifacts_by_id"] = {

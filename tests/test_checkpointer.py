@@ -9,19 +9,20 @@ from __future__ import annotations
 
 import os
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from unittest.mock import MagicMock
 
-from src.graph.builder import build_graph, get_compiled_graph
+from src.graph.builder import get_compiled_graph
 
 
 # ===========================================================================
 # TestGetCompiledGraph — checkpointer parameter
 # ===========================================================================
+
 
 class TestGetCompiledGraphWithCheckpointer:
     """Tests that get_compiled_graph correctly accepts a checkpointer."""
@@ -54,6 +55,7 @@ class TestGetCompiledGraphWithCheckpointer:
 # ===========================================================================
 # TestCheckpointerModule — lifecycle management
 # ===========================================================================
+
 
 class TestCheckpointerModule:
     """Tests for src/database/checkpointer.py functions."""
@@ -98,9 +100,75 @@ class TestCheckpointerModule:
         assert "thread_id" in config["configurable"]
 
 
+class TestAppLifespanCheckpointer:
+    """Tests app lifespan checkpointer selection without real database access."""
+
+    @pytest.mark.anyio
+    async def test_postgres_checkpointer_requires_db_uri(self, monkeypatch):
+        import app as app_module
+
+        fake_app = SimpleNamespace(state=SimpleNamespace())
+        monkeypatch.setattr(app_module, "checkpointer_enabled", lambda: True)
+        monkeypatch.setattr(app_module, "checkpointer_type", lambda: "postgres")
+        monkeypatch.setattr(app_module, "get_db_uri", lambda: None)
+        get_graph = MagicMock()
+        monkeypatch.setattr(app_module, "get_compiled_graph", get_graph)
+
+        with pytest.raises(RuntimeError, match="requires DB_URI"):
+            async with app_module.lifespan(fake_app):
+                pass
+
+        get_graph.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_postgres_checkpointer_setup_failure_does_not_fallback(
+        self,
+        monkeypatch,
+    ):
+        import app as app_module
+        import langgraph.checkpoint.postgres.aio as postgres_aio
+
+        class FailingPostgresSaver:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def setup(self):
+                raise RuntimeError("setup failed")
+
+            @classmethod
+            def from_conn_string(cls, _db_uri):
+                return cls()
+
+        fake_app = SimpleNamespace(state=SimpleNamespace())
+        monkeypatch.setattr(app_module, "checkpointer_enabled", lambda: True)
+        monkeypatch.setattr(app_module, "checkpointer_type", lambda: "postgres")
+        monkeypatch.setattr(
+            app_module,
+            "get_db_uri",
+            lambda: "postgresql://user:pass@localhost:5432/a3",
+        )
+        monkeypatch.setattr(
+            postgres_aio,
+            "AsyncPostgresSaver",
+            FailingPostgresSaver,
+        )
+        get_graph = MagicMock()
+        monkeypatch.setattr(app_module, "get_compiled_graph", get_graph)
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            async with app_module.lifespan(fake_app):
+                pass
+
+        get_graph.assert_not_called()
+
+
 # ===========================================================================
 # TestChatRequestModel — thread_id field
 # ===========================================================================
+
 
 class TestChatRequestWithThreadId:
     """Tests that the ChatRequest model accepts an optional thread_id."""
@@ -124,6 +192,7 @@ class TestChatRequestWithThreadId:
 # ===========================================================================
 # TestSSEWithConfig — streaming with thread config
 # ===========================================================================
+
 
 class AsyncIteratorMock:
     """Helper to create an async iterator from a list."""
@@ -153,6 +222,7 @@ class TestSSEWithConfig:
         mock_graph.astream_events = MagicMock(
             return_value=AsyncIteratorMock(events or []),
         )
+        mock_graph.aupdate_state = AsyncMock()
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(next=(), tasks=[]),
         )

@@ -1179,3 +1179,55 @@ class TestSSEDoneEvent:
         ]
         assert not [p for p in all_payloads if p.get("type") == "done"]
         assert mock_graph.aupdate_state.await_count == 1
+
+    @pytest.mark.anyio
+    async def test_profile_completion_interrupt_payload_is_typed(self):
+        """Profile completion interrupt should be distinguishable and resumable."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+
+        request_payload = {
+            "title": "生成学习计划前需要补充学习信息",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "学习目标",
+                    "required": True,
+                    "max_chars": 400,
+                }
+            ],
+        }
+        interrupt_obj = SimpleNamespace(
+            value={
+                "type": "profile_completion_required",
+                "profile_completion_request": request_payload,
+                "resume_available": True,
+            }
+        )
+        task = SimpleNamespace(interrupts=[interrupt_obj])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=("resource_worker",), tasks=[task]),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        all_payloads = [json.loads(s.removeprefix("data: ").strip()) for s in collected]
+        interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
+        assert interrupt_events == [
+            {
+                "type": "interrupt",
+                "interrupt_type": "profile_completion_required",
+                "title": "生成学习计划前需要补充学习信息",
+                "fields": request_payload["fields"],
+                "profile_completion_request": request_payload,
+                "resume_available": True,
+                "thread_id": "t-1",
+            }
+        ]
+        assert not [p for p in all_payloads if p.get("type") == "done"]
+        assert mock_graph.aupdate_state.await_count == 1

@@ -175,6 +175,53 @@ async def test_status_missing_checkpoint_is_404():
 
 
 @pytest.mark.anyio
+async def test_status_exposes_profile_completion_interrupt():
+    from app import get_thread_status_payload
+
+    request_payload = {
+        "title": "补充学习信息",
+        "fields": [
+            {
+                "key": "learning_goal",
+                "label": "学习目标",
+                "required": True,
+                "max_chars": 400,
+            }
+        ],
+    }
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(
+            values={
+                "schema_version": "run_control_v1",
+                "run_status": "running",
+                "stop_requested": False,
+                "stop_reason": "",
+                "current_node": "resource_worker",
+                "last_completed_node": "",
+                "resume_available": True,
+                "stopped_at": "",
+                "pending_interrupt_type": "profile_completion_required",
+                "context_usage": {},
+                "context_usage_history": [],
+            },
+            interrupt_value={
+                "type": "profile_completion_required",
+                "profile_completion_request": request_payload,
+            },
+            next_nodes=("resource_worker",),
+        )
+    )
+
+    status = await get_thread_status_payload(graph, "thread-1")
+
+    assert status.run_status == "stopped"
+    assert status.resume_available is True
+    assert status.pending_interrupt_type == "profile_completion_required"
+    assert status.profile_completion_request == request_payload
+
+
+@pytest.mark.anyio
 async def test_status_prefers_active_run_without_checkpoint_read():
     from app import get_thread_status_payload
     from src.run_control import finish_active_run, start_active_run
@@ -557,6 +604,60 @@ async def test_resume_memory_confirmation_sends_choice_command():
     assert getattr(resume_input, "resume") == {
         "type": "memory_confirmation",
         "choice": "use",
+    }
+    assert payloads[0]["run_status"] == "continuing"
+    assert payloads[-1] == {"type": "done"}
+
+
+@pytest.mark.anyio
+async def test_resume_profile_completion_sends_profile_command():
+    from app import generate_resume_sse
+
+    final_snapshot = _snapshot(values={"schema_version": "run_control_v1"})
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aget_state = AsyncMock(
+        side_effect=[
+            _snapshot(
+                values={"schema_version": "run_control_v1"},
+                interrupt_value={
+                    "type": "profile_completion_required",
+                    "profile_completion_request": {
+                        "title": "补充学习信息",
+                        "fields": [],
+                    },
+                },
+                next_nodes=("resource_worker",),
+            ),
+            final_snapshot,
+            final_snapshot,
+        ]
+    )
+    graph.aupdate_state = AsyncMock()
+
+    collected = []
+    async for sse in generate_resume_sse(
+        "",
+        None,
+        graph,
+        "thread-1",
+        profile_completion={
+            "learning_goal": "Master ML",
+            "current_foundation": "Python",
+            "daily_study_time": "2 hours",
+        },
+    ):
+        collected.append(sse)
+
+    payloads = _payloads(collected)
+    resume_input = graph.astream_events.call_args.args[0]
+    assert getattr(resume_input, "resume") == {
+        "type": "profile_completion_required",
+        "profile_completion": {
+            "learning_goal": "Master ML",
+            "current_foundation": "Python",
+            "daily_study_time": "2 hours",
+        },
     }
     assert payloads[0]["run_status"] == "continuing"
     assert payloads[-1] == {"type": "done"}

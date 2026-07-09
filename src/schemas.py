@@ -22,6 +22,18 @@ class ResumeRequest(BaseModel):
     edited_plan: str = Field(default="", max_length=16384)
     feedback: str | None = Field(default=None, max_length=4096)
     memory_use_choice: Literal["use", "ignore"] | None = None
+    profile_completion: "ProfileCompletionSubmission | None" = None
+
+
+class ProfileCompletionSubmission(BaseModel):
+    """User-supplied learner facts for resuming study-plan generation."""
+
+    learning_goal: str = Field(default="", max_length=512)
+    current_foundation: str = Field(default="", max_length=512)
+    daily_study_time: str = Field(default="", max_length=256)
+    deadline: str = Field(default="", max_length=256)
+    preferred_learning_style: str = Field(default="", max_length=512)
+    weak_points: str = Field(default="", max_length=768)
 
 
 class StopRequest(BaseModel):
@@ -49,6 +61,7 @@ class ThreadStatusResponse(BaseModel):
     background_context_window: dict[str, Any] = Field(default_factory=dict)
     request_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
+    profile_completion_request: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)
     message: str = ""
 

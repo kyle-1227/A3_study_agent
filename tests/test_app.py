@@ -130,6 +130,21 @@ class TestInputValidation:
         req = ResumeRequest(thread_id="t-1", memory_use_choice="use")
         assert req.memory_use_choice == "use"
 
+    def test_resume_request_accepts_profile_completion(self):
+        from src.schemas import ResumeRequest
+
+        req = ResumeRequest(
+            thread_id="t-1",
+            profile_completion={
+                "learning_goal": "Master ML basics",
+                "current_foundation": "Python",
+                "daily_study_time": "2 hours",
+            },
+        )
+
+        assert req.profile_completion is not None
+        assert req.profile_completion.learning_goal == "Master ML basics"
+
 
 class TestResourceFinalPayloadCore:
     """Verify final resource payload shaping."""

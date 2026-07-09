@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage
+from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
 
 from src.context_engineering.workspace import (
@@ -59,6 +60,7 @@ from src.graph.study_plan import (
     study_plan_emotional_intel,
     study_plan_output,
     study_plan_planner,
+    study_plan_profile_gate,
     study_plan_reviewer_academic,
     study_plan_reviewer_emotional,
     study_plan_rewrite,
@@ -342,6 +344,21 @@ async def _run_resource_subnode(
     )
     try:
         output = await func(local_state)
+    except GraphInterrupt:
+        emit_a3_trace(
+            logger,
+            "resource_subnode.end",
+            {
+                "resource_type": resource_type,
+                "subnode": subnode,
+                "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                "status": "interrupted",
+                "error_type": "GraphInterrupt",
+            },
+            state=local_state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        raise
     except Exception as exc:
         emit_a3_trace(
             logger,
@@ -502,6 +519,12 @@ async def _run_study_plan_resource(local_state: dict) -> str:
         ),
     )
     while True:
+        await _merge_resource_subnode(
+            local_state,
+            resource_type="study_plan",
+            subnode="study_plan_profile_gate",
+            func=study_plan_profile_gate,
+        )
         await _merge_resource_subnode(
             local_state,
             resource_type="study_plan",
@@ -777,6 +800,18 @@ async def resource_worker(state: LearningState) -> dict:
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
         )
+    except GraphInterrupt:
+        emit_a3_trace(
+            logger,
+            "resource_generation.worker.interrupted",
+            {
+                "resource_type": resource_type,
+                "elapsed_ms": int((time.perf_counter() - start) * 1000),
+            },
+            state=state,
+            env_flag="LOG_GENERATION_SUMMARY",
+        )
+        raise
     except Exception as exc:
         logger.exception("resource_worker failed for resource_type=%s", resource_type)
         result = _failed_result(
@@ -942,16 +977,13 @@ def _compose_bundle_message(
 
 def _resource_metrics(result: dict) -> dict:
     resource_type = result.get("resource_type")
-    artifact = (
-        result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
-    )
-    artifacts = (
-        result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
-    )
-    state_updates = (
-        result.get("state_updates")
-        if isinstance(result.get("state_updates"), dict)
-        else {}
+    raw_artifact = result.get("artifact")
+    artifact: dict[str, Any] = raw_artifact if isinstance(raw_artifact, dict) else {}
+    raw_artifacts = result.get("artifacts")
+    artifacts: list[Any] = raw_artifacts if isinstance(raw_artifacts, list) else []
+    raw_state_updates = result.get("state_updates")
+    state_updates: dict[str, Any] = (
+        raw_state_updates if isinstance(raw_state_updates, dict) else {}
     )
 
     if resource_type == "review_doc":
@@ -1033,10 +1065,9 @@ def _resource_metrics(result: dict) -> dict:
         }
 
     if resource_type == "study_plan":
-        document = (
-            artifact.get("document")
-            if isinstance(artifact.get("document"), dict)
-            else {}
+        raw_document = artifact.get("document")
+        document: dict[str, Any] = (
+            raw_document if isinstance(raw_document, dict) else {}
         )
         markdown = (
             state_updates.get("study_plan_markdown")
@@ -1134,8 +1165,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
     if successes:
         try:
             workspace_successes = [
-                {**result, "metrics": _resource_metrics(result)}
-                for result in successes
+                {**result, "metrics": _resource_metrics(result)} for result in successes
             ]
             artifact_updates = build_workspace_artifact_update(
                 state,

@@ -207,3 +207,72 @@ def test_structured_output_active_rollout_skips_non_resource_agent_nodes(
     assert result.debug["provider_bound_messages_mutated"] is False
     assert result.debug["context_apply_applied"] is False
     assert shadow_calls == ["items", "packing"]
+
+
+def test_structured_output_active_rollout_applies_for_reviewer_node(monkeypatch):
+    from src.context_engineering.packing import ContextPreparedMessages
+    from src.llm import structured_output
+
+    messages = [
+        {"role": "system", "content": "contract"},
+        {"role": "user", "content": "review"},
+    ]
+    final_messages = [
+        messages[0],
+        {"role": "system", "content": "<INJECTED_CONTEXT>rules</INJECTED_CONTEXT>"},
+        messages[1],
+    ]
+
+    def fake_prepare(*_args, **_kwargs):
+        return ContextPreparedMessages(
+            messages_for_llm=final_messages,
+            original_messages=messages,
+            trace_call_id="trace-1",
+            next_trace_seq=1,
+            context_apply_applied=True,
+            context_apply_fallback_used=False,
+            apply_result=SimpleNamespace(
+                injected_items_count=1,
+                injected_context_tokens=4,
+            ),
+        )
+
+    monkeypatch.setattr(
+        structured_output,
+        "_structured_context_apply_config",
+        lambda: {
+            "enabled": True,
+            "mode": "active",
+            "active_nodes": ("study_plan_reviewer_academic",),
+            "allow_structured_output": True,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "prepare_messages_with_context_policy",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_context_items_shadow",
+        lambda *_, **__: pytest.fail("active node must not use observe shadow"),
+    )
+    monkeypatch.setattr(
+        structured_output,
+        "emit_context_packing_shadow",
+        lambda *_, **__: pytest.fail("active node must not use observe shadow"),
+    )
+    monkeypatch.setattr(structured_output, "emit_a3_trace", lambda *_, **__: None)
+
+    result = structured_output._prepare_structured_messages_with_context(
+        node_name="study_plan_reviewer_academic",
+        llm_node="study_plan",
+        messages=messages,
+        state={"request_id": "r1", "thread_id": "t1"},
+    )
+
+    assert result.messages == final_messages
+    assert result.debug["structured_context_apply_status"] == "applied"
+    assert result.debug["provider_bound_messages_mutated"] is True
+    assert result.debug["context_apply_applied"] is True
