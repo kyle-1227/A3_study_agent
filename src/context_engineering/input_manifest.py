@@ -167,6 +167,7 @@ def build_llm_input_manifest(
             _artifact_section(state_payload),
             _memory_profile_section(state_payload),
             _context_influence_section(state_payload),
+            _capability_context_section(safe_messages),
             _ce_block_section(safe_messages, context_apply_applied),
             _structured_contract_section(
                 schema_name=schema_name,
@@ -657,6 +658,20 @@ def _ce_block_section(
         "present": bool(context_apply_applied or ce_chars),
         "item_count": 1 if context_apply_applied or ce_chars else 0,
         "char_count": ce_chars,
+    }
+
+
+def _capability_context_section(messages: list[Any]) -> LLMInputManifestSection:
+    capability_chars = sum(
+        len(content)
+        for message in messages
+        if "<CAPABILITY_CONTEXT>" in (content := _message_content(message))
+    )
+    return {
+        "section": "capability_context",
+        "present": capability_chars > 0,
+        "item_count": 1 if capability_chars > 0 else 0,
+        "char_count": capability_chars,
     }
 
 

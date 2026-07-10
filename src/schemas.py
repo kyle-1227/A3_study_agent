@@ -63,6 +63,7 @@ class ThreadStatusResponse(BaseModel):
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
     context_influence_ledger: dict[str, Any] = Field(default_factory=dict)
     last_resource_final_payload: dict[str, Any] = Field(default_factory=dict)
+    last_qa_response: dict[str, Any] = Field(default_factory=dict)
     profile_completion_request: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)
     message: str = ""

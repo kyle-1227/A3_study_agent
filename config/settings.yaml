@@ -245,6 +245,7 @@ context_engineering:
           - study_plan_reviewer_academic
           - study_plan_reviewer_emotional
           - study_plan_consensus
+          - qa_agent
       role: system
       position: after_system
       exclude_message_source: true
@@ -496,6 +497,43 @@ context_engineering:
           required_sources: []
           optional_sources: []
       node_policies:
+        qa_agent:
+          mode: active
+          risk_tier: 2
+          max_injected_context_tokens: 3000
+          max_items_total: 8
+          min_injectable_items: 1
+          injectable_sources:
+            - rules
+            - pipeline
+            - evidence
+            - profile
+            - memory
+            - artifact
+          required_sources:
+            - rules
+          optional_sources:
+            - pipeline
+            - evidence
+            - profile
+            - memory
+            - artifact
+          source_overrides:
+            rules:
+              max_items: 3
+              max_tokens: 1000
+            pipeline:
+              max_items: 4
+              max_tokens: 1400
+            evidence:
+              max_items: 4
+              max_tokens: 1800
+            profile:
+              max_items: 2
+            memory:
+              max_items: 2
+            artifact:
+              max_items: 2
         conversation_summary:
           mode: active
           risk_tier: 2
@@ -873,6 +911,16 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  qa_agent:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.3
+    max_tokens: 4096
+    thinking: disabled
+    streaming: false
   academic:
     provider: deepseek_official
     model: "deepseek-v4-pro"
@@ -1061,6 +1109,13 @@ llm_outputs:
     max_raw_chars: 12000
     reask_enabled: true
     reask_business_validation: true
+  qa_agent:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 20000
+    reask_enabled: true
   supervisor:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []

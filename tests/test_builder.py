@@ -41,6 +41,7 @@ class TestBuildGraph:
             "resource_orchestrator",
             "resource_worker",
             "resource_bundle_output",
+            "qa_agent",
             "emotional_response",
             "handle_unknown",
         }
@@ -119,6 +120,16 @@ class TestBuildGraph:
         )
         assert route_after_evidence_judge({}) == "answer"
 
+    def test_route_after_evidence_judge_routes_academic_qa_to_qa_agent(self):
+        assert (
+            route_after_evidence_judge({"response_mode": "qa", "qa_scope": "academic"})
+            == "qa"
+        )
+
+    def test_route_after_evidence_judge_rejects_non_academic_qa_scope(self):
+        with pytest.raises(ValueError, match="qa_scope=academic"):
+            route_after_evidence_judge({"response_mode": "qa", "qa_scope": "general"})
+
     def test_route_after_evidence_judge_routes_multi_resource_requests_to_orchestrator(
         self,
     ):
@@ -165,6 +176,7 @@ class TestBuildGraph:
         assert ("study_plan_profile_gate_main", "resource_orchestrator") in graph.edges
         assert ("resource_worker", "resource_bundle_output") in graph.edges
         assert ("resource_bundle_output", "__end__") in graph.edges
+        assert ("qa_agent", "__end__") in graph.edges
         assert "multi_resource_runner" not in graph.nodes
         assert ("multi_resource_runner", "__end__") not in graph.edges
 
@@ -191,7 +203,11 @@ class TestBuildGraph:
         calls = []
 
         async def fake_supervisor(state):
-            return {"intent": "academic"}
+            return {
+                "intent": "academic",
+                "response_mode": "qa",
+                "qa_scope": "academic",
+            }
 
         async def fake_memory_use_decider(state):
             return {
@@ -230,11 +246,8 @@ class TestBuildGraph:
             )
             return {"context": [{"type": "rag", "content": "judged"}]}
 
-        async def fake_generate_answer(state):
+        async def fake_qa_agent(state):
             return {"messages": [AIMessage(content="answer")]}
-
-        async def fake_evaluate_hallucination(state):
-            return {"hallucination_detected": False}
 
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
@@ -246,10 +259,7 @@ class TestBuildGraph:
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
             patch("src.graph.builder.web_search", fake_web_search),
             patch("src.graph.builder.evidence_judge", fake_evidence_judge),
-            patch("src.graph.builder.generate_answer", fake_generate_answer),
-            patch(
-                "src.graph.builder.evaluate_hallucination", fake_evaluate_hallucination
-            ),
+            patch("src.graph.builder.qa_agent", fake_qa_agent),
         ):
             compiled = build_graph().compile()
             result = await compiled.ainvoke(
@@ -265,10 +275,14 @@ class TestBuildGraph:
 
     @pytest.mark.anyio
     async def test_evidence_judge_failure_blocks_generation(self):
-        generate_called = False
+        qa_called = False
 
         async def fake_supervisor(state):
-            return {"intent": "academic"}
+            return {
+                "intent": "academic",
+                "response_mode": "qa",
+                "qa_scope": "academic",
+            }
 
         async def fake_memory_use_decider(state):
             return {
@@ -299,9 +313,9 @@ class TestBuildGraph:
         async def fake_evidence_judge(state):
             raise RuntimeError("judge failed")
 
-        async def fake_generate_answer(state):
-            nonlocal generate_called
-            generate_called = True
+        async def fake_qa_agent(state):
+            nonlocal qa_called
+            qa_called = True
             return {"messages": [AIMessage(content="should not happen")]}
 
         with (
@@ -314,10 +328,10 @@ class TestBuildGraph:
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
             patch("src.graph.builder.web_search", fake_web_search),
             patch("src.graph.builder.evidence_judge", fake_evidence_judge),
-            patch("src.graph.builder.generate_answer", fake_generate_answer),
+            patch("src.graph.builder.qa_agent", fake_qa_agent),
         ):
             compiled = build_graph().compile()
             with pytest.raises(RuntimeError, match="judge failed"):
                 await compiled.ainvoke({"messages": [HumanMessage(content="test")]})
 
-        assert generate_called is False
+        assert qa_called is False

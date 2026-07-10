@@ -31,9 +31,10 @@ from src.graph.resource_generation import (
     resource_worker,
     route_after_resource_preflight,
 )
+from src.graph.qa import qa_agent
 from src.graph.state import LearningState
 from src.graph.study_plan import study_plan_profile_gate_main
-from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
+from src.graph.supervisor import handle_unknown, route_after_supervisor, supervisor_node
 from src.run_control import wrap_interruptible_node
 
 
@@ -70,6 +71,9 @@ def build_graph() -> StateGraph:
     # Emotional support
     add_interruptible_node("emotional_response", emotional_response)
 
+    # First-class structured question answering
+    add_interruptible_node("qa_agent", qa_agent)
+
     # Unified resource generation
     add_interruptible_node("resource_preflight_router", resource_preflight_router)
     add_interruptible_node(
@@ -89,11 +93,12 @@ def build_graph() -> StateGraph:
     # Conditional fork edges
     graph.add_conditional_edges(
         "supervisor",
-        route_by_intent,  # judge users intent
+        route_after_supervisor,
         {
             "academic": "episodic_memory_retriever",
             "emotional": "emotional_response",
-            "unknown": "handle_unknown",
+            "qa": "qa_agent",
+            "invalid": "handle_unknown",
         },
     )
 
@@ -124,6 +129,7 @@ def build_graph() -> StateGraph:
         route_after_evidence_judge,
         {
             "answer": "generate_answer",
+            "qa": "qa_agent",
             "resources": "resource_preflight_router",
             "evidence_summary_output": "evidence_summary_output",
         },
@@ -158,6 +164,7 @@ def build_graph() -> StateGraph:
 
     # Emotional support ends after the response node.
     graph.add_edge("emotional_response", END)
+    graph.add_edge("qa_agent", END)
 
     # Unknown: legacy handler remains available for compatibility.
     graph.add_edge("handle_unknown", END)
@@ -167,6 +174,15 @@ def build_graph() -> StateGraph:
 
 def route_after_evidence_judge(state: LearningState) -> str:
     """Route judged evidence to answer generation, resource chains, or controlled stop."""
+    response_mode = str(state.get("response_mode") or "").strip()
+    qa_scope = str(state.get("qa_scope") or "").strip()
+    if response_mode == "qa":
+        if qa_scope != "academic":
+            raise ValueError("retrieval-backed QA requires qa_scope=academic")
+        return "qa"
+    if response_mode not in {"", "resource"}:
+        raise ValueError("evidence judge received an invalid response_mode")
+
     requested_resource_type = str(state.get("requested_resource_type") or "").strip()
     requested_resource_types = [
         str(item or "").strip()

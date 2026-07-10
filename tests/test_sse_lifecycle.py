@@ -889,6 +889,68 @@ class TestSSEEvidenceSummaryResourceFinal:
         assert all_payloads[-1] == {"type": "done"}
 
 
+class TestSSEQAFinal:
+    @pytest.mark.anyio
+    async def test_qa_final_is_emitted_once_before_completed_and_done(self):
+        from app import generate_sse
+        from src.graph.qa import QAResponse, QASuggestion, build_qa_final_payload
+
+        qa_payload = build_qa_final_payload(
+            response=QAResponse(
+                answer="A grounded QA answer.",
+                uncertainty_note="",
+                grounding_status="general_knowledge",
+                suggestions=[
+                    QASuggestion(
+                        label="Continue",
+                        action="continue_qa",
+                        resource_type="",
+                    )
+                ],
+            ),
+            qa_scope="general",
+            thread_id="t-1",
+            request_id="request-1",
+        )
+        final_state = {
+            "request_id": "request-1",
+            "thread_id": "t-1",
+            "response_mode": "qa",
+            "final_response_type": "qa",
+            "last_qa_response": qa_payload,
+        }
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values=final_state),
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = _parse_all_payloads(collected)
+        qa_events = [item for item in payloads if item.get("type") == "qa_final"]
+        assert len(qa_events) == 1
+        qa_index = payloads.index(qa_events[0])
+        completed_index = next(
+            index
+            for index, payload in enumerate(payloads)
+            if payload.get("type") == "run_status"
+            and payload.get("run_status") == "completed"
+        )
+        done_index = next(
+            index
+            for index, payload in enumerate(payloads)
+            if payload.get("type") == "done"
+        )
+        assert qa_index < completed_index < done_index
+        assert not [
+            item
+            for item in payloads
+            if item.get("type") in {"resource_final", "resource_final_diagnostic"}
+        ]
+
+
 class TestSSEResourceFinalDiagnostics:
     @pytest.mark.anyio
     async def test_plain_answer_does_not_emit_completed_without_resource(self):

@@ -12,6 +12,17 @@ Initial governance report created on 2026-06-20. No dead code was deleted.
 
 Vulture has not been run in this first governance round. No dead-code candidates are approved for deletion.
 
+## 2026-07-10 Supervisor phrase-detector candidates
+
+Candidate: Legacy resource-request phrase detectors
+File: `src/graph/supervisor.py`
+Symbol: `_READABLE_*_MARKERS`, `_detect_requested_resource_types`, `_detect_requested_resource_type`
+Evidence: Repository reference scan finds runtime definitions and test imports only; `supervisor_node` uses strict structured output and does not call these helpers.
+Confidence: High
+Dynamic reference checks: LangGraph builder and prompt/config scans show no dynamic symbol lookup for these private helpers.
+Related tests: `tests/test_supervisor.py`
+Recommended action: Keep report-only until explicit deletion approval; do not use these helpers as a runtime routing source.
+
 ## How to Add Findings
 
 Use this format:

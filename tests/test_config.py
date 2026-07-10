@@ -515,14 +515,19 @@ class TestNodeConfigIntegration:
 
         from src.graph.supervisor import SupervisorOutput, supervisor_node
 
-        mock_invoke.side_effect = AsyncMock(return_value=SimpleNamespace(
-            parsed=SupervisorOutput(
-                intent="academic",
-                keywords=["test"],
-                confidence=0.9,
-                subject_candidates=["math"],
-            ),
-        ))
+        mock_invoke.side_effect = AsyncMock(
+            return_value=SimpleNamespace(
+                parsed=SupervisorOutput(
+                    intent="academic",
+                    response_mode="qa",
+                    qa_scope="academic",
+                    requires_live_verification=False,
+                    keywords=["test"],
+                    confidence=0.9,
+                    subject_candidates=["math"],
+                ),
+            )
+        )
         state = {"messages": [HumanMessage(content="test")]}
         with patch("src.graph.supervisor.get_available_subjects_from_data", return_value=["math"]):
             result = await supervisor_node(state)

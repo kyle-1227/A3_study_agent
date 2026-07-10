@@ -11,7 +11,7 @@ import logging
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.context_engineering.workspace import (
     workspace_continuation_context,
@@ -22,6 +22,7 @@ from src.graph.resource_generation import (
     SUPPORTED_RESOURCE_TYPES,
     normalize_requested_resource_types as _normalize_supported_requested_resource_types,
 )
+from src.graph.capability_registry import get_registered_resource_types
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
@@ -39,21 +40,22 @@ logger = logging.getLogger(__name__)
 class SupervisorOutput(BaseModel):
     """Structured output for supervisor intent classification."""
 
+    model_config = ConfigDict(extra="forbid")
+
     intent: Literal["academic", "emotional", "unknown"]
+    response_mode: Literal["qa", "resource", "emotional"]
+    qa_scope: Literal["academic", "general", "a3_agent", ""]
+    requires_live_verification: bool
     keywords: list[str]
     confidence: float
-    subject_candidates: list[str] = []
+    subject_candidates: list[str] = Field(default_factory=list)
     requested_resource_type: str = ""
-    requested_resource_types: list[str] = []
+    requested_resource_types: list[str] = Field(default_factory=list)
 
 
 _VALID_INTENTS: set[str] = set()
 
-_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES) | {
-    "code_practice",
-    "video_script",
-    "video_animation",
-}
+_VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES)
 
 _SUPERVISOR_RESOURCE_ALIASES = {
     "code_case": "code_practice",
@@ -177,12 +179,34 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
     ]
     if invalid_resources:
         return f"invalid requested_resource_types: {invalid_resources}"
-    if resource_types and parsed.intent in ("emotional", "unknown"):
-        return (
-            f"intent={parsed.intent} may not carry "
-            f"requested_resource_types={resource_types}. "
-            f"Only academic intent supports resource generation."
-        )
+    if parsed.response_mode == "resource":
+        if parsed.intent != "academic":
+            return "resource response_mode requires academic intent"
+        if not resource_types:
+            return "resource response_mode requires requested_resource_types"
+        if parsed.qa_scope:
+            return "resource response_mode requires empty qa_scope"
+    elif parsed.response_mode == "emotional":
+        if parsed.intent != "emotional":
+            return "emotional response_mode requires emotional intent"
+        if resource_types or parsed.qa_scope:
+            return "emotional response_mode may not carry resources or qa_scope"
+        if parsed.requires_live_verification:
+            return "emotional response_mode may not require live verification"
+    elif parsed.response_mode == "qa":
+        if resource_types:
+            return "qa response_mode may not carry requested_resource_types"
+        if parsed.qa_scope not in {"academic", "general", "a3_agent"}:
+            return "qa response_mode requires a non-empty valid qa_scope"
+        if parsed.qa_scope == "academic" and parsed.intent != "academic":
+            return "academic qa_scope requires academic intent"
+        if parsed.qa_scope in {"general", "a3_agent"} and parsed.intent not in {
+            "academic",
+            "unknown",
+        }:
+            return "general and a3_agent qa_scope may not use emotional intent"
+    else:
+        return "response_mode is invalid"
     return ""
 
 
@@ -204,9 +228,14 @@ async def supervisor_node(state: LearningState) -> dict:
         if available_subjects
         else "当前 data/ 目录下未发现可用课程 subject。"
     )
+    available_resource_types_text = "\n".join(
+        f"- {resource_type}" for resource_type in get_registered_resource_types()
+    )
     user_message = (
         "## 当前知识库 available subjects\n"
         f"{available_subjects_text}\n\n"
+        "## Available resource types\n"
+        f"{available_resource_types_text}\n\n"
         "## 用户输入\n"
         f"{user_text}"
     )
@@ -238,6 +267,9 @@ async def supervisor_node(state: LearningState) -> dict:
     if not isinstance(result, SupervisorOutput):
         raise TypeError("supervisor parsed result is not SupervisorOutput")
     intent = result.intent
+    response_mode = result.response_mode
+    qa_scope = result.qa_scope
+    requires_live_verification = result.requires_live_verification
     keypoints = result.keywords
     subject_candidates = _filter_subject_candidates(
         result.subject_candidates,
@@ -253,11 +285,6 @@ async def supervisor_node(state: LearningState) -> dict:
         requested_resource_types[0] if requested_resource_types else ""
     )
     is_parallel_resource_request = len(requested_resource_types) > 1
-    if requested_resource_types and intent in {"emotional", "unknown"}:
-        intent = "academic"
-
-    # academic intent with resource type stays academic
-    # emotional/unknown with resource type was already blocked by validation
     needs_mindmap = (
         requested_resource_type == "mindmap" or "mindmap" in requested_resource_types
     )
@@ -311,6 +338,9 @@ async def supervisor_node(state: LearningState) -> dict:
         "supervisor",
         {
             "intent": intent,
+            "response_mode": response_mode,
+            "qa_scope": qa_scope,
+            "requires_live_verification": requires_live_verification,
             "subject": subject,
             "subject_candidates": subject_candidates,
             "keypoints": keypoints,
@@ -333,6 +363,9 @@ async def supervisor_node(state: LearningState) -> dict:
 
     return {
         "intent": intent,
+        "response_mode": response_mode,
+        "qa_scope": qa_scope,
+        "requires_live_verification": requires_live_verification,
         "subject": subject,
         "subject_candidates": subject_candidates,
         "keypoints": keypoints,
@@ -380,6 +413,22 @@ def route_by_intent(state: LearningState) -> str:
     if intent not in ("academic", "emotional", "unknown"):
         intent = "unknown"
     return intent
+
+
+def route_after_supervisor(state: LearningState) -> str:
+    """Route the strict supervisor response contract without phrase heuristics."""
+    response_mode = str(state.get("response_mode") or "").strip()
+    qa_scope = str(state.get("qa_scope") or "").strip()
+    intent = str(state.get("intent") or "").strip()
+    if response_mode == "emotional" and intent == "emotional":
+        return "emotional"
+    if response_mode == "resource" and intent == "academic":
+        return "academic"
+    if response_mode == "qa" and qa_scope == "academic" and intent == "academic":
+        return "academic"
+    if response_mode == "qa" and qa_scope in {"general", "a3_agent"}:
+        return "qa"
+    return "invalid"
 
 
 _READABLE_RESOURCE_ACTION_MARKERS = (

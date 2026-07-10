@@ -112,6 +112,9 @@ def _json_response(content) -> _FakeResponse:
 def _supervisor_args(**overrides) -> dict:
     data = {
         "intent": "academic",
+        "response_mode": "resource",
+        "qa_scope": "",
+        "requires_live_verification": False,
         "keywords": ["Python"],
         "confidence": 0.92,
         "subject_candidates": ["python"],

@@ -14,7 +14,17 @@ from src.graph.state import (
 class TestLearningState:
     def test_state_has_required_keys(self):
         annotations = LearningState.__annotations__
-        required = ["messages", "intent", "subject", "keypoints", "context", "plan"]
+        required = [
+            "messages",
+            "intent",
+            "response_mode",
+            "qa_scope",
+            "last_qa_response",
+            "subject",
+            "keypoints",
+            "context",
+            "plan",
+        ]
         for key in required:
             assert key in annotations, f"LearningState missing key: {key}"
 
@@ -69,6 +79,10 @@ class TestTaskWorkspaceReducers:
         assert "task_workspace" not in reset
         assert "workspace_events" not in reset
         assert "context_influence_ledger" not in reset
+        assert "last_qa_response" not in reset
+        assert reset["response_mode"] == ""
+        assert reset["qa_scope"] == ""
+        assert reset["requires_live_verification"] is False
 
     def test_task_workspace_reducer_is_idempotent(self):
         update = {

@@ -179,6 +179,11 @@ def initial_request_reset_transient_state() -> dict:
     return {
         # routing
         "intent": "unknown",
+        "response_mode": "",
+        "qa_scope": "",
+        "requires_live_verification": False,
+        "final_response_type": "",
+        "runtime_capability_metadata": {},
         "subject": "",
         "subject_candidates": [],
         "keypoints": [],
@@ -477,7 +482,15 @@ class LearningState(TypedDict):
     last_resource_final_payload: Annotated[
         dict, merge_dict_reducer
     ]  # Last sanitized renderable resource_final payload
+    last_qa_response: Annotated[
+        dict, latest_dict_reducer
+    ]  # Last bounded renderable qa_final payload
     intent: Literal["academic", "emotional", "unknown"]  # User intent
+    response_mode: Literal["qa", "resource", "emotional", ""]
+    qa_scope: Literal["academic", "general", "a3_agent", ""]
+    requires_live_verification: bool
+    final_response_type: str
+    runtime_capability_metadata: dict
     subject: str  # The topic being discussed
     subject_candidates: list[str]  # Ordered available-subject candidates
     keypoints: list[str]  # Key points

@@ -670,6 +670,31 @@ def test_settings_resolve_expected_default_tiers():
     )
 
 
+def test_settings_enable_qa_agent_with_required_rules_and_optional_context(
+    monkeypatch,
+):
+    from src.config import clear_cache
+
+    monkeypatch.setenv("CONTEXT_POLICY_MODE", "strict")
+    clear_cache()
+    resolved = resolve_context_policy(
+        node_name="qa_agent",
+        llm_node="qa_agent",
+        state={"response_mode": "qa", "qa_scope": "academic"},
+    )
+
+    assert resolved.mode == "active"
+    assert resolved.injection_policy.required_sources == ("rules",)
+    assert resolved.injection_policy.optional_sources == (
+        "pipeline",
+        "evidence",
+        "profile",
+        "memory",
+        "artifact",
+    )
+    assert resolved.source_policies["evidence"].max_items == 4
+
+
 def test_settings_agent_required_sources_are_node_specific():
     from src.config import clear_cache
 

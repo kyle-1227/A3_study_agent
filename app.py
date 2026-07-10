@@ -61,6 +61,7 @@ from src.graph.resource_final import (
     completed_without_resource_payload,
     normalize_resource_final_payload,
 )
+from src.graph.qa import qa_final_payload, qa_final_trace_payload
 from src.profile import get_profile_manager
 from src.run_control import (
     RUN_CONTROL_FIELDS,
@@ -674,10 +675,15 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
     )
     resource_artifacts_by_type = values.get("resource_artifacts_by_type")
     last_generated_artifacts = values.get("last_generated_artifacts")
-    last_resource_payload = (
-        values.get("last_resource_final_payload")
-        if isinstance(values.get("last_resource_final_payload"), dict)
+    last_resource_payload_value = values.get("last_resource_final_payload")
+    last_resource_payload: dict = (
+        last_resource_payload_value
+        if isinstance(last_resource_payload_value, dict)
         else {}
+    )
+    last_qa_response_value = values.get("last_qa_response")
+    last_qa_response: dict = (
+        last_qa_response_value if isinstance(last_qa_response_value, dict) else {}
     )
     workspace_status = workspace_status_payload(values.get("task_workspace"))
     raw_manifest_history = values.get("llm_input_manifests")
@@ -723,6 +729,8 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         "last_resource_final_resource_type": str(
             last_resource_payload.get("resource_type") or ""
         ),
+        "last_qa_response_present": bool(last_qa_response),
+        "last_qa_scope": str(last_qa_response.get("qa_scope") or ""),
         "background_context_window": background_window,
         "context_influence_ledger": influence_status,
         "context_influence_entry_count": influence_status.get("entry_count", 0),
@@ -822,6 +830,9 @@ def _thread_status_from_snapshot(
             last_resource_final_payload=values.get("last_resource_final_payload")
             if isinstance(values.get("last_resource_final_payload"), dict)
             else {},
+            last_qa_response=values.get("last_qa_response")
+            if isinstance(values.get("last_qa_response"), dict)
+            else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
             profile_completion_request=profile_completion_request,
@@ -869,6 +880,9 @@ def _thread_status_from_snapshot(
         ),
         last_resource_final_payload=values.get("last_resource_final_payload")
         if isinstance(values.get("last_resource_final_payload"), dict)
+        else {},
+        last_qa_response=values.get("last_qa_response")
+        if isinstance(values.get("last_qa_response"), dict)
         else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
@@ -1261,9 +1275,9 @@ def _legacy_resource_final_payload(final_state: dict) -> dict | None:
         )
     )
     if (
-        final_state.get("evidence_controlled_stop") is True
-        or final_state.get("final_response_type") == "evidence_summary"
-    ) and not has_generated_resource_artifact:
+        final_state.get("final_response_type") == "evidence_summary"
+        and not has_generated_resource_artifact
+    ):
         answer = _last_ai_message_content(final_state) or str(
             final_state.get("plan") or ""
         )
@@ -1554,6 +1568,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "resource_artifacts_by_type",
         "last_generated_artifacts",
         "last_resource_final_payload",
+        "last_qa_response",
         "llm_input_manifest",
         "llm_input_manifests",
         "thread_context_ledger",
@@ -1572,6 +1587,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "resource_artifacts_by_type": DICT_CLEAR,
         "last_generated_artifacts": GENERATED_ARTIFACTS_CLEAR,
         "last_resource_final_payload": DICT_CLEAR,
+        "last_qa_response": {},
         "llm_input_manifest": {},
         "llm_input_manifests": LLM_INPUT_MANIFESTS_CLEAR,
         "thread_context_ledger": DICT_CLEAR,
@@ -2842,6 +2858,7 @@ async def _stream_graph_events(
         "current_node": "",
         "last_event_count": len(request_context_events),
     }
+    qa_payload = qa_final_payload(final_state)
     resource_payload = _resource_final_payload(final_state)
     if terminal_resource_output:
         terminal_resource_payload = _resource_final_payload(terminal_resource_output)
@@ -2871,6 +2888,8 @@ async def _stream_graph_events(
     }
     if resource_payload:
         completed_values["last_resource_final_payload"] = resource_payload
+    if qa_payload:
+        completed_values["last_qa_response"] = qa_payload
     if context_usage_history:
         completed_values["context_usage"] = context_usage_history[-1]
         completed_values["context_usage_history"] = list(context_usage_history)
@@ -2904,6 +2923,15 @@ async def _stream_graph_events(
         state=final_state,
     )
     run_control_registry.clear_stop_signal(thread_id)
+    if qa_payload:
+        emit_a3_trace(
+            logger,
+            "sse_qa_final",
+            {"sent": True, **qa_final_trace_payload(qa_payload)},
+            state=final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield f"data: {json.dumps(qa_payload, ensure_ascii=False)}\n\n"
     if resource_payload:
         emit_a3_trace(
             logger,
@@ -3034,6 +3062,11 @@ async def generate_sse(
         "thread_id": thread_id,
         "context": CONTEXT_CLEAR,
         **initial_request_reset_transient_state(),
+    }
+    runtime_checkpointer_type = _graph_checkpointer_type(graph)
+    state_input["runtime_capability_metadata"] = {
+        "checkpointer_enabled": runtime_checkpointer_type != "none",
+        "checkpointer_type": runtime_checkpointer_type,
     }
     if profile_summary:
         state_input["profile_summary"] = profile_summary

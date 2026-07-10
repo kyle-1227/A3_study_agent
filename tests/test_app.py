@@ -267,6 +267,7 @@ class TestDevMemoryClear:
         assert values["resource_artifacts_by_type"] is DICT_CLEAR
         assert values["last_generated_artifacts"] is GENERATED_ARTIFACTS_CLEAR
         assert values["last_resource_final_payload"] is DICT_CLEAR
+        assert values["last_qa_response"] == {}
         assert values["llm_input_manifest"] == {}
         assert values["llm_input_manifests"] is LLM_INPUT_MANIFESTS_CLEAR
         assert values["thread_context_ledger"] is DICT_CLEAR
@@ -287,6 +288,7 @@ class TestDevMemoryClear:
                 "resource_artifacts_by_type",
                 "last_generated_artifacts",
                 "last_resource_final_payload",
+                "last_qa_response",
                 "llm_input_manifest",
                 "llm_input_manifests",
                 "thread_context_ledger",
@@ -826,6 +828,51 @@ class TestThreadStatusProfileCompletion:
         assert response.profile_completion_request
         assert response.profile_completion_request["title"] == request_payload["title"]
         assert len(response.profile_completion_request["fields"]) == 3
+
+    def test_status_exposes_last_qa_response_additively(self):
+        from app import _thread_status_from_snapshot
+        from src.graph.qa import QAResponse, QASuggestion, build_qa_final_payload
+
+        qa_payload = build_qa_final_payload(
+            response=QAResponse(
+                answer="Stored answer",
+                uncertainty_note="",
+                grounding_status="general_knowledge",
+                suggestions=[
+                    QASuggestion(
+                        label="Continue",
+                        action="continue_qa",
+                        resource_type="",
+                    )
+                ],
+            ),
+            qa_scope="general",
+            thread_id="t-1",
+            request_id="r-1",
+        )
+        snapshot = SimpleNamespace(
+            values={
+                "schema_version": "run_control_v1",
+                "run_status": "completed",
+                "stop_requested": False,
+                "stop_reason": "",
+                "stop_requested_at": "",
+                "current_node": "",
+                "last_completed_node": "qa_agent",
+                "resume_available": False,
+                "stopped_at": "",
+                "pending_interrupt_type": "",
+                "last_qa_response": qa_payload,
+            },
+            tasks=[],
+            next=(),
+        )
+
+        response = _thread_status_from_snapshot("t-1", snapshot)
+
+        assert response.last_qa_response["qa_id"] == qa_payload["qa_id"]
+        assert response.thread_context_window["last_qa_response_present"] is True
+        assert response.thread_context_window["last_qa_scope"] == "general"
 
     def test_profile_completion_sanitizer_consistent_with_sse(self):
         """_safe_profile_completion_request produces identical output for

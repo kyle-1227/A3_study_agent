@@ -15,8 +15,10 @@ from src.graph.supervisor import (
     _detect_requested_resource_type,
     _detect_requested_resource_types,
     handle_unknown,
+    route_after_supervisor,
     route_by_intent,
     supervisor_node,
+    validate_supervisor_output,
 )
 
 
@@ -27,10 +29,29 @@ def _result(
     subject_candidates: list[str] | None = None,
     requested_resource_type: str = "",
     requested_resource_types: list[str] | None = None,
+    response_mode: str | None = None,
+    qa_scope: str | None = None,
+    requires_live_verification: bool = False,
 ) -> SimpleNamespace:
+    has_resources = bool(requested_resource_type or requested_resource_types)
+    resolved_mode = response_mode or (
+        "emotional" if intent == "emotional" else "resource" if has_resources else "qa"
+    )
+    resolved_scope = qa_scope
+    if resolved_scope is None:
+        resolved_scope = (
+            ""
+            if resolved_mode != "qa"
+            else "academic"
+            if intent == "academic"
+            else "general"
+        )
     return SimpleNamespace(
         parsed=SupervisorOutput(
             intent=intent,
+            response_mode=resolved_mode,
+            qa_scope=resolved_scope,
+            requires_live_verification=requires_live_verification,
             keywords=keywords or [],
             confidence=confidence,
             subject_candidates=subject_candidates or [],
@@ -503,6 +524,39 @@ class TestRouteByIntent:
         assert route_by_intent({}) == "academic"
 
 
+class TestRouteAfterSupervisor:
+    def test_routes_general_and_a3_qa_directly(self):
+        assert (
+            route_after_supervisor(
+                {"intent": "unknown", "response_mode": "qa", "qa_scope": "general"}
+            )
+            == "qa"
+        )
+        assert (
+            route_after_supervisor(
+                {"intent": "unknown", "response_mode": "qa", "qa_scope": "a3_agent"}
+            )
+            == "qa"
+        )
+
+    def test_routes_academic_qa_and_resource_to_retrieval(self):
+        assert (
+            route_after_supervisor(
+                {"intent": "academic", "response_mode": "qa", "qa_scope": "academic"}
+            )
+            == "academic"
+        )
+        assert (
+            route_after_supervisor(
+                {"intent": "academic", "response_mode": "resource", "qa_scope": ""}
+            )
+            == "academic"
+        )
+
+    def test_invalid_contract_routes_to_technical_handler(self):
+        assert route_after_supervisor({"intent": "unknown"}) == "invalid"
+
+
 class TestValidIntents:
     def test_valid_intents_includes_unknown(self):
         assert "unknown" in _VALID_INTENTS
@@ -528,6 +582,9 @@ class TestSupervisorOutput:
     def test_valid_output(self):
         output = SupervisorOutput(
             intent="academic",
+            response_mode="resource",
+            qa_scope="",
+            requires_live_verification=False,
             keywords=["mathematics"],
             confidence=0.9,
             subject_candidates=["math"],
@@ -540,9 +597,53 @@ class TestSupervisorOutput:
         assert output.requested_resource_types == ["quiz"]
 
     def test_unknown_intent_valid(self):
-        output = SupervisorOutput(intent="unknown", keywords=[], confidence=0.1)
+        output = SupervisorOutput(
+            intent="unknown",
+            response_mode="qa",
+            qa_scope="general",
+            requires_live_verification=False,
+            keywords=[],
+            confidence=0.1,
+        )
         assert output.intent == "unknown"
 
     def test_invalid_intent_raises(self):
         with pytest.raises(Exception):
-            SupervisorOutput(intent="invalid", keywords=[], confidence=0.5)
+            SupervisorOutput(
+                intent="invalid",
+                response_mode="qa",
+                qa_scope="general",
+                requires_live_verification=False,
+                keywords=[],
+                confidence=0.5,
+            )
+
+    def test_new_routing_fields_are_required(self):
+        with pytest.raises(Exception):
+            SupervisorOutput(intent="academic", keywords=[], confidence=0.5)
+
+
+class TestSupervisorBusinessValidation:
+    def test_rejects_resource_mode_without_resource(self):
+        parsed = SupervisorOutput(
+            intent="academic",
+            response_mode="resource",
+            qa_scope="",
+            requires_live_verification=False,
+            keywords=["topic"],
+            confidence=0.9,
+        )
+        assert "requires requested_resource_types" in validate_supervisor_output(parsed)
+
+    def test_rejects_qa_with_resource(self):
+        parsed = SupervisorOutput(
+            intent="academic",
+            response_mode="qa",
+            qa_scope="academic",
+            requires_live_verification=False,
+            keywords=["topic"],
+            confidence=0.9,
+            requested_resource_type="mindmap",
+            requested_resource_types=["mindmap"],
+        )
+        assert "may not carry" in validate_supervisor_output(parsed)

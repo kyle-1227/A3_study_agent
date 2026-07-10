@@ -355,6 +355,16 @@ for item in (
         ),
     ),
     _metadata(
+        "qa_agent",
+        label="Question answering",
+        description="Answer academic, general, or A3 capability questions.",
+        role="agent",
+        group="qa",
+        stage_rank=70,
+        order=70,
+        capture_rules=(_rule("agent_output", "last_qa_response", priority=80),),
+    ),
+    _metadata(
         "emotional_response",
         label="Emotional support",
         description="Produce a supportive learning response.",
