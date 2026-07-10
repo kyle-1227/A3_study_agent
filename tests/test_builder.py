@@ -16,9 +16,9 @@ from src.graph.builder import (
 
 
 class TestBuildGraph:
-
     def test_returns_state_graph(self):
         from langgraph.graph import StateGraph
+
         graph = build_graph()
         assert isinstance(graph, StateGraph)
 
@@ -36,6 +36,8 @@ class TestBuildGraph:
             "generate_answer",
             "evaluate_hallucination",
             "rewrite_query",
+            "resource_preflight_router",
+            "study_plan_profile_gate_main",
             "resource_orchestrator",
             "resource_worker",
             "resource_bundle_output",
@@ -99,15 +101,33 @@ class TestBuildGraph:
     def test_route_after_evidence_judge_routes_single_resource_requests_to_orchestrator(
         self, resource_type
     ):
-        assert route_after_evidence_judge({"requested_resource_type": resource_type}) == "resources"
-        assert route_after_evidence_judge({"requested_resource_types": [resource_type]}) == "resources"
+        assert (
+            route_after_evidence_judge({"requested_resource_type": resource_type})
+            == "resources"
+        )
+        assert (
+            route_after_evidence_judge({"requested_resource_types": [resource_type]})
+            == "resources"
+        )
 
     def test_route_after_evidence_judge_routes_non_resource_requests_to_answer(self):
-        assert route_after_evidence_judge({"needs_mindmap": False, "requested_resource_type": ""}) == "answer"
+        assert (
+            route_after_evidence_judge(
+                {"needs_mindmap": False, "requested_resource_type": ""}
+            )
+            == "answer"
+        )
         assert route_after_evidence_judge({}) == "answer"
 
-    def test_route_after_evidence_judge_routes_multi_resource_requests_to_orchestrator(self):
-        assert route_after_evidence_judge({"requested_resource_types": ["mindmap", "quiz"]}) == "resources"
+    def test_route_after_evidence_judge_routes_multi_resource_requests_to_orchestrator(
+        self,
+    ):
+        assert (
+            route_after_evidence_judge(
+                {"requested_resource_types": ["mindmap", "quiz"]}
+            )
+            == "resources"
+        )
 
     def test_route_after_query_rewrite_routes_academic(self):
         assert route_after_query_rewrite({"intent": "academic"}) == "academic"
@@ -137,7 +157,12 @@ class TestBuildGraph:
         }
         assert old_direct_edges.isdisjoint(graph.edges)
         assert "route_after_evidence_judge" in graph.branches["evidence_judge"]
+        assert (
+            "route_after_resource_preflight"
+            in graph.branches["resource_preflight_router"]
+        )
         assert "dispatch_resource_workers" in graph.branches["resource_orchestrator"]
+        assert ("study_plan_profile_gate_main", "resource_orchestrator") in graph.edges
         assert ("resource_worker", "resource_bundle_output") in graph.edges
         assert ("resource_bundle_output", "__end__") in graph.edges
         assert "multi_resource_runner" not in graph.nodes
@@ -153,6 +178,8 @@ class TestBuildGraph:
     def test_unified_resource_chain_has_no_legacy_resource_nodes(self):
         graph = build_graph()
         assert "resource_orchestrator" in graph.nodes
+        assert "resource_preflight_router" in graph.nodes
+        assert "study_plan_profile_gate_main" in graph.nodes
         assert "resource_worker" in graph.nodes
         assert "resource_bundle_output" in graph.nodes
         assert "study_plan_output" not in graph.nodes
@@ -167,7 +194,10 @@ class TestBuildGraph:
             return {"intent": "academic"}
 
         async def fake_memory_use_decider(state):
-            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
+            return {
+                "memory_use_policy": "ignore",
+                "selected_evidence_memory_summaries": [],
+            }
 
         async def fake_search_query_rewriter(state):
             return {}
@@ -177,21 +207,27 @@ class TestBuildGraph:
 
         async def fake_rag_retrieve(state):
             return {
-                "local_evidence_candidates": [{"evidence_id": "local:math:0", "source_type": "local_rag"}],
+                "local_evidence_candidates": [
+                    {"evidence_id": "local:math:0", "source_type": "local_rag"}
+                ],
                 "local_evidence_originals": {"local:math:0": {"content": "local"}},
             }
 
         async def fake_web_search(state):
             return {
-                "web_evidence_candidates": [{"evidence_id": "web:math:0", "source_type": "web"}],
+                "web_evidence_candidates": [
+                    {"evidence_id": "web:math:0", "source_type": "web"}
+                ],
                 "web_evidence_originals": {"web:math:0": {"content": "web"}},
             }
 
         async def fake_evidence_judge(state):
-            calls.append({
-                "local": list(state.get("local_evidence_candidates") or []),
-                "web": list(state.get("web_evidence_candidates") or []),
-            })
+            calls.append(
+                {
+                    "local": list(state.get("local_evidence_candidates") or []),
+                    "web": list(state.get("web_evidence_candidates") or []),
+                }
+            )
             return {"context": [{"type": "rag", "content": "judged"}]}
 
         async def fake_generate_answer(state):
@@ -203,19 +239,27 @@ class TestBuildGraph:
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
             patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
-            patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
+            patch(
+                "src.graph.builder.search_query_rewriter", fake_search_query_rewriter
+            ),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
             patch("src.graph.builder.web_search", fake_web_search),
             patch("src.graph.builder.evidence_judge", fake_evidence_judge),
             patch("src.graph.builder.generate_answer", fake_generate_answer),
-            patch("src.graph.builder.evaluate_hallucination", fake_evaluate_hallucination),
+            patch(
+                "src.graph.builder.evaluate_hallucination", fake_evaluate_hallucination
+            ),
         ):
             compiled = build_graph().compile()
-            result = await compiled.ainvoke({"messages": [HumanMessage(content="test")]})
+            result = await compiled.ainvoke(
+                {"messages": [HumanMessage(content="test")]}
+            )
 
         assert len(calls) == 1
-        assert calls[0]["local"] == [{"evidence_id": "local:math:0", "source_type": "local_rag"}]
+        assert calls[0]["local"] == [
+            {"evidence_id": "local:math:0", "source_type": "local_rag"}
+        ]
         assert calls[0]["web"] == [{"evidence_id": "web:math:0", "source_type": "web"}]
         assert result["context"] == [{"type": "rag", "content": "judged"}]
 
@@ -227,7 +271,10 @@ class TestBuildGraph:
             return {"intent": "academic"}
 
         async def fake_memory_use_decider(state):
-            return {"memory_use_policy": "ignore", "selected_evidence_memory_summaries": []}
+            return {
+                "memory_use_policy": "ignore",
+                "selected_evidence_memory_summaries": [],
+            }
 
         async def fake_search_query_rewriter(state):
             return {}
@@ -236,10 +283,18 @@ class TestBuildGraph:
             return {}
 
         async def fake_rag_retrieve(state):
-            return {"local_evidence_candidates": [{"evidence_id": "local:math:0", "source_type": "local_rag"}]}
+            return {
+                "local_evidence_candidates": [
+                    {"evidence_id": "local:math:0", "source_type": "local_rag"}
+                ]
+            }
 
         async def fake_web_search(state):
-            return {"web_evidence_candidates": [{"evidence_id": "web:math:0", "source_type": "web"}]}
+            return {
+                "web_evidence_candidates": [
+                    {"evidence_id": "web:math:0", "source_type": "web"}
+                ]
+            }
 
         async def fake_evidence_judge(state):
             raise RuntimeError("judge failed")
@@ -252,7 +307,9 @@ class TestBuildGraph:
         with (
             patch("src.graph.builder.supervisor_node", fake_supervisor),
             patch("src.graph.builder.memory_use_decider", fake_memory_use_decider),
-            patch("src.graph.builder.search_query_rewriter", fake_search_query_rewriter),
+            patch(
+                "src.graph.builder.search_query_rewriter", fake_search_query_rewriter
+            ),
             patch("src.graph.builder.academic_router", fake_academic_router),
             patch("src.graph.builder.rag_retrieve", fake_rag_retrieve),
             patch("src.graph.builder.web_search", fake_web_search),

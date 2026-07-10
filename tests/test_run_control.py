@@ -664,6 +664,46 @@ async def test_resume_profile_completion_sends_profile_command():
 
 
 @pytest.mark.anyio
+async def test_resume_profile_completion_without_checkpoint_fails_fast():
+    from app import generate_resume_sse
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(values={"schema_version": "run_control_v1"})
+    )
+    graph.aupdate_state = AsyncMock()
+
+    collected = []
+    async for sse in generate_resume_sse(
+        "",
+        None,
+        graph,
+        "thread-1",
+        profile_completion={
+            "learning_goal": "Master ML",
+            "current_foundation": "Python",
+            "daily_study_time": "2 hours",
+        },
+    ):
+        collected.append(sse)
+
+    payloads = _payloads(collected)
+    assert payloads == [
+        {
+            "type": "error",
+            "error_type": "profile_completion_checkpoint_missing",
+            "message": "profile_completion_checkpoint_missing",
+            "thread_id": "thread-1",
+            "pending_interrupt_type": "",
+            "resume_available": False,
+            "recoverable": False,
+        }
+    ]
+    graph.astream_events.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_continue_user_stop_clears_stop_before_command_resume():
     from app import generate_continue_sse
 

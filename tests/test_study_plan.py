@@ -19,6 +19,7 @@ from src.graph.study_plan import (
     study_plan_output,
     study_plan_planner,
     study_plan_profile_gate,
+    study_plan_profile_gate_main,
     validate_study_plan_artifact,
 )
 from src.llm.structured_output import StructuredLLMResult
@@ -146,6 +147,42 @@ async def test_study_plan_profile_gate_interrupts_when_profile_missing():
     assert result["profile_summary"] == result["learner_profile_summary"]
     assert result["task_workspace"]["profile_requirements"]
     assert result["task_workspace"]["constraints"]
+
+
+@pytest.mark.anyio
+async def test_study_plan_profile_gate_main_uses_graph_level_node_name():
+    resume_value = {
+        "type": "profile_completion_required",
+        "profile_completion": {
+            "learning_goal": "Master ML basics",
+            "current_foundation": "Knows Python",
+            "daily_study_time": "2 hours",
+        },
+    }
+
+    with (
+        patch(
+            "src.graph.study_plan.interrupt", return_value=resume_value
+        ) as mock_interrupt,
+        patch("src.graph.study_plan.emit_a3_trace") as mock_emit_trace,
+    ):
+        result = await study_plan_profile_gate_main(
+            {
+                "request_id": "r1",
+                "thread_id": "t1",
+                "subject": "machine learning",
+            }
+        )
+
+    interrupt_payload = mock_interrupt.call_args.args[0]
+    assert interrupt_payload["node"] == "study_plan_profile_gate_main"
+    required_trace_payload = next(
+        call.args[2]
+        for call in mock_emit_trace.call_args_list
+        if len(call.args) >= 3 and call.args[1] == "profile_completion.required"
+    )
+    assert required_trace_payload["node_name"] == "study_plan_profile_gate_main"
+    assert result["learner_profile"]["learning_goal"] == "Master ML basics"
 
 
 @pytest.mark.anyio

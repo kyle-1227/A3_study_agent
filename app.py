@@ -500,6 +500,8 @@ GRAPH_NODES = {
     "generate_answer",
     "evaluate_hallucination",
     "rewrite_query",
+    "resource_preflight_router",
+    "study_plan_profile_gate_main",
     "resource_orchestrator",
     "resource_worker",
     "resource_bundle_output",
@@ -3141,6 +3143,38 @@ async def generate_resume_sse(
             "pending_interrupt_type": "user_stop",
             "message": "use /threads/{thread_id}/continue for user_stop interrupts",
         }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
+    if profile_completion is not None and pending_type != "profile_completion_required":
+        payload = {
+            "type": "error",
+            "error_type": "profile_completion_checkpoint_missing",
+            "message": "profile_completion_checkpoint_missing",
+            "thread_id": thread_id,
+            "pending_interrupt_type": pending_type,
+            "resume_available": False,
+            "recoverable": False,
+        }
+        emit_a3_trace(
+            logger,
+            "profile_completion.resume_failed",
+            {
+                "thread_id": thread_id,
+                "pending_interrupt_type": pending_type,
+                "error_type": "profile_completion_checkpoint_missing",
+            },
+            state={"thread_id": thread_id, "session_id": thread_id},
+            env_flag="LOG_A3_TRACE",
+        )
+        finish_active_run(
+            thread_id,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "error_type": "profile_completion_checkpoint_missing",
+            },
+        )
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return
 

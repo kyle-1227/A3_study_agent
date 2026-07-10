@@ -15,7 +15,9 @@ from src.graph.resource_generation import (
     normalize_requested_resource_types,
     resource_bundle_output,
     resource_orchestrator,
+    resource_preflight_router,
     resource_worker,
+    route_after_resource_preflight,
 )
 from src.graph.state import resource_branch_results_reducer
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
@@ -67,6 +69,32 @@ async def test_resource_orchestrator_plans_dynamic_worker_tasks():
         },
         {"task_id": "resource:quiz", "resource_type": "quiz", "status": "pending"},
     ]
+
+
+async def test_resource_preflight_routes_study_plan_requests_to_profile_gate():
+    result = await resource_preflight_router(
+        {
+            "request_id": "req-1",
+            "requested_resource_types": ["mindmap", "study_plan"],
+            "requested_resource_type": "",
+        }
+    )
+
+    assert result["requested_resource_types"] == ["mindmap", "study_plan"]
+    assert result["resource_generation_status"] == "preflight"
+    assert route_after_resource_preflight(result) == "study_plan_profile_gate_main"
+
+
+def test_resource_preflight_routes_non_study_plan_to_orchestrator():
+    assert (
+        route_after_resource_preflight(
+            {
+                "requested_resource_types": ["mindmap", "quiz"],
+                "requested_resource_type": "",
+            }
+        )
+        == "resource_orchestrator"
+    )
 
 
 def test_dispatch_resource_workers_returns_send_packets():
@@ -191,6 +219,34 @@ async def test_resource_worker_failure_is_captured(monkeypatch):
     assert "quiz failed" in branch["error_message_sanitized"]
 
 
+async def test_study_plan_worker_fails_if_profile_gate_was_bypassed(monkeypatch):
+    async def fake_study_plan_runner(_local_state):
+        raise AssertionError("runner must not be called")
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "study_plan", fake_study_plan_runner)
+
+    result = await resource_worker(
+        {
+            "messages": [HumanMessage(content="make a study plan")],
+            "resource_task": {
+                "task_id": "resource:study_plan",
+                "resource_type": "study_plan",
+            },
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+        }
+    )
+
+    branch = result["resource_branch_results"][0]
+    assert branch["resource_type"] == "study_plan"
+    assert branch["status"] == "failed"
+    assert branch["error_type"] == "RuntimeError"
+    assert (
+        "study_plan_profile_missing_after_preflight"
+        in branch["error_message_sanitized"]
+    )
+
+
 async def test_resource_worker_reraises_graph_interrupt(monkeypatch):
     async def interrupting_runner(_local_state):
         raise GraphInterrupt(())
@@ -204,6 +260,11 @@ async def test_resource_worker_reraises_graph_interrupt(monkeypatch):
                 "resource_task": {
                     "task_id": "resource:study_plan",
                     "resource_type": "study_plan",
+                },
+                "learner_profile": {
+                    "learning_goal": "Master ML",
+                    "current_foundation": "Python",
+                    "daily_study_time": "2 hours",
                 },
             }
         )

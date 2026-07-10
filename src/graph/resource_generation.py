@@ -58,9 +58,9 @@ from src.graph.study_plan import (
     study_plan_agent,
     study_plan_consensus,
     study_plan_emotional_intel,
+    missing_profile_fields_for_resource,
     study_plan_output,
     study_plan_planner,
-    study_plan_profile_gate,
     study_plan_reviewer_academic,
     study_plan_reviewer_emotional,
     study_plan_rewrite,
@@ -306,6 +306,44 @@ def dispatch_resource_workers(state: LearningState) -> list[Send]:
     ]
 
 
+@traced_node
+async def resource_preflight_router(state: LearningState) -> dict:
+    """Normalize requested resources before graph-level resource preflight gates."""
+    resource_types = normalize_requested_resource_types(
+        state.get("requested_resource_types") or [],
+        state.get("requested_resource_type") or "",
+    )
+    emit_a3_trace(
+        logger,
+        "resource_generation.preflight.checked",
+        {
+            "requested_resource_types": resource_types,
+            "requires_profile_completion_gate": "study_plan" in resource_types,
+            "resource_count": len(resource_types),
+        },
+        state=state,
+        env_flag="LOG_GENERATION_SUMMARY",
+    )
+    return {
+        "requested_resource_type": resource_types[0] if resource_types else "",
+        "requested_resource_types": resource_types,
+        "resource_generation_status": "preflight" if resource_types else "skipped",
+    }
+
+
+def route_after_resource_preflight(state: LearningState) -> str:
+    """Route study-plan requests through the graph-level profile checkpoint gate."""
+    resource_types = normalize_requested_resource_types(
+        state.get("requested_resource_types") or [],
+        state.get("requested_resource_type") or "",
+    )
+    return (
+        "study_plan_profile_gate_main"
+        if "study_plan" in resource_types
+        else "resource_orchestrator"
+    )
+
+
 def _merge_node_output(local_state: dict, output: dict | None) -> str:
     if not output:
         return ""
@@ -522,12 +560,6 @@ async def _run_study_plan_resource(local_state: dict) -> str:
         await _merge_resource_subnode(
             local_state,
             resource_type="study_plan",
-            subnode="study_plan_profile_gate",
-            func=study_plan_profile_gate,
-        )
-        await _merge_resource_subnode(
-            local_state,
-            resource_type="study_plan",
             subnode="study_plan_agent",
             func=study_plan_agent,
         )
@@ -663,6 +695,25 @@ RESOURCE_RUNNERS = {
 }
 
 
+def _assert_study_plan_profile_complete(local_state: dict) -> None:
+    """Fail fast if the graph-level profile gate was bypassed for study plans."""
+    requirement_status = missing_profile_fields_for_resource(
+        local_state,
+        "study_plan",
+    )
+    missing_required = requirement_status.get("missing_required_fields") or []
+    if not missing_required:
+        return
+    missing_keys = [
+        str(field.get("key") or "")
+        for field in missing_required
+        if isinstance(field, dict) and str(field.get("key") or "").strip()
+    ]
+    raise RuntimeError(
+        "study_plan_profile_missing_after_preflight: " + ",".join(sorted(missing_keys))
+    )
+
+
 def _state_updates_for_resource(resource_type: str, local_state: dict) -> dict:
     return {
         key: local_state.get(key)
@@ -782,6 +833,8 @@ async def resource_worker(state: LearningState) -> dict:
         local_state = dict(state)
         local_state["requested_resource_type"] = resource_type
         local_state["requested_resource_types"] = [resource_type]
+        if resource_type == "study_plan":
+            _assert_study_plan_profile_complete(local_state)
         message_content = await RESOURCE_RUNNERS[resource_type](local_state)
         result = _success_result(
             resource_type,

@@ -295,6 +295,8 @@ def missing_profile_fields_for_resource(
 def _profile_completion_request_payload(
     state: LearningState,
     missing_required_fields: list[dict[str, Any]],
+    *,
+    node_name: str = "study_plan_profile_gate",
 ) -> dict[str, Any]:
     field_keys = {str(field["key"]) for field in missing_required_fields}
     fields = [
@@ -307,7 +309,7 @@ def _profile_completion_request_payload(
         "title": "生成学习计划前需要补充学习信息",
         "fields": fields,
         "missing_required_keys": sorted(field_keys),
-        "node": "study_plan_profile_gate",
+        "node": node_name,
         "resource_type": "study_plan",
         "thread_id": sanitize_workspace_text(
             state.get("thread_id") or state.get("session_id"),
@@ -746,8 +748,11 @@ async def study_plan_planner(state: LearningState) -> dict:
     }
 
 
-@traced_node
-async def study_plan_profile_gate(state: LearningState) -> dict:
+async def _study_plan_profile_gate(
+    state: LearningState,
+    *,
+    node_name: str,
+) -> dict:
     """Pause study-plan generation until minimum learner profile facts exist."""
     requirement_status = missing_profile_fields_for_resource(state, "study_plan")
     missing_required_fields = list(
@@ -761,7 +766,9 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
         }
 
     request_payload = _profile_completion_request_payload(
-        state, missing_required_fields
+        state,
+        missing_required_fields,
+        node_name=node_name,
     )
     safe_profile_request = {
         "title": request_payload["title"],
@@ -772,7 +779,7 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
         logger,
         "profile_completion.required",
         {
-            "node_name": "study_plan_profile_gate",
+            "node_name": node_name,
             "resource_type": "study_plan",
             "field_count": len(request_payload.get("fields") or []),
             "required_field_count": len(missing_required_fields),
@@ -808,7 +815,7 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
         logger,
         "profile_completion.completed",
         {
-            "node_name": "study_plan_profile_gate",
+            "node_name": node_name,
             "resource_type": "study_plan",
             "field_count": len(completion),
             "workspace_id": trace_payload.get("workspace_id", ""),
@@ -830,6 +837,24 @@ async def study_plan_profile_gate(state: LearningState) -> dict:
             }
         ],
     }
+
+
+@traced_node
+async def study_plan_profile_gate(state: LearningState) -> dict:
+    """Backward-compatible internal profile-completion gate."""
+    return await _study_plan_profile_gate(
+        state,
+        node_name="study_plan_profile_gate",
+    )
+
+
+@traced_node
+async def study_plan_profile_gate_main(state: LearningState) -> dict:
+    """Graph-level resumable profile-completion gate for study-plan resources."""
+    return await _study_plan_profile_gate(
+        state,
+        node_name="study_plan_profile_gate_main",
+    )
 
 
 @traced_node

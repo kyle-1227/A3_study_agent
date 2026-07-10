@@ -24,11 +24,14 @@ from src.graph.resource_generation import (
     SUPPORTED_RESOURCE_TYPES,
     dispatch_resource_workers,
     normalize_requested_resource_types,
+    resource_preflight_router,
     resource_bundle_output,
     resource_orchestrator,
     resource_worker,
+    route_after_resource_preflight,
 )
 from src.graph.state import LearningState
+from src.graph.study_plan import study_plan_profile_gate_main
 from src.graph.supervisor import handle_unknown, route_by_intent, supervisor_node
 from src.run_control import wrap_interruptible_node
 
@@ -63,6 +66,11 @@ def build_graph() -> StateGraph:
     add_interruptible_node("emotional_response", emotional_response)
 
     # Unified resource generation
+    add_interruptible_node("resource_preflight_router", resource_preflight_router)
+    add_interruptible_node(
+        "study_plan_profile_gate_main",
+        study_plan_profile_gate_main,
+    )
     add_interruptible_node("resource_orchestrator", resource_orchestrator)
     add_interruptible_node("resource_worker", resource_worker)
     add_interruptible_node("resource_bundle_output", resource_bundle_output)
@@ -111,12 +119,21 @@ def build_graph() -> StateGraph:
         route_after_evidence_judge,
         {
             "answer": "generate_answer",
-            "resources": "resource_orchestrator",
+            "resources": "resource_preflight_router",
             "evidence_summary_output": "evidence_summary_output",
         },
     )
     graph.add_edge("evidence_summary_output", END)
 
+    graph.add_conditional_edges(
+        "resource_preflight_router",
+        route_after_resource_preflight,
+        {
+            "study_plan_profile_gate_main": "study_plan_profile_gate_main",
+            "resource_orchestrator": "resource_orchestrator",
+        },
+    )
+    graph.add_edge("study_plan_profile_gate_main", "resource_orchestrator")
     graph.add_conditional_edges("resource_orchestrator", dispatch_resource_workers)
     graph.add_edge("resource_worker", "resource_bundle_output")
     graph.add_edge("resource_bundle_output", END)
@@ -137,7 +154,7 @@ def build_graph() -> StateGraph:
     # Emotional support ends after the response node.
     graph.add_edge("emotional_response", END)
 
-    # Unknown: direct to END
+    # Unknown: legacy handler remains available for compatibility.
     graph.add_edge("handle_unknown", END)
 
     return graph
