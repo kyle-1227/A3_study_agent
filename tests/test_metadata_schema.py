@@ -27,7 +27,11 @@ def local_tmp_path():
         yield Path(tmpdir)
 
 
-def test_load_documents_outputs_scalar_metadata_with_stable_ids(local_tmp_path):
+def test_load_documents_outputs_scalar_metadata_with_stable_ids(
+    local_tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("RAG_SPLITTER_MODE", raising=False)
     source = local_tmp_path / "notes_2026.txt"
     source.write_text("Header\n\nUseful source content. " * 80, encoding="utf-8")
 

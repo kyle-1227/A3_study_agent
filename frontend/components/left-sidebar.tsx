@@ -82,6 +82,10 @@ export function LeftSidebar({
   const router = useRouter()
 
   useEffect(() => {
+    if (window.matchMedia("(max-width: 767px)").matches) setIsCollapsed(true)
+  }, [])
+
+  useEffect(() => {
     setVolunteerHistory(getVolunteerHistory())
     const onStorage = () => setVolunteerHistory(getVolunteerHistory())
     window.addEventListener("storage", onStorage)

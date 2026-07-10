@@ -2188,11 +2188,33 @@ async def _stream_graph_events(
                 except Exception as exc:
                     payload = {
                         "type": "context_usage_report_error",
+                        "schema_version": "context_usage_report_error_v1",
+                        "manifest_id": sanitize_error_message(
+                            event.get("manifest_id", ""),
+                            max_chars=180,
+                        ),
                         "reason": "context_usage_report_contract_invalid",
+                        "warning": "context usage report contract validation failed",
                         "error_type": type(exc).__name__,
                         "node": sanitize_error_message(
                             event.get("node_name", ""),
                             max_chars=120,
+                        ),
+                        "node_name": sanitize_error_message(
+                            event.get("node_name", ""),
+                            max_chars=120,
+                        ),
+                        "llm_node": sanitize_error_message(
+                            event.get("llm_node", ""),
+                            max_chars=120,
+                        ),
+                        "provider": sanitize_error_message(
+                            event.get("provider", ""),
+                            max_chars=120,
+                        ),
+                        "model": sanitize_error_message(
+                            event.get("model", ""),
+                            max_chars=160,
                         ),
                     }
                     drained.append(
@@ -2268,11 +2290,16 @@ async def _stream_graph_events(
             if stage == "context_usage_report_error":
                 payload = {
                     "type": "context_usage_report_error",
+                    "schema_version": "context_usage_report_error_v1",
                     "manifest_id": sanitize_error_message(
                         event.get("manifest_id", ""),
                         max_chars=180,
                     ),
                     "node": sanitize_error_message(
+                        event.get("node_name", ""),
+                        max_chars=120,
+                    ),
+                    "node_name": sanitize_error_message(
                         event.get("node_name", ""),
                         max_chars=120,
                     ),

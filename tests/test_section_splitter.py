@@ -13,9 +13,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
-from langchain_core.documents import Document
-
 # ---------------------------------------------------------------------------
 # Sample university course assessment text (simplified)
 # ---------------------------------------------------------------------------
@@ -64,6 +61,7 @@ SAMPLE_NO_SECTIONS = """\
 # TestSectionPattern — regex detection
 # ===========================================================================
 
+
 class TestSectionPattern:
     """Verify the section header regex matches expected patterns."""
 
@@ -106,6 +104,7 @@ class TestSectionPattern:
 # ===========================================================================
 # TestSplitIntoSections — core splitting logic
 # ===========================================================================
+
 
 class TestSplitIntoSections:
     """Verify text is correctly split into (title, body) pairs."""
@@ -177,6 +176,7 @@ class TestSplitIntoSections:
 # ===========================================================================
 # TestCreateDocuments — full chunking pipeline
 # ===========================================================================
+
 
 class TestCreateDocuments:
     """Verify create_documents produces chunks with section_title metadata."""
@@ -286,6 +286,7 @@ class TestCreateDocuments:
 # TestLoaderIntegration — load_documents with section splitter
 # ===========================================================================
 
+
 class TestLoaderIntegration:
     """Verify load_documents accepts and uses a custom splitter."""
 
@@ -310,10 +311,11 @@ class TestLoaderIntegration:
             assert any("综合应用" in t for t in titles if t)
             assert any("基础概念" in t for t in titles if t)
 
-    def test_load_documents_default_splitter_unchanged(self):
+    def test_load_documents_default_splitter_unchanged(self, monkeypatch):
         """Without splitter param, load_documents behaves as before."""
         from src.rag.loader import load_documents
 
+        monkeypatch.delenv("RAG_SPLITTER_MODE", raising=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / "test_2024.txt"
             p.write_text("Simple test content " * 50, encoding="utf-8")

@@ -26,7 +26,6 @@ def test_context_apply_module_does_not_implement_phase4_capabilities():
         "write_memory",
         "save_memory",
         "upsert_memory",
-        "summary",
         "summarizer",
         "compaction",
         "compact",

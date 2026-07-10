@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.observability.a3_trace import emit_a3_trace
 from src.observability.llm_input import (
     build_llm_input_observation,
     emit_llm_input_usage,
@@ -164,6 +165,54 @@ async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist
     assert "secret-user-question" not in serialized_report
     updates = [call.args[1] for call in graph.aupdate_state.await_args_list]
     assert any("context_usage_report" in item for item in updates)
+
+
+@pytest.mark.anyio
+async def test_usage_report_error_sse_preserves_versioned_contract(monkeypatch):
+    from app import _stream_graph_events
+
+    monkeypatch.setenv("LOG_A3_TRACE", "true")
+
+    async def events():
+        emit_a3_trace(
+            logging.getLogger("test_usage_report_error_sse"),
+            "context_usage_report_error",
+            {
+                "manifest_id": "llm_input_manifest:v1:failed",
+                "node_name": "qa_agent",
+                "llm_node": "qa_agent",
+                "provider": "configured-provider",
+                "model": "configured-model",
+                "reason": "budget_unavailable",
+                "warning": "budget accounting failed",
+                "error_type": "ContextUsageError",
+            },
+            state={"request_id": "r1", "thread_id": "t1"},
+            env_flag="LOG_A3_TRACE",
+        )
+        yield _node_event("qa_agent", "on_chain_start")
+        yield _node_event("qa_agent", "on_chain_end")
+
+    graph = _graph(events(), activity=True)
+    collected = []
+    async for item in _stream_graph_events(
+        graph,
+        {"request_id": "r1", "thread_id": "t1"},
+        {"configurable": {"thread_id": "t1"}},
+        "t1",
+        request_id="r1",
+        preserve_context_history=True,
+    ):
+        collected.append(item)
+
+    error = next(
+        item
+        for item in _payloads(collected)
+        if item.get("type") == "context_usage_report_error"
+    )
+    assert error["schema_version"] == "context_usage_report_error_v1"
+    assert error["node_name"] == "qa_agent"
+    assert error["node"] == "qa_agent"
 
 
 @pytest.mark.anyio

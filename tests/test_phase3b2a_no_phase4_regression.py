@@ -195,7 +195,7 @@ def test_trace_module_does_not_declare_forbidden_payload_fields():
         assert token not in source
 
 
-def test_graph_raw_scorer_bypasses_plain_llm_apply_path():
+def test_graph_raw_scorer_bypasses_ce_apply_but_keeps_mandatory_input_accounting():
     source = _source(GRAPH_LLM_SOURCE)
     marker = "async def invoke_context_importance_scorer_raw"
     assert marker in source
@@ -207,11 +207,19 @@ def test_graph_raw_scorer_bypasses_plain_llm_apply_path():
 
     forbidden = (
         "invoke_plain_llm_fail_fast(",
-        "emit_context_usage_trace",
         "emit_context_items_shadow",
         "emit_context_packing_shadow",
         "build_applied_messages",
+        "prepare_messages_with_context_policy(",
         "plain_llm_output",
     )
     for token in forbidden:
         assert token not in raw_code
+
+    required = (
+        "build_llm_input_observation(",
+        "emit_context_usage_trace(",
+        "invoke_with_provider_transport_retry(",
+    )
+    for token in required:
+        assert token in raw_code

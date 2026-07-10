@@ -635,8 +635,8 @@ async def invoke_context_importance_scorer_raw(
 
     CE-3 production config keeps importance scoring disabled. This raw transport
     path remains isolated for explicit tests or future opt-in experiments and
-    must avoid invoke_plain_llm_fail_fast(), context usage/items/packing/apply,
-    and state or memory writes, while still emitting provider input manifests.
+    must avoid invoke_plain_llm_fail_fast(), CE item collection/packing/apply,
+    and state or memory writes, while still emitting manifests and reconciled usage.
     """
     if timeout_seconds <= 0:
         raise ContextImportanceError(

@@ -26,12 +26,12 @@ def test_phase2_keeps_model_window_and_memory_budget_config_unchanged():
     assert settings["memory"]["token_budget"]["total_budget"] == 4096
 
 
-def test_phase2_provider_config_defaults_to_shadow_non_strict():
+def test_provider_collection_is_active_but_remains_non_strict():
     settings = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
     providers = settings["context_engineering"]["providers"]
 
     assert providers["enabled"] is True
-    assert providers["shadow_mode"] is True
+    assert providers["shadow_mode"] is False
     assert providers["strict"] is False
 
 

@@ -80,7 +80,9 @@ def test_cleaning_metadata_is_scalar_only():
 
     assert metadata
     assert all(key.startswith("cleaning_") for key in metadata)
-    assert all(isinstance(value, (str, int, float, bool)) for value in metadata.values())
+    assert all(
+        isinstance(value, (str, int, float, bool)) for value in metadata.values()
+    )
 
 
 def test_same_text_cleans_same_way_for_different_subjects():
@@ -92,7 +94,8 @@ def test_same_text_cleans_same_way_for_different_subjects():
     assert cleaned_a == cleaned_b
 
 
-def test_loader_adds_only_cleaning_metadata_from_new_pipeline():
+def test_loader_adds_only_cleaning_metadata_from_new_pipeline(monkeypatch):
+    monkeypatch.delenv("RAG_SPLITTER_MODE", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "notes_2026.txt"
         source.write_text("Header\n\n\nUseful source content. " * 20, encoding="utf-8")

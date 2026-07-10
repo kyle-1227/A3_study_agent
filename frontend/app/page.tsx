@@ -4,15 +4,12 @@ import { useState, useCallback, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { LeftSidebar } from "@/components/left-sidebar"
 import { useUser } from "@/hooks/use-user"
-import { RightPanel, NodeEvent, LogEntry } from "@/components/right-panel"
+import { RightPanel, type LogEntry } from "@/components/right-panel"
 import {
   ChatArea,
-  BackgroundContextWindow,
-  ContextUsage,
-  ContextUsageError,
-  Message,
-  ResourceGenerationStatus,
-  ResourceGenerationStep,
+  type Message,
+  type ResourceGenerationStatus,
+  type ResourceGenerationStep,
 } from "@/components/chat-area"
 import { PlanReview } from "@/components/plan-review"
 import {
@@ -22,8 +19,45 @@ import {
   resourceMessageIdFromDedupeKey,
   type ResourceFinalEvent,
 } from "@/lib/resource-final"
+import { mergeActivityTimeline } from "@/lib/activity-reducer"
+import {
+  applyContextUsageError,
+  applyContextUsageReport,
+  beginContextUsageUpdate,
+  EMPTY_CONTEXT_USAGE_STATE,
+  finishContextUsageUpdate,
+  restoreContextUsageReport,
+} from "@/lib/context-usage-state"
+import {
+  attachActivityToAssistantMessage,
+  restoreActivitiesToMessages,
+} from "@/lib/message-activity"
+import {
+  ContractParseError,
+  parseActivityEvent,
+  parseActivityTimeline,
+  parseBackgroundContextWindow,
+  parseContextUsageReport,
+  parseContextUsageReportError,
+  parseGraphManifest,
+  parseGraphManifestRef,
+  parseGraphManifestUnavailable,
+  parseStreamContext,
+  type ActivityEvent,
+  type BackgroundContextWindow,
+  type ContextUsageReportError,
+  type GraphManifest,
+  type GraphManifestUnavailable,
+} from "@/lib/observability-contracts"
+import { requirePublicApiBaseUrl } from "@/lib/public-config"
+import {
+  beginStreamLifecycle,
+  IDLE_STREAM_LIFECYCLE,
+  reduceStreamLifecycle,
+  type StreamLifecycleState,
+} from "@/lib/stream-lifecycle"
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+const API_BASE_URL = requirePublicApiBaseUrl()
 
 const A3_CHAT_HISTORY_KEY = "a3_chat_history"
 const A3_CURRENT_CHAT_ID_KEY = "a3_current_chat_id"
@@ -110,14 +144,20 @@ function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
 
 function normalizeMessages(raw: unknown): Message[] {
   if (!Array.isArray(raw)) return []
-  return raw.filter((item: any) => {
-    return (
-      item &&
-      typeof item.id === "string" &&
-      (item.role === "user" || item.role === "assistant") &&
-      typeof item.content === "string"
-    )
-  }) as Message[]
+  return raw
+    .filter((item: any) => {
+      return (
+        item &&
+        typeof item.id === "string" &&
+        (item.role === "user" || item.role === "assistant") &&
+        typeof item.content === "string"
+      )
+    })
+    .map((item: Message) => {
+      if (!item.activities) return item
+      const parsed = parseActivityTimeline(item.activities)
+      return { ...item, activities: parsed.items }
+    })
 }
 
 function makeChatTitle(content: string): string {
@@ -130,71 +170,31 @@ function timestamp(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false })
 }
 
-function numberField(data: any, key: string, legacyKey?: string): number {
-  if (typeof data[key] === "number") return data[key]
-  if (legacyKey && typeof data[legacyKey] === "number") return data[legacyKey]
-  return 0
+function contractFailureReason(error: unknown): string {
+  if (error instanceof ContractParseError) return error.reason
+  return error instanceof Error ? error.message : "unknown_contract_error"
 }
 
-function mapContextUsage(data: any): ContextUsage {
+function graphManifestFailure(error: unknown): GraphManifestUnavailable {
   return {
-    node: typeof data.node === "string" ? data.node : "",
-    llmNode: typeof data.llm_node === "string" ? data.llm_node : "",
-    provider: typeof data.provider === "string" ? data.provider : "",
-    model: typeof data.model === "string" ? data.model : "",
-    inputEstimatedTokens: numberField(data, "input_estimated_tokens", "prompt_tokens"),
-    reservedOutputTokens: numberField(data, "reserved_output_tokens", "output_reserved_tokens"),
-    usedTokens: numberField(data, "used_tokens"),
-    maxContextTokens: numberField(data, "max_context_tokens"),
-    availableTokens: numberField(data, "available_tokens", "remaining_tokens"),
-    usedRatio: numberField(data, "used_ratio", "usage_ratio"),
-    warningLevel:
-      typeof data.warning_level === "string"
-        ? data.warning_level
-        : typeof data.level === "string"
-          ? data.level
-          : "ok",
-    estimated: Boolean(data.estimated),
-    tokenizerMode: typeof data.tokenizer_mode === "string" ? data.tokenizer_mode : "",
-    messageCount: numberField(data, "message_count"),
-    schemaSizeChars: typeof data.schema_size_chars === "number" ? data.schema_size_chars : undefined,
+    schemaVersion: "graph_manifest_error_v1",
+    error: "graph_manifest_unavailable",
+    reason: contractFailureReason(error).slice(0, 160) || "graph_manifest_contract_invalid",
+    errorType: error instanceof Error ? error.name.slice(0, 120) : "ContractError",
   }
 }
 
-function mapContextUsageError(data: any): ContextUsageError {
+function contextUsageContractFailure(error: unknown): ContextUsageReportError {
   return {
-    node: typeof data.node === "string" ? data.node : "",
-    llmNode: typeof data.llm_node === "string" ? data.llm_node : "",
-    provider: typeof data.provider === "string" ? data.provider : "",
-    model: typeof data.model === "string" ? data.model : "",
-    reason: typeof data.reason === "string" ? data.reason : "context_usage_unavailable",
-    warning:
-      typeof data.warning === "string"
-        ? data.warning
-        : "context usage telemetry unavailable",
-  }
-}
-
-function mapBackgroundContextWindow(data: any): BackgroundContextWindow | null {
-  if (!data || typeof data !== "object") return null
-  const lastManifestId = typeof data.last_manifest_id === "string" ? data.last_manifest_id : ""
-  const usedTokens = numberField(data, "used_tokens")
-  const maxContextTokens = numberField(data, "max_context_tokens")
-  const present = Boolean(lastManifestId || usedTokens > 0 || data.background_context_window_present)
-  if (!present) return null
-  return {
-    present,
-    usedTokens,
-    maxContextTokens,
-    usedRatio: numberField(data, "used_ratio"),
-    updatedAt: typeof data.updated_at === "string" ? data.updated_at : "",
-    manifestCount: numberField(data, "manifest_count", "llm_input_manifest_count"),
-    sectionNames: Array.isArray(data.section_names) ? data.section_names.filter((item: any) => typeof item === "string") : [],
-    workspacePresent: Boolean(data.workspace_present),
-    workspaceActiveSubject: typeof data.workspace_active_subject === "string" ? data.workspace_active_subject : "",
-    workspaceEvidenceSummaryCount: numberField(data, "workspace_evidence_summary_count"),
-    workspaceGapCount: numberField(data, "workspace_gap_count"),
-    workspaceArtifactCount: numberField(data, "workspace_artifact_count"),
+    schemaVersion: "context_usage_report_error_v1",
+    manifestId: "",
+    nodeName: "",
+    llmNode: "",
+    provider: "",
+    model: "",
+    reason: "context_usage_report_contract_invalid",
+    warning: contractFailureReason(error).slice(0, 200),
+    errorType: error instanceof Error ? error.name.slice(0, 120) : "ContractError",
   }
 }
 
@@ -228,44 +228,6 @@ function getAuthHeaders(): Record<string, string> {
   return {}
 }
 
-const RESOURCE_NODE_COPY: Record<string, { title: string; detail: string }> = {
-  supervisor: { title: "解析学习需求", detail: "识别课程主题、学习目标和需要生成的资源类型。" },
-  memory_use_decider: { title: "确认历史上下文", detail: "判断本轮检索是否需要结合历史学习记录。" },
-  search_query_rewriter: { title: "改写检索查询", detail: "将原始问题改写为适合本地课程库和网络搜索的查询。" },
-  academic_router: { title: "选择学习资源链路", detail: "调度本地 RAG、网络搜索和资源生成子 Agent。" },
-  rag_retrieve: { title: "本地 RAG", detail: "从本地课程资料库检索候选证据。" },
-  web_search: { title: "Tavily 网络搜索", detail: "检索外部学习资料与官方文档候选证据。" },
-  evidence_judge: { title: "证据评审", detail: "裁决本地和网络候选证据，只保留可信上下文。" },
-  evidence_summary_output: { title: "证据摘要输出", detail: "证据不足时输出摘要、缺口和后续检索建议。" },
-  generate_answer: { title: "生成学习回答", detail: "基于已裁决证据生成课程答疑或学习资源建议。" },
-  evaluate_hallucination: { title: "可信度校验", detail: "检查回答与证据的一致性。" },
-  rewrite_query: { title: "重写检索问题", detail: "根据校验反馈准备下一轮检索。" },
-  study_plan_emotional_intel: { title: "情绪画像分析", detail: "分析学习负担、节奏风险和支持需求。" },
-  study_plan_planner: { title: "学习计划规划", detail: "基于证据、目标和学习者状态规划学习计划蓝图。" },
-  study_plan_agent: { title: "学习计划生成", detail: "生成结构化个性化学习计划。" },
-  study_plan_reviewer_academic: { title: "学习计划学术审查", detail: "检查阶段递进、证据一致性和资源可靠性。" },
-  study_plan_reviewer_emotional: { title: "学习计划负担审查", detail: "检查任务负担、复盘休息和执行可持续性。" },
-  study_plan_consensus: { title: "学习计划共识检查", detail: "汇总双 reviewer 结论，决定输出或修订。" },
-  study_plan_rewrite: { title: "学习计划修订", detail: "根据审查意见准备下一轮生成。" },
-  study_plan_output: { title: "学习计划输出", detail: "渲染 Markdown 学习计划并生成文档 artifact。" },
-  mindmap_planner: { title: "规划知识结构", detail: "规划课程知识点的导图结构。" },
-  mindmap_agent: { title: "生成导图", detail: "生成结构化 JSON Tree。" },
-  mindmap_reviewer: { title: "审查导图质量", detail: "检查层级、覆盖和学术准确性。" },
-  mindmap_rewrite: { title: "修订导图", detail: "根据审查意见重写导图。" },
-  mindmap_output: { title: "导出导图", detail: "生成 XMind 等导图 artifact。" },
-  exercise_planner: { title: "规划练习结构", detail: "规划基础、进阶、应用和自检练习。" },
-  exercise_agent: { title: "生成分层练习", detail: "生成包含答案、解析和易错提醒的练习题。" },
-  exercise_reviewer: { title: "审查练习质量", detail: "检查题型覆盖、难度递进和解析完整性。" },
-  exercise_rewrite: { title: "修订练习", detail: "根据审查意见重写练习。" },
-  exercise_output: { title: "输出练习资源", detail: "整理最终分层练习资源。" },
-  review_doc_planner: { title: "规划复习文档", detail: "规划 Markdown 复习文档结构。" },
-  review_doc_agent: { title: "生成复习文档", detail: "生成 Markdown 课程复习文档。" },
-  review_doc_reviewer: { title: "审查文档质量", detail: "检查结构、证据使用和内容完整性。" },
-  review_doc_rewrite: { title: "修订复习文档", detail: "根据审查意见重写文档。" },
-  review_doc_output: { title: "输出复习文档", detail: "生成 Markdown/DOCX 文档 artifact。" },
-  emotional_response: { title: "生成学业支持建议", detail: "围绕学习压力、适应和执行困难生成支持性建议。" },
-  handle_unknown: { title: "确认服务范围", detail: "判断请求是否属于高校课程学习与个性化资源生成范围。" },
-}
 function createInitialResourceStatus(): ResourceGenerationStatus {
   return {
     state: "running",
@@ -273,32 +235,6 @@ function createInitialResourceStatus(): ResourceGenerationStatus {
     steps: [],
     tokenUsage: { input: 0, output: 0, total: 0 },
   }
-}
-
-function createResourceStep(
-  node: string,
-  state: ResourceGenerationStep["state"],
-  ts: string,
-): ResourceGenerationStep {
-  const copy = RESOURCE_NODE_COPY[node] ?? {
-    title: node,
-    detail: "正在处理个性化学习资源生成流程中的一个技术阶段。",
-  }
-
-  return {
-    node,
-    title: copy.title,
-    detail: copy.detail,
-    state,
-    startedAt: ts,
-  }
-}
-
-function findLastRunningStepIndex(steps: ResourceGenerationStep[], node: string): number {
-  for (let i = steps.length - 1; i >= 0; i--) {
-    if (steps[i].node === node && steps[i].state === "running") return i
-  }
-  return -1
 }
 
 function ProfileCompletionDialog({
@@ -381,11 +317,14 @@ export default function Home() {
   const [logs, setLogs] = useState<LogEntry[]>([
     { type: "info", message: "[INFO] 系统已初始化。", ts: "--:--:--" },
   ])
-  const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([])
+  const [activityTimeline, setActivityTimeline] = useState<ActivityEvent[]>([])
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
-  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
-  const [contextUsageError, setContextUsageError] = useState<ContextUsageError | null>(null)
+  const [contextUsageState, setContextUsageState] = useState(EMPTY_CONTEXT_USAGE_STATE)
   const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
+  const [graphManifest, setGraphManifest] = useState<GraphManifest | null>(null)
+  const [graphManifestError, setGraphManifestError] = useState<GraphManifestUnavailable | null>(null)
+  const [graphManifestLoading, setGraphManifestLoading] = useState(false)
+  const [currentRequestId, setCurrentRequestId] = useState("")
   const [canContinue, setCanContinue] = useState(false)
   const [stopPending, setStopPending] = useState(false)
 
@@ -411,6 +350,8 @@ export default function Home() {
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
+  const streamLifecycleRef = useRef<StreamLifecycleState>(IDLE_STREAM_LIFECYCLE)
+  const graphManifestVersionRef = useRef("")
   const resourceFinalDedupeRef = useRef<Set<string>>(new Set())
   const abortControllerRef = useRef<AbortController | null>(null)
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -516,6 +457,8 @@ export default function Home() {
         id: messageId,
         role: "assistant",
         content: "",
+        requestId: typeof event.request_id === "string" ? event.request_id : undefined,
+        threadId: typeof event.thread_id === "string" ? event.thread_id : undefined,
         resourceStatus: createInitialResourceStatus(),
       }
       let foundTarget = false
@@ -534,12 +477,12 @@ export default function Home() {
   const handleNewChat = useCallback(() => {
     setSelectedChatId(undefined)
     setMessages([])
-    setNodeEvents([])
+    setActivityTimeline([])
     setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
-    setContextUsage(null)
-    setContextUsageError(null)
+    setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
+    setCurrentRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -557,10 +500,10 @@ export default function Home() {
     const threadId = chat?.threadId || id
     setSelectedChatId(threadId)
     setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
-    setNodeEvents([])
-    setContextUsage(null)
-    setContextUsageError(null)
+    setActivityTimeline([])
+    setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
+    setCurrentRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -588,11 +531,11 @@ export default function Home() {
     setChatHistory([])
     setSelectedChatId(undefined)
     setMessages([])
-    setNodeEvents([])
+    setActivityTimeline([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
-    setContextUsage(null)
-    setContextUsageError(null)
+    setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
+    setCurrentRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -623,8 +566,11 @@ export default function Home() {
     if (selectedChatId === id || selectedChatId === threadId) {
       setSelectedChatId(undefined)
       setMessages([])
-      setNodeEvents([])
+      setActivityTimeline([])
       setTokenUsage({ input: 0, output: 0, total: 0 })
+      setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
+      setBackgroundContextWindow(null)
+      setCurrentRequestId("")
       setIsInterrupted(false)
       setInterruptDraft("")
       setMemoryConfirmation(null)
@@ -664,9 +610,64 @@ export default function Home() {
     }
   }, [chatHistory, selectedChatId, setActiveThreadId])
 
+  const fetchGraphManifest = useCallback(async (
+    expectedVersion = "",
+    endpoint = "/graph/manifest",
+  ) => {
+    setGraphManifestLoading(true)
+    try {
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        headers: { ...getAuthHeaders() },
+      })
+      const payload: unknown = await response.json()
+      if (!response.ok) {
+        const unavailable = parseGraphManifestUnavailable(payload)
+        graphManifestVersionRef.current = ""
+        setGraphManifest(null)
+        setGraphManifestError(unavailable)
+        return
+      }
+      const manifest = parseGraphManifest(payload)
+      if (expectedVersion && manifest.graphVersion !== expectedVersion) {
+        throw new ContractParseError(
+          "graph_manifest_v1",
+          "graph_version does not match the stream reference",
+        )
+      }
+      graphManifestVersionRef.current = manifest.graphVersion
+      setGraphManifest((current) =>
+        current?.graphVersion === manifest.graphVersion ? current : manifest,
+      )
+      setGraphManifestError(null)
+    } catch (error) {
+      graphManifestVersionRef.current = ""
+      setGraphManifest(null)
+      setGraphManifestError(graphManifestFailure(error))
+      setLogs((current) => [
+        ...current,
+        {
+          type: "warning",
+          message: `[CONTRACT] Graph Manifest rejected: ${contractFailureReason(error)}`,
+          ts: timestamp(),
+        },
+      ])
+    } finally {
+      setGraphManifestLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchGraphManifest()
+  }, [fetchGraphManifest])
+
   /** Process a single SSE data payload shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
+    streamLifecycleRef.current = reduceStreamLifecycle(streamLifecycleRef.current, data)
+    if (["done", "error", "interrupt"].includes(streamLifecycleRef.current.terminalEvent)) {
+      setIsLoading(false)
+      setContextUsageState((current) => finishContextUsageUpdate(current))
+    }
 
     if (data.type === "thread_id") {
       const threadId = data.thread_id
@@ -769,28 +770,146 @@ export default function Home() {
       }
     }
 
-    if (data.type === "context_usage") {
-      const usage = mapContextUsage(data)
-      setContextUsage(usage)
-      setContextUsageError(null)
-      updateAssistantResourceStatus(asstId, (status) => ({
-        ...status,
-        contextUsage: usage,
-      }))
-      setLogs((prev) => [
-        ...prev,
-        {
-          type: "context",
-          message: `[CONTEXT] ${usage.node || usage.llmNode}: ${Math.round(usage.usedRatio * 100)}% used, ${usage.availableTokens} available`,
-          ts: timestamp(),
-        },
-      ])
+    if (data.type === "context_usage_report") {
+      try {
+        const report = parseContextUsageReport(data)
+        setContextUsageState((current) => applyContextUsageReport(current, report))
+        updateAssistantResourceStatus(asstId, (status) => ({ ...status, contextUsage: report }))
+        setLogs((current) => [
+          ...current,
+          {
+            type: "context",
+            message: `[CONTEXT] ${report.nodeName}: ${Math.round(report.usedRatio * 100)}% used, ${report.availableTokens} available`,
+            ts: timestamp(),
+          },
+        ])
+      } catch (error) {
+        setContextUsageState((current) =>
+          applyContextUsageError(current, contextUsageContractFailure(error)),
+        )
+      }
+      return
+    }
+
+    if (data.type === "stream_context") {
+      try {
+        const streamContext = parseStreamContext(data)
+        setCurrentRequestId(streamContext.requestId)
+        setActiveThreadId(streamContext.threadId)
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === asstId && message.role === "assistant"
+              ? {
+                  ...message,
+                  requestId: streamContext.requestId,
+                  threadId: streamContext.threadId,
+                }
+              : message,
+          ),
+        )
+        if (graphManifestVersionRef.current !== streamContext.graphVersion) {
+          void fetchGraphManifest(streamContext.graphVersion)
+        }
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Stream context rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      return
+    }
+
+    if (data.type === "graph_manifest_ref") {
+      try {
+        const reference = parseGraphManifestRef(data)
+        if (graphManifestVersionRef.current !== reference.graphVersion) {
+          void fetchGraphManifest(reference.graphVersion, reference.endpoint)
+        }
+      } catch (error) {
+        setGraphManifest(null)
+        setGraphManifestError(graphManifestFailure(error))
+      }
+      return
+    }
+
+    if (data.type === "activity_event") {
+      try {
+        const activity = parseActivityEvent(data)
+        setCurrentRequestId(activity.requestId)
+        setActivityTimeline((current) => mergeActivityTimeline(current, [activity]))
+        setMessages((current) =>
+          attachActivityToAssistantMessage(current, activity, assistantMessageIdRef.current),
+        )
+        if (activity.node) {
+          updateAssistantResourceStatus(asstId, (status) => {
+            const steps = [...status.steps]
+            const stepState: ResourceGenerationStep["state"] =
+              activity.status === "failed" || activity.status === "interrupted"
+                ? "error"
+                : activity.status === "completed" || activity.status === "skipped"
+                  ? "done"
+                  : "running"
+            let stepIndex = -1
+            for (let index = steps.length - 1; index >= 0; index -= 1) {
+              if (steps[index].node === activity.node) {
+                stepIndex = index
+                break
+              }
+            }
+            const step: ResourceGenerationStep = {
+              ...(stepIndex >= 0 ? steps[stepIndex] : {}),
+              node: activity.node,
+              title: activity.title,
+              detail: activity.summary,
+              state: stepState,
+              startedAt: activity.startedAt,
+              endedAt: stepState === "running" ? undefined : activity.completedAt || activity.updatedAt,
+              durationMs: activity.durationMs,
+              error: stepState === "error" ? activity.summary : undefined,
+            }
+            if (stepIndex >= 0) steps[stepIndex] = step
+            else steps.push(step)
+            return {
+              ...status,
+              state: stepState === "error" ? "error" : status.state,
+              summary: activity.summary || activity.title,
+              steps,
+              error: stepState === "error" ? activity.summary : status.error,
+            }
+          })
+        }
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Activity event rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
       return
     }
 
     if (data.type === "llm_input_manifest") {
-      const background = mapBackgroundContextWindow(data.background_context_window)
-      if (background) setBackgroundContextWindow(background)
+      try {
+        setBackgroundContextWindow(
+          parseBackgroundContextWindow(data.background_context_window),
+        )
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Background context rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
       setLogs((prev) => [
         ...prev,
         {
@@ -802,12 +921,16 @@ export default function Home() {
       return
     }
 
-    if (data.type === "context_usage_error") {
-      const usageError = mapContextUsageError(data)
-      setContextUsage(null)
-      setContextUsageError(usageError)
-      setLogs((prev) => [
-        ...prev,
+    if (data.type === "context_usage_report_error") {
+      let usageError: ContextUsageReportError
+      try {
+        usageError = parseContextUsageReportError(data)
+      } catch (error) {
+        usageError = contextUsageContractFailure(error)
+      }
+      setContextUsageState((current) => applyContextUsageError(current, usageError))
+      setLogs((current) => [
+        ...current,
         {
           type: "warning",
           message: `[CONTEXT] ${usageError.reason}: ${usageError.warning}`,
@@ -884,6 +1007,8 @@ export default function Home() {
       setIsLoading(false)
       return
     }
+
+    if (data.type === "context_usage" || data.type === "context_usage_error") return
 
     if (data.type === "provider_retry") {
       const retryCount = typeof data.retry_count === "number" ? data.retry_count : 0
@@ -1046,114 +1171,7 @@ export default function Home() {
     }
 
     if (data.type === "node_event") {
-      const node: string = data.node
-      const status: "start" | "end" = data.status
-      const now = timestamp()
-
-      updateAssistantResourceStatus(asstId, (resourceStatus) => {
-        const steps = [...resourceStatus.steps]
-        const copy = RESOURCE_NODE_COPY[node]
-
-        if (status === "start") {
-          steps.push(createResourceStep(node, "running", now))
-          return {
-            ...resourceStatus,
-            state: resourceStatus.state === "stopping" ? "stopping" : "running",
-            summary: resourceStatus.state === "stopping"
-              ? resourceStatus.summary
-              : copy?.detail ?? "多智能体正在推进个性化学习资源生成。",
-            steps,
-            waitingForReview: false,
-          }
-        }
-
-        const nextState: ResourceGenerationStep["state"] = data.error ? "error" : "done"
-        const runningIndex = findLastRunningStepIndex(steps, node)
-        const completedStep = {
-          ...(runningIndex >= 0 ? steps[runningIndex] : createResourceStep(node, nextState, now)),
-          state: nextState,
-          endedAt: now,
-          durationMs: data.duration_ms ?? undefined,
-          error: data.error ?? undefined,
-        }
-
-        if (runningIndex >= 0) {
-          steps[runningIndex] = completedStep
-        } else {
-          steps.push(completedStep)
-        }
-
-        return {
-          ...resourceStatus,
-          state: data.error ? "error" : resourceStatus.state,
-          summary: data.error
-            ? "个性化资源生成的某个阶段遇到异常。"
-            : copy?.detail ?? resourceStatus.summary,
-          steps,
-          error: data.error ?? resourceStatus.error,
-        }
-      })
-
-      setNodeEvents((prev) => {
-        if (status === "start") {
-          return [...prev, { node, status: "running", ts: now }]
-        }
-        const nextStatus: NodeEvent["status"] = data.error ? "error" : "done"
-        let updated = false
-        const nextEvents = prev.map((e) => {
-          if (e.node === node && e.status === "running") {
-            updated = true
-            return {
-              ...e,
-              status: nextStatus,
-              endTs: now,
-              durationMs: data.duration_ms ?? undefined,
-              error: data.error ?? undefined,
-              synthetic: Boolean(data.synthetic),
-            }
-          }
-          return e
-        })
-        if (updated) return nextEvents
-        return [
-          ...nextEvents,
-          {
-            node,
-            status: nextStatus,
-            ts: now,
-            endTs: now,
-            durationMs: data.duration_ms ?? undefined,
-            error: data.error ?? undefined,
-            synthetic: Boolean(data.synthetic),
-          },
-        ]
-      })
-
-      const label = status === "start" ? "进入" : data.error ? "失败" : "完成"
-      setLogs((prev) => [
-        ...prev,
-        { type: data.error ? "error" : "info", message: `${data.error ? "[ERROR]" : "[INFO]"} 节点 ${node} ${label}`, ts: now },
-      ])
-
-      if (status === "end" && data.duration_ms != null) {
-        setLogs((prev) => [
-          ...prev,
-          {
-            type: data.error ? "error" : "perf",
-            message: data.error
-              ? `[ERROR] 节点 "${node}" 在 ${data.duration_ms}ms 后失败`
-              : `[PERF] 节点 "${node}" 完成，用时 ${data.duration_ms}ms`,
-            ts: now,
-          },
-        ])
-      }
-
-      if (status === "end" && data.error) {
-        setLogs((prev) => [
-          ...prev,
-          { type: "error", message: `[ERROR] 节点 "${node}"：${data.error}`, ts: now },
-        ])
-      }
+      // Legacy compatibility event: ActivityEvent is the only source for trail and graph state.
       return
     }
 
@@ -1177,10 +1195,18 @@ export default function Home() {
         { type: "usage", message: `[USAGE] ${data.node}: 输入 ${data.input_tokens} / 输出 ${data.output_tokens}`, ts: now },
       ])
     }
-  }, [attachResourceFinalToAssistant, clearStopTimeout, setActiveThreadId, updateAssistantResourceStatus])
+  }, [
+    attachResourceFinalToAssistant,
+    clearStopTimeout,
+    fetchGraphManifest,
+    setActiveThreadId,
+    updateAssistantResourceStatus,
+  ])
 
   /** Read an SSE response body and dispatch events via processSSEEvent */
   const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
+    streamLifecycleRef.current = beginStreamLifecycle()
+    setContextUsageState((current) => beginContextUsageUpdate(current))
     const reader = body.getReader()
     const decoder = new TextDecoder()
     let buffer = ""
@@ -1198,8 +1224,15 @@ export default function Home() {
           try {
             const data = JSON.parse(part.slice(6))
             processSSEEvent(data)
-          } catch {
-            // Ignore partial or malformed JSON chunks
+          } catch (error) {
+            setLogs((current) => [
+              ...current,
+              {
+                type: "warning",
+                message: `[SSE] Malformed event rejected: ${contractFailureReason(error)}`,
+                ts: timestamp(),
+              },
+            ])
           }
         }
       }
@@ -1252,15 +1285,65 @@ export default function Home() {
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const status = await response.json()
-      const usage = status.context_usage && Object.keys(status.context_usage).length > 0
-        ? mapContextUsage(status.context_usage)
-        : null
-      const background = mapBackgroundContextWindow(
-        status.background_context_window || status.thread_context_window?.background_context_window,
-      )
-      setContextUsage(usage)
-      setBackgroundContextWindow(background)
-      if (usage) setContextUsageError(null)
+      try {
+        const report =
+          status.context_usage_report && Object.keys(status.context_usage_report).length > 0
+            ? parseContextUsageReport(status.context_usage_report)
+            : null
+        setContextUsageState(restoreContextUsageReport(report))
+      } catch (error) {
+        setContextUsageState((current) =>
+          applyContextUsageError(current, contextUsageContractFailure(error)),
+        )
+      }
+      try {
+        const background =
+          status.background_context_window && Object.keys(status.background_context_window).length > 0
+            ? parseBackgroundContextWindow(status.background_context_window)
+            : null
+        setBackgroundContextWindow(background)
+      } catch (error) {
+        setBackgroundContextWindow(null)
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Stored background context rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      try {
+        const parsedTimeline = parseActivityTimeline(status.activity_timeline ?? [])
+        setActivityTimeline(parsedTimeline.items)
+        setMessages((current) =>
+          restoreActivitiesToMessages(current, parsedTimeline.items, threadId),
+        )
+        setCurrentRequestId(parsedTimeline.items.at(-1)?.requestId ?? "")
+        if (parsedTimeline.rejectedCount > 0) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Skipped ${parsedTimeline.rejectedCount} invalid stored activity event(s).`,
+              ts: timestamp(),
+            },
+          ])
+        }
+      } catch (error) {
+        setActivityTimeline([])
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Stored activity timeline rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      if (typeof status.graph_version === "string" && status.graph_version) {
+        void fetchGraphManifest(status.graph_version)
+      }
       if (status.last_resource_final_payload?.type === "resource_final") {
         attachResourceFinalToAssistant(status.last_resource_final_payload as ResourceFinalEvent)
       }
@@ -1292,7 +1375,7 @@ export default function Home() {
         { type: "warning", message: `[RUN] Status unavailable: ${error.message}`, ts: timestamp() },
       ])
     }
-  }, [attachResourceFinalToAssistant])
+  }, [attachResourceFinalToAssistant, fetchGraphManifest, updateAssistantResourceStatus])
 
   useEffect(() => {
     if (!storageReady || !currentThreadId) return
@@ -1310,10 +1393,7 @@ export default function Home() {
 
     pendingChatTitleRef.current = content
     setMessages((prev) => [...prev, userMessage])
-    setNodeEvents([])
     setTokenUsage({ input: 0, output: 0, total: 0 })
-    setContextUsage(null)
-    setContextUsageError(null)
     setCanContinue(false)
     setStopPending(false)
     clearStopTimeout()
@@ -1781,11 +1861,14 @@ export default function Home() {
       </div>
       <RightPanel
         logs={logs}
-        nodeEvents={nodeEvents}
+        activities={activityTimeline}
         tokenUsage={tokenUsage}
-        contextUsage={contextUsage}
-        contextUsageError={contextUsageError}
+        contextUsageState={contextUsageState}
         backgroundContextWindow={backgroundContextWindow}
+        graphManifest={graphManifest}
+        graphManifestError={graphManifestError}
+        graphManifestLoading={graphManifestLoading}
+        currentRequestId={currentRequestId}
         isInterrupted={isInterrupted}
       />
     </div>

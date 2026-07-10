@@ -27,14 +27,19 @@ import {
 } from "lucide-react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { ActivityStream } from "@/components/activity-stream"
 import { Button } from "@/components/ui/button"
 import { useScrollActivity } from "@/hooks/use-scroll-activity"
+import type { ActivityEvent, ContextUsageReport } from "@/lib/observability-contracts"
 import { cn } from "@/lib/utils"
 
 export interface Message {
   id: string
   role: "user" | "assistant"
   content: string
+  requestId?: string
+  threadId?: string
+  activities?: ActivityEvent[]
   resourceStatus?: ResourceGenerationStatus
   mindmap?: MindmapResult
   reviewDoc?: ReviewDocResult
@@ -46,48 +51,6 @@ export interface Message {
   studyPlan?: StudyPlanResult
   resourceFinalPayload?: Record<string, unknown>
   resourceFinalDedupeKey?: string
-}
-
-export interface ContextUsage {
-  node: string
-  llmNode: string
-  provider: string
-  model: string
-  inputEstimatedTokens: number
-  reservedOutputTokens: number
-  usedTokens: number
-  maxContextTokens: number
-  availableTokens: number
-  usedRatio: number
-  warningLevel: "ok" | "warning" | "critical" | "overflow" | string
-  estimated: boolean
-  tokenizerMode: string
-  messageCount: number
-  schemaSizeChars?: number
-}
-
-export interface ContextUsageError {
-  node: string
-  llmNode: string
-  provider: string
-  model: string
-  reason: string
-  warning: string
-}
-
-export interface BackgroundContextWindow {
-  present: boolean
-  usedTokens: number
-  maxContextTokens: number
-  usedRatio: number
-  updatedAt: string
-  manifestCount: number
-  sectionNames: string[]
-  workspacePresent: boolean
-  workspaceActiveSubject: string
-  workspaceEvidenceSummaryCount: number
-  workspaceGapCount: number
-  workspaceArtifactCount: number
 }
 
 export type ResourceGenerationState =
@@ -120,7 +83,7 @@ export interface ResourceGenerationStatus {
   summary: string
   steps: ResourceGenerationStep[]
   tokenUsage: { input: number; output: number; total: number }
-  contextUsage?: ContextUsage | null
+  contextUsage?: ContextUsageReport | null
   error?: string
   waitingForReview?: boolean
   hasReceivedResourceFinal?: boolean
@@ -268,7 +231,7 @@ export function ChatArea({
   }
 
   return (
-    <main className="flex h-full min-h-0 flex-1 flex-col bg-background">
+    <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
       <div
         ref={scrollContainerRef}
         className={cn(
@@ -277,7 +240,7 @@ export function ChatArea({
           isScrolling && "chat-scroll-area--scrolling",
         )}
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-6 py-6">
+        <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-6 py-6">
           {messages.length === 0 ? (
             <div className="flex min-h-[56dvh] flex-col items-center justify-center text-center">
               <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary text-primary-foreground">
@@ -322,8 +285,8 @@ export function ChatArea({
         </div>
       </div>
 
-      <div className="bg-background px-4 pt-2 pb-4 md:px-8">
-        <form onSubmit={handleSubmit} className="mx-auto max-w-3xl">
+      <div className="min-w-0 bg-background px-2 pb-3 pt-2 sm:px-4 sm:pb-4 md:px-8">
+        <form onSubmit={handleSubmit} className="mx-auto min-w-0 max-w-3xl">
           <div className="overflow-hidden rounded-3xl bg-background shadow-[0_0_0_1px_rgba(0,0,0,0.03),0_2px_8px_rgba(0,0,0,0.06)]">
             <div className="px-4 pb-2 pt-4">
               <textarea
@@ -337,7 +300,7 @@ export function ChatArea({
               />
             </div>
 
-            <div className="flex items-center gap-1 px-3 pb-3">
+            <div className="flex min-w-0 items-center gap-0.5 px-2 pb-3 sm:gap-1 sm:px-3">
               <Button
                 type="button"
                 variant="ghost"
@@ -353,10 +316,11 @@ export function ChatArea({
                   variant="ghost"
                   size="sm"
                   onClick={() => setIsToolsOpen((open) => !open)}
-                  className="h-9 rounded-full px-3 text-muted-foreground hover:bg-card/70 hover:text-primary"
+                  className="h-9 w-9 rounded-full px-0 text-muted-foreground hover:bg-card/70 hover:text-primary sm:w-auto sm:px-3"
+                  title="工具"
                 >
                   <SlidersHorizontal className="h-4 w-4" />
-                  <span className="text-sm">工具</span>
+                  <span className="hidden text-sm sm:inline">工具</span>
                 </Button>
                 {isToolsOpen && (
                   <div className="a3-popover-shadow absolute bottom-11 left-0 z-20 w-56 rounded-lg border border-border bg-popover p-1">
@@ -377,10 +341,11 @@ export function ChatArea({
                 variant="ghost"
                 size="sm"
                 onClick={() => router.push("/volunteer")}
-                className="h-9 rounded-full px-3 text-muted-foreground hover:bg-card/70 hover:text-primary"
+                className="h-9 w-9 rounded-full px-0 text-muted-foreground hover:bg-card/70 hover:text-primary md:w-auto md:px-3"
+                title="志愿填报"
               >
                 <GraduationCap className="h-4 w-4" />
-                <span className="text-sm">志愿填报</span>
+                <span className="hidden text-sm md:inline">志愿填报</span>
               </Button>
 
               <div className="flex-1" />
@@ -462,6 +427,19 @@ const markdownComponents: Components = {
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user"
+  const hasAssistantPayload = Boolean(
+    message.content ||
+      message.resourceStatus ||
+      message.activities?.length ||
+      message.mindmap ||
+      message.reviewDoc ||
+      message.reviewDocs?.length ||
+      message.exercise ||
+      message.codePractice ||
+      message.videoScript ||
+      message.videoAnimation ||
+      message.studyPlan,
+  )
 
   return (
     <div className={cn("flex items-start gap-3", isUser && "flex-row-reverse")}>
@@ -486,6 +464,7 @@ function MessageBubble({ message }: { message: Message }) {
         ) : (
           <div className="min-w-0 space-y-3">
             {message.resourceStatus && <ResourceGenerationStatusPanel status={message.resourceStatus} />}
+            {message.activities?.length ? <ActivityStream activities={message.activities} /> : null}
             {message.reviewDocs?.length
               ? message.reviewDocs.map((doc) => (
                   <ReviewDocCard
@@ -527,9 +506,9 @@ function MessageBubble({ message }: { message: Message }) {
                   {message.content}
                 </ReactMarkdown>
               </div>
-            ) : (
+            ) : !hasAssistantPayload ? (
               <p className="text-muted-foreground">正在生成个性化学习资源...</p>
-            )}
+            ) : null}
           </div>
         )}
       </div>
