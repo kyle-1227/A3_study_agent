@@ -1316,7 +1316,10 @@ class TestSSEDoneEvent:
             }
         ]
         assert not [p for p in all_payloads if p.get("type") == "done"]
-        assert mock_graph.aupdate_state.await_count == 1
+        assert mock_graph.aupdate_state.await_count == 2
+        interrupt_update = mock_graph.aupdate_state.await_args_list[-1].args[1]
+        assert interrupt_update["pending_interrupt_type"] == "memory_confirmation"
+        assert "activity_timeline" in interrupt_update
 
     @pytest.mark.anyio
     async def test_profile_completion_interrupt_payload_is_typed(self):

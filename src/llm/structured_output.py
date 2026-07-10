@@ -53,7 +53,6 @@ from src.context_engineering.packing import (
     prepare_messages_with_context_policy,
 )
 from src.context_engineering.input_manifest import (
-    build_llm_input_manifest,
     llm_input_manifest_trace_payload,
 )
 from src.context_engineering.influence_runtime import (
@@ -61,9 +60,18 @@ from src.context_engineering.influence_runtime import (
     record_structured_output_influence,
 )
 from src.context_engineering.providers import emit_context_items_shadow
+from src.context_engineering.schema import (
+    ContextConfigError,
+    ContextItem,
+    ContextUsageError,
+)
 from src.context_engineering.tokenizer import count_schema_chars
-from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
+from src.observability.llm_input import (
+    build_llm_input_observation,
+    emit_context_usage_trace,
+    raise_for_blocking_input_observation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -675,6 +683,7 @@ def _structured_context_apply_config() -> dict[str, Any]:
 class _StructuredContextApplyResult:
     messages: list
     debug: dict[str, Any]
+    context_items: tuple[ContextItem, ...] = ()
 
 
 def _emit_structured_context_apply_event(
@@ -934,7 +943,14 @@ def _prepare_structured_messages_with_context(
         provider_remaining_input_tokens=prepared.provider_remaining_input_tokens,
         effective_context_budget_tokens=prepared.effective_context_budget_tokens,
     )
-    return _StructuredContextApplyResult(messages=final_messages, debug=debug)
+    context_items = (
+        tuple(prepared.selection.final_items) if prepared.selection is not None else ()
+    )
+    return _StructuredContextApplyResult(
+        messages=final_messages,
+        debug=debug,
+        context_items=context_items,
+    )
 
 
 def _emit_llm_input_manifest_built(
@@ -2118,16 +2134,6 @@ async def _invoke_one_mode(
     messages = structured_context_result.messages
     metrics.extra_debug.update(structured_context_result.debug)
     metrics.prompt_chars = _compute_prompt_chars(messages)
-    emit_context_usage_trace(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        provider=_provider(llm_node),
-        model=_model(llm_node),
-        messages=messages,
-        state=state or {},
-        schema_size_chars=_safe_schema_size_chars(schema),
-    )
     context_apply_applied = bool(
         structured_context_result.debug.get("context_apply_applied")
     )
@@ -2135,7 +2141,22 @@ async def _invoke_one_mode(
         structured_context_result.debug.get("provider_bound_messages_mutated")
     )
     try:
-        llm_input_manifest = build_llm_input_manifest(
+        schema_size_chars = _safe_schema_size_chars(schema)
+        trace_call_id = str(
+            structured_context_result.debug.get(
+                "structured_context_apply_trace_call_id",
+                "",
+            )
+            or ""
+        )
+        trace_seq = int(
+            structured_context_result.debug.get(
+                "structured_context_apply_trace_seq",
+                0,
+            )
+            or 0
+        )
+        observation = build_llm_input_observation(
             node_name=node_name,
             llm_node=llm_node,
             provider=_provider(llm_node),
@@ -2145,7 +2166,7 @@ async def _invoke_one_mode(
             call_purpose="structured_llm",
             output_mode=mode,
             schema_name=schema.__name__,
-            schema_size_chars=_safe_schema_size_chars(schema),
+            schema_size_chars=schema_size_chars,
             context_apply_applied=context_apply_applied,
             context_apply_status=str(
                 structured_context_result.debug.get(
@@ -2192,25 +2213,24 @@ async def _invoke_one_mode(
             ),
             schema_contract_first=True,
             provider_bound_messages_mutated=provider_bound_messages_mutated,
-            trace_call_id=str(
-                structured_context_result.debug.get(
-                    "structured_context_apply_trace_call_id",
-                    "",
-                )
-                or ""
-            ),
-            trace_seq=int(
-                structured_context_result.debug.get(
-                    "structured_context_apply_trace_seq",
-                    0,
-                )
-                or 0
-            ),
+            trace_call_id=trace_call_id,
+            trace_seq=trace_seq,
+            context_items=structured_context_result.context_items,
+        )
+        llm_input_manifest = observation.manifest
+        emit_context_usage_trace(
+            logger,
+            observation=observation,
+            messages=messages,
+            state=state or {},
+            trace_call_id=trace_call_id,
+            trace_seq=trace_seq,
         )
         _emit_llm_input_manifest_built(
             llm_input_manifest,
             state=state or {},
         )
+        raise_for_blocking_input_observation(observation)
         record_llm_input_influences(
             node_name=node_name,
             llm_node=llm_node,
@@ -2220,6 +2240,8 @@ async def _invoke_one_mode(
             schema_name=schema.__name__,
             output_mode=mode,
         )
+    except (ContextConfigError, ContextUsageError) as exc:
+        raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name=node_name,

@@ -11,12 +11,14 @@ from src.context_engineering.packing.importance import (
     ContextImportanceError,
     parse_importance_scorer_output,
 )
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 
 
 def _mock_llm(
     content: str = '{"scores":[{"item_id":"i1","score":0.8,"reason_code":"useful_memory"}]}',
 ):
     mock_llm = MagicMock()
+    mock_llm.model_name = "deepseek-v4-pro"
     mock_llm.ainvoke = AsyncMock(return_value=SimpleNamespace(content=content))
     return mock_llm
 
@@ -27,6 +29,7 @@ async def test_raw_scorer_uses_manifest_guard_without_plain_llm(monkeypatch):
 
     mock_llm = _mock_llm()
     traces: list[str] = []
+    usage_traces: list[dict] = []
 
     async def fail_plain(*_args, **_kwargs):
         raise AssertionError("raw scorer must not call invoke_plain_llm_fail_fast")
@@ -50,11 +53,15 @@ async def test_raw_scorer_uses_manifest_guard_without_plain_llm(monkeypatch):
         lambda _logger, stage, _payload, **_kwargs: traces.append(stage),
     )
 
-    scores = await llm_module.invoke_context_importance_scorer_raw(
-        llm_node="importance_scorer",
-        scorer_messages=[{"role": "user", "content": "internal prompt"}],
-        timeout_seconds=1,
-    )
+    token = set_trace_event_sink(usage_traces)
+    try:
+        scores = await llm_module.invoke_context_importance_scorer_raw(
+            llm_node="importance_scorer",
+            scorer_messages=[{"role": "user", "content": "internal prompt"}],
+            timeout_seconds=1,
+        )
+    finally:
+        reset_trace_event_sink(token)
 
     assert scores.scores[0].item_id == "i1"
     mock_llm.ainvoke.assert_awaited_once()
@@ -62,7 +69,9 @@ async def test_raw_scorer_uses_manifest_guard_without_plain_llm(monkeypatch):
         "context_importance_scoring"
     )
     assert "plain_llm_output" not in traces
-    assert "context_usage" not in traces
+    usage_stages = [event.get("stage") for event in usage_traces]
+    assert "context_usage_report" in usage_stages
+    assert "context_usage" in usage_stages
     assert "llm_input_manifest.built" in traces
 
 
@@ -90,6 +99,7 @@ async def test_raw_scorer_timeout_raises_safe_error(monkeypatch):
     from src.graph import llm as llm_module
 
     mock_llm = MagicMock()
+    mock_llm.model_name = "deepseek-v4-pro"
     mock_llm.ainvoke = AsyncMock(side_effect=TimeoutError("api_key=sk-secret"))
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
 

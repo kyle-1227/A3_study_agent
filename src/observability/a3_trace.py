@@ -19,22 +19,30 @@ def _env_enabled(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _truncate(value: Any, max_chars: int = 500) -> Any:
+def _truncate(value: Any, max_chars: int = 500, max_items: int = 20) -> Any:
     if value is None:
         return None
     if isinstance(value, str):
         text = value.replace("\n", " ").strip()
         return text[:max_chars] + ("..." if len(text) > max_chars else "")
     if isinstance(value, list):
-        return [_truncate(item, max_chars=max_chars) for item in value[:20]]
+        return [
+            _truncate(item, max_chars=max_chars, max_items=max_items)
+            for item in value[:max_items]
+        ]
     if isinstance(value, dict):
-        return {str(k): _truncate(v, max_chars=max_chars) for k, v in value.items()}
+        return {
+            str(k): _truncate(v, max_chars=max_chars, max_items=max_items)
+            for k, v in value.items()
+        }
     return value
 
 
 def _trace_ids_from_state(state: dict | None) -> dict[str, str]:
     state = state or {}
-    configurable = state.get("configurable") if isinstance(state.get("configurable"), dict) else {}
+    configurable = (
+        state.get("configurable") if isinstance(state.get("configurable"), dict) else {}
+    )
     metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
 
     def _pick(*keys: str) -> str:
@@ -74,6 +82,7 @@ def emit_a3_trace(
     env_flag: str = "LOG_A3_TRACE",
     level: str = "warning",
     max_chars: int = 500,
+    max_items: int = 20,
 ) -> None:
     """
     Emit one structured A3_TRACE log line.
@@ -87,7 +96,7 @@ def emit_a3_trace(
         safe_payload = {
             "stage": stage,
             **_trace_ids_from_state(state),
-            **_truncate(payload, max_chars=max_chars),
+            **_truncate(payload, max_chars=max_chars, max_items=max_items),
         }
         sink = _TRACE_EVENT_SINK.get()
         if sink is not None:

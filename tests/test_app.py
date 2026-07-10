@@ -239,6 +239,8 @@ class TestDevMemoryClear:
     ):
         from app import clear_persistent_memory_for_thread
         from src.graph.state import (
+            ACTIVITY_TIMELINE_CLEAR,
+            CONTEXT_USAGE_REPORTS_CLEAR,
             DICT_CLEAR,
             GENERATED_ARTIFACTS_CLEAR,
             MEMORY_CLEAR,
@@ -274,6 +276,9 @@ class TestDevMemoryClear:
         assert values["background_context_window"] == {}
         assert values["context_continuity"] == {}
         assert values["context_influence_ledger"] is CONTEXT_INFLUENCE_LEDGER_CLEAR
+        assert values["context_usage_report"] == {}
+        assert values["context_usage_reports"] is CONTEXT_USAGE_REPORTS_CLEAR
+        assert values["activity_timeline"] is ACTIVITY_TIMELINE_CLEAR
         assert result == {
             "ok": True,
             "thread_id": "thread-1",
@@ -295,6 +300,9 @@ class TestDevMemoryClear:
                 "background_context_window",
                 "context_continuity",
                 "context_influence_ledger",
+                "context_usage_report",
+                "context_usage_reports",
+                "activity_timeline",
             ],
         }
 
@@ -487,8 +495,9 @@ class TestMindmapArtifacts:
         artifact_file = artifact_dir / "mindmap.xmind"
         artifact_file.write_bytes(b"fake-xmind")
 
-        with TestClient(app) as client:
-            response = client.get("/artifacts/mindmaps/a1/mindmap.xmind")
+        with patch("app.checkpointer_enabled", return_value=False):
+            with TestClient(app) as client:
+                response = client.get("/artifacts/mindmaps/a1/mindmap.xmind")
 
         assert response.status_code == 200
         assert response.content == b"fake-xmind"
@@ -499,8 +508,9 @@ class TestMindmapArtifacts:
 
         monkeypatch.setenv("MINDMAP_ARTIFACT_DIR", str(tmp_path))
 
-        with TestClient(app) as client:
-            response = client.get("/artifacts/mindmaps/a1/missing.xmind")
+        with patch("app.checkpointer_enabled", return_value=False):
+            with TestClient(app) as client:
+                response = client.get("/artifacts/mindmaps/a1/missing.xmind")
 
         assert response.status_code == 404
 

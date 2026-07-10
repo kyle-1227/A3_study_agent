@@ -28,7 +28,6 @@ from src.context_engineering.packing import (
     should_emit_context_policy_summary,
 )
 from src.context_engineering.input_manifest import (
-    build_llm_input_manifest,
     llm_input_manifest_trace_payload,
     validate_llm_input_manifest,
 )
@@ -36,8 +35,13 @@ from src.context_engineering.influence_runtime import (
     record_llm_input_influences,
     record_plain_output_influence,
 )
-from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
+from src.observability.llm_input import (
+    build_llm_input_observation,
+    emit_context_usage_trace,
+    raise_for_blocking_input_observation,
+)
+from src.context_engineering.schema import ContextConfigError, ContextUsageError
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -651,7 +655,7 @@ async def invoke_context_importance_scorer_raw(
     )
     state_payload = state or {}
     try:
-        llm_input_manifest = build_llm_input_manifest(
+        observation = build_llm_input_observation(
             node_name="context_importance_scorer",
             llm_node=llm_node,
             provider=str(provider or ""),
@@ -663,10 +667,18 @@ async def invoke_context_importance_scorer_raw(
             schema_contract_first=False,
             provider_bound_messages_mutated=False,
         )
+        llm_input_manifest = observation.manifest
+        emit_context_usage_trace(
+            logger,
+            observation=observation,
+            messages=scorer_messages,
+            state=state_payload,
+        )
         _emit_llm_input_manifest_built(
             llm_input_manifest,
             state=state_payload,
         )
+        raise_for_blocking_input_observation(observation)
         record_llm_input_influences(
             node_name="context_importance_scorer",
             llm_node=llm_node,
@@ -674,6 +686,12 @@ async def invoke_context_importance_scorer_raw(
             state=state_payload,
             manifest=llm_input_manifest,
         )
+    except (ContextConfigError, ContextUsageError) as exc:
+        raise ContextImportanceError(
+            reason="context_importance_input_budget_failed",
+            warning="importance scorer input budget validation failed",
+            error_type=type(exc).__name__,
+        ) from exc
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name="context_importance_scorer",
@@ -776,20 +794,6 @@ async def invoke_plain_llm_fail_fast(
             state_payload,
         )
     messages_for_llm = prepared.messages_for_llm
-    emit_context_usage_trace(
-        logger,
-        node_name=node_name,
-        llm_node=llm_node,
-        provider=str(provider or ""),
-        model=str(model or ""),
-        messages=messages_for_llm,
-        state=state_payload,
-        trace_fields={
-            "trace_call_id": prepared.trace_call_id,
-            "trace_seq": prepared.next_trace_seq + 1,
-        },
-    )
-
     base_payload = {
         "node_name": node_name,
         "llm_node": llm_node,
@@ -805,7 +809,12 @@ async def invoke_plain_llm_fail_fast(
         "trace_seq": prepared.next_trace_seq + 2,
     }
     try:
-        llm_input_manifest = build_llm_input_manifest(
+        context_items = (
+            tuple(prepared.selection.final_items)
+            if prepared.selection is not None
+            else ()
+        )
+        observation = build_llm_input_observation(
             node_name=node_name,
             llm_node=llm_node,
             provider=str(provider or ""),
@@ -826,11 +835,22 @@ async def invoke_plain_llm_fail_fast(
             provider_bound_messages_mutated=prepared.context_apply_applied,
             trace_call_id=prepared.trace_call_id,
             trace_seq=prepared.next_trace_seq + 2,
+            context_items=context_items,
+        )
+        llm_input_manifest = observation.manifest
+        emit_context_usage_trace(
+            logger,
+            observation=observation,
+            messages=messages_for_llm,
+            state=state_payload,
+            trace_call_id=prepared.trace_call_id,
+            trace_seq=prepared.next_trace_seq + 1,
         )
         _emit_llm_input_manifest_built(
             llm_input_manifest,
             state=state_payload,
         )
+        raise_for_blocking_input_observation(observation)
         record_llm_input_influences(
             node_name=node_name,
             llm_node=llm_node,
@@ -838,6 +858,8 @@ async def invoke_plain_llm_fail_fast(
             state=state_payload,
             manifest=llm_input_manifest,
         )
+    except (ContextConfigError, ContextUsageError):
+        raise
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name=node_name,

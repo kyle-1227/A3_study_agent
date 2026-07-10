@@ -497,6 +497,17 @@ async def test_dev_memory_clear_uses_registered_supervisor_writer(monkeypatch):
     assert graph.aupdate_state.await_args.args[0] == {
         "configurable": {"thread_id": "thread-1"}
     }
+    clear_values = graph.aupdate_state.await_args.args[1]
+    assert clear_values["context_usage_report"] == {}
+    assert (
+        clear_values["context_usage_reports"] == app_module.CONTEXT_USAGE_REPORTS_CLEAR
+    )
+    assert clear_values["activity_timeline"] == app_module.ACTIVITY_TIMELINE_CLEAR
+    assert {
+        "context_usage_report",
+        "context_usage_reports",
+        "activity_timeline",
+    } <= set(result["cleared_fields"])
 
 
 @pytest.mark.anyio

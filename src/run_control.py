@@ -10,6 +10,10 @@ from typing import Any, Callable
 
 from langgraph.types import interrupt
 
+from src.observability.activity import merge_activity_timeline
+from src.observability.context_usage_report import merge_context_usage_report_history
+from src.observability.contracts import ContextUsageReport
+
 
 RUN_CONTROL_SCHEMA_VERSION = "run_control_v1"
 RUN_STATUS_RUNNING = "running"
@@ -133,6 +137,10 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
         "thread_context_window",
         "context_usage",
         "context_usage_history",
+        "context_usage_report",
+        "context_usage_reports",
+        "activity_timeline",
+        "graph_version",
         "llm_input_manifest",
         "llm_input_manifests",
         "thread_context_ledger",
@@ -147,8 +155,23 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
     }
     result: dict[str, Any] = {"thread_id": str(thread_id)}
     for key, value in (payload or {}).items():
-        if key in allowed:
-            result[key] = _safe_active_value(value)
+        if key not in allowed:
+            continue
+        if key == "activity_timeline" and isinstance(value, list):
+            result[key] = merge_activity_timeline([], value)
+            continue
+        if key == "context_usage_reports" and isinstance(value, list):
+            result[key] = merge_context_usage_report_history([], value)
+            continue
+        if key == "context_usage_report" and isinstance(value, dict):
+            try:
+                result[key] = ContextUsageReport.model_validate(value).model_dump(
+                    mode="json"
+                )
+            except Exception:
+                continue
+            continue
+        result[key] = _safe_active_value(value)
     return result
 
 

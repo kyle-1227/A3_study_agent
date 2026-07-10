@@ -12,9 +12,13 @@ from typing import Any, Iterable, Mapping, TypedDict
 
 from langchain_core.messages import BaseMessage
 
+from src.context_engineering.input_accounting import (
+    LLMInputAccounting,
+    build_llm_input_accounting,
+)
 from src.context_engineering.itemizer import sanitize_metadata
 from src.context_engineering.influence import influence_status_payload
-from src.context_engineering.tokenizer import estimate_messages_tokens_mixed
+from src.context_engineering.schema import ContextItem
 from src.context_engineering.workspace import (
     sanitize_workspace_text,
     utc_now_iso,
@@ -77,6 +81,7 @@ class LLMInputManifest(TypedDict, total=False):
     trace_call_id: str
     trace_seq: int
     diagnostics: list[str]
+    message_fingerprint: str
 
 
 class ThreadContextLedger(TypedDict, total=False):
@@ -147,17 +152,27 @@ def build_llm_input_manifest(
     provider_bound_messages_mutated: bool = False,
     trace_call_id: str = "",
     trace_seq: int = 0,
+    accounting: LLMInputAccounting | None = None,
+    context_items: Iterable[ContextItem] = (),
 ) -> LLMInputManifest:
     """Build a sanitized manifest for the exact provider-bound messages."""
     state_payload = state or {}
     safe_messages = messages or []
+    input_accounting = accounting or build_llm_input_accounting(safe_messages)
+    if input_accounting.message_count != len(safe_messages):
+        raise LLMInputManifestError("llm_input_accounting_message_count_mismatch")
+    safe_context_items = tuple(context_items)
     request_id = _safe_text(state_payload.get("request_id"), 120)
     thread_id = _safe_text(
         state_payload.get("thread_id") or state_payload.get("session_id"),
         120,
     )
-    role_counts, prompt_chars = _message_role_counts_and_chars(safe_messages)
-    input_tokens = estimate_messages_tokens_mixed(safe_messages)
+    role_counts: dict[str, int] = {}
+    for message in input_accounting.messages:
+        role_counts[message.role] = role_counts.get(message.role, 0) + 1
+    role_counts = dict(sorted(role_counts.items()))
+    prompt_chars = input_accounting.prompt_chars
+    input_tokens = input_accounting.input_estimated_tokens
     sections = _bounded_sections(
         [
             _message_section(role_counts, prompt_chars, input_tokens),
@@ -167,8 +182,12 @@ def build_llm_input_manifest(
             _artifact_section(state_payload),
             _memory_profile_section(state_payload),
             _context_influence_section(state_payload),
-            _capability_context_section(safe_messages),
-            _ce_block_section(safe_messages, context_apply_applied),
+            _capability_context_section(input_accounting),
+            _ce_block_section(
+                input_accounting,
+                context_apply_applied,
+                context_items=safe_context_items,
+            ),
             _structured_contract_section(
                 schema_name=schema_name,
                 schema_size_chars=schema_size_chars,
@@ -206,7 +225,7 @@ def build_llm_input_manifest(
         "model": safe_model,
         "call_purpose": safe_call_purpose,
         "output_mode": safe_output_mode,
-        "message_fingerprint": _message_fingerprint(safe_messages),
+        "message_fingerprint": input_accounting.message_fingerprint,
         "sections": section_names,
         "trace_call_id": safe_trace_call_id,
         "trace_seq": int(trace_seq or 0),
@@ -243,6 +262,7 @@ def build_llm_input_manifest(
         "trace_call_id": safe_trace_call_id,
         "trace_seq": int(trace_seq or 0),
         "diagnostics": [],
+        "message_fingerprint": input_accounting.message_fingerprint,
     }
     validate_llm_input_manifest(manifest)
     return manifest
@@ -322,6 +342,10 @@ def llm_input_manifest_trace_payload(
         "diagnostics": [
             _safe_text(item, 120) for item in (manifest.get("diagnostics") or [])
         ][:8],
+        "message_fingerprint": _safe_text(
+            manifest.get("message_fingerprint"),
+            80,
+        ),
     }
 
 
@@ -644,34 +668,45 @@ def _context_influence_section(state: Mapping[str, Any]) -> LLMInputManifestSect
 
 
 def _ce_block_section(
-    messages: list[Any],
+    accounting: LLMInputAccounting,
     context_apply_applied: bool,
+    *,
+    context_items: tuple[ContextItem, ...],
 ) -> LLMInputManifestSection:
-    ce_chars = 0
-    for message in messages:
-        content = _message_content(message)
-        marker = "<INJECTED_CONTEXT>"
-        if marker in content:
-            ce_chars += len(content)
+    ce_messages = [
+        message for message in accounting.messages if message.contains_injected_context
+    ]
+    ce_chars = sum(message.char_count for message in ce_messages)
+    source_ids = [
+        _safe_text(item.id, 180) for item in context_items if _safe_text(item.id, 180)
+    ][:_SOURCE_ID_LIMIT]
     return {
         "section": "ce_block",
         "present": bool(context_apply_applied or ce_chars),
         "item_count": 1 if context_apply_applied or ce_chars else 0,
         "char_count": ce_chars,
+        "estimated_tokens": sum(message.estimated_tokens for message in ce_messages),
+        "source_ids": source_ids,
     }
 
 
-def _capability_context_section(messages: list[Any]) -> LLMInputManifestSection:
-    capability_chars = sum(
-        len(content)
-        for message in messages
-        if "<CAPABILITY_CONTEXT>" in (content := _message_content(message))
+def _capability_context_section(
+    accounting: LLMInputAccounting,
+) -> LLMInputManifestSection:
+    capability_messages = tuple(
+        message
+        for message in accounting.messages
+        if message.contains_capability_context
     )
+    capability_chars = sum(message.char_count for message in capability_messages)
     return {
         "section": "capability_context",
         "present": capability_chars > 0,
         "item_count": 1 if capability_chars > 0 else 0,
         "char_count": capability_chars,
+        "estimated_tokens": sum(
+            message.estimated_tokens for message in capability_messages
+        ),
     }
 
 

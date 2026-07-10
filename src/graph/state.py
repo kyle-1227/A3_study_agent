@@ -19,6 +19,10 @@ from src.context_engineering.influence import (
     CONTEXT_INFLUENCE_LEDGER_CLEAR as _CONTEXT_INFLUENCE_LEDGER_CLEAR,
     merge_context_influence_ledger,
 )
+from src.observability.activity import merge_activity_timeline
+from src.observability.context_usage_report import (
+    merge_context_usage_report_history,
+)
 
 
 # Sentinel value: returning this from a node signals "clear all context"
@@ -37,6 +41,8 @@ GENERATED_ARTIFACTS_CLEAR: list[dict] = [{"__generated_artifacts_clear__": True}
 WORKSPACE_EVENTS_CLEAR: list[dict] = [{"__workspace_events_clear__": True}]
 LLM_INPUT_MANIFESTS_CLEAR: list[dict] = [{"__llm_input_manifests_clear__": True}]
 CONTEXT_INFLUENCE_LEDGER_CLEAR: dict = _CONTEXT_INFLUENCE_LEDGER_CLEAR
+ACTIVITY_TIMELINE_CLEAR: list[dict] = [{"__activity_timeline_clear__": True}]
+CONTEXT_USAGE_REPORTS_CLEAR: list[dict] = [{"__context_usage_reports_clear__": True}]
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
@@ -100,6 +106,26 @@ def llm_input_manifests_reducer(
     if update and update[0].get("__llm_input_manifests_clear__"):
         return []
     return merge_llm_input_manifest_history(existing, update)
+
+
+def context_usage_reports_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Merge versioned context usage reports by stable report_id."""
+    if update and update[0].get("__context_usage_reports_clear__"):
+        return []
+    return merge_context_usage_report_history(existing, update)
+
+
+def activity_timeline_reducer(
+    existing: list[dict],
+    update: list[dict],
+) -> list[dict]:
+    """Merge bounded thread activity events idempotently by activity_id."""
+    if update and update[0].get("__activity_timeline_clear__"):
+        return []
+    return merge_activity_timeline(existing, update)
 
 
 def merge_dict_reducer(existing: dict, update: dict) -> dict:
@@ -412,6 +438,7 @@ class LearningState(TypedDict):
     request_id: str  # Per-request trace identifier
     session_id: str  # Session identifier for trace grouping
     thread_id: str  # LangGraph thread identifier
+    graph_version: str  # Deterministic compiled graph manifest version
     schema_version: str  # Run-control state schema version
     run_status: str  # running / stopping / stopped / completed / error
     stop_requested: bool  # Whether user requested safe stop
@@ -431,6 +458,15 @@ class LearningState(TypedDict):
     context_usage_history: Annotated[
         list[dict], bounded_context_window_reducer
     ]  # Cross-request bounded usage history
+    context_usage_report: Annotated[
+        dict, latest_dict_reducer
+    ]  # Most recent reconciled provider-input usage report
+    context_usage_reports: Annotated[
+        list[dict], context_usage_reports_reducer
+    ]  # Bounded reconciled usage report history
+    activity_timeline: Annotated[
+        list[dict], activity_timeline_reducer
+    ]  # Thread-level normalized activity timeline
     llm_input_manifest: Annotated[
         dict, latest_dict_reducer
     ]  # Most recent provider-bound LLM input manifest

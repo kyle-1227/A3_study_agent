@@ -1,9 +1,13 @@
 """Unit tests for LearningState definition."""
 
 from src.graph.state import (
+    ACTIVITY_TIMELINE_CLEAR,
+    CONTEXT_USAGE_REPORTS_CLEAR,
     GENERATED_ARTIFACTS_CLEAR,
     MEMORY_CLEAR,
     LearningState,
+    activity_timeline_reducer,
+    context_usage_reports_reducer,
     evidence_memory_reducer,
     generated_artifacts_reducer,
     initial_request_reset_transient_state,
@@ -79,6 +83,9 @@ class TestTaskWorkspaceReducers:
         assert "task_workspace" not in reset
         assert "workspace_events" not in reset
         assert "context_influence_ledger" not in reset
+        assert "context_usage_report" not in reset
+        assert "context_usage_reports" not in reset
+        assert "activity_timeline" not in reset
         assert "last_qa_response" not in reset
         assert reset["response_mode"] == ""
         assert reset["qa_scope"] == ""
@@ -116,3 +123,41 @@ class TestTaskWorkspaceReducers:
 
         assert merged == [artifact]
         assert generated_artifacts_reducer(merged, GENERATED_ARTIFACTS_CLEAR) == []
+
+    def test_observability_reducers_are_idempotent_and_support_explicit_clear(self):
+        from src.observability.activity import build_activity_event
+        from src.observability.llm_input import build_llm_input_observation
+
+        activity = build_activity_event(
+            thread_id="thread-1",
+            request_id="request-1",
+            sequence=1,
+            kind="stream",
+            status="completed",
+            activity_key="stream:request-1",
+            title="Completed",
+            now="2026-07-10T00:00:00+00:00",
+        ).model_dump(mode="json")
+        observation = build_llm_input_observation(
+            node_name="qa_agent",
+            llm_node="qa_agent",
+            provider="deepseek_official",
+            model="deepseek-v4-pro",
+            messages=[{"role": "user", "content": "question"}],
+            state={"request_id": "request-1", "thread_id": "thread-1"},
+            call_purpose="structured_llm",
+        )
+        report = observation.context_usage_report
+        assert report is not None
+        report_payload = report.model_dump(mode="json")
+
+        activities = activity_timeline_reducer([activity], [activity])
+        reports = context_usage_reports_reducer(
+            [report_payload],
+            [report_payload],
+        )
+
+        assert len(activities) == 1
+        assert len(reports) == 1
+        assert activity_timeline_reducer(activities, ACTIVITY_TIMELINE_CLEAR) == []
+        assert context_usage_reports_reducer(reports, CONTEXT_USAGE_REPORTS_CLEAR) == []

@@ -81,12 +81,21 @@ async def test_plain_llm_strict_missing_model_window_fails_before_call(monkeypat
     monkeypatch.setattr(llm_module, "get_setting", fake_graph_setting)
     monkeypatch.setattr(budget, "get_setting", fake_budget_setting)
 
-    with pytest.raises(ContextConfigError, match="model_window_unknown"):
-        await invoke_plain_llm_fail_fast(
-            node_name="strict_missing",
-            llm_node="missing_window",
-            messages=[{"role": "user", "content": "question"}],
-            state={"request_id": "r1", "thread_id": "t1"},
-        )
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        with pytest.raises(ContextConfigError, match="model_window_unknown"):
+            await invoke_plain_llm_fail_fast(
+                node_name="strict_missing",
+                llm_node="missing_window",
+                messages=[{"role": "user", "content": "question"}],
+                state={"request_id": "r1", "thread_id": "t1"},
+            )
+    finally:
+        reset_trace_event_sink(token)
 
     mock_llm.ainvoke.assert_not_called()
+    stages = [event.get("stage") for event in sink]
+    assert "context_usage_report_error" in stages
+    assert "llm_input_manifest.built" in stages
+    assert "llm_input_manifest.failed" not in stages

@@ -47,8 +47,10 @@ from src.config import get_setting
 from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import (
+    ACTIVITY_TIMELINE_CLEAR,
     CONTEXT_CLEAR,
     CONTEXT_INFLUENCE_LEDGER_CLEAR,
+    CONTEXT_USAGE_REPORTS_CLEAR,
     DICT_CLEAR,
     GENERATED_ARTIFACTS_CLEAR,
     LLM_INPUT_MANIFESTS_CLEAR,
@@ -94,6 +96,28 @@ from src.observability.a3_trace import (
     emit_a3_trace,
     reset_trace_event_sink,
     set_trace_event_sink,
+)
+from src.observability.activity import (
+    activity_from_trace_event,
+    activity_timeline_status,
+    build_activity_event,
+    build_node_activity_event,
+    merge_activity_timeline,
+    next_activity_sequence,
+)
+from src.observability.context_usage_report import (
+    merge_context_usage_report_history,
+)
+from src.observability.contracts import (
+    ActivityEvent,
+    ActivityStatus,
+    ContextUsageReport,
+    GraphManifest,
+)
+from src.observability.graph_manifest import (
+    build_graph_manifest,
+    graph_manifest_error_payload,
+    graph_manifest_ref_payload,
 )
 from src.tools.document_tool import (
     get_code_practice_artifact_dir,
@@ -481,6 +505,45 @@ async def lifespan(app: FastAPI):
         graph = get_compiled_graph(checkpointer=checkpointer)
         setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
         setattr(graph, "_a3_checkpointer_type", ckp_type)
+        try:
+            graph_manifest = build_graph_manifest(
+                graph,
+                context_policy_mode=runtime_context_policy.mode,
+                checkpointer_enabled=bool(checkpointer),
+                checkpointer_type=ckp_type,
+            )
+        except Exception as exc:
+            manifest_error = graph_manifest_error_payload(exc)
+            app.state.graph_manifest = None
+            app.state.graph_manifest_error = manifest_error.model_dump(mode="json")
+            app.state.graph_version = ""
+            setattr(graph, "_a3_activity_events_enabled", False)
+            emit_a3_trace(
+                logger,
+                "graph_manifest.failed",
+                app.state.graph_manifest_error,
+                state={},
+                env_flag="LOG_A3_TRACE",
+            )
+            logger.exception("Graph manifest construction failed")
+        else:
+            app.state.graph_manifest = graph_manifest
+            app.state.graph_manifest_error = None
+            app.state.graph_version = graph_manifest.graph_version
+            setattr(graph, "_a3_graph_version", graph_manifest.graph_version)
+            setattr(graph, "_a3_activity_events_enabled", True)
+            emit_a3_trace(
+                logger,
+                "graph_manifest.built",
+                {
+                    "schema_version": graph_manifest.schema_version,
+                    "graph_version": graph_manifest.graph_version,
+                    "node_count": len(graph_manifest.nodes),
+                    "edge_count": len(graph_manifest.edges),
+                },
+                state={},
+                env_flag="LOG_A3_TRACE",
+            )
         app.state.graph = graph
         yield
 
@@ -701,6 +764,12 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         if isinstance(values.get("context_influence_ledger"), dict)
         else {}
     )
+    raw_usage_reports = values.get("context_usage_reports")
+    usage_reports = raw_usage_reports if isinstance(raw_usage_reports, list) else []
+    raw_activity_timeline = values.get("activity_timeline")
+    activity_status = activity_timeline_status(
+        raw_activity_timeline if isinstance(raw_activity_timeline, list) else []
+    )
     thread_context_window = {
         "context_usage_history_count": len(usage_history),
         "artifact_count": _artifact_count(
@@ -737,6 +806,13 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         "context_influence_total_recorded": influence_status.get("total_recorded", 0),
         **background_status,
         "llm_input_manifest_count": len(manifest_history),
+        "context_usage_report_count": len(usage_reports),
+        "context_usage_report_present": bool(_last_context_usage_report(values)),
+        "graph_version": sanitize_error_message(
+            values.get("graph_version", ""),
+            max_chars=180,
+        ),
+        **activity_status,
         **workspace_status,
     }
     return request_context_window, thread_context_window
@@ -752,6 +828,23 @@ def _last_llm_input_manifest(values: dict) -> dict:
         if isinstance(latest, dict):
             return latest
     return {}
+
+
+def _last_context_usage_report(values: dict) -> dict:
+    report = values.get("context_usage_report")
+    if isinstance(report, dict) and report:
+        return report
+    history = values.get("context_usage_reports")
+    if isinstance(history, list) and history:
+        latest = history[0]
+        if isinstance(latest, dict):
+            return latest
+    return {}
+
+
+def _activity_timeline(values: dict) -> list[dict]:
+    timeline = values.get("activity_timeline")
+    return merge_activity_timeline([], timeline if isinstance(timeline, list) else [])
 
 
 def _dict_keys(value: object) -> list[str]:
@@ -775,6 +868,9 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
     previous_ledger = values.get("thread_context_ledger")
     previous_background = values.get("background_context_window")
     previous_resource_payload = values.get("last_resource_final_payload")
+    previous_usage_report = values.get("context_usage_report")
+    previous_usage_reports = values.get("context_usage_reports")
+    previous_activity_timeline = values.get("activity_timeline")
     values.update(initial_run_values or {})
     if isinstance(previous_history, list):
         values["context_usage_history"] = previous_history
@@ -788,6 +884,12 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
         values["background_context_window"] = previous_background
     if isinstance(previous_resource_payload, dict):
         values["last_resource_final_payload"] = previous_resource_payload
+    if isinstance(previous_usage_report, dict):
+        values["context_usage_report"] = previous_usage_report
+    if isinstance(previous_usage_reports, list):
+        values["context_usage_reports"] = previous_usage_reports
+    if isinstance(previous_activity_timeline, list):
+        values["activity_timeline"] = previous_activity_timeline
     return values
 
 
@@ -817,6 +919,13 @@ def _thread_status_from_snapshot(
             context_usage_history=values.get("context_usage_history")
             if isinstance(values.get("context_usage_history"), list)
             else [],
+            context_usage_report=_last_context_usage_report(values),
+            context_usage_report_count=len(values.get("context_usage_reports") or [])
+            if isinstance(values.get("context_usage_reports"), list)
+            else 0,
+            activity_timeline=_activity_timeline(values),
+            activity_timeline_count=len(_activity_timeline(values)),
+            graph_version=str(values.get("graph_version") or ""),
             last_llm_input_manifest=_last_llm_input_manifest(values),
             llm_input_manifest_count=len(values.get("llm_input_manifests") or [])
             if isinstance(values.get("llm_input_manifests"), list)
@@ -868,6 +977,13 @@ def _thread_status_from_snapshot(
         context_usage_history=values.get("context_usage_history")
         if isinstance(values.get("context_usage_history"), list)
         else [],
+        context_usage_report=_last_context_usage_report(values),
+        context_usage_report_count=len(values.get("context_usage_reports") or [])
+        if isinstance(values.get("context_usage_reports"), list)
+        else 0,
+        activity_timeline=_activity_timeline(values),
+        activity_timeline_count=len(_activity_timeline(values)),
+        graph_version=str(values.get("graph_version") or ""),
         last_llm_input_manifest=_last_llm_input_manifest(values),
         llm_input_manifest_count=len(values.get("llm_input_manifests") or [])
         if isinstance(values.get("llm_input_manifests"), list)
@@ -913,6 +1029,13 @@ def _thread_status_from_active_run(
         context_usage_history=active_run.get("context_usage_history")
         if isinstance(active_run.get("context_usage_history"), list)
         else [],
+        context_usage_report=_last_context_usage_report(active_run),
+        context_usage_report_count=len(active_run.get("context_usage_reports") or [])
+        if isinstance(active_run.get("context_usage_reports"), list)
+        else 0,
+        activity_timeline=_activity_timeline(active_run),
+        activity_timeline_count=len(_activity_timeline(active_run)),
+        graph_version=str(active_run.get("graph_version") or ""),
         last_llm_input_manifest=active_run.get("llm_input_manifest")
         if isinstance(active_run.get("llm_input_manifest"), dict)
         else {},
@@ -1575,6 +1698,9 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "background_context_window",
         "context_continuity",
         "context_influence_ledger",
+        "context_usage_report",
+        "context_usage_reports",
+        "activity_timeline",
     ]
     values = {
         "conversation_summary": "",
@@ -1594,6 +1720,9 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "background_context_window": {},
         "context_continuity": {},
         "context_influence_ledger": CONTEXT_INFLUENCE_LEDGER_CLEAR,
+        "context_usage_report": {},
+        "context_usage_reports": CONTEXT_USAGE_REPORTS_CLEAR,
+        "activity_timeline": ACTIVITY_TIMELINE_CLEAR,
     }
     await safe_update_thread_state(
         graph,
@@ -1627,6 +1756,8 @@ async def _stream_graph_events(
     input_data,
     config: dict,
     thread_id: str,
+    *,
+    request_id: str,
     preserve_context_history: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Shared SSE event streaming logic for /stream and /resume.
@@ -1639,6 +1770,7 @@ async def _stream_graph_events(
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
     context_usage_history: list[dict] = []
+    context_usage_reports: list[dict] = []
     llm_input_manifests: list[dict] = []
     manifest_state_context: dict = {}
     request_context_events: list[dict] = []
@@ -1651,6 +1783,9 @@ async def _stream_graph_events(
     terminal_resource_output: dict | None = None
     worker_interrupted_seen = False
     recovered_profile_completion_request: dict = {}
+    activity_enabled = getattr(graph, "_a3_activity_events_enabled", False) is True
+    activity_timeline: list[dict] = []
+    activity_sequence = 0
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
@@ -1665,6 +1800,19 @@ async def _stream_graph_events(
                     existing_manifests,
                     [],
                 )
+            existing_reports = existing_values.get("context_usage_reports")
+            if isinstance(existing_reports, list):
+                context_usage_reports = merge_context_usage_report_history(
+                    existing_reports,
+                    [],
+                )
+            existing_activities = existing_values.get("activity_timeline")
+            if isinstance(existing_activities, list):
+                activity_timeline = merge_activity_timeline(
+                    existing_activities,
+                    [],
+                )
+                activity_sequence = next_activity_sequence(activity_timeline) - 1
         except Exception as exc:
             emit_a3_trace(
                 logger,
@@ -1678,6 +1826,146 @@ async def _stream_graph_events(
                 env_flag="LOG_A3_TRACE",
             )
 
+    async def _record_activity(
+        activity: ActivityEvent,
+        *,
+        persist_checkpoint: bool = False,
+    ) -> str:
+        nonlocal activity_timeline, activity_sequence
+        activity_sequence = max(activity_sequence, activity.sequence)
+        activity_timeline = merge_activity_timeline(
+            activity_timeline,
+            [activity.model_dump(mode="json")],
+        )
+        active_run = get_active_run(thread_id)
+        active_thread_window = (
+            dict(active_run.get("thread_context_window") or {})
+            if isinstance(active_run, dict)
+            else {}
+        )
+        active_thread_window.update(activity_timeline_status(activity_timeline))
+        update_active_run(
+            thread_id,
+            {
+                "activity_timeline": activity_timeline,
+                "thread_context_window": active_thread_window,
+            },
+        )
+        if persist_checkpoint:
+            await _try_update_run_state(
+                graph,
+                config,
+                {
+                    "activity_timeline": activity_timeline,
+                    "thread_context_window": active_thread_window,
+                },
+                state={
+                    "request_id": request_id,
+                    "thread_id": thread_id,
+                    "session_id": thread_id,
+                    "current_node": activity.node,
+                },
+                persist_checkpoint=True,
+            )
+        payload = {
+            "type": "activity_event",
+            **activity.model_dump(mode="json"),
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def _activity_from_trace(event: dict) -> str:
+        if not activity_enabled:
+            return ""
+        try:
+            activity = activity_from_trace_event(
+                event,
+                thread_id=thread_id,
+                request_id=request_id,
+                sequence=activity_sequence + 1,
+            )
+        except Exception as exc:
+            emit_a3_trace(
+                logger,
+                "activity_event.failed",
+                {
+                    "stage_name": sanitize_error_message(
+                        event.get("stage", ""),
+                        max_chars=160,
+                    ),
+                    "error_type": type(exc).__name__,
+                },
+                state={"request_id": request_id, "thread_id": thread_id},
+                env_flag="LOG_A3_TRACE",
+            )
+            return ""
+        return await _record_activity(activity) if activity is not None else ""
+
+    async def _finalize_stream_activity(
+        *,
+        status: ActivityStatus,
+        title: str,
+        summary: str,
+        node: str = "",
+        error_type: str = "",
+    ) -> str:
+        if not activity_enabled:
+            return ""
+        activity = build_activity_event(
+            thread_id=thread_id,
+            request_id=request_id,
+            sequence=activity_sequence + 1,
+            kind="stream",
+            status=status,
+            activity_key=f"stream:{request_id}",
+            title=title,
+            summary=summary,
+            node=node,
+            safe_details={"error_type": error_type} if error_type else {},
+        )
+        return await _record_activity(activity)
+
+    async def _interrupt_activity_events(
+        interrupt_type: str,
+        *,
+        node: str = "",
+    ) -> list[str]:
+        if not activity_enabled:
+            return []
+        stream_event = await _finalize_stream_activity(
+            status="interrupted",
+            title="Request processing interrupted",
+            summary="Streaming graph execution is waiting for continuation",
+            node=node,
+        )
+        waiting_event = await _record_activity(
+            build_activity_event(
+                thread_id=thread_id,
+                request_id=request_id,
+                sequence=activity_sequence + 1,
+                kind="interrupt",
+                status="waiting",
+                activity_key=f"interrupt:{interrupt_type}",
+                title="Waiting for user input",
+                summary="Graph execution paused at a persisted interrupt",
+                node=node,
+                safe_details={"interrupt_type": interrupt_type},
+            )
+        )
+        return [stream_event, waiting_event]
+
+    if activity_enabled:
+        stream_started = build_activity_event(
+            thread_id=thread_id,
+            request_id=request_id,
+            sequence=activity_sequence + 1,
+            kind="stream",
+            status="running",
+            activity_key=f"stream:{request_id}",
+            title="Request processing",
+            summary="Streaming graph execution started",
+        )
+        yield await _record_activity(stream_started)
+
     async def _drain_trace_events() -> list[str]:
         nonlocal llm_input_manifests, manifest_state_context
         nonlocal worker_interrupted_seen, recovered_profile_completion_request
@@ -1685,6 +1973,9 @@ async def _stream_graph_events(
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
+            activity_payload = await _activity_from_trace(event)
+            if activity_payload:
+                drained.append(activity_payload)
             recovered_from_trace = _profile_completion_request_from_trace_event(event)
             if recovered_from_trace:
                 recovered_profile_completion_request = recovered_from_trace
@@ -1878,6 +2169,124 @@ async def _stream_graph_events(
                     "reason": sanitize_error_message(
                         event.get("reason", ""),
                         max_chars=160,
+                    ),
+                    "error_type": sanitize_error_message(
+                        event.get("error_type", ""),
+                        max_chars=120,
+                    ),
+                }
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_usage_report":
+                try:
+                    report = ContextUsageReport.model_validate(
+                        {
+                            field: event.get(field)
+                            for field in ContextUsageReport.model_fields
+                        }
+                    )
+                except Exception as exc:
+                    payload = {
+                        "type": "context_usage_report_error",
+                        "reason": "context_usage_report_contract_invalid",
+                        "error_type": type(exc).__name__,
+                        "node": sanitize_error_message(
+                            event.get("node_name", ""),
+                            max_chars=120,
+                        ),
+                    }
+                    drained.append(
+                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    )
+                    continue
+                report_payload = report.model_dump(mode="json")
+                context_usage_reports[:] = merge_context_usage_report_history(
+                    context_usage_reports,
+                    [report_payload],
+                )
+                active_run = get_active_run(thread_id)
+                active_thread_window = (
+                    dict(active_run.get("thread_context_window") or {})
+                    if isinstance(active_run, dict)
+                    else {}
+                )
+                background_window = (
+                    dict(active_run.get("background_context_window") or {})
+                    if isinstance(active_run, dict)
+                    and isinstance(active_run.get("background_context_window"), dict)
+                    else dict(
+                        manifest_state_context.get("background_context_window") or {}
+                    )
+                    if isinstance(
+                        manifest_state_context.get("background_context_window"),
+                        dict,
+                    )
+                    else {}
+                )
+                background_window.update(
+                    {
+                        "used_tokens": report.used_tokens,
+                        "max_context_tokens": report.max_context_tokens,
+                        "used_ratio": round(report.used_ratio, 4),
+                        "updated_at": report.created_at,
+                    }
+                )
+                active_thread_window.update(
+                    {
+                        "context_usage_report_count": len(context_usage_reports),
+                        "context_usage_report_present": True,
+                        "background_context_window": background_window,
+                        **background_context_status_payload(background_window),
+                    }
+                )
+                await _try_update_run_state(
+                    graph,
+                    config,
+                    {
+                        "context_usage_report": report_payload,
+                        "context_usage_reports": [report_payload],
+                        "background_context_window": background_window,
+                        "thread_context_window": active_thread_window,
+                    },
+                    state={
+                        "request_id": request_id,
+                        "thread_id": thread_id,
+                        "session_id": thread_id,
+                    },
+                    persist_checkpoint=True,
+                )
+                manifest_state_context.update(
+                    {
+                        "context_usage_report": report_payload,
+                        "context_usage_reports": list(context_usage_reports),
+                        "background_context_window": background_window,
+                    }
+                )
+                payload = {"type": "context_usage_report", **report_payload}
+                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                continue
+            if stage == "context_usage_report_error":
+                payload = {
+                    "type": "context_usage_report_error",
+                    "manifest_id": sanitize_error_message(
+                        event.get("manifest_id", ""),
+                        max_chars=180,
+                    ),
+                    "node": sanitize_error_message(
+                        event.get("node_name", ""),
+                        max_chars=120,
+                    ),
+                    "llm_node": sanitize_error_message(
+                        event.get("llm_node", ""),
+                        max_chars=120,
+                    ),
+                    "reason": sanitize_error_message(
+                        event.get("reason", ""),
+                        max_chars=160,
+                    ),
+                    "warning": sanitize_error_message(
+                        event.get("warning", ""),
+                        max_chars=200,
                     ),
                     "error_type": sanitize_error_message(
                         event.get("error_type", ""),
@@ -2431,6 +2840,7 @@ async def _stream_graph_events(
                 # Only emit for top-level graph nodes (name matches metadata),
                 # not for internal sub-chains (RunnableSequence, etc.).
                 if node_name and node_name == meta_node and node_name in GRAPH_NODES:
+                    activity_sse = ""
                     if event_type == "on_chain_start":
                         node_start_times[node_name] = time.monotonic()
                         if node_name not in active_nodes:
@@ -2455,6 +2865,16 @@ async def _stream_graph_events(
                             },
                             ensure_ascii=False,
                         )
+                        if activity_enabled:
+                            activity_sse = await _record_activity(
+                                build_node_activity_event(
+                                    thread_id=thread_id,
+                                    request_id=request_id,
+                                    sequence=activity_sequence + 1,
+                                    node_id=node_name,
+                                    status="running",
+                                )
+                            )
                     else:
                         duration_ms = None
                         start_t = node_start_times.pop(node_name, None)
@@ -2485,6 +2905,19 @@ async def _stream_graph_events(
                             },
                             ensure_ascii=False,
                         )
+                        if activity_enabled:
+                            activity_sse = await _record_activity(
+                                build_node_activity_event(
+                                    thread_id=thread_id,
+                                    request_id=request_id,
+                                    sequence=activity_sequence + 1,
+                                    node_id=node_name,
+                                    status="failed" if error else "completed",
+                                    duration_ms=duration_ms,
+                                    error_type="NodeOutputError" if error else "",
+                                ),
+                                persist_checkpoint=True,
+                            )
                         await _try_update_run_state(
                             graph,
                             config,
@@ -2495,6 +2928,8 @@ async def _stream_graph_events(
                             state={"thread_id": thread_id, "session_id": thread_id},
                             persist_checkpoint=False,
                         )
+                    if activity_sse:
+                        yield activity_sse
                     yield f"data: {payload}\n\n"
 
                     # Emit "text" for non-streaming nodes (AC-02)
@@ -2550,7 +2985,28 @@ async def _stream_graph_events(
     except Exception as e:
         for trace_payload in await _drain_trace_events():
             yield trace_payload
-        logger.exception("Unhandled error in graph streaming")
+        safe_error_message = sanitize_error_message(e, max_chars=300)
+        logger.error(
+            "Unhandled error in graph streaming: error_type=%s error_message=%s",
+            type(e).__name__,
+            safe_error_message,
+        )
+        failed_activity_sse = ""
+        if activity_enabled:
+            failed_activity_sse = await _record_activity(
+                build_activity_event(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    sequence=activity_sequence + 1,
+                    kind="stream",
+                    status="failed",
+                    activity_key=f"stream:{request_id}",
+                    title="Request processing failed",
+                    summary="Streaming graph execution failed",
+                    node=active_nodes[-1] if active_nodes else "",
+                    safe_details={"error_type": type(e).__name__},
+                )
+            )
         failed_update_ok = await _try_update_run_state(
             graph,
             config,
@@ -2558,11 +3014,14 @@ async def _stream_graph_events(
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
+                "activity_timeline": activity_timeline,
             },
             state={"thread_id": thread_id, "session_id": thread_id},
         )
         run_control_registry.clear_stop_signal(thread_id)
         failed_node = active_nodes[-1] if active_nodes else None
+        if failed_activity_sse:
+            yield failed_activity_sse
         if failed_node:
             start_t = node_start_times.get(failed_node)
             duration_ms = (
@@ -2576,7 +3035,7 @@ async def _stream_graph_events(
                     "status": "end",
                     "node": failed_node,
                     "duration_ms": duration_ms,
-                    "error": str(e),
+                    "error": safe_error_message,
                     "synthetic": True,
                 },
                 ensure_ascii=False,
@@ -2585,7 +3044,7 @@ async def _stream_graph_events(
         error_payload = json.dumps(
             {
                 "type": "error",
-                "message": str(e),
+                "message": safe_error_message,
                 "failed_node": failed_node,
                 "active_nodes": active_nodes,
             },
@@ -2601,8 +3060,13 @@ async def _stream_graph_events(
     # Check for interrupt after stream completes
     try:
         state_snapshot = await graph.aget_state(config)
-    except Exception:
-        logger.exception("Failed to read graph state snapshot after stream")
+    except Exception as exc:
+        logger.error(
+            "Failed to read graph state snapshot after stream: "
+            "error_type=%s error_message=%s",
+            type(exc).__name__,
+            sanitize_error_message(exc, max_chars=300),
+        )
         raise
 
     interrupt_values = _pending_interrupt_values(state_snapshot)
@@ -2624,6 +3088,11 @@ async def _stream_graph_events(
                 for value in interrupt_values
                 if isinstance(value, dict)
             ],
+        },
+        state={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
         },
         env_flag="LOG_A3_TRACE",
     )
@@ -2647,7 +3116,12 @@ async def _stream_graph_events(
             "exercise_items_count": len(final_state.get("exercise_items") or []),
             "requested_resource_type": final_state.get("requested_resource_type", ""),
         },
-        state=final_state,
+        state={
+            **final_state,
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
         env_flag="LOG_A3_TRACE",
     )
 
@@ -2659,6 +3133,10 @@ async def _stream_graph_events(
         ):
             stopped_at = utc_now_iso()
             stopped_node = str(interrupt_value.get("node") or "")
+            interrupt_activity_payloads = await _interrupt_activity_events(
+                "user_stop",
+                node=stopped_node,
+            )
             stopped_update_ok = await _try_update_run_state(
                 graph,
                 config,
@@ -2670,6 +3148,7 @@ async def _stream_graph_events(
                     "stopped_at": stopped_at,
                     "current_node": stopped_node,
                     "stop_reason": str(interrupt_value.get("reason") or "user_stop"),
+                    "activity_timeline": activity_timeline,
                 },
                 state=final_state,
             )
@@ -2697,6 +3176,8 @@ async def _stream_graph_events(
                 },
                 ensure_ascii=False,
             )
+            for activity_payload in interrupt_activity_payloads:
+                yield activity_payload
             yield f"data: {payload}\n\n"
             if stopped_update_ok:
                 finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
@@ -2705,15 +3186,19 @@ async def _stream_graph_events(
             isinstance(interrupt_value, dict)
             and interrupt_value.get("type") == "memory_confirmation"
         ):
+            interrupt_activity_payloads = await _interrupt_activity_events(
+                "memory_confirmation"
+            )
             interrupt_update_ok = await _try_update_run_state(
                 graph,
                 config,
                 {
                     "resume_available": False,
                     "pending_interrupt_type": "memory_confirmation",
+                    "activity_timeline": activity_timeline,
                 },
                 state=final_state,
-                persist_checkpoint=False,
+                persist_checkpoint=True,
             )
             payload_data = {
                 "type": "interrupt",
@@ -2731,6 +3216,9 @@ async def _stream_graph_events(
             and interrupt_value.get("type") == "profile_completion_required"
         ):
             profile_request = _safe_profile_completion_request(interrupt_value)
+            interrupt_activity_payloads = await _interrupt_activity_events(
+                "profile_completion_required"
+            )
             interrupt_update_ok = await _try_update_run_state(
                 graph,
                 config,
@@ -2738,6 +3226,7 @@ async def _stream_graph_events(
                     "resume_available": True,
                     "pending_interrupt_type": "profile_completion_required",
                     "profile_completion_request": profile_request,
+                    "activity_timeline": activity_timeline,
                 },
                 state=final_state,
                 persist_checkpoint=True,
@@ -2752,15 +3241,19 @@ async def _stream_graph_events(
                 "thread_id": thread_id,
             }
         else:
+            interrupt_activity_payloads = await _interrupt_activity_events(
+                "plan_review"
+            )
             interrupt_update_ok = await _try_update_run_state(
                 graph,
                 config,
                 {
                     "resume_available": False,
                     "pending_interrupt_type": "plan_review",
+                    "activity_timeline": activity_timeline,
                 },
                 state=final_state,
-                persist_checkpoint=False,
+                persist_checkpoint=True,
             )
             payload_data = {
                 "type": "interrupt",
@@ -2769,6 +3262,8 @@ async def _stream_graph_events(
                 "thread_id": thread_id,
             }
         payload = json.dumps(payload_data, ensure_ascii=False)
+        for activity_payload in interrupt_activity_payloads:
+            yield activity_payload
         yield f"data: {payload}\n\n"
         if interrupt_update_ok:
             finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
@@ -2781,6 +3276,9 @@ async def _stream_graph_events(
             final_state.get("profile_completion_request")
         )
         if recovered_request:
+            interrupt_activity_payloads = await _interrupt_activity_events(
+                "profile_completion_required"
+            )
             interrupt_update_ok = await _try_update_run_state(
                 graph,
                 config,
@@ -2788,6 +3286,7 @@ async def _stream_graph_events(
                     "resume_available": True,
                     "pending_interrupt_type": "profile_completion_required",
                     "profile_completion_request": recovered_request,
+                    "activity_timeline": activity_timeline,
                 },
                 state=final_state,
                 persist_checkpoint=True,
@@ -2814,6 +3313,8 @@ async def _stream_graph_events(
                 state=final_state,
                 env_flag="LOG_A3_TRACE",
             )
+            for activity_payload in interrupt_activity_payloads:
+                yield activity_payload
             yield f"data: {json.dumps(payload_data, ensure_ascii=False)}\n\n"
             if interrupt_update_ok:
                 finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
@@ -2841,6 +3342,26 @@ async def _stream_graph_events(
             state=final_state,
             env_flag="LOG_A3_TRACE",
         )
+        lost_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Request processing failed",
+            summary="An expected interrupt checkpoint could not be recovered",
+            error_type="InterruptLostError",
+        )
+        await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "activity_timeline": activity_timeline,
+            },
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        if lost_activity_payload:
+            yield lost_activity_payload
         yield f"data: {json.dumps(interrupt_lost_payload, ensure_ascii=False)}\n\n"
         finish_active_run(
             thread_id,
@@ -2870,6 +3391,31 @@ async def _stream_graph_events(
         if not resource_payload
         else None
     )
+    final_activity_payloads: list[str] = []
+    if activity_enabled and resource_payload:
+        artifact_activity = build_activity_event(
+            thread_id=thread_id,
+            request_id=request_id,
+            sequence=activity_sequence + 1,
+            kind="artifact",
+            status="completed",
+            activity_key=f"resource_final:{resource_payload.get('resource_id', '')}",
+            title="Generated resource ready",
+            summary="Renderable resource payload finalized",
+            node="resource_bundle_output",
+            safe_details={
+                "resource_id": resource_payload.get("resource_id", ""),
+                "resource_type": resource_payload.get("resource_type", ""),
+            },
+        )
+        final_activity_payloads.append(await _record_activity(artifact_activity))
+    completed_activity_payload = await _finalize_stream_activity(
+        status="completed",
+        title="Request processing completed",
+        summary="Streaming graph execution completed",
+    )
+    if completed_activity_payload:
+        final_activity_payloads.append(completed_activity_payload)
     completed_values = {
         "run_status": RUN_STATUS_COMPLETED,
         "resume_available": False,
@@ -2885,6 +3431,7 @@ async def _stream_graph_events(
         "last_context_applied_by_node": dict(last_context_applied_by_node),
         "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
         "last_resource_subnodes": list(last_resource_subnodes),
+        "activity_timeline": activity_timeline,
     }
     if resource_payload:
         completed_values["last_resource_final_payload"] = resource_payload
@@ -2893,16 +3440,18 @@ async def _stream_graph_events(
     if context_usage_history:
         completed_values["context_usage"] = context_usage_history[-1]
         completed_values["context_usage_history"] = list(context_usage_history)
+    if context_usage_reports:
+        completed_values["context_usage_report"] = context_usage_reports[0]
+        completed_values["context_usage_reports"] = list(context_usage_reports)
     if llm_input_manifests:
         completed_values["llm_input_manifest"] = llm_input_manifests[0]
         completed_values["llm_input_manifests"] = list(llm_input_manifests)
         background_window = manifest_state_context.get("background_context_window")
         if isinstance(background_window, dict):
             completed_values["background_context_window"] = background_window
+            raw_thread_window = completed_values.get("thread_context_window")
             active_thread_window = (
-                dict(completed_values.get("thread_context_window") or {})
-                if isinstance(completed_values.get("thread_context_window"), dict)
-                else {}
+                dict(raw_thread_window) if isinstance(raw_thread_window, dict) else {}
             )
             active_thread_window.update(
                 {
@@ -2915,6 +3464,21 @@ async def _stream_graph_events(
         ledger = manifest_state_context.get("thread_context_ledger")
         if isinstance(ledger, dict):
             completed_values["thread_context_ledger"] = ledger
+
+    active_run = get_active_run(thread_id)
+    completed_thread_window = (
+        dict(active_run.get("thread_context_window") or {})
+        if isinstance(active_run, dict)
+        else {}
+    )
+    completed_thread_window.update(
+        {
+            "context_usage_report_count": len(context_usage_reports),
+            "context_usage_report_present": bool(context_usage_reports),
+            **activity_timeline_status(activity_timeline),
+        }
+    )
+    completed_values["thread_context_window"] = completed_thread_window
 
     completed_update_ok = await _try_update_run_state(
         graph,
@@ -2991,6 +3555,9 @@ async def _stream_graph_events(
         )
         yield f"data: {json.dumps(resource_diagnostic_payload, ensure_ascii=False)}\n\n"
 
+    for activity_payload in final_activity_payloads:
+        yield activity_payload
+
     completed_payload = {
         "type": "run_status",
         "run_status": RUN_STATUS_COMPLETED,
@@ -3008,6 +3575,7 @@ async def generate_sse(
     graph,
     thread_id: str | None = None,
     user_id: str | None = None,
+    graph_version: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream LangGraph events as Server-Sent Events (SSE).
 
@@ -3063,6 +3631,8 @@ async def generate_sse(
         "context": CONTEXT_CLEAR,
         **initial_request_reset_transient_state(),
     }
+    if graph_version:
+        state_input["graph_version"] = graph_version
     runtime_checkpointer_type = _graph_checkpointer_type(graph)
     state_input["runtime_capability_metadata"] = {
         "checkpointer_enabled": runtime_checkpointer_type != "none",
@@ -3095,6 +3665,7 @@ async def generate_sse(
         "request_id": request_id,
         "session_id": thread_id,
         "thread_id": thread_id,
+        "graph_version": graph_version,
     }
     try:
         await safe_update_thread_state(
@@ -3138,6 +3709,16 @@ async def generate_sse(
             "context_usage_history": status_values.get("context_usage_history")
             if isinstance(status_values.get("context_usage_history"), list)
             else [],
+            "context_usage_report": status_values.get("context_usage_report")
+            if isinstance(status_values.get("context_usage_report"), dict)
+            else {},
+            "context_usage_reports": status_values.get("context_usage_reports")
+            if isinstance(status_values.get("context_usage_reports"), list)
+            else [],
+            "activity_timeline": status_values.get("activity_timeline")
+            if isinstance(status_values.get("activity_timeline"), list)
+            else [],
+            "graph_version": graph_version,
             "llm_input_manifest": _last_llm_input_manifest(status_values),
             "llm_input_manifests": status_values.get("llm_input_manifests")
             if isinstance(status_values.get("llm_input_manifests"), list)
@@ -3161,6 +3742,20 @@ async def generate_sse(
 
     thread_payload = {"type": "thread_id", "thread_id": thread_id}
     yield f"data: {json.dumps(thread_payload, ensure_ascii=False)}\n\n"
+    if graph_version:
+        stream_context_payload = {
+            "type": "stream_context",
+            "schema_version": "stream_context_v1",
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "graph_version": graph_version,
+        }
+        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
+        yield (
+            "data: "
+            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
+            "\n\n"
+        )
     running_payload = {
         "type": "run_status",
         "run_status": RUN_STATUS_RUNNING,
@@ -3191,7 +3786,12 @@ async def generate_sse(
             logger.exception("Failed to record user input episodic memory")
 
     async for chunk in _stream_graph_events(
-        graph, state_input, config, thread_id, preserve_context_history=True
+        graph,
+        state_input,
+        config,
+        thread_id,
+        request_id=request_id,
+        preserve_context_history=True,
     ):
         yield chunk
 
@@ -3215,6 +3815,7 @@ async def generate_resume_sse(
     thread_id: str,
     memory_use_choice: str | None = None,
     profile_completion: dict | None = None,
+    graph_version: str = "",
 ) -> AsyncGenerator[str, None]:
     """Resume an interrupted graph and stream remaining events as SSE.
 
@@ -3319,6 +3920,16 @@ async def generate_resume_sse(
             "context_usage_history": status_values.get("context_usage_history")
             if isinstance(status_values.get("context_usage_history"), list)
             else [],
+            "context_usage_report": status_values.get("context_usage_report")
+            if isinstance(status_values.get("context_usage_report"), dict)
+            else {},
+            "context_usage_reports": status_values.get("context_usage_reports")
+            if isinstance(status_values.get("context_usage_reports"), list)
+            else [],
+            "activity_timeline": status_values.get("activity_timeline")
+            if isinstance(status_values.get("activity_timeline"), list)
+            else [],
+            "graph_version": graph_version,
             "llm_input_manifest": _last_llm_input_manifest(status_values),
             "llm_input_manifests": status_values.get("llm_input_manifests")
             if isinstance(status_values.get("llm_input_manifests"), list)
@@ -3340,6 +3951,20 @@ async def generate_resume_sse(
         },
     )
 
+    if graph_version:
+        stream_context_payload = {
+            "type": "stream_context",
+            "schema_version": "stream_context_v1",
+            "request_id": resume_request_id,
+            "thread_id": thread_id,
+            "graph_version": graph_version,
+        }
+        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
+        yield (
+            "data: "
+            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
+            "\n\n"
+        )
     continuing_payload = {
         "type": "run_status",
         "run_status": RUN_STATUS_CONTINUING,
@@ -3348,7 +3973,12 @@ async def generate_resume_sse(
     yield f"data: {json.dumps(continuing_payload, ensure_ascii=False)}\n\n"
 
     async for chunk in _stream_graph_events(
-        graph, resume_input, config, thread_id, preserve_context_history=True
+        graph,
+        resume_input,
+        config,
+        thread_id,
+        request_id=resume_request_id,
+        preserve_context_history=True,
     ):
         yield chunk
 
@@ -3396,7 +4026,12 @@ async def request_thread_stop(graph, thread_id: str, reason: str) -> dict:
     }
 
 
-async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, None]:
+async def generate_continue_sse(
+    graph,
+    thread_id: str,
+    *,
+    graph_version: str = "",
+) -> AsyncGenerator[str, None]:
     config = make_thread_config(thread_id)
     state_snapshot = await graph.aget_state(config)
     if not _has_checkpoint_state(state_snapshot):
@@ -3456,6 +4091,16 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
             "context_usage_history": status_values.get("context_usage_history")
             if isinstance(status_values.get("context_usage_history"), list)
             else [],
+            "context_usage_report": status_values.get("context_usage_report")
+            if isinstance(status_values.get("context_usage_report"), dict)
+            else {},
+            "context_usage_reports": status_values.get("context_usage_reports")
+            if isinstance(status_values.get("context_usage_reports"), list)
+            else [],
+            "activity_timeline": status_values.get("activity_timeline")
+            if isinstance(status_values.get("activity_timeline"), list)
+            else [],
+            "graph_version": graph_version,
             "llm_input_manifest": _last_llm_input_manifest(status_values),
             "llm_input_manifests": status_values.get("llm_input_manifests")
             if isinstance(status_values.get("llm_input_manifests"), list)
@@ -3498,6 +4143,21 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
         state={"thread_id": thread_id, "session_id": thread_id},
         env_flag="LOG_A3_TRACE",
     )
+    continue_request_id = str(uuid.uuid4())
+    if graph_version:
+        stream_context_payload = {
+            "type": "stream_context",
+            "schema_version": "stream_context_v1",
+            "request_id": continue_request_id,
+            "thread_id": thread_id,
+            "graph_version": graph_version,
+        }
+        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
+        yield (
+            "data: "
+            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
+            "\n\n"
+        )
     continuing_payload = {
         "type": "run_status",
         "run_status": RUN_STATUS_CONTINUING,
@@ -3510,25 +4170,69 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
         graph,
         config,
         {
-            "request_id": str(uuid.uuid4()),
+            "request_id": continue_request_id,
             "session_id": thread_id,
             "thread_id": thread_id,
         },
     )
     async for chunk in _stream_graph_events(
-        graph, resume_input, config, thread_id, preserve_context_history=True
+        graph,
+        resume_input,
+        config,
+        thread_id,
+        request_id=continue_request_id,
+        preserve_context_history=True,
     ):
         yield chunk
 
 
+def _app_graph_version(fastapi_app: FastAPI) -> str:
+    value = getattr(fastapi_app.state, "graph_version", "")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    error = getattr(fastapi_app.state, "graph_manifest_error", None)
+    detail = (
+        error
+        if isinstance(error, dict)
+        else {
+            "schema_version": "graph_manifest_error_v1",
+            "error": "graph_manifest_unavailable",
+            "reason": "graph manifest is unavailable",
+            "error_type": "GraphManifestBuildError",
+        }
+    )
+    raise HTTPException(status_code=503, detail=detail)
+
+
+@app.get("/graph/manifest", response_model=GraphManifest)
+async def graph_manifest_endpoint(request: Request):
+    manifest = getattr(request.app.state, "graph_manifest", None)
+    if isinstance(manifest, GraphManifest):
+        return manifest
+    error = getattr(request.app.state, "graph_manifest_error", None)
+    detail = (
+        error
+        if isinstance(error, dict)
+        else {
+            "schema_version": "graph_manifest_error_v1",
+            "error": "graph_manifest_unavailable",
+            "reason": "graph manifest cache is unavailable",
+            "error_type": "GraphManifestBuildError",
+        }
+    )
+    raise HTTPException(status_code=503, detail=detail)
+
+
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
+    graph_version = _app_graph_version(request.app)
     return StreamingResponse(
         generate_sse(
             chat.query,
             request.app.state.graph,
             thread_id=chat.thread_id,
             user_id=chat.user_id,
+            graph_version=graph_version,
         ),
         media_type="text/event-stream",
     )
@@ -3536,6 +4240,7 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
 
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
+    graph_version = _app_graph_version(request.app)
     profile_completion = (
         req.profile_completion.model_dump()
         if req.profile_completion is not None
@@ -3549,6 +4254,7 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
             req.thread_id,
             memory_use_choice=req.memory_use_choice,
             profile_completion=profile_completion,
+            graph_version=graph_version,
         ),
         media_type="text/event-stream",
     )
@@ -3566,8 +4272,13 @@ async def thread_status_endpoint(thread_id: str, request: Request):
 
 @app.post("/threads/{thread_id}/continue")
 async def continue_thread_endpoint(thread_id: str, request: Request):
+    graph_version = _app_graph_version(request.app)
     return StreamingResponse(
-        generate_continue_sse(request.app.state.graph, thread_id),
+        generate_continue_sse(
+            request.app.state.graph,
+            thread_id,
+            graph_version=graph_version,
+        ),
         media_type="text/event-stream",
     )
 
