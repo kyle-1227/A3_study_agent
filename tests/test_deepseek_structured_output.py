@@ -25,7 +25,9 @@ class NestedDeepSeekSchemaModel(BaseModel):
 
 class DeepSeekSchemaModel(BaseModel):
     name: str = Field(..., max_length=32)
-    tags: list[Annotated[str, Field(max_length=12)]] = Field(default_factory=list, max_length=4)
+    tags: list[Annotated[str, Field(max_length=12)]] = Field(
+        default_factory=list, max_length=4
+    )
     nested: NestedDeepSeekSchemaModel = Field(default_factory=NestedDeepSeekSchemaModel)
 
 
@@ -57,46 +59,54 @@ class _FakeAsyncClient:
         return False
 
     async def post(self, url, *, headers=None, json=None):
-        self.__class__.requests.append({"url": url, "headers": headers or {}, "json": json or {}})
+        self.__class__.requests.append(
+            {"url": url, "headers": headers or {}, "json": json or {}}
+        )
         if len(self.__class__.responses) > 1:
             return self.__class__.responses.pop(0)
         return self.__class__.responses[0]
 
 
-def _tool_response(arguments, *, tool_name: str = "supervisor_SupervisorOutput") -> _FakeResponse:
+def _tool_response(
+    arguments, *, tool_name: str = "supervisor_SupervisorOutput"
+) -> _FakeResponse:
     if not isinstance(arguments, str):
         arguments = json.dumps(arguments, ensure_ascii=False)
-    return _FakeResponse({
-        "choices": [
-            {
-                "finish_reason": "tool_calls",
-                "message": {
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        }
-                    ]
-                },
-            }
-        ]
-    })
+    return _FakeResponse(
+        {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": arguments,
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
 
 
 def _json_response(content) -> _FakeResponse:
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False)
-    return _FakeResponse({
-        "choices": [
-            {
-                "finish_reason": "stop",
-                "message": {"content": content},
-            }
-        ]
-    })
+    return _FakeResponse(
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": content},
+                }
+            ]
+        }
+    )
 
 
 def _supervisor_args(**overrides) -> dict:
@@ -138,14 +148,19 @@ class TestDeepSeekSchemaCompiler:
         with pytest.raises(RuntimeError) as exc_info:
             compile_pydantic_schema_for_deepseek_tool(DeepSeekMapModel)
 
-        assert getattr(exc_info.value, "failure_phase", "") == "deepseek_schema_compile_error"
+        assert (
+            getattr(exc_info.value, "failure_phase", "")
+            == "deepseek_schema_compile_error"
+        )
 
 
 @pytest.mark.anyio
 class TestDeepSeekStrictRuntime:
     async def test_supervisor_tool_call_success_and_trace(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -170,9 +185,14 @@ class TestDeepSeekStrictRuntime:
 
         assert result.success is True
         assert isinstance(result.parsed, SupervisorOutput)
-        assert _FakeAsyncClient.requests[0]["url"] == "https://api.deepseek.com/beta/chat/completions"
+        assert (
+            _FakeAsyncClient.requests[0]["url"]
+            == "https://api.deepseek.com/beta/chat/completions"
+        )
         assert _FakeAsyncClient.requests[0]["json"]["thinking"] == {"type": "disabled"}
-        payload = next(event for event in events if event["stage"] == "structured_llm_output")
+        payload = next(
+            event for event in events if event["stage"] == "structured_llm_output"
+        )
         assert payload["provider"] == "deepseek_official"
         assert payload["provider_request_mode"] == "deepseek_tool_call_strict"
         assert payload["using_deepseek_official_http"] is True
@@ -182,12 +202,16 @@ class TestDeepSeekStrictRuntime:
 
     async def test_missing_tool_call_fails_with_deepseek_phase(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
         )
-        _FakeAsyncClient.responses = [_FakeResponse({"choices": [{"finish_reason": "stop", "message": {}}]})]
+        _FakeAsyncClient.responses = [
+            _FakeResponse({"choices": [{"finish_reason": "stop", "message": {}}]})
+        ]
         _FakeAsyncClient.requests = []
 
         with pytest.raises(StructuredOutputError) as exc_info:
@@ -205,12 +229,16 @@ class TestDeepSeekStrictRuntime:
 
     async def test_wrong_tool_name_fails_with_deepseek_phase(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
         )
-        _FakeAsyncClient.responses = [_tool_response(_supervisor_args(), tool_name="wrong_tool")]
+        _FakeAsyncClient.responses = [
+            _tool_response(_supervisor_args(), tool_name="wrong_tool")
+        ]
         _FakeAsyncClient.requests = []
 
         with pytest.raises(StructuredOutputError) as exc_info:
@@ -228,7 +256,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_empty_arguments_fails_with_deepseek_phase(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -251,7 +281,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_malformed_arguments_fails_as_parsing_error(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -274,7 +306,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_malformed_arguments_reask_then_success(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -308,18 +342,32 @@ class TestDeepSeekStrictRuntime:
         assert "Structured output correction required" in correction
         assert "Previous failure_phase: parsing_error" in correction
 
-        retry_event = next(event for event in events if event["stage"] == "structured_llm_retry_attempt")
-        reask_event = next(event for event in events if event["stage"] == "structured_llm_reask_attempt")
+        retry_event = next(
+            event
+            for event in events
+            if event["stage"] == "structured_llm_retry_attempt"
+        )
+        reask_event = next(
+            event
+            for event in events
+            if event["stage"] == "structured_llm_reask_attempt"
+        )
         assert retry_event["reask_used"] is True
         assert reask_event["reask_reason"] == "parsing_error"
-        final_payload = [event for event in events if event["stage"] == "structured_llm_output"][-1]
+        final_payload = [
+            event for event in events if event["stage"] == "structured_llm_output"
+        ][-1]
         assert final_payload["reask_used"] is True
         assert final_payload["provider"] == "deepseek_official"
         assert final_payload["provider_request_mode"] == "deepseek_tool_call_strict"
 
-    async def test_validation_error_reask_includes_field_path_then_success(self, monkeypatch):
+    async def test_validation_error_reask_includes_field_path_then_success(
+        self, monkeypatch
+    ):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -351,7 +399,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_business_validation_failure_keeps_business_phase(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -361,7 +411,9 @@ class TestDeepSeekStrictRuntime:
             lambda _node_name: False,
         )
         _FakeAsyncClient.responses = [
-            _tool_response(_supervisor_args(intent="emotional", requested_resource_type="quiz"))
+            _tool_response(
+                _supervisor_args(intent="emotional", requested_resource_type="quiz")
+            )
         ]
         _FakeAsyncClient.requests = []
 
@@ -382,7 +434,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_length_finish_reason_is_semantic_failure(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -408,13 +462,17 @@ class TestDeepSeekStrictRuntime:
 
     async def test_content_filter_finish_reason_fails_fast(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
         )
         _FakeAsyncClient.responses = [
-            _FakeResponse({"choices": [{"finish_reason": "content_filter", "message": {}}]})
+            _FakeResponse(
+                {"choices": [{"finish_reason": "content_filter", "message": {}}]}
+            )
         ]
         _FakeAsyncClient.requests = []
 
@@ -434,14 +492,26 @@ class TestDeepSeekStrictRuntime:
 
     async def test_insufficient_system_resource_uses_transport_retry(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         from src.graph import llm as llm_module
 
-        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 2)
-        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_max_retries", lambda node_name=None: 2
+        )
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0
+        )
         monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
         _FakeAsyncClient.responses = [
-            _FakeResponse({"choices": [{"finish_reason": "insufficient_system_resource", "message": {}}]}),
+            _FakeResponse(
+                {
+                    "choices": [
+                        {"finish_reason": "insufficient_system_resource", "message": {}}
+                    ]
+                }
+            ),
             _tool_response(_supervisor_args()),
         ]
         _FakeAsyncClient.requests = []
@@ -465,9 +535,13 @@ class TestDeepSeekStrictRuntime:
         stages = [event["stage"] for event in events]
         assert "structured_llm_transport_retry_attempt" in stages
 
-    async def test_deepseek_json_object_does_not_force_strict_thinking_override(self, monkeypatch):
+    async def test_deepseek_json_object_does_not_force_strict_thinking_override(
+        self, monkeypatch
+    ):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -495,7 +569,9 @@ class TestDeepSeekStrictRuntime:
 
     async def test_business_validation_reask_only_when_enabled(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-        monkeypatch.setattr("src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
         monkeypatch.setattr(
             "src.llm.structured_output.invoke_with_provider_transport_retry",
             _fake_transport_retry,
@@ -581,7 +657,10 @@ class TestDeepSeekConfigScope:
             assert get_setting(f"llm.{llm_node}.provider") == "deepseek_official"
             assert get_setting(f"llm.{llm_node}.model") == "deepseek-v4-pro"
             assert get_setting(f"llm.{llm_node}.base_url") == "https://api.deepseek.com"
-            assert get_setting(f"llm.{llm_node}.beta_base_url") == "https://api.deepseek.com/beta"
+            assert (
+                get_setting(f"llm.{llm_node}.beta_base_url")
+                == "https://api.deepseek.com/beta"
+            )
             assert get_setting(f"llm.{llm_node}.api_key_env") == "DEEPSEEK_API_KEY"
 
     def test_structured_nodes_resolve_strict_mode_and_no_fallback(self):
@@ -590,7 +669,13 @@ class TestDeepSeekConfigScope:
             assert get_llm_output_mode(node_name) == "deepseek_tool_call_strict"
             assert get_fallback_modes(node_name) == []
             assert get_setting(f"llm_outputs.{node_name}.fallback_modes", []) == []
-            assert get_setting(f"llm_outputs.{node_name}.max_retries", 2) == 2
+            max_retries = get_setting(f"llm_outputs.{node_name}.max_retries", 2)
+            assert isinstance(max_retries, int)
+            assert not isinstance(max_retries, bool)
+            assert max_retries >= 1
+
+        # Staged study-plan generation intentionally permits one strict repair.
+        assert get_setting("llm_outputs.study_plan_agent.max_retries") == 1
 
     def test_strict_structured_llm_nodes_disable_thinking_in_config(self):
         for llm_node in self.STRICT_LLM_NODES:
@@ -615,7 +700,9 @@ class TestDeepSeekConfigScope:
         assert get_setting("llm_outputs.default.reask_business_validation") is True
         assert get_setting("llm_outputs.default.transport_max_retries") == 2
 
-    def test_reask_instruction_does_not_use_empty_value_for_non_empty_business_rule(self):
+    def test_reask_instruction_does_not_use_empty_value_for_non_empty_business_rule(
+        self,
+    ):
         instruction = _build_reask_instruction(
             result=StructuredLLMResult(
                 success=False,
@@ -637,7 +724,14 @@ class TestDeepSeekConfigScope:
 
         assert "validation error says non-empty" in instruction
         assert "business validation error says a field must be non-empty" in instruction
-        assert "Do not use an empty value to satisfy a field that failed a non-empty business rule" in instruction
-        assert 'If the previous error says "Extra inputs are not permitted"' in instruction
+        assert (
+            "Do not use an empty value to satisfy a field that failed a non-empty business rule"
+            in instruction
+        )
+        assert (
+            'If the previous error says "Extra inputs are not permitted"' in instruction
+        )
         assert 'If the previous error says "Field required"' in instruction
-        assert "Do not fix one validation error by introducing extra fields" in instruction
+        assert (
+            "Do not fix one validation error by introducing extra fields" in instruction
+        )

@@ -32,6 +32,10 @@ from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
     validate_llm_input_manifest,
 )
+from src.context_engineering.influence_runtime import (
+    record_llm_input_influences,
+    record_plain_output_influence,
+)
 from src.observability.context_usage import emit_context_usage_trace
 from src.observability.a3_trace import emit_a3_trace
 
@@ -663,6 +667,13 @@ async def invoke_context_importance_scorer_raw(
             llm_input_manifest,
             state=state_payload,
         )
+        record_llm_input_influences(
+            node_name="context_importance_scorer",
+            llm_node=llm_node,
+            messages=scorer_messages,
+            state=state_payload,
+            manifest=llm_input_manifest,
+        )
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name="context_importance_scorer",
@@ -811,6 +822,13 @@ async def invoke_plain_llm_fail_fast(
             llm_input_manifest,
             state=state_payload,
         )
+        record_llm_input_influences(
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=messages_for_llm,
+            state=state_payload,
+            manifest=llm_input_manifest,
+        )
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name=node_name,
@@ -856,7 +874,13 @@ async def invoke_plain_llm_fail_fast(
                 state=state_payload,
                 env_flag="LOG_A3_TRACE",
             )
-            return raw.strip()
+            normalized_output = raw.strip()
+            record_plain_output_influence(
+                node_name=node_name,
+                output=normalized_output,
+                state=state_payload,
+            )
+            return normalized_output
         except Exception as exc:
             should_retry_empty = (
                 isinstance(exc, ValueError)

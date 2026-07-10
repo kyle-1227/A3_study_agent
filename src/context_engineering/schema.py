@@ -152,6 +152,7 @@ ContextSourceType = Literal[
     "trajectory",
     "rules",
     "curriculum",
+    "pipeline",
     "unknown",
 ]
 

@@ -31,6 +31,7 @@ from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
     merge_llm_input_manifest_history,
 )
+from src.context_engineering.influence import influence_status_payload
 from src.context_engineering.workspace import workspace_status_payload
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -46,6 +47,7 @@ from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import (
     CONTEXT_CLEAR,
+    CONTEXT_INFLUENCE_LEDGER_CLEAR,
     DICT_CLEAR,
     GENERATED_ARTIFACTS_CLEAR,
     LLM_INPUT_MANIFESTS_CLEAR,
@@ -221,6 +223,15 @@ def _safe_context_event_summary(event: dict) -> dict:
         if isinstance(event.get("trace_seq"), int)
         and not isinstance(event.get("trace_seq"), bool)
         else 0,
+        "entry_count": _safe_int(event.get("entry_count"), default=0),
+        "token_estimate": _safe_int(event.get("token_estimate"), default=0),
+        "counts_by_kind": {
+            sanitize_error_message(key, max_chars=80): _safe_int(value, default=0)
+            for key, value in (event.get("counts_by_kind") or {}).items()
+        }
+        if isinstance(event.get("counts_by_kind"), dict)
+        else {},
+        "influence_ids": _safe_warning_list(event.get("influence_ids")),
     }
 
 
@@ -659,6 +670,11 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
         else {}
     )
     background_status = background_context_status_payload(background_window)
+    influence_status = influence_status_payload(
+        values.get("context_influence_ledger")
+        if isinstance(values.get("context_influence_ledger"), dict)
+        else {}
+    )
     thread_context_window = {
         "context_usage_history_count": len(usage_history),
         "artifact_count": _artifact_count(
@@ -688,6 +704,9 @@ def _context_window_status(values: dict) -> tuple[dict, dict]:
             last_resource_payload.get("resource_type") or ""
         ),
         "background_context_window": background_window,
+        "context_influence_ledger": influence_status,
+        "context_influence_entry_count": influence_status.get("entry_count", 0),
+        "context_influence_total_recorded": influence_status.get("total_recorded", 0),
         **background_status,
         "llm_input_manifest_count": len(manifest_history),
         **workspace_status,
@@ -777,6 +796,9 @@ def _thread_status_from_snapshot(
             background_context_window=values.get("background_context_window")
             if isinstance(values.get("background_context_window"), dict)
             else {},
+            context_influence_ledger=thread_context_window.get(
+                "context_influence_ledger", {}
+            ),
             last_resource_final_payload=values.get("last_resource_final_payload")
             if isinstance(values.get("last_resource_final_payload"), dict)
             else {},
@@ -822,6 +844,9 @@ def _thread_status_from_snapshot(
         background_context_window=values.get("background_context_window")
         if isinstance(values.get("background_context_window"), dict)
         else {},
+        context_influence_ledger=thread_context_window.get(
+            "context_influence_ledger", {}
+        ),
         last_resource_final_payload=values.get("last_resource_final_payload")
         if isinstance(values.get("last_resource_final_payload"), dict)
         else {},
@@ -863,6 +888,13 @@ def _thread_status_from_active_run(
         background_context_window=active_run.get("background_context_window")
         if isinstance(active_run.get("background_context_window"), dict)
         else {},
+        context_influence_ledger=active_run.get("context_influence_ledger")
+        if isinstance(active_run.get("context_influence_ledger"), dict)
+        else (
+            thread_context_window.get("context_influence_ledger", {})
+            if isinstance(thread_context_window, dict)
+            else {}
+        ),
         last_resource_final_payload=active_run.get("last_resource_final_payload")
         if isinstance(active_run.get("last_resource_final_payload"), dict)
         else {},
@@ -887,6 +919,9 @@ def _thread_status_from_active_run(
             "background_context_window_max_tokens": 0,
             "background_context_window_used_ratio": 0.0,
             "background_context_window_updated_at": "",
+            "context_influence_ledger": {},
+            "context_influence_entry_count": 0,
+            "context_influence_total_recorded": 0,
             "workspace_present": False,
             "workspace_active_subject": "",
             "workspace_evidence_summary_count": 0,
@@ -1504,6 +1539,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "thread_context_ledger",
         "background_context_window",
         "context_continuity",
+        "context_influence_ledger",
     ]
     values = {
         "conversation_summary": "",
@@ -1521,6 +1557,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "thread_context_ledger": DICT_CLEAR,
         "background_context_window": {},
         "context_continuity": {},
+        "context_influence_ledger": CONTEXT_INFLUENCE_LEDGER_CLEAR,
     }
     await safe_update_thread_state(
         graph,
@@ -3058,6 +3095,9 @@ async def generate_sse(
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
             else {},
+            "context_influence_ledger": status_values.get("context_influence_ledger")
+            if isinstance(status_values.get("context_influence_ledger"), dict)
+            else {},
             "last_resource_final_payload": status_values.get(
                 "last_resource_final_payload"
             )
@@ -3236,6 +3276,9 @@ async def generate_resume_sse(
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
             else {},
+            "context_influence_ledger": status_values.get("context_influence_ledger")
+            if isinstance(status_values.get("context_influence_ledger"), dict)
+            else {},
             "last_resource_final_payload": status_values.get(
                 "last_resource_final_payload"
             )
@@ -3369,6 +3412,9 @@ async def generate_continue_sse(graph, thread_id: str) -> AsyncGenerator[str, No
             else {},
             "background_context_window": status_values.get("background_context_window")
             if isinstance(status_values.get("background_context_window"), dict)
+            else {},
+            "context_influence_ledger": status_values.get("context_influence_ledger")
+            if isinstance(status_values.get("context_influence_ledger"), dict)
             else {},
             "last_resource_final_payload": status_values.get(
                 "last_resource_final_payload"

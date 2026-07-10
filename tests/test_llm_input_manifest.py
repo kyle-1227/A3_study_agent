@@ -16,6 +16,11 @@ from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
     merge_llm_input_manifest_history,
 )
+from src.context_engineering.influence import (
+    build_influence_entry,
+    build_influence_update,
+    merge_context_influence_ledger,
+)
 from src.graph.state import initial_request_reset_transient_state
 
 
@@ -101,6 +106,50 @@ def test_background_context_window_uses_manifest_workspace_metadata():
     assert window["workspace_active_subject"] == "机器学习"
     assert window["workspace_evidence_summary_count"] == 1
     assert window["workspace_artifact_count"] == 1
+
+
+def test_manifest_and_background_window_include_safe_influence_counts():
+    influence_state = {"request_id": "r1", "thread_id": "t1"}
+    influence_ledger = merge_context_influence_ledger(
+        {},
+        build_influence_update(
+            state=influence_state,
+            entries=[
+                build_influence_entry(
+                    state=influence_state,
+                    kind="planner_output",
+                    source_node="mindmap_planner",
+                    preview="Compact outline only.",
+                )
+            ],
+        ),
+    )
+    manifest = build_llm_input_manifest(
+        node_name="mindmap_agent",
+        llm_node="mindmap",
+        provider="deepseek_official",
+        model="deepseek-v4-pro",
+        messages=[HumanMessage(content="mindmap")],
+        state={**influence_state, "context_influence_ledger": influence_ledger},
+        call_purpose="plain_llm",
+    )
+
+    assert "context_influence_ledger" in manifest["section_names"]
+    section = next(
+        item
+        for item in manifest["sections"]
+        if item["section"] == "context_influence_ledger"
+    )
+    assert section["item_count"] == 1
+    assert "Compact outline only." not in repr(section)
+
+    window = build_background_context_window(
+        manifest=manifest,
+        state={"context_influence_ledger": influence_ledger},
+        manifest_count=1,
+    )
+    assert window["influence_entry_count"] == 1
+    assert window["influence_source_node_count"] == 1
 
 
 def test_request_reset_preserves_thread_background_context_fields():

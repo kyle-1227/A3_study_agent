@@ -123,6 +123,7 @@ context_engineering:
       - artifact
       - trajectory
       - curriculum
+      - pipeline
     max_items_per_provider: 10
     max_content_chars_per_item: 4000
     trace_top_items: 10

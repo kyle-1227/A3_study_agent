@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping, TypedDict
 from langchain_core.messages import BaseMessage
 
 from src.context_engineering.itemizer import sanitize_metadata
+from src.context_engineering.influence import influence_status_payload
 from src.context_engineering.tokenizer import estimate_messages_tokens_mixed
 from src.context_engineering.workspace import (
     sanitize_workspace_text,
@@ -78,6 +79,9 @@ class ThreadContextLedger(TypedDict, total=False):
     updated_at: str
     last_manifest_id: str
     manifest_count: int
+    influence_entry_count: int
+    influence_token_estimate: int
+    influence_source_node_count: int
     node_count: int
     llm_node_count: int
     section_counts: dict[str, int]
@@ -146,6 +150,7 @@ def build_llm_input_manifest(
             _evidence_section(state_payload),
             _artifact_section(state_payload),
             _memory_profile_section(state_payload),
+            _context_influence_section(state_payload),
             _ce_block_section(safe_messages, context_apply_applied),
             _structured_contract_section(
                 schema_name=schema_name,
@@ -382,6 +387,16 @@ def build_background_context_window(
     section_names = [
         _safe_text(item, 80) for item in (payload.get("section_names") or [])
     ][:_SECTION_LIMIT]
+    influence = influence_status_payload(
+        state_payload.get("context_influence_ledger")
+        if isinstance(state_payload.get("context_influence_ledger"), Mapping)
+        else {},
+        include_recent_entries=False,
+    )
+    influence_tokens = sum(
+        _safe_int(value)
+        for value in (influence.get("token_estimates_by_kind") or {}).values()
+    )
     return {
         "schema_version": BACKGROUND_CONTEXT_SCHEMA_VERSION,
         "thread_id": _safe_text(
@@ -411,6 +426,9 @@ def build_background_context_window(
         "ce_block_present": bool(payload.get("context_apply_applied")),
         "structured_contract_present": bool(payload.get("schema_contract_first")),
         "manifest_count": manifest_count,
+        "influence_entry_count": _safe_int(influence.get("entry_count")),
+        "influence_token_estimate": influence_tokens,
+        "influence_source_node_count": len(influence.get("source_nodes") or []),
         **workspace,
     }
 
@@ -424,6 +442,8 @@ def background_context_status_payload(value: Mapping[str, Any] | None) -> dict[s
             "background_context_window_used_ratio": 0.0,
             "background_context_window_updated_at": "",
             "llm_input_manifest_count": 0,
+            "background_context_influence_entry_count": 0,
+            "background_context_influence_token_estimate": 0,
         }
     return {
         "background_context_window_present": bool(value.get("last_manifest_id")),
@@ -439,6 +459,12 @@ def background_context_status_payload(value: Mapping[str, Any] | None) -> dict[s
             80,
         ),
         "llm_input_manifest_count": _safe_int(value.get("manifest_count")),
+        "background_context_influence_entry_count": _safe_int(
+            value.get("influence_entry_count")
+        ),
+        "background_context_influence_token_estimate": _safe_int(
+            value.get("influence_token_estimate")
+        ),
     }
 
 
@@ -533,6 +559,33 @@ def _memory_profile_section(state: Mapping[str, Any]) -> LLMInputManifestSection
         "section": "selected_memory_profile",
         "present": count > 0,
         "item_count": count,
+    }
+
+
+def _context_influence_section(state: Mapping[str, Any]) -> LLMInputManifestSection:
+    status = influence_status_payload(
+        state.get("context_influence_ledger")
+        if isinstance(state.get("context_influence_ledger"), Mapping)
+        else {},
+        include_recent_entries=False,
+    )
+    count = _safe_int(status.get("entry_count"))
+    token_estimate = sum(
+        _safe_int(value)
+        for value in (status.get("token_estimates_by_kind") or {}).values()
+    )
+    return {
+        "section": "context_influence_ledger",
+        "present": count > 0,
+        "item_count": count,
+        "estimated_tokens": token_estimate,
+        "source_ids": [
+            _safe_text(item, 120) for item in (status.get("source_nodes") or [])
+        ][:_SOURCE_ID_LIMIT],
+        "metadata": {
+            "counts_by_kind": status.get("counts_by_kind") or {},
+            "source_node_count": len(status.get("source_nodes") or []),
+        },
     }
 
 

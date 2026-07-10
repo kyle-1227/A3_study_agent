@@ -68,6 +68,7 @@ class TestTaskWorkspaceReducers:
 
         assert "task_workspace" not in reset
         assert "workspace_events" not in reset
+        assert "context_influence_ledger" not in reset
 
     def test_task_workspace_reducer_is_idempotent(self):
         update = {

@@ -19,6 +19,7 @@ from src.context_engineering.providers.curriculum_provider import (
 from src.context_engineering.providers.evidence_provider import EvidenceContextProvider
 from src.context_engineering.providers.memory_provider import MemoryContextProvider
 from src.context_engineering.providers.message_provider import MessageContextProvider
+from src.context_engineering.providers.pipeline_provider import PipelineContextProvider
 from src.context_engineering.providers.profile_provider import ProfileContextProvider
 from src.context_engineering.providers.rules_provider import RulesContextProvider
 from src.context_engineering.providers.trajectory_provider import (
@@ -58,6 +59,7 @@ _PROVIDER_CLASSES = (
     ArtifactContextProvider,
     TrajectoryContextProvider,
     CurriculumContextProvider,
+    PipelineContextProvider,
 )
 
 _ALLOWED_SOURCES = {
@@ -69,6 +71,7 @@ _ALLOWED_SOURCES = {
     "trajectory",
     "rules",
     "curriculum",
+    "pipeline",
     "unknown",
 }
 

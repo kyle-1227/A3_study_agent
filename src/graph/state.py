@@ -15,6 +15,10 @@ from src.context_engineering.input_manifest import (
     merge_llm_input_manifest_history,
     merge_thread_context_ledger,
 )
+from src.context_engineering.influence import (
+    CONTEXT_INFLUENCE_LEDGER_CLEAR as _CONTEXT_INFLUENCE_LEDGER_CLEAR,
+    merge_context_influence_ledger,
+)
 
 
 # Sentinel value: returning this from a node signals "clear all context"
@@ -32,6 +36,7 @@ DICT_CLEAR: dict = {"__dict_clear__": True}
 GENERATED_ARTIFACTS_CLEAR: list[dict] = [{"__generated_artifacts_clear__": True}]
 WORKSPACE_EVENTS_CLEAR: list[dict] = [{"__workspace_events_clear__": True}]
 LLM_INPUT_MANIFESTS_CLEAR: list[dict] = [{"__llm_input_manifests_clear__": True}]
+CONTEXT_INFLUENCE_LEDGER_CLEAR: dict = _CONTEXT_INFLUENCE_LEDGER_CLEAR
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
@@ -152,6 +157,11 @@ def generated_artifacts_reducer(
 def task_workspace_reducer(existing: dict, update: dict) -> dict:
     """Merge versioned task workspace updates without unbounded growth."""
     return merge_task_workspace(existing, update)
+
+
+def context_influence_ledger_reducer(existing: dict, update: dict) -> dict:
+    """Merge the bounded, idempotent cross-node influence ledger."""
+    return merge_context_influence_ledger(existing, update)
 
 
 # Current-turn transient state reset
@@ -431,6 +441,9 @@ class LearningState(TypedDict):
     context_continuity: Annotated[
         dict, latest_dict_reducer
     ]  # Task-continuity diagnostics for current request
+    context_influence_ledger: Annotated[
+        dict, context_influence_ledger_reducer
+    ]  # Bounded cross-node context influence metadata
     request_context_window: Annotated[
         dict, latest_dict_reducer
     ]  # Current request CE window summary

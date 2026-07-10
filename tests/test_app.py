@@ -245,6 +245,7 @@ class TestDevMemoryClear:
             TASK_WORKSPACE_CLEAR,
             WORKSPACE_EVENTS_CLEAR,
             LLM_INPUT_MANIFESTS_CLEAR,
+            CONTEXT_INFLUENCE_LEDGER_CLEAR,
         )
 
         graph = AsyncMock()
@@ -271,6 +272,7 @@ class TestDevMemoryClear:
         assert values["thread_context_ledger"] is DICT_CLEAR
         assert values["background_context_window"] == {}
         assert values["context_continuity"] == {}
+        assert values["context_influence_ledger"] is CONTEXT_INFLUENCE_LEDGER_CLEAR
         assert result == {
             "ok": True,
             "thread_id": "thread-1",
@@ -290,6 +292,7 @@ class TestDevMemoryClear:
                 "thread_context_ledger",
                 "background_context_window",
                 "context_continuity",
+                "context_influence_ledger",
             ],
         }
 
@@ -357,11 +360,14 @@ class TestDevMemoryClear:
             ],
         }
 
-        with patch(
-            "app.clear_persistent_memory_for_thread",
-            new_callable=AsyncMock,
-            return_value=helper_result,
-        ), patch("app.checkpointer_enabled", return_value=False):
+        with (
+            patch(
+                "app.clear_persistent_memory_for_thread",
+                new_callable=AsyncMock,
+                return_value=helper_result,
+            ),
+            patch("app.checkpointer_enabled", return_value=False),
+        ):
             with TestClient(app) as client:
                 response = client.post("/dev/threads/thread-1/memory/clear")
 
@@ -371,9 +377,31 @@ class TestDevMemoryClear:
 
 def test_context_window_status_includes_workspace_counts():
     from app import _context_window_status
+    from src.context_engineering.influence import (
+        build_influence_entry,
+        build_influence_update,
+        merge_context_influence_ledger,
+    )
+
+    influence_state = {"request_id": "request-1", "thread_id": "thread-1"}
+    influence_ledger = merge_context_influence_ledger(
+        {},
+        build_influence_update(
+            state=influence_state,
+            entries=[
+                build_influence_entry(
+                    state=influence_state,
+                    kind="planner_output",
+                    source_node="mindmap_planner",
+                    preview="Compact outline",
+                )
+            ],
+        ),
+    )
 
     _request_window, thread_window = _context_window_status(
         {
+            "context_influence_ledger": influence_ledger,
             "task_workspace": {
                 "schema_version": 1,
                 "workspace_id": "workspace:v1:one",
@@ -384,7 +412,7 @@ def test_context_window_status_includes_workspace_counts():
                 "artifacts_by_id": {
                     "artifact:v1:one": {"artifact_id": "artifact:v1:one"}
                 },
-            }
+            },
         }
     )
 
@@ -394,6 +422,8 @@ def test_context_window_status_includes_workspace_counts():
     assert thread_window["workspace_gap_count"] == 1
     assert thread_window["workspace_artifact_count"] == 1
     assert thread_window["workspace_updated_at"] == "2026-01-01T00:00:00+00:00"
+    assert thread_window["context_influence_entry_count"] == 1
+    assert thread_window["context_influence_ledger"]["present"] is True
 
 
 def test_new_request_status_values_preserve_thread_workspace_counts():

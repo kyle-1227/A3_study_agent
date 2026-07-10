@@ -18,6 +18,7 @@ _ALLOWED_SOURCES = {
     "trajectory",
     "rules",
     "curriculum",
+    "pipeline",
     "unknown",
 }
 

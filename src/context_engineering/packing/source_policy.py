@@ -9,7 +9,7 @@ from src.context_engineering.packing.node_policy import SourceBudgetPolicy
 from src.context_engineering.schema import ContextItem
 from src.rag.course_catalog import normalize_subject
 
-_HIGH_RISK_MATCH_SOURCES = {"memory", "trajectory", "artifact"}
+_HIGH_RISK_MATCH_SOURCES = {"memory", "trajectory", "artifact", "pipeline"}
 _LOW_RISK_MATCH_SOURCES = {"rules", "curriculum", "evidence"}
 _USER_ALIASES = ("user_id", "student_id", "learner_id", "profile_user_id")
 _THREAD_ALIASES = ("thread_id", "session_id")

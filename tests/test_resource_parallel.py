@@ -9,6 +9,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
 
+from src.context_engineering.influence import (
+    build_influence_entry,
+    merge_context_influence_ledger,
+)
 from src.graph import resource_generation as rg
 from src.graph.resource_generation import (
     dispatch_resource_workers,
@@ -358,6 +362,46 @@ async def test_resource_bundle_output_all_failed_returns_failed_bundle():
     assert result["resource_generation_status"] == "failed"
     assert result["resource_bundle_artifact"]["status"] == "failed"
     assert "所有请求的学习资源都生成失败" in result["messages"][0].content
+
+
+async def test_resource_bundle_fan_in_persists_branch_influences_idempotently():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "subject": "math",
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+    }
+    entry = build_influence_entry(
+        state=state,
+        kind="planner_output",
+        source_node="mindmap_planner",
+        title="Mindmap plan",
+        preview="Functions and derivatives.",
+        metadata={"workflow": "mindmap", "iteration": 1},
+    )
+    state["resource_branch_results"] = [
+        {
+            "resource_type": "mindmap",
+            "status": "success",
+            "title": "Mock Map",
+            "artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}},
+            "artifacts": [],
+            "state_updates": {"mindmap_tree": {"title": "Mock Map"}},
+            "message_content": "Generated map",
+            "message_preview": "Generated map",
+            "elapsed_ms": 1,
+            "context_influence_entries": [entry, entry],
+        }
+    ]
+
+    result = await resource_bundle_output(state)
+    once = merge_context_influence_ledger({}, result["context_influence_ledger"])
+    twice = merge_context_influence_ledger(once, result["context_influence_ledger"])
+
+    assert len(result["context_influence_ledger"]["entries"]) == 1
+    assert once["ordered_ids"] == twice["ordered_ids"]
+    assert twice["counts_by_kind"] == {"planner_output": 1}
 
 
 def test_resource_summary_includes_review_doc_metrics():

@@ -43,6 +43,7 @@ _ALLOWED_SOURCES = {
     "trajectory",
     "rules",
     "curriculum",
+    "pipeline",
     "unknown",
 }
 _ALLOWED_DROP_ORDER_KEYS = {

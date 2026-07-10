@@ -56,6 +56,10 @@ from src.context_engineering.input_manifest import (
     build_llm_input_manifest,
     llm_input_manifest_trace_payload,
 )
+from src.context_engineering.influence_runtime import (
+    record_llm_input_influences,
+    record_structured_output_influence,
+)
 from src.context_engineering.providers import emit_context_items_shadow
 from src.context_engineering.tokenizer import count_schema_chars
 from src.observability.context_usage import emit_context_usage_trace
@@ -2123,6 +2127,15 @@ async def _invoke_one_mode(
             llm_input_manifest,
             state=state or {},
         )
+        record_llm_input_influences(
+            node_name=node_name,
+            llm_node=llm_node,
+            messages=messages,
+            state=state or {},
+            manifest=llm_input_manifest,
+            schema_name=schema.__name__,
+            output_mode=mode,
+        )
     except Exception as exc:
         _emit_llm_input_manifest_failed(
             node_name=node_name,
@@ -2734,6 +2747,11 @@ async def invoke_structured_llm(
                 provider_request_mode=metrics.provider_request_mode,
                 http_messages_preview=metrics.http_messages_preview,
                 extra_debug=dict(metrics.extra_debug),
+            )
+            record_structured_output_influence(
+                node_name=node_name,
+                output=parsed,
+                state=state or {},
             )
             _emit_and_maybe_raise(result)
             return result

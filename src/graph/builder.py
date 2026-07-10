@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
+from src.context_engineering.influence_runtime import wrap_context_influence_node
 from src.graph.academic import (
     academic_router,
     episodic_memory_retriever,
@@ -43,7 +44,11 @@ def build_graph() -> StateGraph:
     graph = StateGraph(LearningState)
 
     def add_interruptible_node(node_name: str, node_fn) -> None:
-        graph.add_node(node_name, wrap_interruptible_node(node_name, node_fn))
+        interruptible = wrap_interruptible_node(node_name, node_fn)
+        graph.add_node(
+            node_name,
+            wrap_context_influence_node(node_name, interruptible),
+        )
 
     # Nodes
     add_interruptible_node("supervisor", supervisor_node)

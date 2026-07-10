@@ -16,6 +16,15 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
 
+from src.context_engineering.influence import merge_context_influence_ledger
+from src.context_engineering.influence_runtime import (
+    begin_influence_capture,
+    build_node_output_influences,
+    combine_influence_updates,
+    emit_influence_capture_trace,
+    end_influence_capture,
+    influence_entries_for_scope,
+)
 from src.context_engineering.workspace import (
     build_workspace_artifact_update,
     workspace_trace_payload,
@@ -367,6 +376,7 @@ async def _run_resource_subnode(
     func: Callable[[dict], Awaitable[dict | None]],
 ) -> dict | None:
     start = time.perf_counter()
+    capture_token = begin_influence_capture()
     emit_a3_trace(
         logger,
         "resource_subnode.start",
@@ -383,6 +393,7 @@ async def _run_resource_subnode(
     try:
         output = await func(local_state)
     except GraphInterrupt:
+        end_influence_capture(capture_token)
         emit_a3_trace(
             logger,
             "resource_subnode.end",
@@ -398,6 +409,7 @@ async def _run_resource_subnode(
         )
         raise
     except Exception as exc:
+        end_influence_capture(capture_token)
         emit_a3_trace(
             logger,
             "resource_subnode.end",
@@ -412,6 +424,29 @@ async def _run_resource_subnode(
             env_flag="LOG_GENERATION_SUMMARY",
         )
         raise
+    captured = end_influence_capture(capture_token)
+    captured.extend(
+        build_node_output_influences(
+            node_name=subnode,
+            output=output,
+            state=local_state,
+        )
+    )
+    if captured:
+        influence_update = combine_influence_updates(
+            state=local_state,
+            updates=(),
+            entries=captured,
+        )
+        local_state["context_influence_ledger"] = merge_context_influence_ledger(
+            local_state.get("context_influence_ledger") or {},
+            influence_update,
+        )
+        emit_influence_capture_trace(
+            node_name=subnode,
+            entries=captured,
+            state=local_state,
+        )
     emit_a3_trace(
         logger,
         "resource_subnode.end",
@@ -768,6 +803,11 @@ def _success_result(
     resource_type: str, local_state: dict, message_content: str, elapsed_ms: int
 ) -> dict:
     artifact = _primary_artifact(resource_type, local_state)
+    influence_entries = influence_entries_for_scope(
+        local_state.get("context_influence_ledger") or {},
+        request_id=str(local_state.get("request_id") or ""),
+        workflow=resource_type,
+    )
     return {
         "resource_type": resource_type,
         "status": "success",
@@ -782,6 +822,7 @@ def _success_result(
         "error_type": None,
         "error_message_sanitized": None,
         "elapsed_ms": elapsed_ms,
+        "context_influence_entries": influence_entries,
     }
 
 
@@ -1215,6 +1256,17 @@ async def resource_bundle_output(state: LearningState) -> dict:
     message = _compose_bundle_message(status, successes, failures)
     bundle["message"] = message
     artifact_updates: dict[str, Any] = {}
+    influence_entries = [
+        entry
+        for result in results
+        for entry in (result.get("context_influence_entries") or [])
+        if isinstance(entry, dict)
+    ]
+    influence_update = combine_influence_updates(
+        state=state,
+        updates=(),
+        entries=influence_entries,
+    )
     if successes:
         try:
             workspace_successes = [
@@ -1295,5 +1347,6 @@ async def resource_bundle_output(state: LearningState) -> dict:
         "resource_bundle_artifact": bundle,
         "resource_generation_debug": debug,
         "resource_generation_status": status,
+        "context_influence_ledger": influence_update,
         "messages": [AIMessage(content=message)] if message else [],
     }
