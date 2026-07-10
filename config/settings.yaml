@@ -100,6 +100,73 @@ context_budget:
 context_engineering:
   enabled: true
   strict: true
+  policy_mode: strict
+  broad_policy:
+    max_items_total: 24
+    max_injected_context_tokens: 12000
+    max_content_chars_per_item: 2000
+    enabled_sources:
+      - pipeline
+      - evidence
+      - artifact
+      - memory
+      - profile
+      - rules
+      - curriculum
+      - trajectory
+    eligible_node_roles:
+      - planner
+      - agent
+      - reviewer
+      - consensus
+    bypass_business_filters:
+      - purpose
+      - quality
+      - relevance
+      - subject
+      - task
+      - stale
+    source_caps:
+      pipeline:
+        max_items: 8
+        max_tokens: 5000
+        require_user_match: false
+        require_thread_match: true
+      evidence:
+        max_items: 6
+        max_tokens: 4000
+        require_user_match: false
+        require_thread_match: false
+      artifact:
+        max_items: 4
+        max_tokens: 2500
+        require_user_match: false
+        require_thread_match: true
+      memory:
+        max_items: 4
+        max_tokens: 2000
+        require_user_match: true
+        require_thread_match: true
+      profile:
+        max_items: 2
+        max_tokens: 1000
+        require_user_match: true
+        require_thread_match: false
+      rules:
+        max_items: 4
+        max_tokens: 2000
+        require_user_match: false
+        require_thread_match: false
+      curriculum:
+        max_items: 4
+        max_tokens: 2000
+        require_user_match: false
+        require_thread_match: false
+      trajectory:
+        max_items: 4
+        max_tokens: 2000
+        require_user_match: true
+        require_thread_match: true
   tokenizer:
     mode: estimated_mixed
     estimated: true
@@ -145,6 +212,7 @@ context_engineering:
       - artifact
       - trajectory
       - curriculum
+      - pipeline
     apply:
       enabled: true
       apply_enabled_nodes: []

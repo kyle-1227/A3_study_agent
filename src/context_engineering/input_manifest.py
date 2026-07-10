@@ -63,6 +63,12 @@ class LLMInputManifest(TypedDict, total=False):
     input_estimated_tokens: int
     prompt_chars: int
     context_apply_applied: bool
+    context_apply_status: str
+    optional_sources_missing: list[str]
+    provider_input_budget_tokens: int
+    provider_input_tokens_before_context: int
+    provider_remaining_input_tokens: int
+    effective_context_budget_tokens: int
     schema_contract_first: bool
     provider_bound_messages_mutated: bool
     sections: list[LLMInputManifestSection]
@@ -105,6 +111,7 @@ class BackgroundContextWindow(TypedDict, total=False):
     workspace_evidence_summary_count: int
     workspace_gap_count: int
     workspace_artifact_count: int
+    workspace_updated_at: str
     conversation_summary_present: bool
     selected_memory_count: int
     artifact_summary_count: int
@@ -112,6 +119,9 @@ class BackgroundContextWindow(TypedDict, total=False):
     ce_block_present: bool
     structured_contract_present: bool
     manifest_count: int
+    influence_entry_count: int
+    influence_token_estimate: int
+    influence_source_node_count: int
 
 
 def build_llm_input_manifest(
@@ -127,6 +137,12 @@ def build_llm_input_manifest(
     schema_name: str = "",
     schema_size_chars: int | None = None,
     context_apply_applied: bool = False,
+    context_apply_status: str = "",
+    optional_sources_missing: Iterable[str] = (),
+    provider_input_budget_tokens: int = 0,
+    provider_input_tokens_before_context: int = 0,
+    provider_remaining_input_tokens: int = 0,
+    effective_context_budget_tokens: int = 0,
     schema_contract_first: bool = False,
     provider_bound_messages_mutated: bool = False,
     trace_call_id: str = "",
@@ -162,7 +178,9 @@ def build_llm_input_manifest(
     )
     section_names = [section["section"] for section in sections]
     source_counts = {
-        section["section"]: int(section.get("item_count") or section.get("message_count") or 0)
+        section["section"]: int(
+            section.get("item_count") or section.get("message_count") or 0
+        )
         for section in sections
     }
     safe_node_name = _safe_text(node_name, 120)
@@ -172,6 +190,12 @@ def build_llm_input_manifest(
     safe_call_purpose = _safe_text(call_purpose, 120)
     safe_output_mode = _safe_text(output_mode, 120)
     safe_trace_call_id = _safe_text(trace_call_id, 120)
+    safe_apply_status = _safe_text(context_apply_status, 80)
+    safe_optional_sources = [
+        _safe_text(source, 80)
+        for source in optional_sources_missing
+        if _safe_text(source, 80)
+    ][:_SOURCE_ID_LIMIT]
     identity: dict[str, Any] = {
         "request_id": request_id,
         "thread_id": thread_id,
@@ -202,6 +226,14 @@ def build_llm_input_manifest(
         "input_estimated_tokens": input_tokens,
         "prompt_chars": prompt_chars,
         "context_apply_applied": bool(context_apply_applied),
+        "context_apply_status": safe_apply_status,
+        "optional_sources_missing": safe_optional_sources,
+        "provider_input_budget_tokens": _safe_int(provider_input_budget_tokens),
+        "provider_input_tokens_before_context": _safe_int(
+            provider_input_tokens_before_context
+        ),
+        "provider_remaining_input_tokens": _safe_int(provider_remaining_input_tokens),
+        "effective_context_budget_tokens": _safe_int(effective_context_budget_tokens),
         "schema_contract_first": bool(schema_contract_first),
         "provider_bound_messages_mutated": bool(provider_bound_messages_mutated),
         "sections": sections,
@@ -251,11 +283,30 @@ def llm_input_manifest_trace_payload(
         "call_purpose": _safe_text(manifest.get("call_purpose"), 120),
         "output_mode": _safe_text(manifest.get("output_mode"), 120),
         "message_count": _safe_int(manifest.get("message_count")),
-        "input_estimated_tokens": _safe_int(
-            manifest.get("input_estimated_tokens")
-        ),
+        "input_estimated_tokens": _safe_int(manifest.get("input_estimated_tokens")),
         "prompt_chars": _safe_int(manifest.get("prompt_chars")),
         "context_apply_applied": bool(manifest.get("context_apply_applied")),
+        "context_apply_status": _safe_text(
+            manifest.get("context_apply_status"),
+            80,
+        ),
+        "optional_sources_missing": [
+            _safe_text(item, 80)
+            for item in (manifest.get("optional_sources_missing") or [])
+            if _safe_text(item, 80)
+        ][:_SOURCE_ID_LIMIT],
+        "provider_input_budget_tokens": _safe_int(
+            manifest.get("provider_input_budget_tokens")
+        ),
+        "provider_input_tokens_before_context": _safe_int(
+            manifest.get("provider_input_tokens_before_context")
+        ),
+        "provider_remaining_input_tokens": _safe_int(
+            manifest.get("provider_remaining_input_tokens")
+        ),
+        "effective_context_budget_tokens": _safe_int(
+            manifest.get("effective_context_budget_tokens")
+        ),
         "schema_contract_first": bool(manifest.get("schema_contract_first")),
         "provider_bound_messages_mutated": bool(
             manifest.get("provider_bound_messages_mutated")
@@ -433,7 +484,9 @@ def build_background_context_window(
     }
 
 
-def background_context_status_payload(value: Mapping[str, Any] | None) -> dict[str, Any]:
+def background_context_status_payload(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {
             "background_context_window_present": False,
@@ -451,9 +504,7 @@ def background_context_status_payload(value: Mapping[str, Any] | None) -> dict[s
         "background_context_window_max_tokens": _safe_int(
             value.get("max_context_tokens")
         ),
-        "background_context_window_used_ratio": _safe_float(
-            value.get("used_ratio")
-        ),
+        "background_context_window_used_ratio": _safe_float(value.get("used_ratio")),
         "background_context_window_updated_at": _safe_text(
             value.get("updated_at"),
             80,
@@ -495,7 +546,9 @@ def _conversation_summary_section(state: Mapping[str, Any]) -> LLMInputManifestS
 
 def _task_workspace_section(state: Mapping[str, Any]) -> LLMInputManifestSection:
     status = workspace_status_payload(
-        state.get("task_workspace") if isinstance(state.get("task_workspace"), dict) else {}
+        state.get("task_workspace")
+        if isinstance(state.get("task_workspace"), dict)
+        else {}
     )
     count = (
         int(status.get("workspace_evidence_summary_count") or 0)

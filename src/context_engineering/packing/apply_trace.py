@@ -55,6 +55,7 @@ def build_context_applied_event(
         "node_name": node_name,
         "llm_node": llm_node,
         "applied": result.applied,
+        "apply_status": result.apply_status,
         "fallback_used": result.fallback_used,
         "original_message_count": result.original_message_count,
         "final_message_count": result.final_message_count,

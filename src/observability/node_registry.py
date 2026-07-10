@@ -39,6 +39,7 @@ class NodeRuntimeMetadata:
     label: str
     description: str
     role: NodeRole
+    operation: str
     group: str
     stage_rank: int
     parent: str = ""
@@ -83,6 +84,7 @@ def _metadata(
     label: str,
     description: str,
     role: NodeRole,
+    operation: str = "",
     group: str,
     stage_rank: int,
     parent: str = "",
@@ -98,6 +100,7 @@ def _metadata(
         label=label,
         description=description,
         role=role,
+        operation=operation or role,
         group=group,
         stage_rank=stage_rank,
         parent=parent,
@@ -502,6 +505,7 @@ for workflow, node_ids in _RESOURCE_WORKFLOWS.items():
                 label=node_id.replace("_", " ").title(),
                 description=f"Logical {role} step for the {workflow} workflow.",
                 role=role,
+                operation=("rewrite" if node_id.endswith("_rewrite") else role),
                 group="resource_workflow",
                 parent="resource_worker",
                 workflow=workflow,

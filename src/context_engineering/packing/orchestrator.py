@@ -7,8 +7,11 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
+from src.context_engineering.budget import build_context_budget
+from src.context_engineering.influence import content_fingerprint
 from src.context_engineering.packing.apply import (
     ContextApplyError,
+    ContextApplyErrorScope,
     ContextApplyResult,
     ContextApplySelection,
     ContextInjectionPolicy,
@@ -48,7 +51,15 @@ from src.context_engineering.providers.supply import (
     emit_context_provider_supply_plan,
     emit_provider_errors,
 )
-from src.context_engineering.schema import ContextItem, ContextSourceType
+from src.context_engineering.schema import (
+    ContextConfigError,
+    ContextItem,
+    ContextSourceType,
+)
+from src.context_engineering.tokenizer import (
+    estimate_messages_tokens_mixed,
+    message_content_to_text,
+)
 from src.observability.a3_trace import emit_a3_trace
 
 
@@ -65,6 +76,12 @@ class ContextPreparedMessages:
     resolved_policy: ResolvedContextPolicy | None = None
     selection: ContextApplySelection | None = None
     apply_result: ContextApplyResult | None = None
+    context_apply_status: str = "skipped"
+    optional_sources_missing: tuple[str, ...] = ()
+    provider_input_budget_tokens: int = 0
+    provider_input_tokens_before_context: int = 0
+    provider_remaining_input_tokens: int = 0
+    effective_context_budget_tokens: int = 0
 
 
 @dataclass
@@ -88,11 +105,21 @@ class _TraceSequencer:
         }
 
 
+@dataclass(frozen=True)
+class _ProviderBudgetState:
+    resolved: ResolvedContextPolicy
+    provider_input_budget_tokens: int = 0
+    provider_input_tokens_before_context: int = 0
+    provider_remaining_input_tokens: int = 0
+    effective_context_budget_tokens: int = 0
+
+
 def prepare_messages_with_context_policy(
     logger: logging.Logger,
     *,
     node_name: str,
     llm_node: str,
+    model: str,
     messages: list[Any],
     state: dict[str, Any] | None,
 ) -> ContextPreparedMessages:
@@ -109,11 +136,32 @@ def prepare_messages_with_context_policy(
         trace_call_id=str(uuid.uuid4()),
     )
     try:
-        resolved = resolve_context_policy(
-            node_name=node_name,
-            llm_node=llm_node,
-            state=state_payload,
-        )
+        try:
+            resolved = resolve_context_policy(
+                node_name=node_name,
+                llm_node=llm_node,
+                state=state_payload,
+            )
+        except ContextConfigError as exc:
+            raise ContextApplyError(
+                reason=exc.reason,
+                warning=exc.warning,
+                node_name=node_name,
+                llm_node=llm_node,
+                original_exception_type=type(exc).__name__,
+                error_scope="config",
+                recoverable=False,
+            ) from exc
+        budget_state = _ProviderBudgetState(resolved=resolved)
+        if resolved.mode == "active":
+            budget_state = _constrain_policy_to_provider_budget(
+                resolved=resolved,
+                node_name=node_name,
+                llm_node=llm_node,
+                model=model,
+                messages=original_messages,
+            )
+        resolved = budget_state.resolved
         policy = resolved.injection_policy
         _emit_context_policy_resolved(
             logger,
@@ -143,6 +191,19 @@ def prepare_messages_with_context_policy(
                 context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
+                context_apply_status="skipped",
+                provider_input_budget_tokens=(
+                    budget_state.provider_input_budget_tokens
+                ),
+                provider_input_tokens_before_context=(
+                    budget_state.provider_input_tokens_before_context
+                ),
+                provider_remaining_input_tokens=(
+                    budget_state.provider_remaining_input_tokens
+                ),
+                effective_context_budget_tokens=(
+                    budget_state.effective_context_budget_tokens
+                ),
             )
 
         plan, collection = _collect_for_policy(
@@ -212,6 +273,21 @@ def prepare_messages_with_context_policy(
                 context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
+                context_apply_status=(
+                    "observed" if policy.mode == "observe_only" else "skipped"
+                ),
+                provider_input_budget_tokens=(
+                    budget_state.provider_input_budget_tokens
+                ),
+                provider_input_tokens_before_context=(
+                    budget_state.provider_input_tokens_before_context
+                ),
+                provider_remaining_input_tokens=(
+                    budget_state.provider_remaining_input_tokens
+                ),
+                effective_context_budget_tokens=(
+                    budget_state.effective_context_budget_tokens
+                ),
             )
 
         source_filter = filter_context_items_by_source_policy(
@@ -220,12 +296,16 @@ def prepare_messages_with_context_policy(
             exclude_message_source=policy.exclude_message_source,
             source_policies=resolved.source_policies,
             state=state_payload,
+            policy_mode=resolved.runtime_policy_mode,
+            target_node_name=node_name,
+            existing_content_fingerprints=_message_fingerprints(original_messages),
         )
         _emit_context_source_filter(
             logger,
             node_name=node_name,
             llm_node=llm_node,
             result=source_filter,
+            policy_mode=resolved.runtime_policy_mode,
             state=state_payload,
             trace_fields=sequencer.next_fields(),
         )
@@ -282,6 +362,19 @@ def prepare_messages_with_context_policy(
                 context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
+                context_apply_status="observed",
+                provider_input_budget_tokens=(
+                    budget_state.provider_input_budget_tokens
+                ),
+                provider_input_tokens_before_context=(
+                    budget_state.provider_input_tokens_before_context
+                ),
+                provider_remaining_input_tokens=(
+                    budget_state.provider_remaining_input_tokens
+                ),
+                effective_context_budget_tokens=(
+                    budget_state.effective_context_budget_tokens
+                ),
             )
 
         _emit_context_apply_selection(
@@ -316,6 +409,29 @@ def prepare_messages_with_context_policy(
                 error_scope="source_filter",
                 recoverable=False,
             )
+        optional_provider_errors = _optional_provider_error_sources(
+            plan=plan,
+            collection=collection,
+        )
+        apply_status = "applied"
+        if optional_provider_errors:
+            apply_status = "degraded_applied"
+            apply_result = replace(
+                apply_result,
+                apply_status=apply_status,
+                warnings=list(
+                    dict.fromkeys(
+                        [
+                            *apply_result.warnings,
+                            "optional_provider_error",
+                            *(
+                                f"optional_provider_error:{source}"
+                                for source in optional_provider_errors
+                            ),
+                        ]
+                    )
+                ),
+            )
         _emit_context_applied(
             logger,
             node_name=node_name,
@@ -335,6 +451,18 @@ def prepare_messages_with_context_policy(
             resolved_policy=resolved,
             selection=selection,
             apply_result=apply_result,
+            context_apply_status=apply_status,
+            optional_sources_missing=optional_provider_errors,
+            provider_input_budget_tokens=budget_state.provider_input_budget_tokens,
+            provider_input_tokens_before_context=(
+                budget_state.provider_input_tokens_before_context
+            ),
+            provider_remaining_input_tokens=(
+                budget_state.provider_remaining_input_tokens
+            ),
+            effective_context_budget_tokens=(
+                budget_state.effective_context_budget_tokens
+            ),
         )
     except ContextApplyError as exc:
         _emit_context_apply_error(
@@ -573,6 +701,101 @@ def _requested_sources(policy: ContextInjectionPolicy) -> tuple[ContextSourceTyp
     return tuple(result)
 
 
+def _constrain_policy_to_provider_budget(
+    *,
+    resolved: ResolvedContextPolicy,
+    node_name: str,
+    llm_node: str,
+    model: str,
+    messages: list[Any],
+) -> _ProviderBudgetState:
+    """Constrain CE injection to the provider's actual remaining input window."""
+    try:
+        budget = build_context_budget(
+            node_name=node_name,
+            llm_node=llm_node,
+            model=model,
+        )
+    except ContextConfigError as exc:
+        raise ContextApplyError(
+            reason=exc.reason,
+            warning=exc.warning,
+            node_name=node_name,
+            llm_node=llm_node,
+            original_exception_type=type(exc).__name__,
+            error_scope="config",
+            recoverable=False,
+        ) from exc
+
+    input_tokens = estimate_messages_tokens_mixed(messages)
+    remaining_tokens = budget.max_input_tokens - input_tokens
+    if remaining_tokens <= 0:
+        raise ContextApplyError(
+            reason="provider_context_budget_exceeded",
+            warning="provider input budget is exhausted before context injection",
+            node_name=node_name,
+            llm_node=llm_node,
+            original_exception_type="ContextBudgetError",
+            error_scope="budget",
+            recoverable=False,
+        )
+
+    effective_tokens = min(
+        resolved.injection_policy.max_injected_context_tokens,
+        remaining_tokens,
+    )
+    if effective_tokens <= 0:
+        raise ContextApplyError(
+            reason="provider_context_budget_exceeded",
+            warning="no provider input budget remains for context injection",
+            node_name=node_name,
+            llm_node=llm_node,
+            original_exception_type="ContextBudgetError",
+            error_scope="budget",
+            recoverable=False,
+        )
+
+    constrained_policy = replace(
+        resolved.injection_policy,
+        max_injected_context_tokens=effective_tokens,
+    )
+    return _ProviderBudgetState(
+        resolved=replace(resolved, injection_policy=constrained_policy),
+        provider_input_budget_tokens=budget.max_input_tokens,
+        provider_input_tokens_before_context=input_tokens,
+        provider_remaining_input_tokens=remaining_tokens,
+        effective_context_budget_tokens=effective_tokens,
+    )
+
+
+def _message_fingerprints(messages: list[Any]) -> set[str]:
+    """Return deterministic content fingerprints for already-bound messages."""
+    return {
+        content_fingerprint(content)
+        for message in messages
+        if (content := message_content_to_text(message).strip())
+    }
+
+
+def _optional_provider_error_sources(
+    *,
+    plan: ProviderSupplyPlan,
+    collection: ContextCollectionResult,
+) -> tuple[str, ...]:
+    """Return optional sources whose providers failed during collection."""
+    required = {str(source) for source in plan.required_sources}
+    optional = {str(source) for source in plan.optional_sources}
+    return tuple(
+        sorted(
+            source
+            for source, reason in collection.provider_missing_reasons.items()
+            if source in optional
+            and source not in required
+            and reason == "provider_error"
+        )
+    )
+
+
 def _emit_context_policy_resolved(
     logger: logging.Logger,
     *,
@@ -601,6 +824,11 @@ def _emit_context_policy_resolved(
             ],
             "legacy_mode_enabled": resolved.legacy_mode_enabled,
             "node_policy_enabled": resolved.node_policy_enabled,
+            "runtime_policy_mode": resolved.runtime_policy_mode,
+            "runtime_environment": resolved.runtime_environment,
+            "effective_context_budget_tokens": (
+                resolved.injection_policy.max_injected_context_tokens
+            ),
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -675,6 +903,7 @@ def _emit_context_source_filter(
     node_name: str,
     llm_node: str,
     result: SourceFilterResult,
+    policy_mode: str,
     state: dict[str, Any],
     trace_fields: dict[str, Any],
 ) -> None:
@@ -685,6 +914,7 @@ def _emit_context_source_filter(
             **trace_fields,
             "node_name": node_name,
             "llm_node": llm_node,
+            "policy_mode": policy_mode,
             "source_counts_before": result.source_counts_before,
             "source_counts_after": result.source_counts_after,
             "source_counts_dropped": result.source_counts_dropped,
@@ -707,9 +937,7 @@ def _emit_workspace_context_collected(
     state: dict[str, Any],
     trace_fields: dict[str, Any],
 ) -> None:
-    workspace_items = [
-        item for item in collection.items if _item_from_workspace(item)
-    ]
+    workspace_items = [item for item in collection.items if _item_from_workspace(item)]
     if not workspace_items:
         return
     source_counts: dict[str, int] = {}
@@ -811,7 +1039,7 @@ def _emit_context_apply_error(
     )
 
 
-def _scope_for_skip_reason(skip_reason: str) -> str:
+def _scope_for_skip_reason(skip_reason: str) -> ContextApplyErrorScope:
     if skip_reason in {"budget_fit_failed", "context_apply_budget_fit_failed"}:
         return "budget"
     if skip_reason in {"no_injectable_items", "quality_filtered_all"}:

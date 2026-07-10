@@ -170,6 +170,11 @@ def _candidate_to_item(
         "thread_id": candidate.get("thread_id", ""),
         "request_id": candidate.get("request_id", ""),
         "created_at": candidate.get("created_at", ""),
+        "grounding_approved": bool(
+            workspace_item
+            or candidate.get("judge_keep") is True
+            or candidate.get("keep") is True
+        ),
     }
     metadata.update(_candidate_score_metadata(candidate))
     if score is not None:

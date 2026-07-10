@@ -694,6 +694,11 @@ def _emit_structured_context_apply_event(
     trace_seq: int = 0,
     injected_items_count: int = 0,
     injected_context_tokens: int = 0,
+    optional_sources_missing: tuple[str, ...] = (),
+    provider_input_budget_tokens: int = 0,
+    provider_input_tokens_before_context: int = 0,
+    provider_remaining_input_tokens: int = 0,
+    effective_context_budget_tokens: int = 0,
 ) -> dict[str, Any]:
     diagnostics = diagnostics or []
     emit_a3_trace(
@@ -715,6 +720,13 @@ def _emit_structured_context_apply_event(
             "trace_seq": trace_seq,
             "injected_items_count": injected_items_count,
             "injected_context_tokens": injected_context_tokens,
+            "optional_sources_missing": list(optional_sources_missing),
+            "provider_input_budget_tokens": provider_input_budget_tokens,
+            "provider_input_tokens_before_context": (
+                provider_input_tokens_before_context
+            ),
+            "provider_remaining_input_tokens": provider_remaining_input_tokens,
+            "effective_context_budget_tokens": effective_context_budget_tokens,
         },
         state=state,
         env_flag="LOG_A3_TRACE",
@@ -729,6 +741,21 @@ def _emit_structured_context_apply_event(
         "structured_context_apply_trace_seq": trace_seq,
         "structured_context_apply_injected_items_count": injected_items_count,
         "structured_context_apply_injected_context_tokens": injected_context_tokens,
+        "structured_context_apply_optional_sources_missing": list(
+            optional_sources_missing
+        ),
+        "structured_context_apply_provider_input_budget_tokens": (
+            provider_input_budget_tokens
+        ),
+        "structured_context_apply_provider_input_tokens_before_context": (
+            provider_input_tokens_before_context
+        ),
+        "structured_context_apply_provider_remaining_input_tokens": (
+            provider_remaining_input_tokens
+        ),
+        "structured_context_apply_effective_context_budget_tokens": (
+            effective_context_budget_tokens
+        ),
     }
 
 
@@ -825,6 +852,7 @@ def _prepare_structured_messages_with_context(
             logger,
             node_name=node_name,
             llm_node=llm_node,
+            model=_model(llm_node),
             messages=messages,
             state=state_payload,
         )
@@ -869,6 +897,12 @@ def _prepare_structured_messages_with_context(
         raise error
 
     apply_result = prepared.apply_result
+    apply_status = prepared.context_apply_status
+    if prepared.context_apply_applied and apply_status not in {
+        "applied",
+        "degraded_applied",
+    }:
+        apply_status = "applied"
     injected_items_count = (
         int(apply_result.injected_items_count) if apply_result is not None else 0
     )
@@ -880,7 +914,7 @@ def _prepare_structured_messages_with_context(
         node_name=node_name,
         llm_node=llm_node,
         mode=mode,
-        status="applied",
+        status=apply_status,
         skip_reason="",
         context_item_count=injected_items_count,
         messages=final_messages,
@@ -892,6 +926,13 @@ def _prepare_structured_messages_with_context(
         trace_seq=prepared.next_trace_seq + 1,
         injected_items_count=injected_items_count,
         injected_context_tokens=injected_context_tokens,
+        optional_sources_missing=prepared.optional_sources_missing,
+        provider_input_budget_tokens=prepared.provider_input_budget_tokens,
+        provider_input_tokens_before_context=(
+            prepared.provider_input_tokens_before_context
+        ),
+        provider_remaining_input_tokens=prepared.provider_remaining_input_tokens,
+        effective_context_budget_tokens=prepared.effective_context_budget_tokens,
     )
     return _StructuredContextApplyResult(messages=final_messages, debug=debug)
 
@@ -2106,6 +2147,49 @@ async def _invoke_one_mode(
             schema_name=schema.__name__,
             schema_size_chars=_safe_schema_size_chars(schema),
             context_apply_applied=context_apply_applied,
+            context_apply_status=str(
+                structured_context_result.debug.get(
+                    "structured_context_apply_status",
+                    "",
+                )
+                or ""
+            ),
+            optional_sources_missing=tuple(
+                str(item)
+                for item in structured_context_result.debug.get(
+                    "structured_context_apply_optional_sources_missing",
+                    [],
+                )
+                if str(item).strip()
+            ),
+            provider_input_budget_tokens=int(
+                structured_context_result.debug.get(
+                    "structured_context_apply_provider_input_budget_tokens",
+                    0,
+                )
+                or 0
+            ),
+            provider_input_tokens_before_context=int(
+                structured_context_result.debug.get(
+                    "structured_context_apply_provider_input_tokens_before_context",
+                    0,
+                )
+                or 0
+            ),
+            provider_remaining_input_tokens=int(
+                structured_context_result.debug.get(
+                    "structured_context_apply_provider_remaining_input_tokens",
+                    0,
+                )
+                or 0
+            ),
+            effective_context_budget_tokens=int(
+                structured_context_result.debug.get(
+                    "structured_context_apply_effective_context_budget_tokens",
+                    0,
+                )
+                or 0
+            ),
             schema_contract_first=True,
             provider_bound_messages_mutated=provider_bound_messages_mutated,
             trace_call_id=str(

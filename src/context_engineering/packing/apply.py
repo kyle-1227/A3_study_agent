@@ -274,6 +274,7 @@ class ContextApplyResult:
     policy_source: str = "legacy_global"
     source_drop_reasons: dict[str, int] = field(default_factory=dict)
     budget_drop_reasons: dict[str, int] = field(default_factory=dict)
+    apply_status: str = "applied"
 
 
 class ContextApplyError(RuntimeError):

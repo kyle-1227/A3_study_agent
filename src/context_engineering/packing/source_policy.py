@@ -7,6 +7,7 @@ from typing import Any
 
 from src.context_engineering.packing.node_policy import SourceBudgetPolicy
 from src.context_engineering.schema import ContextItem
+from src.observability.node_registry import get_node_runtime_metadata
 from src.rag.course_catalog import normalize_subject
 
 _HIGH_RISK_MATCH_SOURCES = {"memory", "trajectory", "artifact", "pipeline"}
@@ -48,6 +49,9 @@ def filter_context_items_by_source_policy(
     exclude_message_source: bool,
     source_policies: dict[str, SourceBudgetPolicy],
     state: dict | None,
+    policy_mode: str = "strict",
+    target_node_name: str = "",
+    existing_content_fingerprints: set[str] | None = None,
 ) -> SourceFilterResult:
     """Filter candidate items by source policy without inspecting new backends."""
     state_values = _state_match_values(state)
@@ -67,6 +71,10 @@ def filter_context_items_by_source_policy(
             exclude_message_source=exclude_message_source,
             policy=policy,
             state_values=state_values,
+            state=state or {},
+            policy_mode=policy_mode,
+            target_node_name=target_node_name,
+            existing_content_fingerprints=existing_content_fingerprints or set(),
             warnings=warnings,
         )
         if reason:
@@ -101,6 +109,10 @@ def _first_source_drop_reason(
     exclude_message_source: bool,
     policy: SourceBudgetPolicy | None,
     state_values: dict[str, str],
+    state: dict[str, Any],
+    policy_mode: str,
+    target_node_name: str,
+    existing_content_fingerprints: set[str],
     warnings: list[str],
 ) -> str:
     source = str(item.source_type)
@@ -108,10 +120,36 @@ def _first_source_drop_reason(
         return "message_source_excluded"
     if source not in allowed_sources:
         return "source_not_allowed"
-    if source == "evidence" and item.relevance_score is None:
+    if source == "evidence" and item.metadata.get("grounding_approved") is not True:
+        return "grounding_not_approved"
+    if source == "pipeline":
+        pipeline_reason = _pipeline_safety_drop_reason(
+            item,
+            state=state,
+            target_node_name=target_node_name,
+        )
+        if pipeline_reason:
+            return pipeline_reason
+        fingerprint = str(item.metadata.get("content_fingerprint") or "").strip()
+        if fingerprint and fingerprint in existing_content_fingerprints:
+            return "duplicate_provider_input"
+    if (
+        policy_mode == "strict"
+        and source == "evidence"
+        and item.relevance_score is None
+    ):
         return "missing_required_relevance_score"
     if policy is None:
         return ""
+    if policy_mode == "broad":
+        warnings.append("broad_business_filters_bypassed")
+        return _match_drop_reason(
+            item,
+            policy=policy,
+            state_values=state_values,
+            warnings=warnings,
+            match_keys=("user", "thread"),
+        )
     if policy.min_priority is not None and item.priority < policy.min_priority:
         return "quality_below_threshold"
     if policy.min_relevance_score is not None:
@@ -172,6 +210,7 @@ def _match_drop_reason(
     policy: SourceBudgetPolicy,
     state_values: dict[str, str],
     warnings: list[str],
+    match_keys: tuple[str, ...] = ("user", "thread", "subject", "task"),
 ) -> str:
     checks = (
         ("user", policy.require_user_match, "user_mismatch"),
@@ -180,6 +219,8 @@ def _match_drop_reason(
         ("task", policy.require_task_match, "task_mismatch"),
     )
     for key, required, reason in checks:
+        if key not in match_keys:
+            continue
         if not required:
             continue
         item_value = _metadata_match_value(item, key)
@@ -199,6 +240,67 @@ def _match_drop_reason(
             continue
         warnings.append(f"missing_{key}_match_metadata")
     return ""
+
+
+def _pipeline_safety_drop_reason(
+    item: ContextItem,
+    *,
+    state: dict[str, Any],
+    target_node_name: str,
+) -> str:
+    source_node = str(item.metadata.get("source_node") or "").strip()
+    source_metadata = get_node_runtime_metadata(source_node)
+    target_metadata = get_node_runtime_metadata(target_node_name)
+    if source_metadata is None or target_metadata is None:
+        return "pipeline_stage_metadata_missing"
+    if source_metadata.node_id == target_metadata.node_id:
+        return "pipeline_self_output"
+
+    item_request_id = str(item.metadata.get("request_id") or "").strip()
+    current_request_id = str(state.get("request_id") or "").strip()
+    if item_request_id and current_request_id and item_request_id != current_request_id:
+        return "pipeline_request_mismatch"
+    if (
+        source_metadata.workflow
+        and target_metadata.workflow
+        and source_metadata.workflow != target_metadata.workflow
+    ):
+        return "pipeline_workflow_mismatch"
+
+    source_iteration = _non_negative_metadata_int(item.metadata, "iteration")
+    target_iteration = _target_iteration(target_metadata.iteration_field, state)
+    if source_iteration == target_iteration:
+        if source_metadata.stage_rank < target_metadata.stage_rank:
+            return ""
+        if source_metadata.role == "reviewer" and (
+            target_metadata.operation == "rewrite"
+            or target_metadata.role == "consensus"
+        ):
+            return ""
+        return "pipeline_future_output"
+    if (
+        source_iteration + 1 == target_iteration
+        and source_metadata.role == "reviewer"
+        and target_metadata.role == "agent"
+    ):
+        return ""
+    return "pipeline_iteration_mismatch"
+
+
+def _target_iteration(iteration_field: str, state: dict[str, Any]) -> int:
+    if not iteration_field:
+        return 0
+    value = state.get(iteration_field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _non_negative_metadata_int(metadata: dict[str, Any], key: str) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 
 
 def _apply_source_budgets(

@@ -766,6 +766,7 @@ async def invoke_plain_llm_fail_fast(
         logger,
         node_name=node_name,
         llm_node=llm_node,
+        model=str(model or ""),
         messages=messages or [],
         state=state_payload,
     )
@@ -813,6 +814,14 @@ async def invoke_plain_llm_fail_fast(
             state=state_payload,
             call_purpose="plain_llm",
             context_apply_applied=prepared.context_apply_applied,
+            context_apply_status=prepared.context_apply_status,
+            optional_sources_missing=prepared.optional_sources_missing,
+            provider_input_budget_tokens=prepared.provider_input_budget_tokens,
+            provider_input_tokens_before_context=(
+                prepared.provider_input_tokens_before_context
+            ),
+            provider_remaining_input_tokens=(prepared.provider_remaining_input_tokens),
+            effective_context_budget_tokens=(prepared.effective_context_budget_tokens),
             schema_contract_first=False,
             provider_bound_messages_mutated=prepared.context_apply_applied,
             trace_call_id=prepared.trace_call_id,

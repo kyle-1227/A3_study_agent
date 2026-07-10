@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -112,7 +114,11 @@ def _item(
     token_estimate: int = 5,
     priority: int = 80,
     relevance_score: float | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> ContextItem:
+    item_metadata = dict(metadata or {})
+    if source_type == "evidence":
+        item_metadata.setdefault("grounding_approved", True)
     return ContextItem(
         id=item_id,
         source_type=source_type,
@@ -130,7 +136,7 @@ def _item(
         compressible=True,
         can_drop=True,
         disclosure_level="snippet",
-        metadata={},
+        metadata=item_metadata,
     )
 
 
@@ -252,6 +258,74 @@ def _patch_orchestrator(
                 {"stage": stage, **payload}
             ),
         )
+
+
+def test_optional_provider_error_with_valid_context_is_degraded_applied(monkeypatch):
+    from src.context_engineering.input_manifest import build_llm_input_manifest
+    from src.context_engineering.packing import orchestrator as orchestrator_module
+
+    policy = replace(
+        _policy(),
+        injectable_sources=("rules", "memory"),
+        optional_sources=("rules", "memory"),
+    )
+    _patch_orchestrator(
+        monkeypatch,
+        policy=policy,
+        items=[_item("rules-1", source_type="rules")],
+    )
+
+    def collect_with_optional_error(**kwargs):
+        plan, collection = _collection(
+            [_item("rules-1", source_type="rules")],
+            requested_sources=kwargs["requested_sources"],
+            required_sources=kwargs["required_sources"],
+            optional_sources=kwargs["optional_sources"],
+        )
+        reasons = {**collection.provider_missing_reasons, "memory": "provider_error"}
+        return plan, replace(collection, provider_missing_reasons=reasons)
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "collect_context_for_policy",
+        collect_with_optional_error,
+    )
+
+    prepared = orchestrator_module.prepare_messages_with_context_policy(
+        MagicMock(),
+        node_name="plain_node",
+        llm_node="llm",
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "question"}],
+        state={"request_id": "r1", "thread_id": "t1"},
+    )
+    manifest = build_llm_input_manifest(
+        node_name="plain_node",
+        llm_node="llm",
+        provider="configured-provider",
+        model="deepseek-v4-pro",
+        messages=prepared.messages_for_llm,
+        state={"request_id": "r1", "thread_id": "t1"},
+        call_purpose="plain_llm",
+        context_apply_applied=prepared.context_apply_applied,
+        context_apply_status=prepared.context_apply_status,
+        optional_sources_missing=prepared.optional_sources_missing,
+        provider_input_budget_tokens=prepared.provider_input_budget_tokens,
+        provider_input_tokens_before_context=(
+            prepared.provider_input_tokens_before_context
+        ),
+        provider_remaining_input_tokens=prepared.provider_remaining_input_tokens,
+        effective_context_budget_tokens=prepared.effective_context_budget_tokens,
+    )
+
+    assert prepared.context_apply_applied is True
+    assert prepared.context_apply_status == "degraded_applied"
+    assert prepared.optional_sources_missing == ("memory",)
+    assert prepared.apply_result is not None
+    assert "optional_provider_error:memory" in prepared.apply_result.warnings
+    assert manifest["context_apply_status"] == "degraded_applied"
+    assert manifest["optional_sources_missing"] == ["memory"]
+    assert manifest["effective_context_budget_tokens"] > 0
 
 
 @pytest.mark.anyio

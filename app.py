@@ -32,6 +32,7 @@ from src.context_engineering.input_manifest import (
     merge_llm_input_manifest_history,
 )
 from src.context_engineering.influence import influence_status_payload
+from src.context_engineering.policy_mode import validate_context_runtime_policy
 from src.context_engineering.workspace import workspace_status_payload
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -423,6 +424,25 @@ def _emit_graph_config_trace(graph, config: dict, state: dict) -> None:
 async def lifespan(app: FastAPI):
     """Manage async resources: tracing, PostgreSQL checkpointer, graph."""
     setup_tracing()
+    runtime_context_policy = validate_context_runtime_policy()
+    app.state.context_policy_mode = runtime_context_policy.mode
+    app.state.context_policy_environment = runtime_context_policy.environment
+    emit_a3_trace(
+        logger,
+        "context_runtime_policy.validated",
+        {
+            "policy_mode": runtime_context_policy.mode,
+            "environment": runtime_context_policy.environment,
+            "max_items_total": runtime_context_policy.max_items_total,
+            "max_injected_context_tokens": (
+                runtime_context_policy.max_injected_context_tokens
+            ),
+            "enabled_sources": list(runtime_context_policy.enabled_sources),
+            "eligible_node_roles": list(runtime_context_policy.eligible_node_roles),
+        },
+        state={},
+        env_flag="LOG_A3_TRACE",
+    )
 
     async with AsyncExitStack() as stack:
         checkpointer = None

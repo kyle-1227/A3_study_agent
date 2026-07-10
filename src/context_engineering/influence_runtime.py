@@ -570,6 +570,7 @@ def _runtime_metadata(
     return sanitize_metadata(
         {
             "node_role": metadata.role,
+            "node_operation": metadata.operation,
             "node_group": metadata.group,
             "stage_rank": metadata.stage_rank,
             "parent_node": metadata.parent,

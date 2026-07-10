@@ -60,6 +60,9 @@ class PipelineContextProvider:
                     "request_id": request_id,
                     "thread_id": thread_id,
                     "created_at": str(entry_mapping.get("created_at") or ""),
+                    "content_fingerprint": str(
+                        entry_mapping.get("content_fingerprint") or ""
+                    ),
                     "purpose": "pipeline_continuity",
                 }
             )

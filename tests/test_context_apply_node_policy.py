@@ -191,6 +191,9 @@ def _item(
     relevance_score: float | None = 0.8,
     metadata: dict[str, Any] | None = None,
 ) -> ContextItem:
+    item_metadata = dict(metadata or {})
+    if source_type == "evidence":
+        item_metadata.setdefault("grounding_approved", True)
     return ContextItem(
         id=item_id,
         source_type=source_type,
@@ -208,7 +211,7 @@ def _item(
         compressible=True,
         can_drop=True,
         disclosure_level="snippet",
-        metadata=metadata or {},
+        metadata=item_metadata,
     )
 
 

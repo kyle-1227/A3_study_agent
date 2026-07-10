@@ -12,7 +12,12 @@ from src.context_engineering.packing.apply import (
     ContextInjectionPolicy,
     get_context_injection_policy,
 )
+from src.context_engineering.policy_mode import (
+    ContextRuntimePolicy,
+    resolve_context_runtime_policy,
+)
 from src.context_engineering.schema import ContextSourceType, sanitize_error_message
+from src.observability.node_registry import get_node_runtime_metadata
 
 ContextPolicyMode = Literal["disabled", "observe_only", "active"]
 PolicySource = Literal[
@@ -97,6 +102,8 @@ class ResolvedContextPolicy:
     legacy_mode_enabled: bool
     node_policy_enabled: bool
     summary: dict[str, Any]
+    runtime_policy_mode: str = "strict"
+    runtime_environment: str = "unspecified"
 
 
 def resolve_context_policy(
@@ -106,6 +113,7 @@ def resolve_context_policy(
     state: dict | None,
 ) -> ResolvedContextPolicy:
     """Resolve node-aware context policy from settings."""
+    runtime_policy = resolve_context_runtime_policy()
     legacy_policy = get_context_injection_policy(
         node_name=node_name,
         llm_node=llm_node,
@@ -119,38 +127,46 @@ def resolve_context_policy(
             risk_tier=0,
             policy_source="disabled_global",
         )
-        return ResolvedContextPolicy(
-            mode="disabled",
-            risk_tier=0,
-            policy_source="disabled_global",
-            injection_policy=disabled_policy,
-            source_policies={},
-            legacy_mode_enabled=False,
-            node_policy_enabled=_node_policy_schema_configured(apply_config),
-            summary=summary,
+        return _apply_runtime_policy(
+            ResolvedContextPolicy(
+                mode="disabled",
+                risk_tier=0,
+                policy_source="disabled_global",
+                injection_policy=disabled_policy,
+                source_policies={},
+                legacy_mode_enabled=False,
+                node_policy_enabled=_node_policy_schema_configured(apply_config),
+                summary=summary,
+            ),
+            runtime_policy=runtime_policy,
+            node_name=node_name,
         )
 
     if not _node_policy_schema_configured(apply_config):
-        return ResolvedContextPolicy(
-            mode="active",
-            risk_tier=1,
-            policy_source="legacy_global",
-            injection_policy=replace(
-                legacy_policy,
+        return _apply_runtime_policy(
+            ResolvedContextPolicy(
                 mode="active",
                 risk_tier=1,
                 policy_source="legacy_global",
+                injection_policy=replace(
+                    legacy_policy,
+                    mode="active",
+                    risk_tier=1,
+                    policy_source="legacy_global",
+                ),
+                source_policies=_source_policies_from_config(
+                    source_defaults={},
+                    source_overrides={},
+                    injectable_sources=legacy_policy.injectable_sources,
+                    node_name=node_name,
+                    llm_node=llm_node,
+                ),
+                legacy_mode_enabled=True,
+                node_policy_enabled=False,
+                summary=summary,
             ),
-            source_policies=_source_policies_from_config(
-                source_defaults={},
-                source_overrides={},
-                injectable_sources=legacy_policy.injectable_sources,
-                node_name=node_name,
-                llm_node=llm_node,
-            ),
-            legacy_mode_enabled=True,
-            node_policy_enabled=False,
-            summary=summary,
+            runtime_policy=runtime_policy,
+            node_name=node_name,
         )
 
     raw_policy, policy_source = _raw_node_policy(
@@ -179,16 +195,129 @@ def resolve_context_policy(
         policy_source=policy_source,
         node_name=node_name,
     )
-    return ResolvedContextPolicy(
-        mode=node_policy.mode,
-        risk_tier=node_policy.risk_tier,
-        policy_source=policy_source,
-        injection_policy=injection_policy,
-        source_policies=source_policies,
-        legacy_mode_enabled=False,
-        node_policy_enabled=True,
-        summary=summary,
+    return _apply_runtime_policy(
+        ResolvedContextPolicy(
+            mode=node_policy.mode,
+            risk_tier=node_policy.risk_tier,
+            policy_source=policy_source,
+            injection_policy=injection_policy,
+            source_policies=source_policies,
+            legacy_mode_enabled=False,
+            node_policy_enabled=True,
+            summary=summary,
+        ),
+        runtime_policy=runtime_policy,
+        node_name=node_name,
     )
+
+
+def _apply_runtime_policy(
+    resolved: ResolvedContextPolicy,
+    *,
+    runtime_policy: ContextRuntimePolicy,
+    node_name: str,
+) -> ResolvedContextPolicy:
+    summary = {
+        **resolved.summary,
+        "runtime_policy_mode": runtime_policy.mode,
+        "runtime_environment": runtime_policy.environment,
+        "broad_max_items_total": runtime_policy.max_items_total,
+        "broad_max_injected_context_tokens": (
+            runtime_policy.max_injected_context_tokens
+        ),
+    }
+    metadata = get_node_runtime_metadata(node_name)
+    broad_eligible = bool(
+        metadata
+        and metadata.role in set(runtime_policy.eligible_node_roles)
+        and resolved.mode == "active"
+    )
+    if runtime_policy.mode != "broad" or not broad_eligible:
+        return replace(
+            resolved,
+            summary=summary,
+            runtime_policy_mode=runtime_policy.mode,
+            runtime_environment=runtime_policy.environment,
+        )
+
+    policy = resolved.injection_policy
+    sources = _dedupe_context_sources(
+        (
+            *policy.required_sources,
+            *runtime_policy.enabled_sources,
+            *policy.injectable_sources,
+        )
+    )
+    optional_sources = _dedupe_context_sources(
+        (
+            *policy.optional_sources,
+            *(source for source in sources if source not in policy.required_sources),
+        )
+    )
+    source_policies: dict[str, SourceBudgetPolicy] = {}
+    for source in sources:
+        source_text = str(source)
+        broad_source = runtime_policy.source_policies.get(source_text)
+        if broad_source is None:
+            continue
+        strict_source = resolved.source_policies.get(source_text)
+        source_policies[source_text] = SourceBudgetPolicy(
+            source_type=source,
+            max_items=broad_source.max_items,
+            max_tokens=broad_source.max_tokens,
+            require_user_match=(
+                broad_source.require_user_match
+                or bool(strict_source and strict_source.require_user_match)
+            ),
+            require_thread_match=(
+                broad_source.require_thread_match
+                or bool(strict_source and strict_source.require_thread_match)
+            ),
+        )
+    broad_policy = replace(
+        policy,
+        max_injected_context_tokens=runtime_policy.max_injected_context_tokens,
+        injectable_sources=sources,
+        optional_sources=optional_sources,
+        quality=replace(
+            policy.quality,
+            min_priority=0,
+            min_relevance_score=None,
+            max_items_total=runtime_policy.max_items_total,
+            max_items_per_source={
+                source: item.max_items
+                for source, item in runtime_policy.source_policies.items()
+            },
+        ),
+        budget=replace(
+            policy.budget,
+            graceful_degradation_enabled=True,
+            fallback_if_empty_after_drop=False,
+        ),
+        format=replace(
+            policy.format,
+            max_content_chars_per_item=(runtime_policy.max_content_chars_per_item),
+            source_order=sources,
+        ),
+    )
+    return replace(
+        resolved,
+        injection_policy=broad_policy,
+        source_policies=source_policies,
+        summary={**summary, "broad_applied": True},
+        runtime_policy_mode="broad",
+        runtime_environment=runtime_policy.environment,
+    )
+
+
+def _dedupe_context_sources(
+    values: tuple[ContextSourceType, ...],
+) -> tuple[ContextSourceType, ...]:
+    result: list[ContextSourceType] = []
+    for source in values:
+        if source not in result:
+            result.append(source)
+    return tuple(result)
 
 
 def build_context_policy_summary(
