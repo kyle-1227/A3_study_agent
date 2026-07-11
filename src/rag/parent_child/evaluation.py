@@ -329,9 +329,15 @@ class QueryRetrievalResult(_StrictFrozenModel):
 class RetrievalEvaluationInput(_StrictFrozenModel):
     """Complete retrieval projection for one implementation under test."""
 
-    schema_version: Literal["retrieval_evaluation_input_v1"]
+    schema_version: Literal["retrieval_evaluation_input_v2"]
     run_id: str
     dataset_id: str
+    gold_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    embedding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retrieval_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    implementation_kind: Literal["flat_baseline", "parent_child_candidate"]
+    artifact_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation_id: str | None
     parent_aware: bool
     results: tuple[QueryRetrievalResult, ...] = Field(min_length=1)
 
@@ -347,6 +353,17 @@ class RetrievalEvaluationInput(_StrictFrozenModel):
         query_ids = tuple(result.query_id for result in self.results)
         if len(query_ids) != len(set(query_ids)):
             raise ValueError("results must not contain duplicate query_id values")
+        if self.implementation_kind == "flat_baseline":
+            if self.parent_aware or self.generation_id is not None:
+                raise ValueError(
+                    "flat_baseline retrieval inputs must not be parent-aware or "
+                    "carry a generation_id"
+                )
+        elif not self.parent_aware or not self.generation_id:
+            raise ValueError(
+                "parent_child_candidate retrieval inputs require parent-aware "
+                "results and a generation_id"
+            )
         return self
 
 

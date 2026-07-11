@@ -1,4 +1,4 @@
-"""Run a read-only RAG corpus/readiness audit from explicit configuration."""
+"""Run a read-only RAG readiness audit from strict config and GoldDataset input."""
 
 from __future__ import annotations
 
@@ -11,114 +11,199 @@ if str(project_root_from_script) not in sys.path:
     sys.path.insert(0, str(project_root_from_script))
 
 from src.config.rag_benchmark_config import load_rag_benchmark_config  # noqa: E402
-from src.rag.parent_child._storage_io import (  # noqa: E402
-    atomic_write_bytes,
-    model_json_bytes,
+from src.config.rag_index_config import (  # noqa: E402
+    RagIndexConfig,
+    load_rag_index_config,
+    resolve_rag_index_config_paths,
 )
+from src.rag.gold_dataset import (  # noqa: E402
+    GoldDatasetAuthoringError,
+    gold_dataset_to_query_inventory,
+    load_gold_dataset,
+    project_relative_path,
+    resolve_project_path,
+)
+from src.rag.parent_child._storage_io import (  # noqa: E402
+    model_json_bytes,
+    sha256_file,
+)
+from src.rag.parent_child.project_paths import atomic_write_project_bytes  # noqa: E402
 from src.rag.readiness import (  # noqa: E402
-    QueryInventoryRecord,
     ReadinessAuditArtifact,
     audit_rag_readiness,
-    load_query_inventory,
     load_source_group_manifest,
 )
-
-
-def _contained_path(project_root: Path, value: Path, *, must_exist: bool) -> Path:
-    root = project_root.resolve(strict=True)
-    candidate = value if value.is_absolute() else root / value
-    if candidate.is_symlink():
-        raise ValueError("configured paths must not be symlinks")
-    resolved = candidate.resolve(strict=must_exist)
-    if not resolved.is_relative_to(root):
-        raise ValueError("configured path must remain inside project_root")
-    return resolved
-
-
-def _relative_label(project_root: Path, path: Path) -> str:
-    return path.resolve(strict=False).relative_to(project_root).as_posix()
+from src.rag.subject_catalog import SubjectCatalog  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, required=True)
+    parser.add_argument("--index-config", type=Path, required=True)
     parser.add_argument("--benchmark-config", type=Path, required=True)
-    parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--gold-dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--fail-on-blocked", action="store_true")
     return parser
+
+
+def _load_project_index_config(
+    *, project_root: Path, index_config_path: Path
+) -> RagIndexConfig:
+    root = resolve_project_path(
+        project_root=project_root,
+        value=project_root,
+        must_exist=True,
+    )
+    config_path = resolve_project_path(
+        project_root=root,
+        value=index_config_path,
+        must_exist=True,
+    )
+    config = load_rag_index_config(config_path)
+    resolve_project_path(
+        project_root=root,
+        value=config.catalog.data_root,
+        must_exist=True,
+    )
+    index_root = resolve_project_path(
+        project_root=root,
+        value=config.storage.index_root,
+        must_exist=False,
+    )
+    registry_path = (
+        config.storage.registry_path
+        if config.storage.registry_path.is_absolute()
+        else index_root / config.storage.registry_path
+    )
+    resolve_project_path(
+        project_root=root,
+        value=registry_path,
+        must_exist=False,
+    )
+    return resolve_rag_index_config_paths(config, project_root=root)
 
 
 def run_audit(
     *,
     project_root: Path,
+    index_config_path: Path,
     benchmark_config_path: Path,
-    data_root: Path,
+    gold_dataset_path: Path,
     output_path: Path,
+    overwrite: bool,
 ) -> ReadinessAuditArtifact:
-    """Run and persist one explicit audit; missing datasets remain blockers."""
+    """Run and persist one strict read-only audit from the final GoldDataset."""
 
-    root = project_root.resolve(strict=True)
-    config_path = _contained_path(root, benchmark_config_path, must_exist=True)
-    corpus_root = _contained_path(root, data_root, must_exist=True)
-    output = _contained_path(root, output_path, must_exist=False)
-    benchmark = load_rag_benchmark_config(config_path)
-    source_groups_path = _contained_path(
-        root, benchmark.source_group_manifest_path, must_exist=True
+    root = resolve_project_path(
+        project_root=project_root,
+        value=project_root,
+        must_exist=True,
     )
-    source_groups = load_source_group_manifest(source_groups_path)
-
-    records: list[QueryInventoryRecord] = []
-    missing_paths: list[str] = []
+    config_path = resolve_project_path(
+        project_root=root,
+        value=index_config_path,
+        must_exist=True,
+    )
+    benchmark_path = resolve_project_path(
+        project_root=root,
+        value=benchmark_config_path,
+        must_exist=True,
+    )
+    dataset_path = resolve_project_path(
+        project_root=root,
+        value=gold_dataset_path,
+        must_exist=True,
+    )
+    output = resolve_project_path(
+        project_root=root,
+        value=output_path,
+        must_exist=False,
+    )
+    index_config = _load_project_index_config(
+        project_root=root,
+        index_config_path=config_path,
+    )
+    benchmark = load_rag_benchmark_config(benchmark_path)
     for configured_path in (
         *benchmark.human_gold_paths,
         *benchmark.historical_annotated_paths,
         *benchmark.synthetic_smoke_paths,
+        benchmark.source_group_manifest_path,
     ):
-        path = _contained_path(root, configured_path, must_exist=False)
-        if not path.exists():
-            missing_paths.append(_relative_label(root, path))
-            continue
-        records.extend(load_query_inventory(path))
-
+        resolve_project_path(
+            project_root=root,
+            value=configured_path,
+            must_exist=False,
+        )
+    source_groups_path = resolve_project_path(
+        project_root=root,
+        value=benchmark.source_group_manifest_path,
+        must_exist=True,
+    )
+    snapshot = SubjectCatalog(
+        config=index_config.catalog,
+        subject_policy_map=index_config.subject_policy_map,
+    ).discover()
+    if set(benchmark.primary_subjects) != set(snapshot.subject_ids()):
+        raise GoldDatasetAuthoringError(
+            "benchmark primary_subjects must exactly match SubjectCatalog subjects"
+        )
+    dataset = load_gold_dataset(dataset_path)
     report = audit_rag_readiness(
-        data_root=corpus_root,
-        primary_subjects=benchmark.primary_subjects,
-        supported_extensions=(".pdf", ".md", ".txt"),
-        source_group_manifest=source_groups,
-        query_records=tuple(records),
+        catalog_snapshot=snapshot,
+        source_group_manifest=load_source_group_manifest(source_groups_path),
+        query_records=gold_dataset_to_query_inventory(dataset),
         low_text_page_chars=benchmark.low_text_page_chars,
         minimum_independent_sources=benchmark.min_independent_sources,
         minimum_subject_gold_queries=benchmark.min_subject_gold_queries,
         minimum_global_gold_queries=benchmark.min_global_gold_queries,
     )
     artifact = ReadinessAuditArtifact(
-        schema_version="rag_readiness_artifact_v1",
-        benchmark_config_path=_relative_label(root, config_path),
-        data_root=_relative_label(root, corpus_root),
-        missing_dataset_paths=tuple(sorted(missing_paths)),
+        schema_version="rag_readiness_artifact_v2",
+        index_config_path=project_relative_path(project_root=root, path=config_path),
+        benchmark_config_path=project_relative_path(
+            project_root=root, path=benchmark_path
+        ),
+        gold_dataset_path=project_relative_path(project_root=root, path=dataset_path),
+        gold_dataset_sha256=sha256_file(dataset_path),
+        data_root=project_relative_path(
+            project_root=root,
+            path=index_config.catalog.data_root,
+        ),
         report=report,
     )
-    relative_output = output.relative_to(root).as_posix()
-    atomic_write_bytes(
-        root, relative_output, model_json_bytes(artifact), overwrite=True
+    atomic_write_project_bytes(
+        root,
+        output,
+        model_json_bytes(artifact),
+        overwrite=overwrite,
     )
     return artifact
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    artifact = run_audit(
-        project_root=args.project_root,
-        benchmark_config_path=args.benchmark_config,
-        data_root=args.data_root,
-        output_path=args.output,
-    )
+    try:
+        artifact = run_audit(
+            project_root=args.project_root,
+            index_config_path=args.index_config,
+            benchmark_config_path=args.benchmark_config,
+            gold_dataset_path=args.gold_dataset,
+            output_path=args.output,
+            overwrite=args.overwrite,
+        )
+    except (GoldDatasetAuthoringError, OSError, ValueError) as exc:
+        print(f"RAG readiness audit failed: {type(exc).__name__}", file=sys.stderr)
+        return 2
     print(
         "RAG readiness audit written: "
         f"blocked={artifact.report.production_recommendation_blocked}, "
-        f"subjects={len(artifact.report.subjects)}, "
-        f"missing_datasets={len(artifact.missing_dataset_paths)}"
+        f"subjects={len(artifact.report.subjects)}"
     )
+    if args.fail_on_blocked and artifact.report.production_recommendation_blocked:
+        return 1
     return 0
 
 

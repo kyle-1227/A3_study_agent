@@ -117,10 +117,17 @@ def _input(
     *,
     parent_aware: bool,
 ) -> RetrievalEvaluationInput:
+    implementation_kind = "parent_child_candidate" if parent_aware else "flat_baseline"
     return RetrievalEvaluationInput(
-        schema_version="retrieval_evaluation_input_v1",
+        schema_version="retrieval_evaluation_input_v2",
         run_id=run_id,
         dataset_id=dataset.dataset_id,
+        gold_dataset_sha256="a" * 64,
+        embedding_fingerprint="b" * 64,
+        retrieval_fingerprint="c" * 64,
+        implementation_kind=implementation_kind,
+        artifact_manifest_sha256="d" * 64,
+        generation_id="candidate-generation" if parent_aware else None,
         parent_aware=parent_aware,
         results=results,
     )

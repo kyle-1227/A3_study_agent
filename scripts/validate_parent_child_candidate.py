@@ -12,7 +12,7 @@ if str(PROJECT_ROOT_FROM_SCRIPT) not in sys.path:
 
 from src.config.rag_benchmark_config import load_rag_benchmark_config  # noqa: E402
 from src.rag.parent_child._storage_io import (  # noqa: E402
-    atomic_write_bytes,
+    canonical_json_bytes,
     model_json_bytes,
     sha256_bytes,
 )
@@ -31,6 +31,12 @@ from src.rag.parent_child.evaluation_gate import (  # noqa: E402
     OperationalBenchmarkOutcome,
     evaluate_activation_eligibility,
 )
+from src.rag.parent_child.project_paths import (  # noqa: E402
+    atomic_write_project_bytes,
+    require_project_file,
+    resolve_project_path,
+    resolve_project_root,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -48,24 +54,65 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--overwrite", action="store_true")
     return parser
 
 
-def _contained_path(
-    project_root: Path,
-    value: Path,
+def _validate_run_bindings(
     *,
-    must_exist: bool,
-) -> Path:
-    candidate = value if value.is_absolute() else project_root / value
-    if candidate.is_symlink():
-        raise ValueError("validation paths must not be symlinks")
-    resolved = candidate.resolve(strict=must_exist)
-    if not resolved.is_relative_to(project_root):
-        raise ValueError("validation paths must remain inside project_root")
-    if must_exist and not resolved.is_file():
-        raise ValueError("validation input must be a regular non-symlink file")
-    return resolved
+    dataset: GoldDataset,
+    gold_dataset_sha256: str,
+    baseline_input: RetrievalEvaluationInput,
+    candidate_input: RetrievalEvaluationInput,
+    operational: OperationalBenchmarkOutcome,
+    end_to_end: EndToEndQualityOutcome,
+) -> None:
+    """Reject cross-run artifact mixing before formal metrics are calculated."""
+
+    if baseline_input.implementation_kind != "flat_baseline":
+        raise ValueError("baseline input must declare flat_baseline")
+    if candidate_input.implementation_kind != "parent_child_candidate":
+        raise ValueError("candidate input must declare parent_child_candidate")
+    if baseline_input.parent_aware or not candidate_input.parent_aware:
+        raise ValueError("baseline/candidate parent-aware contracts are invalid")
+    if candidate_input.generation_id is None:
+        raise ValueError("candidate input requires an explicit generation_id")
+    if (
+        baseline_input.dataset_id != dataset.dataset_id
+        or candidate_input.dataset_id != dataset.dataset_id
+    ):
+        raise ValueError("retrieval inputs must bind the supplied GoldDataset")
+    if (
+        baseline_input.gold_dataset_sha256 != gold_dataset_sha256
+        or candidate_input.gold_dataset_sha256 != gold_dataset_sha256
+    ):
+        raise ValueError("retrieval inputs must bind the supplied GoldDataset digest")
+    if baseline_input.embedding_fingerprint != candidate_input.embedding_fingerprint:
+        raise ValueError("baseline and candidate embeddings differ")
+    if (
+        operational.dataset_id != dataset.dataset_id
+        or operational.gold_dataset_sha256 != gold_dataset_sha256
+        or operational.baseline_run_id != baseline_input.run_id
+        or operational.candidate_run_id != candidate_input.run_id
+        or operational.candidate_generation_id != candidate_input.generation_id
+        or operational.embedding_fingerprint != baseline_input.embedding_fingerprint
+        or operational.baseline_artifact_manifest_sha256
+        != baseline_input.artifact_manifest_sha256
+        or operational.candidate_artifact_manifest_sha256
+        != candidate_input.artifact_manifest_sha256
+        or operational.query_count != len(dataset.queries)
+    ):
+        raise ValueError(
+            "operational outcome does not bind the supplied retrieval runs"
+        )
+    if (
+        end_to_end.dataset_id != dataset.dataset_id
+        or end_to_end.gold_dataset_sha256 != gold_dataset_sha256
+        or end_to_end.baseline_run_id != baseline_input.run_id
+        or end_to_end.candidate_run_id != candidate_input.run_id
+        or end_to_end.assessment_source != "human"
+    ):
+        raise ValueError("end-to-end outcome does not bind the supplied retrieval runs")
 
 
 def run_validation(
@@ -79,19 +126,22 @@ def run_validation(
     end_to_end_outcome_path: Path,
     functional_tests_passed: bool,
     output_path: Path,
+    overwrite: bool,
 ) -> CandidateValidationArtifact:
-    root = project_root.resolve(strict=True)
-    config_path = _contained_path(root, benchmark_config_path, must_exist=True)
-    gold_path = _contained_path(root, gold_dataset_path, must_exist=True)
-    baseline_path = _contained_path(root, baseline_input_path, must_exist=True)
-    candidate_path = _contained_path(root, candidate_input_path, must_exist=True)
-    operational_path = _contained_path(root, operational_outcome_path, must_exist=True)
-    end_to_end_path = _contained_path(root, end_to_end_outcome_path, must_exist=True)
-    output = _contained_path(root, output_path, must_exist=False)
+    root = resolve_project_root(project_root)
+    config_path = require_project_file(root, benchmark_config_path)
+    gold_path = require_project_file(root, gold_dataset_path)
+    baseline_path = require_project_file(root, baseline_input_path)
+    candidate_path = require_project_file(root, candidate_input_path)
+    operational_path = require_project_file(root, operational_outcome_path)
+    end_to_end_path = require_project_file(root, end_to_end_outcome_path)
+    output = resolve_project_path(root, output_path, must_exist=False)
 
     benchmark = load_rag_benchmark_config(config_path)
     gold_bytes = gold_path.read_bytes()
     dataset = GoldDataset.model_validate_json(gold_bytes)
+    if gold_bytes != canonical_json_bytes(dataset.model_dump(mode="json")):
+        raise ValueError("gold_dataset must use canonical JSON serialization")
     baseline_input = RetrievalEvaluationInput.model_validate_json(
         baseline_path.read_bytes()
     )
@@ -103,6 +153,14 @@ def run_validation(
     )
     end_to_end = EndToEndQualityOutcome.model_validate_json(
         end_to_end_path.read_bytes()
+    )
+    _validate_run_bindings(
+        dataset=dataset,
+        gold_dataset_sha256=sha256_bytes(gold_bytes),
+        baseline_input=baseline_input,
+        candidate_input=candidate_input,
+        operational=operational,
+        end_to_end=end_to_end,
     )
     gate = EvaluationGateConfig(
         schema_version="evaluation_gate_config_v1",
@@ -161,7 +219,7 @@ def run_validation(
         functional_tests_passed=functional_tests_passed,
     )
     artifact = CandidateValidationArtifact(
-        schema_version="candidate_validation_artifact_v1",
+        schema_version="candidate_validation_artifact_v2",
         benchmark_config_sha256=sha256_bytes(config_path.read_bytes()),
         gold_dataset_sha256=sha256_bytes(gold_bytes),
         baseline_report=baseline_report,
@@ -171,11 +229,11 @@ def run_validation(
         end_to_end=end_to_end,
         eligibility=eligibility,
     )
-    atomic_write_bytes(
+    atomic_write_project_bytes(
         root,
-        output.relative_to(root).as_posix(),
+        output,
         model_json_bytes(artifact),
-        overwrite=True,
+        overwrite=overwrite,
     )
     return artifact
 
@@ -192,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         end_to_end_outcome_path=args.end_to_end_outcome,
         functional_tests_passed=args.functional_tests_passed == "true",
         output_path=args.output,
+        overwrite=args.overwrite,
     )
     print(
         "Candidate validation written: "

@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from collections import Counter
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import fitz
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from src.rag.subject_catalog import SourceCatalogEntry, SubjectCatalogSnapshot
 
 
 DatasetKind = Literal["synthetic_smoke", "human_gold", "historical_annotated"]
@@ -118,16 +120,24 @@ class ReadinessAuditArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["rag_readiness_artifact_v1"]
+    schema_version: Literal["rag_readiness_artifact_v2"]
+    index_config_path: str
     benchmark_config_path: str
+    gold_dataset_path: str
+    gold_dataset_sha256: str
     data_root: str
-    missing_dataset_paths: tuple[str, ...]
     report: ReadinessReport
 
 
 def _validate_relative_path(value: str) -> None:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or path.drive:
+    if not value or value != value.strip() or "\\" in value or "\x00" in value:
+        raise ValueError(f"source path must be a contained POSIX path: {value}")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.parts[0].endswith(":")
+    ):
         raise ValueError(f"source path must be relative and contained: {value}")
 
 
@@ -195,13 +205,14 @@ def _inspect_text(path: Path, *, low_text_page_chars: int) -> tuple[int, int, in
 
 
 def _inspect_source(
-    path: Path,
+    source: SourceCatalogEntry,
     *,
     data_root: Path,
     source_groups: dict[str, str],
     low_text_page_chars: int,
 ) -> InspectedSource:
     resolved_root = data_root.resolve()
+    path = source.source_path
     resolved_path = path.resolve()
     try:
         relative = resolved_path.relative_to(resolved_root).as_posix()
@@ -210,7 +221,7 @@ def _inspect_source(
     if path.is_symlink():
         raise ReadinessAuditError("source_symlink_not_allowed")
 
-    suffix = path.suffix.lower()
+    suffix = source.extension
     error_code: str | None = None
     pages = valid_chars = empty_pages = low_text_pages = 0
     try:
@@ -231,7 +242,7 @@ def _inspect_source(
         source_relpath=relative,
         suffix=suffix,
         source_group=source_groups.get(relative),
-        bytes=path.stat().st_size,
+        bytes=source.file_size_bytes,
         pages=pages,
         valid_chars=valid_chars,
         empty_pages=empty_pages,
@@ -242,9 +253,7 @@ def _inspect_source(
 
 def audit_rag_readiness(
     *,
-    data_root: Path,
-    primary_subjects: tuple[str, ...],
-    supported_extensions: tuple[str, ...],
+    catalog_snapshot: SubjectCatalogSnapshot,
     source_group_manifest: SourceGroupManifest,
     query_records: tuple[QueryInventoryRecord, ...],
     low_text_page_chars: int,
@@ -266,35 +275,36 @@ def audit_rag_readiness(
     ):
         raise ValueError("readiness minimums must be positive")
 
-    resolved_root = data_root.resolve()
+    resolved_root = catalog_snapshot.data_root.resolve()
     if not resolved_root.is_dir():
         raise ReadinessAuditError("data_root_not_directory")
 
-    normalized_extensions = {value.lower() for value in supported_extensions}
+    primary_subjects = catalog_snapshot.subject_ids()
+    if not primary_subjects:
+        raise ReadinessAuditError("subject_catalog_has_no_active_subjects")
+    subject_entries = {
+        subject.subject_id: subject for subject in catalog_snapshot.subjects
+    }
+    unknown_query_subjects = sorted(
+        {record.subject for record in query_records} - set(primary_subjects)
+    )
+    if unknown_query_subjects:
+        raise ReadinessAuditError("query_inventory_contains_unknown_subject")
     query_counts: Counter[tuple[str, DatasetKind]] = Counter(
         (record.subject, record.dataset_kind) for record in query_records
     )
     subjects: list[SubjectReadiness] = []
 
     for subject in primary_subjects:
-        subject_dir = resolved_root / subject
-        paths = (
-            sorted(
-                path
-                for path in subject_dir.rglob("*")
-                if path.is_file() and path.suffix.lower() in normalized_extensions
-            )
-            if subject_dir.is_dir()
-            else []
-        )
+        sources = subject_entries[subject].sources
         inspected = tuple(
             _inspect_source(
-                path,
+                source,
                 data_root=resolved_root,
                 source_groups=source_group_manifest.source_groups,
                 low_text_page_chars=low_text_page_chars,
             )
-            for path in paths
+            for source in sources
         )
         groups = {
             item.source_group for item in inspected if item.source_group is not None

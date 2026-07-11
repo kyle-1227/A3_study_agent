@@ -10,6 +10,7 @@ from src.rag.parent_child._storage_io import sha256_file
 from src.rag.parent_child.tokenizer import (
     ConfiguredJiebaTokenizer,
     TokenizerContractError,
+    resolve_jieba_runtime_identity,
 )
 
 
@@ -20,6 +21,14 @@ def _dictionary_path() -> Path:
     finally:
         handle.close()
     return Path(name).resolve(strict=True)
+
+
+def test_runtime_jieba_identity_matches_installed_dictionary() -> None:
+    identity = resolve_jieba_runtime_identity()
+
+    assert identity.tokenizer_version == jieba.__version__
+    assert identity.dictionary_path == _dictionary_path()
+    assert identity.dictionary_hash == sha256_file(identity.dictionary_path)
 
 
 def test_configured_jieba_checks_runtime_and_dictionary_fingerprint() -> None:

@@ -24,17 +24,50 @@ class _StrictFrozenModel(BaseModel):
 
 
 class OperationalBenchmarkOutcome(_StrictFrozenModel):
-    schema_version: Literal["operational_benchmark_outcome_v1"]
+    """Content-free operational evidence bound to one paired retrieval run."""
+
+    schema_version: Literal["operational_benchmark_outcome_v2"]
+    dataset_id: str
+    gold_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_run_id: str
+    candidate_run_id: str
+    candidate_generation_id: str
+    embedding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_artifact_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_artifact_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    query_count: int = Field(gt=0)
+    baseline_p50_latency_ms: float = Field(ge=0.0)
     baseline_p95_latency_ms: float = Field(gt=0.0)
+    candidate_p50_latency_ms: float = Field(ge=0.0)
     candidate_p95_latency_ms: float = Field(gt=0.0)
+    baseline_error_count: int = Field(ge=0)
+    candidate_error_count: int = Field(ge=0)
+    baseline_error_rate: float = Field(ge=0.0, le=1.0)
+    candidate_error_rate: float = Field(ge=0.0, le=1.0)
+    baseline_context_tokens_total: int = Field(ge=0)
+    candidate_context_tokens_total: int = Field(ge=0)
+    baseline_context_tokens_mean: float = Field(ge=0.0)
+    candidate_context_tokens_mean: float = Field(ge=0.0)
+    baseline_context_tokens_p95: float = Field(ge=0.0)
+    candidate_context_tokens_p95: float = Field(ge=0.0)
     parent_context_token_ratio: float = Field(ge=0.0)
+    parent_hydration_attempt_count: int = Field(ge=0)
+    parent_hydration_success_count: int = Field(ge=0)
     orphan_child_count: int = Field(ge=0)
     parent_hydration_failure_count: int = Field(ge=0)
     generation_mismatch_count: int = Field(ge=0)
 
     @field_validator(
+        "baseline_p50_latency_ms",
         "baseline_p95_latency_ms",
+        "candidate_p50_latency_ms",
         "candidate_p95_latency_ms",
+        "baseline_error_rate",
+        "candidate_error_rate",
+        "baseline_context_tokens_mean",
+        "candidate_context_tokens_mean",
+        "baseline_context_tokens_p95",
+        "candidate_context_tokens_p95",
         "parent_context_token_ratio",
     )
     @classmethod
@@ -43,15 +76,101 @@ class OperationalBenchmarkOutcome(_StrictFrozenModel):
             raise ValueError("operational benchmark metrics must be finite")
         return value
 
+    @model_validator(mode="after")
+    def _binding_and_count_invariants(self) -> Self:
+        if not self.dataset_id or self.dataset_id != self.dataset_id.strip():
+            raise ValueError("dataset_id must be non-empty and already stripped")
+        if not self.baseline_run_id or not self.candidate_run_id:
+            raise ValueError("baseline and candidate run IDs are required")
+        if self.baseline_run_id == self.candidate_run_id:
+            raise ValueError("baseline_run_id and candidate_run_id must differ")
+        if not self.candidate_generation_id:
+            raise ValueError("candidate_generation_id is required")
+        if self.baseline_p95_latency_ms < self.baseline_p50_latency_ms:
+            raise ValueError("baseline p95 latency must be at least p50")
+        if self.candidate_p95_latency_ms < self.candidate_p50_latency_ms:
+            raise ValueError("candidate p95 latency must be at least p50")
+        if not math.isclose(
+            self.baseline_error_rate,
+            self.baseline_error_count / self.query_count,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("baseline error_rate must equal error_count/query_count")
+        if not math.isclose(
+            self.candidate_error_rate,
+            self.candidate_error_count / self.query_count,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("candidate error_rate must equal error_count/query_count")
+        baseline_mean = self.baseline_context_tokens_total / self.query_count
+        candidate_mean = self.candidate_context_tokens_total / self.query_count
+        if not math.isclose(
+            self.baseline_context_tokens_mean,
+            baseline_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("baseline context-token mean must equal total/query_count")
+        if not math.isclose(
+            self.candidate_context_tokens_mean,
+            candidate_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "candidate context-token mean must equal total/query_count"
+            )
+        if baseline_mean <= 0.0:
+            raise ValueError("baseline context-token mean must be positive")
+        if not math.isclose(
+            self.parent_context_token_ratio,
+            candidate_mean / baseline_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("parent context-token ratio must match means")
+        if (
+            self.parent_hydration_success_count + self.parent_hydration_failure_count
+            != self.parent_hydration_attempt_count
+        ):
+            raise ValueError("parent hydration counts must sum to attempts")
+        return self
+
 
 class EndToEndQualityOutcome(_StrictFrozenModel):
-    schema_version: Literal["end_to_end_quality_outcome_v1"]
+    """Human-scored final-answer quality bound to one retrieval comparison."""
+
+    schema_version: Literal["end_to_end_quality_outcome_v2"]
+    dataset_id: str
+    gold_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_run_id: str
+    candidate_run_id: str
+    answer_model_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_protocol_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_source: Literal["human"]
+    scored_query_count: int = Field(gt=0)
     baseline_answer_correctness: float = Field(ge=0.0, le=1.0)
     candidate_answer_correctness: float = Field(ge=0.0, le=1.0)
     baseline_citation_support: float = Field(ge=0.0, le=1.0)
     candidate_citation_support: float = Field(ge=0.0, le=1.0)
     baseline_hallucination_rate: float = Field(ge=0.0, le=1.0)
     candidate_hallucination_rate: float = Field(ge=0.0, le=1.0)
+    baseline_context_tokens_total: int = Field(ge=0)
+    candidate_context_tokens_total: int = Field(ge=0)
+    baseline_context_tokens_mean: float = Field(ge=0.0)
+    candidate_context_tokens_mean: float = Field(ge=0.0)
+
+    @field_validator("dataset_id", "baseline_run_id", "candidate_run_id")
+    @classmethod
+    def _identifiers(cls, value: str, info: object) -> str:
+        field_name = str(getattr(info, "field_name", "identifier"))
+        if not value or value != value.strip():
+            raise ValueError(f"{field_name} must be non-empty and already stripped")
+        if any(character in value for character in ("/", "\\", "\x00")):
+            raise ValueError(f"{field_name} must not contain path separators or NUL")
+        return value
 
     @field_validator(
         "baseline_answer_correctness",
@@ -60,12 +179,44 @@ class EndToEndQualityOutcome(_StrictFrozenModel):
         "candidate_citation_support",
         "baseline_hallucination_rate",
         "candidate_hallucination_rate",
+        "baseline_context_tokens_mean",
+        "candidate_context_tokens_mean",
     )
     @classmethod
     def _finite(cls, value: float) -> float:
         if not math.isfinite(value):
             raise ValueError("end-to-end quality metrics must be finite")
         return value
+
+    @model_validator(mode="after")
+    def _binding_and_token_invariants(self) -> Self:
+        if self.baseline_run_id == self.candidate_run_id:
+            raise ValueError("baseline_run_id and candidate_run_id must differ")
+        expected_baseline_mean = (
+            self.baseline_context_tokens_total / self.scored_query_count
+        )
+        expected_candidate_mean = (
+            self.candidate_context_tokens_total / self.scored_query_count
+        )
+        if not math.isclose(
+            self.baseline_context_tokens_mean,
+            expected_baseline_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "baseline_context_tokens_mean must equal total/scored_query_count"
+            )
+        if not math.isclose(
+            self.candidate_context_tokens_mean,
+            expected_candidate_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "candidate_context_tokens_mean must equal total/scored_query_count"
+            )
+        return self
 
 
 class ActivationEligibilityReport(_StrictFrozenModel):
@@ -105,7 +256,7 @@ class ActivationEligibilityReport(_StrictFrozenModel):
 class CandidateValidationArtifact(_StrictFrozenModel):
     """Complete offline comparison and eligibility decision for one fixed dataset."""
 
-    schema_version: Literal["candidate_validation_artifact_v1"]
+    schema_version: Literal["candidate_validation_artifact_v2"]
     benchmark_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     gold_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_report: EvaluationReport
@@ -218,6 +369,8 @@ def evaluate_activation_eligibility(
         operational_blockers.append("p95_latency_gate_failed")
     if operational.parent_context_token_ratio > gates.parent_context_max_baseline_ratio:
         operational_blockers.append("parent_context_token_gate_failed")
+    if operational.baseline_error_count or operational.candidate_error_count:
+        operational_blockers.append("benchmark_retrieval_error_detected")
     if operational.orphan_child_count:
         operational_blockers.append("orphan_child_detected")
     if operational.parent_hydration_failure_count:

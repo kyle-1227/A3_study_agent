@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from src.config.rag_index_config import CatalogConfig
 from src.rag.readiness import (
     QueryInventoryRecord,
     ReadinessAuditError,
@@ -13,6 +14,7 @@ from src.rag.readiness import (
     audit_rag_readiness,
     load_query_inventory,
 )
+from src.rag.subject_catalog import SubjectCatalog
 
 
 def _manifest(mapping: dict[str, str]) -> SourceGroupManifest:
@@ -20,6 +22,28 @@ def _manifest(mapping: dict[str, str]) -> SourceGroupManifest:
         schema_version="source_groups_v1",
         source_groups=mapping,
     )
+
+
+def _catalog(data_root: Path):
+    config = CatalogConfig(
+        data_root=data_root,
+        supported_extensions=(".txt",),
+        excluded_exact_names=("ignored",),
+        excluded_prefixes=("tmp_",),
+        exclude_hidden=True,
+        exclude_cache_directories=True,
+        cache_directory_names=(".cache", "__pycache__"),
+        exclude_unclassified=True,
+        unclassified_directory_name="unclassified",
+        exclude_needs_ocr=True,
+        needs_ocr_directory_name="_needs_ocr",
+        normalization_version="subject_id_v1",
+        symlink_policy="reject",
+    )
+    return SubjectCatalog(
+        config=config,
+        subject_policy_map={"math": "a" * 64},
+    ).discover()
 
 
 def test_synthetic_query_cannot_be_rollout_eligible() -> None:
@@ -52,16 +76,16 @@ def test_query_inventory_rejects_schema_drift(tmp_path: Path) -> None:
         load_query_inventory(path)
 
 
-def test_audit_blocks_missing_groups_and_gold(tmp_path: Path) -> None:
+def test_audit_blocks_missing_groups_and_gold_from_catalog_snapshot(
+    tmp_path: Path,
+) -> None:
     data = tmp_path / "data"
     subject_dir = data / "math"
     subject_dir.mkdir(parents=True)
     (subject_dir / "notes.txt").write_text("calculus notes", encoding="utf-8")
 
     report = audit_rag_readiness(
-        data_root=data,
-        primary_subjects=("math",),
-        supported_extensions=(".pdf", ".md", ".txt"),
+        catalog_snapshot=_catalog(data),
         source_group_manifest=_manifest({}),
         query_records=(),
         low_text_page_chars=5,
@@ -98,9 +122,7 @@ def test_audit_passes_explicit_source_and_gold_gates(tmp_path: Path) -> None:
     )
 
     report = audit_rag_readiness(
-        data_root=data,
-        primary_subjects=("math",),
-        supported_extensions=(".txt",),
+        catalog_snapshot=_catalog(data),
         source_group_manifest=_manifest(mapping),
         query_records=queries,
         low_text_page_chars=5,
@@ -113,92 +135,27 @@ def test_audit_passes_explicit_source_and_gold_gates(tmp_path: Path) -> None:
     assert report.subjects[0].blockers == ()
 
 
-def test_readiness_script_keeps_missing_datasets_as_visible_blockers(
-    tmp_path: Path,
-) -> None:
-    from scripts.audit_rag_readiness import run_audit
+def test_audit_rejects_query_subject_outside_catalog(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    subject_dir = data / "math"
+    subject_dir.mkdir(parents=True)
+    (subject_dir / "notes.txt").write_text("calculus notes", encoding="utf-8")
 
-    project = tmp_path / "project"
-    data = project / "data" / "math"
-    config_dir = project / "config"
-    data.mkdir(parents=True)
-    config_dir.mkdir(parents=True)
-    (data / "notes.txt").write_text("limits", encoding="utf-8")
-    (config_dir / "groups.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "source_groups_v1",
-                "source_groups": {"math/notes.txt": "notes"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    benchmark = {
-        "schema_version": "rag_benchmark_config_v1",
-        "dataset_schema_version": "rag_gold_v1",
-        "report_schema_version": "rag_benchmark_report_v1",
-        "primary_subjects": ["math"],
-        "min_global_gold_queries": 1,
-        "min_subject_gold_queries": 1,
-        "min_independent_sources": 1,
-        "low_text_page_chars": 1,
-        "bootstrap_samples": 100,
-        "bootstrap_confidence": 0.95,
-        "bootstrap_seed": 7,
-        "top_ks": [1, 3, 5, 10],
-        "parent_top_ks": [1, 3, 5],
-        "human_gold_paths": ["data/evaluation/human.jsonl"],
-        "historical_annotated_paths": ["data/evaluation/history.jsonl"],
-        "synthetic_smoke_paths": ["data/evaluation/smoke.jsonl"],
-        "synthetic_smoke_eligible_for_rollout": False,
-        "source_group_manifest_path": "config/groups.json",
-        "candidate_grid": {
-            "parent_sizes": [100],
-            "parent_overlaps": [0],
-            "child_sizes": [50],
-            "child_overlaps": [0],
-            "vector_top_ks": [1],
-            "bm25_top_ks": [1],
-            "reranker_top_ns": [1],
-            "unique_parent_top_ks": [1],
-            "max_children_per_parent_values": [1],
-            "max_parents_per_source_values": [1],
-            "rrf_ks": [1],
-            "rrf_weight_pairs": [{"vector_weight": 1.0, "bm25_weight": 1.0}],
-            "parent_support_lambdas": [0.0],
-            "full_parent_max_chars_values": [100],
-            "hit_window_chars_per_side_values": [10],
-        },
-        "gates": {
-            "recall_at_5_min_absolute_gain": 0.05,
-            "recall_at_5_ci_lower_bound_min": 0.0,
-            "mrr_min_absolute_gain": 0.03,
-            "mrr_ci_lower_bound_min": 0.0,
-            "high_baseline_recall_threshold": 0.9,
-            "high_baseline_relative_error_reduction": 0.2,
-            "high_baseline_noninferiority_margin": 0.01,
-            "per_subject_recall_ci_lower_bound_min": -0.02,
-            "noise_at_5_max_absolute_increase": 0.02,
-            "noise_at_5_ci_upper_bound_max": 0.03,
-            "p95_latency_max_baseline_ratio": 1.25,
-            "p95_latency_absolute_budget_ms": 3000.0,
-            "parent_context_max_baseline_ratio": 1.35,
-            "answer_correctness_noninferiority_margin": 0.02,
-            "citation_support_noninferiority_margin": 0.02,
-            "hallucination_max_absolute_increase": 0.01,
-        },
-    }
-    (config_dir / "benchmark.yaml").write_text(
-        __import__("yaml").safe_dump(benchmark, sort_keys=False), encoding="utf-8"
-    )
-
-    artifact = run_audit(
-        project_root=project,
-        benchmark_config_path=Path("config/benchmark.yaml"),
-        data_root=Path("data"),
-        output_path=Path("reports/readiness.json"),
-    )
-
-    assert artifact.report.production_recommendation_blocked is True
-    assert len(artifact.missing_dataset_paths) == 3
-    assert (project / "reports" / "readiness.json").is_file()
+    with pytest.raises(ReadinessAuditError, match="unknown_subject"):
+        audit_rag_readiness(
+            catalog_snapshot=_catalog(data),
+            source_group_manifest=_manifest({"math/notes.txt": "one"}),
+            query_records=(
+                QueryInventoryRecord(
+                    query_id="other",
+                    subject="other",
+                    query="Q",
+                    dataset_kind="human_gold",
+                    eligible_for_rollout=True,
+                ),
+            ),
+            low_text_page_chars=5,
+            minimum_independent_sources=1,
+            minimum_subject_gold_queries=1,
+            minimum_global_gold_queries=1,
+        )
