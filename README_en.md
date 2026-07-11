@@ -134,7 +134,7 @@ python scripts/build_index.py
 
 ```bash
 # Terminal 1: backend
-uvicorn app:app --reload --port 8000
+python -m scripts.run_backend --reload --port 8000
 
 # Terminal 2: frontend
 cd frontend

@@ -28,6 +28,7 @@ from src.context_engineering.workspace import (
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_ID_PREFIX = "llm_input_manifest:v1"
 MANIFEST_HISTORY_LIMIT = 80
+MANIFEST_HISTORY_CHAR_LIMIT = 192_000
 BACKGROUND_CONTEXT_SCHEMA_VERSION = 1
 THREAD_LEDGER_SCHEMA_VERSION = 1
 
@@ -369,8 +370,27 @@ def merge_llm_input_manifest_history(
             _safe_text(item.get("manifest_id"), 180),
         ),
         reverse=True,
-    )
-    return ordered[:MANIFEST_HISTORY_LIMIT]
+    )[:MANIFEST_HISTORY_LIMIT]
+    bounded: list[dict[str, Any]] = []
+    total_chars = 2
+    for payload in ordered:
+        item_chars = len(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        added_chars = item_chars + (1 if bounded else 0)
+        if (
+            item_chars > MANIFEST_HISTORY_CHAR_LIMIT
+            or total_chars + added_chars > MANIFEST_HISTORY_CHAR_LIMIT
+        ):
+            continue
+        bounded.append(payload)
+        total_chars += added_chars
+    return bounded
 
 
 def build_thread_context_ledger_update(

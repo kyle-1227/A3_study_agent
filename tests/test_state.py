@@ -2,15 +2,23 @@
 
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
+    CONTEXT_WINDOW_EVENT_CHAR_LIMIT,
+    CONTEXT_WINDOW_HISTORY_CHAR_LIMIT,
     CONTEXT_USAGE_REPORTS_CLEAR,
+    DICT_CLEAR,
+    EVIDENCE_MEMORY_CHAR_LIMIT,
     GENERATED_ARTIFACTS_CLEAR,
+    GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT,
     MEMORY_CLEAR,
     LearningState,
     activity_timeline_reducer,
+    bounded_context_event_reducer,
+    bounded_context_window_reducer,
     context_usage_reports_reducer,
     evidence_memory_reducer,
     generated_artifacts_reducer,
     initial_request_reset_transient_state,
+    latest_dict_reducer,
     task_workspace_reducer,
 )
 
@@ -123,6 +131,66 @@ class TestTaskWorkspaceReducers:
 
         assert merged == [artifact]
         assert generated_artifacts_reducer(merged, GENERATED_ARTIFACTS_CLEAR) == []
+
+    def test_latest_dict_reducer_replaces_previous_resource_and_clears(self):
+        previous = {
+            "resource_type": "mindmap",
+            "mindmap": {"title": "Previous map"},
+        }
+        current = {
+            "resource_type": "study_plan",
+            "study_plan": {"title": "Current plan"},
+        }
+
+        assert latest_dict_reducer(previous, current) == current
+        assert latest_dict_reducer(current, DICT_CLEAR) == {}
+
+    def test_context_histories_enforce_character_and_item_bounds(self):
+        small = {"event_id": "small", "summary": "bounded"}
+        oversized_event = {
+            "event_id": "oversized",
+            "summary": "x" * CONTEXT_WINDOW_EVENT_CHAR_LIMIT,
+        }
+        oversized_window = {
+            "window_id": "oversized",
+            "summary": "x" * CONTEXT_WINDOW_HISTORY_CHAR_LIMIT,
+        }
+
+        assert bounded_context_event_reducer(
+            [],
+            [small, oversized_event],
+        ) == [small]
+        assert bounded_context_window_reducer(
+            [],
+            [small, oversized_window],
+        ) == [small]
+
+    def test_memory_and_artifact_histories_drop_oversized_entries(self):
+        memory = {
+            "memory_id": "memory:small",
+            "created_at": "2026-07-11T00:00:00+00:00",
+            "summary": "bounded",
+        }
+        oversized_memory = {
+            "memory_id": "memory:oversized",
+            "created_at": "2026-07-11T01:00:00+00:00",
+            "summary": "x" * EVIDENCE_MEMORY_CHAR_LIMIT,
+        }
+        artifact = {
+            "artifact_id": "artifact:small",
+            "created_at": "2026-07-11T00:00:00+00:00",
+            "summary": "bounded",
+        }
+        oversized_artifact = {
+            "artifact_id": "artifact:oversized",
+            "created_at": "2026-07-11T01:00:00+00:00",
+            "summary": "x" * GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT,
+        }
+
+        assert evidence_memory_reducer([], [memory, oversized_memory]) == [memory]
+        assert generated_artifacts_reducer([], [artifact, oversized_artifact]) == [
+            artifact
+        ]
 
     def test_observability_reducers_are_idempotent_and_support_explicit_clear(self):
         from src.observability.activity import build_activity_event

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal
 
 from langgraph.graph.message import add_messages
@@ -46,8 +47,46 @@ CONTEXT_USAGE_REPORTS_CLEAR: list[dict] = [{"__context_usage_reports_clear__": T
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
+EVIDENCE_MEMORY_CHAR_LIMIT = 64_000
 CONTEXT_WINDOW_HISTORY_LIMIT = 30
+CONTEXT_WINDOW_HISTORY_CHAR_LIMIT = 96_000
 CONTEXT_WINDOW_EVENT_LIMIT = 120
+CONTEXT_WINDOW_EVENT_CHAR_LIMIT = 96_000
+GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT = 96_000
+
+
+def _bounded_json_history(
+    values: list[dict],
+    *,
+    max_items: int,
+    max_chars: int,
+    newest_first: bool = False,
+) -> list[dict]:
+    """Keep the newest JSON-safe entries within deterministic dual bounds."""
+    candidates = values[:max_items] if newest_first else values[-max_items:]
+    ordered = candidates if newest_first else list(reversed(candidates))
+    bounded: list[dict] = []
+    total_chars = 2
+    for entry in ordered:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            item_chars = len(
+                json.dumps(
+                    entry,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+        added_chars = item_chars + (1 if bounded else 0)
+        if item_chars > max_chars or total_chars + added_chars > max_chars:
+            continue
+        bounded.append(entry)
+        total_chars += added_chars
+    return bounded if newest_first else list(reversed(bounded))
 
 
 def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
@@ -75,7 +114,12 @@ def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[di
         key=lambda e: e.get("created_at", ""),
         reverse=True,
     )
-    return sorted_entries[:EVIDENCE_MEMORY_MAX_ENTRIES]
+    return _bounded_json_history(
+        sorted_entries,
+        max_items=EVIDENCE_MEMORY_MAX_ENTRIES,
+        max_chars=EVIDENCE_MEMORY_CHAR_LIMIT,
+        newest_first=True,
+    )
 
 
 def bounded_context_window_reducer(
@@ -84,7 +128,11 @@ def bounded_context_window_reducer(
 ) -> list[dict]:
     """Append bounded context-window telemetry without unbounded growth."""
     values = list(existing or []) + list(update or [])
-    return values[-CONTEXT_WINDOW_HISTORY_LIMIT:]
+    return _bounded_json_history(
+        values,
+        max_items=CONTEXT_WINDOW_HISTORY_LIMIT,
+        max_chars=CONTEXT_WINDOW_HISTORY_CHAR_LIMIT,
+    )
 
 
 def bounded_context_event_reducer(
@@ -95,7 +143,11 @@ def bounded_context_event_reducer(
     if update and update[0].get("__workspace_events_clear__"):
         return []
     values = list(existing or []) + list(update or [])
-    return values[-CONTEXT_WINDOW_EVENT_LIMIT:]
+    return _bounded_json_history(
+        values,
+        max_items=CONTEXT_WINDOW_EVENT_LIMIT,
+        max_chars=CONTEXT_WINDOW_EVENT_CHAR_LIMIT,
+    )
 
 
 def llm_input_manifests_reducer(
@@ -146,6 +198,8 @@ def thread_context_ledger_reducer(existing: dict, update: dict) -> dict:
 
 def latest_dict_reducer(_existing: dict, update: dict) -> dict:
     """Replace with the latest dict value."""
+    if isinstance(update, dict) and update.get("__dict_clear__") is True:
+        return {}
     return dict(update or {})
 
 
@@ -177,7 +231,12 @@ def generated_artifacts_reducer(
         ),
         reverse=True,
     )
-    return sorted_entries[:CONTEXT_WINDOW_HISTORY_LIMIT]
+    return _bounded_json_history(
+        sorted_entries,
+        max_items=CONTEXT_WINDOW_HISTORY_LIMIT,
+        max_chars=GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT,
+        newest_first=True,
+    )
 
 
 def task_workspace_reducer(existing: dict, update: dict) -> dict:
@@ -516,7 +575,7 @@ class LearningState(TypedDict):
         list[dict], generated_artifacts_reducer
     ]  # Bounded generated artifact summaries
     last_resource_final_payload: Annotated[
-        dict, merge_dict_reducer
+        dict, latest_dict_reducer
     ]  # Last sanitized renderable resource_final payload
     last_qa_response: Annotated[
         dict, latest_dict_reducer

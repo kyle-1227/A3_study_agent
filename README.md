@@ -148,7 +148,7 @@ python scripts/build_index.py
 **终端 1：后端**
 
 ```bash
-uvicorn app:app --reload --port 8000
+python -m scripts.run_backend --reload --port 8000
 ```
 
 **终端 2：前端**

@@ -73,6 +73,41 @@ def test_manifest_history_dedupes_by_stable_id():
     assert history[0]["manifest_id"] == payload["manifest_id"]
 
 
+def test_manifest_history_enforces_total_character_budget(monkeypatch):
+    from src.context_engineering import input_manifest as manifest_module
+
+    manifest = build_llm_input_manifest(
+        node_name="mindmap_agent",
+        llm_node="mindmap",
+        provider="test-provider",
+        model="test-model",
+        messages=[HumanMessage(content="bounded prompt")],
+        state={"request_id": "r1", "thread_id": "t1"},
+        call_purpose="plain_llm",
+    )
+    payload = llm_input_manifest_trace_payload(manifest)
+    updates = [
+        {
+            **payload,
+            "manifest_id": f"llm_input_manifest:v1:{index:064x}",
+            "created_at": f"2026-07-11T00:00:{index:02d}+00:00",
+        }
+        for index in range(20)
+    ]
+    monkeypatch.setattr(manifest_module, "MANIFEST_HISTORY_CHAR_LIMIT", 8_000)
+
+    history = merge_llm_input_manifest_history([], updates)
+    serialized = json.dumps(
+        history,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert 0 < len(history) < len(updates)
+    assert len(serialized) <= manifest_module.MANIFEST_HISTORY_CHAR_LIMIT
+
+
 def test_background_context_window_uses_manifest_workspace_metadata():
     manifest = build_llm_input_manifest(
         node_name="mindmap_agent",
