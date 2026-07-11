@@ -1,0 +1,67 @@
+schema_version: rag_rollout_config_v1
+activation_enabled: false
+shadow_enabled: false
+primary_subjects:
+  - big_data
+  - computer
+  - machine_learning
+  - math
+  - python
+request_hash_algorithm: sha256_v1
+candidate_failure_policy: fail_fast
+rollback_mode: explicit_registry_activation
+benchmark_eligibility_required: true
+stages:
+  - stage_id: shadow
+    candidate_allocation_percent: 0.0
+    min_evaluable_requests: 0
+    min_observation_hours: 24.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: false
+  - stage_id: internal
+    candidate_allocation_percent: 100.0
+    min_evaluable_requests: 0
+    min_observation_hours: 24.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: true
+  - stage_id: single_subject
+    candidate_allocation_percent: 5.0
+    min_evaluable_requests: 200
+    min_observation_hours: 24.0
+    eligible_subjects: [python]
+    internal_only: false
+  - stage_id: multi_subject
+    candidate_allocation_percent: 10.0
+    min_evaluable_requests: 500
+    min_observation_hours: 24.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: false
+  - stage_id: expand_1
+    candidate_allocation_percent: 25.0
+    min_evaluable_requests: 1000
+    min_observation_hours: 48.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: false
+  - stage_id: expand_2
+    candidate_allocation_percent: 50.0
+    min_evaluable_requests: 2000
+    min_observation_hours: 72.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: false
+  - stage_id: full
+    candidate_allocation_percent: 100.0
+    min_evaluable_requests: 2000
+    min_observation_hours: 72.0
+    eligible_subjects: [big_data, computer, machine_learning, math, python]
+    internal_only: false
+stop_conditions:
+  max_candidate_error_rate: 0.01
+  max_p95_latency_baseline_ratio: 1.25
+  max_context_token_baseline_ratio: 1.35
+  max_recall_at_5_absolute_regression: 0.02
+  max_answer_correctness_absolute_regression: 0.02
+  max_citation_support_absolute_regression: 0.02
+  max_hallucination_absolute_increase: 0.01
+  max_integrity_failures: 0
+  max_generation_mismatches: 0
+  max_parent_hydration_failures: 0

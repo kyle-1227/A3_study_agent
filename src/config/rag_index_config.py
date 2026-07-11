@@ -1,0 +1,516 @@
+"""Strict, provider-neutral configuration for production RAG generations."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+
+from pydantic import AfterValidator, Field, field_validator, model_validator
+
+from src.config._rag_config import (
+    ConfigPath,
+    NonBlankStr,
+    NonBlankStrTuple,
+    NonEmptyStr,
+    NonEmptyStrTuple,
+    StrictRagConfigModel,
+    load_strict_rag_yaml,
+)
+
+
+def _subject_id(value: str) -> str:
+    if value != value.casefold():
+        raise ValueError("subject identifier must already be case-folded")
+    if value.startswith("_") or value.endswith("_") or "__" in value:
+        raise ValueError("subject identifier has invalid underscore placement")
+    if not all(character.isalnum() or character == "_" for character in value):
+        raise ValueError("subject identifier contains unsupported characters")
+    return value
+
+
+def _base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("base_url must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("base_url must not contain a query or fragment")
+    return value
+
+
+def _endpoint_path(value: str) -> str:
+    if not value.startswith("/") or value.startswith("//"):
+        raise ValueError("endpoint_path must begin with exactly one '/'")
+    if "?" in value or "#" in value or ".." in value.split("/"):
+        raise ValueError("endpoint_path must not contain traversal, query, or fragment")
+    return value
+
+
+def _unique(values: tuple[object, ...], *, field_name: str) -> None:
+    if len(values) != len(set(values)):
+        raise ValueError(f"{field_name} must not contain duplicates")
+
+
+SubjectId = Annotated[NonBlankStr, AfterValidator(_subject_id)]
+PolicyId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+BaseUrl = Annotated[NonBlankStr, AfterValidator(_base_url)]
+EndpointPath = Annotated[NonBlankStr, AfterValidator(_endpoint_path)]
+PositiveInt = Annotated[int, Field(gt=0)]
+NonNegativeInt = Annotated[int, Field(ge=0)]
+PositiveFloat = Annotated[float, Field(gt=0)]
+UnitFloat = Annotated[float, Field(ge=0.0, le=1.0)]
+
+
+class CatalogConfig(StrictRagConfigModel):
+    """Filesystem discovery policy for the source corpus."""
+
+    data_root: ConfigPath
+    supported_extensions: NonBlankStrTuple
+    excluded_exact_names: NonBlankStrTuple
+    excluded_prefixes: NonBlankStrTuple
+    exclude_hidden: bool
+    exclude_cache_directories: bool
+    cache_directory_names: NonBlankStrTuple
+    exclude_unclassified: bool
+    unclassified_directory_name: NonBlankStr
+    exclude_needs_ocr: bool
+    needs_ocr_directory_name: NonBlankStr
+    normalization_version: Literal["subject_id_v1"]
+    symlink_policy: Literal["reject", "allow_internal"]
+
+    @model_validator(mode="after")
+    def _validate_discovery_policy(self) -> "CatalogConfig":
+        _unique(self.supported_extensions, field_name="supported_extensions")
+        _unique(self.excluded_exact_names, field_name="excluded_exact_names")
+        _unique(self.excluded_prefixes, field_name="excluded_prefixes")
+        _unique(self.cache_directory_names, field_name="cache_directory_names")
+        for extension in self.supported_extensions:
+            if not extension.startswith(".") or extension != extension.casefold():
+                raise ValueError(
+                    "supported_extensions must be lower-case suffixes beginning with '.'"
+                )
+        return self
+
+
+class StorageConfig(StrictRagConfigModel):
+    """Immutable generation storage locations and identifiers."""
+
+    index_root: ConfigPath
+    registry_path: ConfigPath
+    collection_name: Annotated[str, Field(min_length=3, pattern=r"^[A-Za-z0-9_-]+$")]
+    parent_store_schema_version: NonBlankStr
+    registry_schema_version: NonBlankStr
+    owner_marker_schema_version: NonBlankStr
+    registry_busy_timeout_seconds: PositiveFloat
+    parent_store_busy_timeout_seconds: PositiveFloat
+    retention_generations: PositiveInt
+
+    @model_validator(mode="after")
+    def _validate_registry_containment(self) -> "StorageConfig":
+        index_root = self.index_root.resolve()
+        registry_path = self.registry_path
+        if not registry_path.is_absolute():
+            registry_path = index_root / registry_path
+        resolved_registry = registry_path.resolve()
+        if not resolved_registry.is_relative_to(index_root):
+            raise ValueError("registry_path must resolve within index_root")
+        return self
+
+    def resolved_registry_path(self) -> Path:
+        """Return the validated registry location under ``index_root``."""
+        index_root = self.index_root.resolve()
+        if self.registry_path.is_absolute():
+            return self.registry_path.resolve()
+        return (index_root / self.registry_path).resolve()
+
+
+class RetryConfig(StrictRagConfigModel):
+    """Explicit bounded retry policy; it never changes provider or model."""
+
+    max_attempts: PositiveInt
+    initial_backoff_seconds: PositiveFloat
+    max_backoff_seconds: PositiveFloat
+    multiplier: Annotated[float, Field(ge=1.0)]
+
+    @model_validator(mode="after")
+    def _validate_backoff(self) -> "RetryConfig":
+        if self.max_attempts > 10:
+            raise ValueError("max_attempts must not exceed 10")
+        if self.max_backoff_seconds > 60.0:
+            raise ValueError("max_backoff_seconds must not exceed 60 seconds")
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise ValueError(
+                "max_backoff_seconds must be at least initial_backoff_seconds"
+            )
+        return self
+
+
+class EmbeddingConfig(StrictRagConfigModel):
+    """Provider-neutral embedding endpoint configuration."""
+
+    provider: NonBlankStr
+    protocol: Literal["openai_embeddings_v1"]
+    model: NonBlankStr
+    base_url: BaseUrl
+    endpoint_path: EndpointPath
+    api_key_env: Annotated[
+        str,
+        Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"),
+    ]
+    timeout_seconds: PositiveFloat
+    retry: RetryConfig
+    batch_size: PositiveInt
+    expected_dimension: PositiveInt
+    distance_metric: Literal["cosine", "l2", "ip"]
+    normalization_contract: NonBlankStr
+    document_input_type: NonBlankStr
+    query_input_type: NonBlankStr
+    input_type_field: NonBlankStr | None
+
+
+class RerankerConfig(StrictRagConfigModel):
+    """Provider-neutral reranker endpoint and response contract."""
+
+    provider: NonBlankStr
+    model: NonBlankStr
+    base_url: BaseUrl
+    endpoint_path: EndpointPath
+    api_key_env: Annotated[
+        str,
+        Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"),
+    ]
+    timeout_seconds: PositiveFloat
+    retry: RetryConfig
+    batch_size: PositiveInt
+    protocol: NonBlankStr
+    score_min: float
+    score_max: float
+
+    @model_validator(mode="after")
+    def _validate_score_contract(self) -> "RerankerConfig":
+        if self.score_min != 0.0 or self.score_max != 1.0:
+            raise ValueError("reranker score contract must be exactly [0.0, 1.0]")
+        return self
+
+
+class Bm25Config(StrictRagConfigModel):
+    """Safe per-subject BM25 artifact contract."""
+
+    tokenizer: NonBlankStr
+    tokenizer_version: NonBlankStr
+    dictionary_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    artifact_format: Literal["jsonl"]
+
+
+class ExtractionPolicyConfig(StrictRagConfigModel):
+    algorithm_version: NonBlankStr
+    pdf_extraction_method: NonBlankStr
+    text_extraction_method: NonBlankStr
+
+
+class PageAssemblyPolicyConfig(StrictRagConfigModel):
+    algorithm_version: NonBlankStr
+    page_separator: NonEmptyStr
+
+
+class CleaningPolicyConfig(StrictRagConfigModel):
+    algorithm_version: NonBlankStr
+    normalize_newlines: bool
+    strip_trailing_whitespace: bool
+    strip_outer_blank_lines: bool
+    header_top_lines: PositiveInt
+    footer_bottom_lines: PositiveInt
+    repeated_line_min_pages: PositiveInt
+    repeated_line_min_ratio: UnitFloat
+    collapse_blank_lines: bool
+    paragraph_deduplication: bool
+
+
+class StructurePolicyConfig(StrictRagConfigModel):
+    detector_version: NonBlankStr
+    pattern_set_version: NonBlankStr
+    merge_version: NonBlankStr
+    short_unit_chars: PositiveInt
+    major_boundary_levels: Annotated[
+        tuple[PositiveInt, ...],
+        # YAML has sequences rather than native Python tuples.
+        # NonBlankStrTuple cannot be reused because the item type is numeric.
+        Field(min_length=1),
+    ]
+
+    @field_validator("major_boundary_levels", mode="before")
+    @classmethod
+    def _freeze_boundary_levels(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_boundary_levels(self) -> "StructurePolicyConfig":
+        _unique(self.major_boundary_levels, field_name="major_boundary_levels")
+        if self.major_boundary_levels != tuple(sorted(self.major_boundary_levels)):
+            raise ValueError("major_boundary_levels must be sorted")
+        expected = tuple(range(1, max(self.major_boundary_levels) + 1))
+        if self.major_boundary_levels != expected:
+            raise ValueError(
+                "major_boundary_levels must be contiguous and start at level 1"
+            )
+        return self
+
+
+class AtomicBlockPolicyConfig(StrictRagConfigModel):
+    policy_version: NonBlankStr
+    protected_types: NonBlankStrTuple
+    hard_max_chars: PositiveInt
+
+    @model_validator(mode="after")
+    def _validate_protected_types(self) -> "AtomicBlockPolicyConfig":
+        _unique(self.protected_types, field_name="protected_types")
+        return self
+
+
+class RecursiveChunkConfig(StrictRagConfigModel):
+    algorithm_version: NonBlankStr
+    size: PositiveInt
+    overlap: NonNegativeInt
+    separators: NonEmptyStrTuple
+    length_policy: NonBlankStr
+    whitespace_policy: NonBlankStr
+
+    @model_validator(mode="after")
+    def _validate_overlap(self) -> "RecursiveChunkConfig":
+        if self.overlap >= self.size:
+            raise ValueError("overlap must be less than size")
+        _unique(self.separators, field_name="separators")
+        return self
+
+
+class ChunkPolicyConfig(StrictRagConfigModel):
+    """All output-affecting parent/child chunk policy inputs."""
+
+    extraction: ExtractionPolicyConfig
+    page_assembly: PageAssemblyPolicyConfig
+    cleaning: CleaningPolicyConfig
+    structure: StructurePolicyConfig
+    atomic_blocks: AtomicBlockPolicyConfig
+    parent: RecursiveChunkConfig
+    child: RecursiveChunkConfig
+    metadata_contract_version: NonBlankStr
+
+    @model_validator(mode="after")
+    def _validate_parent_child_bounds(self) -> "ChunkPolicyConfig":
+        if self.child.size > self.parent.size:
+            raise ValueError("child size must not exceed parent size")
+        if self.parent.size > self.atomic_blocks.hard_max_chars:
+            raise ValueError("parent size must not exceed atomic block hard_max_chars")
+        return self
+
+
+def chunk_policy_manifest_payload(
+    policy: ChunkPolicyConfig,
+) -> dict[str, object]:
+    """Return the canonical output-affecting V1 policy-manifest payload."""
+
+    return {
+        "schema_version": "policy_manifest_v1",
+        "canonicalization_version": "canonical_json_v1",
+        "id_algorithm_version": "parent_child_id_v1",
+        "extraction": policy.extraction.model_dump(mode="json"),
+        "page_assembly": policy.page_assembly.model_dump(mode="json"),
+        "cleaning": policy.cleaning.model_dump(mode="json"),
+        "structure": policy.structure.model_dump(mode="json"),
+        "atomic_blocks": policy.atomic_blocks.model_dump(mode="json"),
+        "parent_split": policy.parent.model_dump(mode="json"),
+        "child_split": policy.child.model_dump(mode="json"),
+        "metadata_contract_version": policy.metadata_contract_version,
+    }
+
+
+def compute_chunk_policy_id(policy: ChunkPolicyConfig) -> str:
+    """Recompute the policy ID from canonical output-affecting configuration."""
+
+    encoded = json.dumps(
+        chunk_policy_manifest_payload(policy),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class RetrievalConfig(StrictRagConfigModel):
+    """Explicit hybrid retrieval, aggregation, and expansion controls."""
+
+    vector_top_k: PositiveInt
+    bm25_top_k: PositiveInt
+    rrf_k: PositiveInt
+    vector_weight: PositiveFloat
+    bm25_weight: PositiveFloat
+    reranker_top_n: PositiveInt
+    unique_parent_top_k: PositiveInt
+    max_children_per_parent: PositiveInt
+    max_parents_per_source: PositiveInt
+    parent_support_lambda: UnitFloat
+    full_parent_max_chars: PositiveInt
+    hit_window_chars_per_side: PositiveInt
+    context_item_max_chars: PositiveInt
+    judge_preview_max_chars: PositiveInt
+    multi_subject_per_subject_top_k: PositiveInt
+    multi_subject_max_parents: PositiveInt
+    cross_branch_rrf_k: PositiveInt
+    subject_coverage_quota: PositiveInt
+
+    @model_validator(mode="after")
+    def _validate_retrieval_bounds(self) -> "RetrievalConfig":
+        candidate_count = self.vector_top_k + self.bm25_top_k
+        if self.reranker_top_n > candidate_count:
+            raise ValueError("reranker_top_n must not exceed vector_top_k + bm25_top_k")
+        if self.unique_parent_top_k > self.reranker_top_n:
+            raise ValueError("unique_parent_top_k must not exceed reranker_top_n")
+        if self.full_parent_max_chars > self.context_item_max_chars:
+            raise ValueError(
+                "full_parent_max_chars must not exceed context_item_max_chars"
+            )
+        if self.multi_subject_per_subject_top_k > self.multi_subject_max_parents:
+            raise ValueError(
+                "multi_subject_per_subject_top_k must not exceed "
+                "multi_subject_max_parents"
+            )
+        if self.subject_coverage_quota > self.multi_subject_per_subject_top_k:
+            raise ValueError("subject_coverage_quota must not exceed per-subject top_k")
+        return self
+
+
+class RagIndexConfig(StrictRagConfigModel):
+    """Complete strict configuration for a parent-child RAG generation."""
+
+    schema_version: NonBlankStr
+    catalog: CatalogConfig
+    storage: StorageConfig
+    embedding: EmbeddingConfig
+    reranker: RerankerConfig
+    bm25: Bm25Config
+    chunk_policies: dict[PolicyId, ChunkPolicyConfig]
+    subject_policy_map: dict[SubjectId, PolicyId]
+    retrieval: RetrievalConfig
+
+    @model_validator(mode="after")
+    def _validate_complete_policy_mapping(self) -> "RagIndexConfig":
+        if not self.chunk_policies:
+            raise ValueError("chunk_policies must not be empty")
+        if not self.subject_policy_map:
+            raise ValueError("subject_policy_map must not be empty")
+        configured_policy_ids = set(self.chunk_policies)
+        referenced_policy_ids = set(self.subject_policy_map.values())
+        unknown = referenced_policy_ids - configured_policy_ids
+        unused = configured_policy_ids - referenced_policy_ids
+        if unknown or unused:
+            raise ValueError(
+                "subject_policy_map and chunk_policies must reference the same policy IDs"
+            )
+        mismatched_policy_ids = tuple(
+            sorted(
+                policy_id
+                for policy_id, policy in self.chunk_policies.items()
+                if compute_chunk_policy_id(policy) != policy_id
+            )
+        )
+        if mismatched_policy_ids:
+            raise ValueError(
+                "chunk policy IDs do not match canonical output-affecting config: "
+                + ", ".join(mismatched_policy_ids)
+            )
+
+        largest_child = max(
+            policy.child.size for policy in self.chunk_policies.values()
+        )
+        expanded_window_chars = (
+            2 * self.retrieval.hit_window_chars_per_side + largest_child
+        )
+        if expanded_window_chars > self.retrieval.context_item_max_chars:
+            raise ValueError(
+                "hit window plus largest child must fit context_item_max_chars"
+            )
+        if self.retrieval.reranker_top_n > self.reranker.batch_size:
+            raise ValueError("reranker_top_n must not exceed reranker.batch_size")
+        minimum_coverage_parents = (
+            len(self.subject_policy_map) * self.retrieval.subject_coverage_quota
+        )
+        if self.retrieval.multi_subject_max_parents < minimum_coverage_parents:
+            raise ValueError(
+                "multi_subject_max_parents cannot satisfy all subject coverage quotas"
+            )
+        return self
+
+
+def load_rag_index_config(config_path: Path) -> RagIndexConfig:
+    """Load a required production RAG index YAML file."""
+    return load_strict_rag_yaml(config_path, RagIndexConfig)
+
+
+def resolve_rag_index_config_paths(
+    config: RagIndexConfig,
+    *,
+    project_root: Path,
+) -> RagIndexConfig:
+    """Resolve configured roots under one explicit project containment boundary."""
+
+    root = project_root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("project_root must be a directory")
+
+    def resolve_contained(value: Path, *, field_name: str) -> Path:
+        candidate = value if value.is_absolute() else root / value
+        resolved = candidate.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"{field_name} must resolve within project_root")
+        return resolved
+
+    payload = config.model_dump(mode="python")
+    catalog = dict(payload["catalog"])
+    storage = dict(payload["storage"])
+    catalog["data_root"] = resolve_contained(
+        config.catalog.data_root,
+        field_name="catalog.data_root",
+    )
+    storage["index_root"] = resolve_contained(
+        config.storage.index_root,
+        field_name="storage.index_root",
+    )
+    registry_path = config.storage.registry_path
+    if registry_path.is_absolute():
+        resolved_registry = registry_path.resolve(strict=False)
+        if not resolved_registry.is_relative_to(storage["index_root"]):
+            raise ValueError("storage.registry_path must remain inside index_root")
+        storage["registry_path"] = resolved_registry
+    payload["catalog"] = catalog
+    payload["storage"] = storage
+    return RagIndexConfig.model_validate(payload)
+
+
+__all__ = [
+    "AtomicBlockPolicyConfig",
+    "Bm25Config",
+    "CatalogConfig",
+    "ChunkPolicyConfig",
+    "CleaningPolicyConfig",
+    "EmbeddingConfig",
+    "ExtractionPolicyConfig",
+    "PageAssemblyPolicyConfig",
+    "RagIndexConfig",
+    "RecursiveChunkConfig",
+    "RerankerConfig",
+    "RetryConfig",
+    "RetrievalConfig",
+    "StorageConfig",
+    "StructurePolicyConfig",
+    "chunk_policy_manifest_payload",
+    "compute_chunk_policy_id",
+    "load_rag_index_config",
+    "resolve_rag_index_config_paths",
+]

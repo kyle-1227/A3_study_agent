@@ -1,0 +1,13 @@
+{
+  "schema_version": "source_groups_v1",
+  "source_groups": {
+    "big_data/大数据导论 (林子雨) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "big_data_intro_linziyu",
+    "big_data/大数据开发工程师系列：Hadoop  Spark大数据开发实战 (大数据开发工程师系列：Hadoop  Spark大数据开发实战) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "big_data_hadoop_spark_practice",
+    "computer/计算机学科基础知识 (计算机学科基础知识) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "computer_foundations",
+    "machine_learning/机器学习 Machine Learning (Chinese Edition) (Zhou Zhihua 周志华) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "machine_learning_zhou_zhihua",
+    "math/高等数学（上册） (同济大学数学系) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "calculus_tongji_series",
+    "math/高等数学（下册） (同济大学数学系) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "calculus_tongji_series",
+    "python/Python Basics A Practical Introduction to Python 3 (Real Python) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "python_basics_real_python",
+    "python/Python机器学习入门与实战（以实操为基础，以入行为目的，快速帮助你掌握Python机器学习相关技能） (桑园) (z-library.sk, 1lib.sk, z-lib.sk).pdf": "python_machine_learning_sangyuan"
+  }
+}

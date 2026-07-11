@@ -1,0 +1,65 @@
+schema_version: rag_benchmark_config_v1
+dataset_schema_version: rag_gold_v1
+report_schema_version: rag_benchmark_report_v1
+primary_subjects:
+  - big_data
+  - computer
+  - machine_learning
+  - math
+  - python
+min_global_gold_queries: 50
+min_subject_gold_queries: 20
+min_independent_sources: 3
+low_text_page_chars: 100
+bootstrap_samples: 10000
+bootstrap_confidence: 0.95
+bootstrap_seed: 20260710
+top_ks: [1, 3, 5, 10]
+parent_top_ks: [1, 3, 5]
+human_gold_paths:
+  - data/evaluation/human_gold.jsonl
+historical_annotated_paths:
+  - data/evaluation/historical_annotated.jsonl
+synthetic_smoke_paths:
+  - data/evaluation/synthetic_smoke.jsonl
+synthetic_smoke_eligible_for_rollout: false
+source_group_manifest_path: config/rag/source_groups.json
+candidate_grid:
+  parent_sizes: [1600, 2400, 3200]
+  parent_overlaps: [0, 200, 300]
+  child_sizes: [400, 600, 800]
+  child_overlaps: [60, 100, 120]
+  vector_top_ks: [20, 40, 80]
+  bm25_top_ks: [20, 40, 80]
+  reranker_top_ns: [10, 20, 40]
+  unique_parent_top_ks: [3, 5, 8]
+  max_children_per_parent_values: [1, 2, 3]
+  max_parents_per_source_values: [1, 2, 3]
+  rrf_ks: [20, 60]
+  rrf_weight_pairs:
+    - vector_weight: 1.0
+      bm25_weight: 1.0
+    - vector_weight: 2.0
+      bm25_weight: 1.0
+    - vector_weight: 1.0
+      bm25_weight: 2.0
+  parent_support_lambdas: [0.0, 0.25, 0.5]
+  full_parent_max_chars_values: [1600, 2400, 3200]
+  hit_window_chars_per_side_values: [400, 800, 1200]
+gates:
+  recall_at_5_min_absolute_gain: 0.05
+  recall_at_5_ci_lower_bound_min: 0.000001
+  mrr_min_absolute_gain: 0.03
+  mrr_ci_lower_bound_min: 0.000001
+  high_baseline_recall_threshold: 0.9
+  high_baseline_relative_error_reduction: 0.2
+  high_baseline_noninferiority_margin: 0.01
+  per_subject_recall_ci_lower_bound_min: -0.02
+  noise_at_5_max_absolute_increase: 0.02
+  noise_at_5_ci_upper_bound_max: 0.03
+  p95_latency_max_baseline_ratio: 1.25
+  p95_latency_absolute_budget_ms: 3000.0
+  parent_context_max_baseline_ratio: 1.35
+  answer_correctness_noninferiority_margin: 0.02
+  citation_support_noninferiority_margin: 0.02
+  hallucination_max_absolute_increase: 0.01

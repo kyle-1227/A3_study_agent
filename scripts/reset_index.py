@@ -13,8 +13,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(PROJECT_ROOT / ".env")
-
 try:
     from src.rag.indexer import _resolve_persist_dir
 except ModuleNotFoundError:
@@ -131,6 +129,9 @@ def remove_targets(
 
 
 def main() -> None:
+    # Importing this module is used by tests and diagnostics. Load environment
+    # configuration only for the explicit CLI execution boundary.
+    load_dotenv(PROJECT_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Reset generated RAG index artifacts.")
     parser.add_argument(
         "--yes", action="store_true", help="Actually delete generated index artifacts."

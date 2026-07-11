@@ -23,6 +23,22 @@ Dynamic reference checks: LangGraph builder and prompt/config scans show no dyna
 Related tests: `tests/test_supervisor.py`
 Recommended action: Keep report-only until explicit deletion approval; do not use these helpers as a runtime routing source.
 
+## 2026-07-10 RAG parent JSONL cleanup candidate
+
+Candidate: `parent_chunks.jsonl` cleanup entry
+File: `scripts/reset_index.py`
+Symbol: cleanup target only; no corresponding writer or reader was found
+Evidence: Repository reference scans find the filename only in the reset
+script and a metadata-schema test. No production Parent Store implementation
+uses it at the approved baseline.
+Confidence: Medium; this may be an unfinished design reservation rather than
+dead code.
+Dynamic reference checks: No config, prompt, CLI, or runtime import constructs
+the filename outside the reset path.
+Related tests: `tests/test_metadata_schema.py`
+Recommended action: Keep report-only. Do not delete the entry until the
+generation-owned cleanup path is implemented and separately approved.
+
 ## How to Add Findings
 
 Use this format:

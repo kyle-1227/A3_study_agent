@@ -373,6 +373,11 @@ def initial_request_reset_transient_state() -> dict:
         "degraded_reason": "",
         "evidence_controlled_stop": False,
         "evidence_controlled_stop_reason": "",
+        "parent_child_retrieval_result": {},
+        "parent_child_local_refs": [],
+        "parent_child_generation_id": "",
+        "parent_child_retrieval_fingerprint": "",
+        "parent_child_hydration": {},
         # context
         "context": CONTEXT_CLEAR,
         # resource artifacts
@@ -477,7 +482,7 @@ def context_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
     Normal updates are appended (same as operator.add).
     """
     if update and update[0].get("__clear__"):
-        return []
+        return update[1:]
     return existing + update
 
 
@@ -773,6 +778,11 @@ class LearningState(TypedDict):
     degraded_reason: str  # Reason for degraded generation
     evidence_controlled_stop: bool  # Controlled stop due to insufficient evidence
     evidence_controlled_stop_reason: str  # Reason for controlled stop
+    parent_child_retrieval_result: dict  # Strict child-only multi-branch result
+    parent_child_local_refs: list[dict]  # Judge-safe child references; no parent body
+    parent_child_generation_id: str  # Generation pinned for this request
+    parent_child_retrieval_fingerprint: str  # Retrieval policy fingerprint
+    parent_child_hydration: dict  # Content-free post-Judge hydration summary
     plan: str  # Generated plans
     resource_generation_plan: dict  # Parallel resource generation plan
     resource_branch_results: Annotated[

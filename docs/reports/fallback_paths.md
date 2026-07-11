@@ -11,6 +11,21 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ## Observed Legacy Risk Areas
 
+### 2026-07-10 Parent-child RAG implementation baseline
+
+- `src/rag/retriever.py` catches BM25 construction failures and continues with
+  vector-only retrieval. The parent-child candidate path must not call this
+  helper and must surface a typed BM25 failure instead.
+- `src/rag/reranker.py` catches provider and protocol failures and returns the
+  original document order. The parent-child candidate path must use a strict
+  reranker boundary and must not treat the original order as a successful
+  rerank result.
+- Existing `get_setting(..., default)` and environment fallbacks in the legacy
+  RAG index/retrieval path remain baseline-only risk. New generation code must
+  receive a fully validated configuration object with no production defaults.
+- These findings are report-only. No legacy fallback was removed as part of
+  the parent-child RAG foundation work.
+
 ### 2026-07-08 LLM Input Manifest enforcement
 
 - Added manifest enforcement for active provider transport paths before any

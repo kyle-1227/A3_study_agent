@@ -620,6 +620,11 @@ def _clear_retrieval_plan_state() -> dict:
         "evidence_judge_failed": False,
         "degraded_generation": False,
         "degraded_reason": "",
+        "parent_child_retrieval_result": {},
+        "parent_child_local_refs": [],
+        "parent_child_generation_id": "",
+        "parent_child_retrieval_fingerprint": "",
+        "parent_child_hydration": {},
     }
 
 
@@ -1121,6 +1126,7 @@ def _normalize_retrieval_plan(
                 for value in item.retrieval_coverage_goals
                 if str(value).strip()
             ],
+            "_parent_child_priority_explicit": "priority" in item.model_fields_set,
         }
 
         plan_key = (subject, role)
@@ -1266,6 +1272,7 @@ def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
         "retrieval_coverage_hint": "",
         "retrieval_coverage_goals": [],
         "_synthetic_single_subject": True,
+        "_parent_child_priority_explicit": True,
     }
     debug = {
         "mode": "single_subject_synthetic",
@@ -1280,6 +1287,14 @@ def _build_retrieval_branches(state: LearningState) -> tuple[list[dict], dict]:
         "retrieval_plan_count": 0,
     }
     return ([branch] if query else []), debug
+
+
+def build_retrieval_branches_for_parent_child(
+    state: LearningState,
+) -> tuple[list[dict], dict]:
+    """Expose the normalized Graph retrieval plan to the strict candidate adapter."""
+
+    return _build_retrieval_branches(state)
 
 
 _BRANCH_STATUS_RANK = {

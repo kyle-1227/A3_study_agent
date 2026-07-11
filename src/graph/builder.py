@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from langgraph.graph import END, StateGraph
 
 from src.context_engineering.influence_runtime import wrap_context_influence_node
@@ -37,9 +39,18 @@ from src.graph.study_plan import study_plan_profile_gate_main
 from src.graph.supervisor import handle_unknown, route_after_supervisor, supervisor_node
 from src.run_control import wrap_interruptible_node
 
+if TYPE_CHECKING:
+    from src.graph.parent_child_nodes import ParentChildGraphRuntime
+else:
+    ParentChildGraphRuntime = object
 
-def build_graph() -> StateGraph:
-    """Construct the full LangGraph StateGraph (uncompiled)."""
+
+def _build_graph_with_academic_nodes(
+    *,
+    rag_node,
+    post_evidence_node,
+) -> StateGraph:
+    """Construct one graph with explicitly supplied local retrieval boundaries."""
 
     # Build graph
     graph = StateGraph(LearningState)
@@ -60,9 +71,11 @@ def build_graph() -> StateGraph:
     add_interruptible_node("academic_router", academic_router)
     add_interruptible_node("memory_use_decider", memory_use_decider)
     add_interruptible_node("search_query_rewriter", search_query_rewriter)
-    add_interruptible_node("rag_retrieve", rag_retrieve)
+    add_interruptible_node("rag_retrieve", rag_node)
     add_interruptible_node("web_search", web_search)
     add_interruptible_node("evidence_judge", evidence_judge)
+    if post_evidence_node is not None:
+        add_interruptible_node("parent_child_parent_hydration", post_evidence_node)
     add_interruptible_node("evidence_summary_output", evidence_summary_output)
     add_interruptible_node("generate_answer", generate_answer)
     add_interruptible_node("evaluate_hallucination", evaluate_hallucination)
@@ -124,8 +137,12 @@ def build_graph() -> StateGraph:
     graph.add_edge(["rag_retrieve", "web_search"], "evidence_judge")
 
     # Fan-in routing: only judged context may enter answer/resource generation.
+    evidence_route_source = "evidence_judge"
+    if post_evidence_node is not None:
+        graph.add_edge("evidence_judge", "parent_child_parent_hydration")
+        evidence_route_source = "parent_child_parent_hydration"
     graph.add_conditional_edges(
-        "evidence_judge",
+        evidence_route_source,
         route_after_evidence_judge,
         {
             "answer": "generate_answer",
@@ -170,6 +187,32 @@ def build_graph() -> StateGraph:
     graph.add_edge("handle_unknown", END)
 
     return graph
+
+
+def build_graph() -> StateGraph:
+    """Construct the legacy-served graph without enabling the candidate route."""
+
+    return _build_graph_with_academic_nodes(
+        rag_node=rag_retrieve,
+        post_evidence_node=None,
+    )
+
+
+def build_parent_child_graph(runtime: ParentChildGraphRuntime) -> StateGraph:
+    """Construct the explicit candidate graph pinned to one generation runtime."""
+
+    from src.graph.parent_child_nodes import (
+        ParentChildGraphRuntime as ParentChildGraphRuntimeType,
+        make_parent_child_hydration_node,
+        make_parent_child_rag_node,
+    )
+
+    if not isinstance(runtime, ParentChildGraphRuntimeType):
+        raise TypeError("runtime must be a validated ParentChildGraphRuntime")
+    return _build_graph_with_academic_nodes(
+        rag_node=make_parent_child_rag_node(runtime),
+        post_evidence_node=make_parent_child_hydration_node(runtime),
+    )
 
 
 def route_after_evidence_judge(state: LearningState) -> str:
@@ -218,3 +261,13 @@ def get_compiled_graph(checkpointer=None):
                       When provided, the graph saves/restores state per thread_id.
     """
     return build_graph().compile(checkpointer=checkpointer)
+
+
+def get_compiled_parent_child_graph(
+    runtime: ParentChildGraphRuntime,
+    *,
+    checkpointer,
+):
+    """Compile the explicit candidate graph; callers must supply all dependencies."""
+
+    return build_parent_child_graph(runtime).compile(checkpointer=checkpointer)

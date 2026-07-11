@@ -741,6 +741,7 @@ class TestSearchQueryRewriter:
             "priority": 0.9,
             "retrieval_coverage_hint": "",
             "retrieval_coverage_goals": [],
+            "_parent_child_priority_explicit": True,
         }
         assert debug["raw_plan_count"] == 5
         assert debug["normalized_plan_count"] == 1
