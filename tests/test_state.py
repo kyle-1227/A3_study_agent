@@ -1,5 +1,7 @@
 """Unit tests for LearningState definition."""
 
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
     CONTEXT_WINDOW_EVENT_CHAR_LIMIT,
@@ -11,9 +13,12 @@ from src.graph.state import (
     GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT,
     MEMORY_CLEAR,
     LearningState,
+    THREAD_MESSAGE_HISTORY_CHAR_LIMIT,
+    THREAD_MESSAGE_HISTORY_LIMIT,
     activity_timeline_reducer,
     bounded_context_event_reducer,
     bounded_context_window_reducer,
+    bounded_messages_reducer,
     context_usage_reports_reducer,
     evidence_memory_reducer,
     generated_artifacts_reducer,
@@ -82,6 +87,62 @@ class TestEvidenceMemoryReducer:
 
         assert len(result) == 1
         assert result[0]["summary"] == "new"
+
+
+class TestBoundedMessagesReducer:
+    def test_preserves_add_messages_id_replacement(self):
+        original = HumanMessage(content="old", id="human-1")
+        replacement = HumanMessage(content="new", id="human-1")
+
+        result = bounded_messages_reducer([original], [replacement])
+
+        assert len(result) == 1
+        assert result[0].content == "new"
+
+    def test_preserves_add_messages_remove_semantics(self):
+        result = bounded_messages_reducer(
+            [
+                HumanMessage(content="question", id="human-1"),
+                AIMessage(content="answer", id="ai-1"),
+            ],
+            [RemoveMessage(id="human-1")],
+        )
+
+        assert [message.id for message in result] == ["ai-1"]
+
+    def test_keeps_recent_messages_and_drops_orphan_tool_prefix(self):
+        messages = [
+            HumanMessage(content=f"question-{index}", id=f"human-{index}")
+            if index % 2 == 0
+            else AIMessage(content=f"answer-{index}", id=f"ai-{index}")
+            for index in range(THREAD_MESSAGE_HISTORY_LIMIT + 8)
+        ]
+
+        result = bounded_messages_reducer([], messages)
+
+        assert len(result) == THREAD_MESSAGE_HISTORY_LIMIT
+        assert result[-1].id == messages[-1].id
+
+        with_orphan_tool = bounded_messages_reducer(
+            [],
+            [
+                ToolMessage(content="tool output", tool_call_id="call-1", id="tool-1"),
+                HumanMessage(content="current question", id="human-current"),
+            ],
+        )
+        assert [message.id for message in with_orphan_tool] == ["human-current"]
+
+    def test_keeps_a_contiguous_suffix_within_character_budget(self):
+        chunk_size = THREAD_MESSAGE_HISTORY_CHAR_LIMIT // 2 + 1_000
+        messages = [
+            AIMessage(content="x" * chunk_size, id="oldest"),
+            AIMessage(content="y" * chunk_size, id="newer"),
+            HumanMessage(content="current question", id="current"),
+        ]
+
+        result = bounded_messages_reducer([], messages)
+
+        assert [message.id for message in result] == ["newer", "current"]
 
 
 class TestTaskWorkspaceReducers:

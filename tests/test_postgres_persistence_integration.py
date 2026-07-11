@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app import _thread_status_from_snapshot
 from src.config import get_setting
@@ -188,6 +189,10 @@ def _durable_state(thread_id: str) -> tuple[dict, dict]:
     )
     durable = {
         **base_state,
+        "messages": [
+            HumanMessage(content="Recent compact question.", id="phase7-human"),
+            AIMessage(content="Recent compact answer.", id="phase7-ai"),
+        ],
         "conversation_summary": "Compact thread summary.",
         "evidence_summary_memory": [
             {
@@ -279,6 +284,10 @@ async def _assert_postgres_reconstruction() -> None:
         assert len(values["resource_artifacts_by_type"]) == 1
         assert len(values["last_generated_artifacts"]) == 1
         assert values["conversation_summary"] == "Compact thread summary."
+        assert [message.id for message in values["messages"]] == [
+            "phase7-human",
+            "phase7-ai",
+        ]
         assert len(values["evidence_summary_memory"]) == 1
         assert len(values["evidence_gap_memory"]) == 1
         assert values["last_qa_response"]["type"] == "qa_final"

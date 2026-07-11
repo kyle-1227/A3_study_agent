@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal
 
+from langchain_core.messages import BaseMessage, ToolMessage, message_to_dict
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
@@ -53,6 +54,8 @@ CONTEXT_WINDOW_HISTORY_CHAR_LIMIT = 96_000
 CONTEXT_WINDOW_EVENT_LIMIT = 120
 CONTEXT_WINDOW_EVENT_CHAR_LIMIT = 96_000
 GENERATED_ARTIFACT_HISTORY_CHAR_LIMIT = 96_000
+THREAD_MESSAGE_HISTORY_LIMIT = 48
+THREAD_MESSAGE_HISTORY_CHAR_LIMIT = 128_000
 
 
 def _bounded_json_history(
@@ -87,6 +90,44 @@ def _bounded_json_history(
         bounded.append(entry)
         total_chars += added_chars
     return bounded if newest_first else list(reversed(bounded))
+
+
+def _message_json_chars(message: BaseMessage) -> int:
+    return len(
+        json.dumps(
+            message_to_dict(message),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def bounded_messages_reducer(existing: list, update: list) -> list:
+    """Apply LangGraph message semantics and retain only the recent window."""
+    merged = list(add_messages(existing or [], update or []))
+    candidates = merged[-THREAD_MESSAGE_HISTORY_LIMIT:]
+    bounded_reversed: list[BaseMessage] = []
+    total_chars = 2
+    for message in reversed(candidates):
+        if not isinstance(message, BaseMessage):
+            continue
+        item_chars = _message_json_chars(message)
+        if item_chars > THREAD_MESSAGE_HISTORY_CHAR_LIMIT:
+            if not bounded_reversed:
+                raise ValueError(
+                    "latest thread message exceeds persistent character limit"
+                )
+            break
+        added_chars = item_chars + (1 if bounded_reversed else 0)
+        if total_chars + added_chars > THREAD_MESSAGE_HISTORY_CHAR_LIMIT:
+            break
+        bounded_reversed.append(message)
+        total_chars += added_chars
+    bounded = list(reversed(bounded_reversed))
+    while bounded and isinstance(bounded[0], ToolMessage):
+        bounded.pop(0)
+    return bounded
 
 
 def evidence_memory_reducer(existing: list[dict], update: list[dict]) -> list[dict]:
@@ -478,7 +519,7 @@ def resource_branch_results_reducer(
 
 
 class LearningState(TypedDict):
-    messages: Annotated[list, add_messages]  # Chat history
+    messages: Annotated[list, bounded_messages_reducer]  # Recent chat history
     conversation_summary: Annotated[
         str, latest_string_reducer
     ]  # Compact multi-turn conversation summary
