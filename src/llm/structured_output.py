@@ -32,6 +32,10 @@ from src.llm.http_messages import (
     preview_openai_messages,
     validate_openai_messages,
 )
+from src.llm.deepseek_tool_stream import (
+    DeepSeekToolStreamResult,
+    consume_deepseek_tool_stream,
+)
 from src.llm.schema_drift import (
     analyze_schema_drift_trace_only,
     drift_report_summary,
@@ -72,6 +76,8 @@ from src.observability.llm_input import (
     emit_context_usage_trace,
     raise_for_blocking_input_observation,
 )
+from src.llm.tool_argument_stream import IncrementalJSONStringFieldDecoder
+from src.streaming.provisional import emit_provisional_event
 
 logger = logging.getLogger(__name__)
 
@@ -1632,6 +1638,117 @@ async def _deepseek_chat_completion(
     )
 
 
+async def _deepseek_chat_completion_tool_stream(
+    *,
+    payload: dict[str, Any],
+    base_url: str,
+    api_key: str,
+    node_name: str,
+    llm_node: str,
+    expected_tool_name: str,
+    state: dict | None,
+    llm_input_manifest: Mapping[str, Any],
+) -> tuple[DeepSeekToolStreamResult, int]:
+    """Dispatch one strict tool-call stream and emit only decoded answer text."""
+
+    state_payload = state or {}
+    request_id = str(state_payload.get("request_id") or "")
+    thread_id = str(
+        state_payload.get("thread_id") or state_payload.get("session_id") or ""
+    )
+
+    async def _stream_request() -> DeepSeekToolStreamResult:
+        answer_decoder = IncrementalJSONStringFieldDecoder("answer")
+        emit_provisional_event(
+            "qa_provisional_start",
+            node_name=node_name,
+            request_id=request_id,
+            thread_id=thread_id,
+        )
+
+        def _on_arguments_delta(fragment: str) -> None:
+            answer_delta = answer_decoder.feed(fragment)
+            if answer_delta:
+                emit_provisional_event(
+                    "qa_provisional_delta",
+                    node_name=node_name,
+                    request_id=request_id,
+                    thread_id=thread_id,
+                    delta=answer_delta,
+                    answer_chars=len(answer_decoder.value),
+                )
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    headers=_deepseek_request_headers(api_key),
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                    _deepseek_raise_for_status(response)
+                    result = await consume_deepseek_tool_stream(
+                        response.aiter_lines(),
+                        expected_tool_name=expected_tool_name,
+                        on_arguments_delta=_on_arguments_delta,
+                    )
+        except Exception:
+            emit_provisional_event(
+                "qa_provisional_reset",
+                node_name=node_name,
+                request_id=request_id,
+                thread_id=thread_id,
+                answer_chars=len(answer_decoder.value),
+                reason="provider_attempt_failed",
+            )
+            raise
+
+        emit_provisional_event(
+            "qa_provisional_stop",
+            node_name=node_name,
+            request_id=request_id,
+            thread_id=thread_id,
+            answer_chars=len(answer_decoder.value),
+        )
+        return result
+
+    return await invoke_with_provider_transport_retry(
+        _stream_request,
+        node_name=node_name,
+        llm_node=llm_node,
+        provider=_provider(llm_node),
+        model=_model(llm_node),
+        llm_input_manifest=llm_input_manifest,
+        output_mode="deepseek_tool_call_strict",
+        trace_stage_prefix="structured_llm_transport",
+        state=state_payload,
+    )
+
+
+def _deepseek_tool_streaming_enabled(
+    *,
+    node_name: str,
+    llm_node: str,
+    schema: type[BaseModel],
+) -> bool:
+    value = get_setting(f"llm.{llm_node}.streaming", None)
+    if not isinstance(value, bool):
+        raise _DeepSeekStructuredOutputError(
+            "streaming_config_invalid",
+            f"llm.{llm_node}.streaming must be an explicit boolean",
+        )
+    if not value:
+        return False
+    if node_name != "qa_agent" or schema.__name__ != "QAResponse":
+        raise _DeepSeekStructuredOutputError(
+            "structured_streaming_unsupported",
+            "strict tool argument streaming is only enabled for QAResponse",
+        )
+    return True
+
+
 async def _invoke_openrouter_native(
     schema: type[BaseModel],
     messages: list,
@@ -1832,31 +1949,72 @@ async def _invoke_deepseek_tool_call_strict(
         },
         "temperature": _deepseek_temperature(llm_node),
         "max_tokens": _deepseek_max_tokens(llm_node),
-        "stream": False,
+        "stream": _deepseek_tool_streaming_enabled(
+            node_name=node_name,
+            llm_node=llm_node,
+            schema=schema,
+        ),
         "thinking": {"type": "disabled"},
     }
 
     llm_started = time.perf_counter()
     try:
-        response, _transport_retry_count = await _deepseek_chat_completion(
-            payload=payload,
-            base_url=base_url,
-            api_key=api_key,
-            node_name=node_name,
-            llm_node=llm_node,
-            state=state,
-            llm_input_manifest=llm_input_manifest or {},
-        )
+        if payload["stream"] is True:
+            (
+                stream_result,
+                _transport_retry_count,
+            ) = await _deepseek_chat_completion_tool_stream(
+                payload=payload,
+                base_url=base_url,
+                api_key=api_key,
+                node_name=node_name,
+                llm_node=llm_node,
+                expected_tool_name=tool_name,
+                state=state,
+                llm_input_manifest=llm_input_manifest or {},
+            )
+            data = {
+                "choices": [
+                    {
+                        "finish_reason": stream_result.finish_reason,
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": stream_result.tool_name,
+                                        "arguments": stream_result.arguments,
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "usage": stream_result.usage,
+            }
+            response = None
+        else:
+            response, _transport_retry_count = await _deepseek_chat_completion(
+                payload=payload,
+                base_url=base_url,
+                api_key=api_key,
+                node_name=node_name,
+                llm_node=llm_node,
+                state=state,
+                llm_input_manifest=llm_input_manifest or {},
+            )
+            data = {}
         metrics.llm_elapsed_ms = _round_ms(llm_started)
     except Exception as exc:
         metrics.llm_elapsed_ms = _round_ms(llm_started)
         raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
 
-    try:
-        data = response.json()
-    except Exception as exc:
-        metrics.raw_output_chars = len(response.text or "")
-        raise _InvokeOneModeError(exc, metrics, raw_output=response.text) from exc
+    if response is not None:
+        try:
+            data = response.json()
+        except Exception as exc:
+            metrics.raw_output_chars = len(response.text or "")
+            raise _InvokeOneModeError(exc, metrics, raw_output=response.text) from exc
 
     choice = _deepseek_choice(data)
     finish_reason = str(choice.get("finish_reason", "") or "")

@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from src.config import get_setting
+from src.graph.qa import QAResponse
 from src.graph.supervisor import SupervisorOutput, validate_supervisor_output
 from src.llm.structured_output import (
     StructuredOutputError,
@@ -17,6 +18,10 @@ from src.llm.structured_output import (
     invoke_structured_llm,
 )
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+from src.streaming.provisional import (
+    reset_provisional_event_sink,
+    set_provisional_event_sink,
+)
 
 
 class NestedDeepSeekSchemaModel(BaseModel):
@@ -47,6 +52,7 @@ class _FakeResponse:
 
 class _FakeAsyncClient:
     responses: list[_FakeResponse] = []
+    stream_responses: list["_FakeStreamResponse"] = []
     requests: list[dict] = []
 
     def __init__(self, *args, **kwargs):
@@ -65,6 +71,39 @@ class _FakeAsyncClient:
         if len(self.__class__.responses) > 1:
             return self.__class__.responses.pop(0)
         return self.__class__.responses[0]
+
+    def stream(self, method, url, *, headers=None, json=None):
+        self.__class__.requests.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers or {},
+                "json": json or {},
+            }
+        )
+        if len(self.__class__.stream_responses) > 1:
+            return self.__class__.stream_responses.pop(0)
+        return self.__class__.stream_responses[0]
+
+
+class _FakeStreamResponse:
+    def __init__(self, lines: list[str], status_code: int = 200):
+        self.lines = lines
+        self.status_code = status_code
+        self.text = "\n".join(lines)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_lines(self):
+        for line in self.lines:
+            yield line
+
+    async def aread(self):
+        return self.text.encode("utf-8")
 
 
 def _tool_response(
@@ -159,6 +198,111 @@ class TestDeepSeekSchemaCompiler:
 
 @pytest.mark.anyio
 class TestDeepSeekStrictRuntime:
+    async def test_qa_tool_arguments_stream_only_provisional_answer(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        monkeypatch.setattr(
+            "src.llm.structured_output.httpx.AsyncClient", _FakeAsyncClient
+        )
+        monkeypatch.setattr(
+            "src.llm.structured_output.invoke_with_provider_transport_retry",
+            _fake_transport_retry,
+        )
+        payload = {
+            "answer": "先解释概念，再给出例子。",
+            "uncertainty_note": "",
+            "grounding_status": "general_knowledge",
+            "suggestions": [],
+        }
+        arguments = json.dumps(payload, ensure_ascii=False)
+        split_at = arguments.index("再给出")
+        _FakeAsyncClient.stream_responses = [
+            _FakeStreamResponse(
+                [
+                    "data: "
+                    + json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "finish_reason": None,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "function": {
+                                                    "name": "qa_agent_QAResponse",
+                                                    "arguments": arguments[:split_at],
+                                                },
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "data: "
+                    + json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "finish_reason": "tool_calls",
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "function": {
+                                                    "arguments": arguments[split_at:],
+                                                },
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "data: [DONE]",
+                ]
+            )
+        ]
+        _FakeAsyncClient.requests = []
+        provisional: list[dict] = []
+        sink_token = set_provisional_event_sink(provisional.append)
+        try:
+            result = await invoke_structured_llm(
+                node_name="qa_agent",
+                llm_node="qa_agent",
+                schema=QAResponse,
+                messages=[{"role": "user", "content": "解释这个概念"}],
+                output_mode="deepseek_tool_call_strict",
+                fallback_modes=[],
+                state={
+                    "request_id": "00000000-0000-4000-8000-000000000001",
+                    "thread_id": "thread-1",
+                },
+            )
+        finally:
+            reset_provisional_event_sink(sink_token)
+
+        assert result.success is True
+        assert isinstance(result.parsed, QAResponse)
+        assert result.parsed.answer == payload["answer"]
+        assert _FakeAsyncClient.requests[0]["json"]["stream"] is True
+        assert [event["type"] for event in provisional] == [
+            "qa_provisional_start",
+            "qa_provisional_delta",
+            "qa_provisional_delta",
+            "qa_provisional_stop",
+        ]
+        assert (
+            "".join(
+                event["delta"]
+                for event in provisional
+                if event["type"] == "qa_provisional_delta"
+            )
+            == payload["answer"]
+        )
+
     async def test_supervisor_tool_call_success_and_trace(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         monkeypatch.setattr(

@@ -134,6 +134,10 @@ from src.observability.performance_service import (
     get_performance_service,
     observe_request_performance,
 )
+from src.streaming.provisional import (
+    reset_provisional_event_sink,
+    set_provisional_event_sink,
+)
 from src.tools.document_tool import (
     get_code_practice_artifact_dir,
     get_exercise_artifact_dir,
@@ -1801,6 +1805,8 @@ async def _stream_graph_events(
     active_nodes: list[str] = []
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
+    provisional_events: list[dict] = []
+    provisional_sink_token = set_provisional_event_sink(provisional_events.append)
     context_usage_history: list[dict] = []
     context_usage_reports: list[dict] = []
     llm_input_manifests: list[dict] = []
@@ -2911,10 +2917,19 @@ async def _stream_graph_events(
                 continue
         return drained
 
+    def _drain_provisional_events() -> list[str]:
+        drained: list[str] = []
+        while provisional_events:
+            event = provisional_events.pop(0)
+            drained.append(f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
+        return drained
+
     try:
         async for event in graph.astream_events(
             input_data, config=config, version="v2"
         ):
+            for provisional_payload in _drain_provisional_events():
+                yield provisional_payload
             for trace_payload in await _drain_trace_events():
                 yield trace_payload
             event_type = event["event"]
@@ -3066,9 +3081,13 @@ async def _stream_graph_events(
                         ensure_ascii=False,
                     )
                     yield f"data: {payload}\n\n"
+        for provisional_payload in _drain_provisional_events():
+            yield provisional_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
     except Exception as e:
+        for provisional_payload in _drain_provisional_events():
+            yield provisional_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
         safe_error_message = sanitize_error_message(e, max_chars=300)
@@ -3141,6 +3160,7 @@ async def _stream_graph_events(
             finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
         return
     finally:
+        reset_provisional_event_sink(provisional_sink_token)
         reset_trace_event_sink(trace_sink_token)
 
     # Check for interrupt after stream completes

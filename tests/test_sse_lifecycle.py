@@ -1838,6 +1838,62 @@ class TestSSEInterruptWithEmptyNext:
         ] == []
 
     @pytest.mark.anyio
+    async def test_request_local_provisional_events_reach_sse_without_trace_logging(
+        self,
+    ):
+        from app import generate_sse
+        from src.streaming.provisional import emit_provisional_event
+
+        async def events():
+            emit_provisional_event(
+                "qa_provisional_start",
+                node_name="qa_agent",
+                request_id="request-local",
+                thread_id="t-1",
+            )
+            emit_provisional_event(
+                "qa_provisional_delta",
+                node_name="qa_agent",
+                request_id="request-local",
+                thread_id="t-1",
+                delta="增量答案",
+                answer_chars=4,
+            )
+            emit_provisional_event(
+                "qa_provisional_stop",
+                node_name="qa_agent",
+                request_id="request-local",
+                thread_id="t-1",
+                answer_chars=4,
+            )
+            if False:
+                yield {}
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=events())
+        mock_graph.aupdate_state = AsyncMock()
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values={})
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = _parse_all_payloads(collected)
+        provisional = [
+            item
+            for item in payloads
+            if str(item.get("type") or "").startswith("qa_provisional_")
+        ]
+        assert [item["type"] for item in provisional] == [
+            "qa_provisional_start",
+            "qa_provisional_delta",
+            "qa_provisional_stop",
+        ]
+        assert provisional[1]["delta"] == "增量答案"
+
+    @pytest.mark.anyio
     async def test_plan_review_interrupt_empty_next_draft_is_raw_value(self):
         """plan_review with a raw string interrupt must emit draft as
         the raw value, not the normalized wrapper dict."""

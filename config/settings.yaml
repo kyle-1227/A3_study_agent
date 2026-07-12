@@ -955,7 +955,7 @@ llm:
     temperature: 0.3
     max_tokens: 4096
     thinking: disabled
-    streaming: false
+    streaming: true
   academic:
     provider: deepseek_official
     model: "deepseek-v4-pro"
