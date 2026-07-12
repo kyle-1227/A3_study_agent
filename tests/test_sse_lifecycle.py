@@ -1797,6 +1797,47 @@ class TestSSEInterruptWithEmptyNext:
         assert [p for p in all_payloads if p.get("type") == "done"] == []
 
     @pytest.mark.anyio
+    async def test_pending_checkpoint_without_interrupt_blocks_completion(self):
+        """A non-empty snapshot.next without an interrupt is not completion."""
+        from app import generate_sse
+
+        mock_graph = MagicMock()
+        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.aupdate_state = AsyncMock()
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=("evidence_judge", "study_plan_profile_gate_main"),
+                tasks=[],
+                values={"requested_resource_type": "study_plan"},
+            )
+        )
+
+        collected = []
+        async for sse in generate_sse("q", mock_graph, thread_id="t-1"):
+            collected.append(sse)
+
+        payloads = _parse_all_payloads(collected)
+        errors = [
+            item
+            for item in payloads
+            if item.get("error_type") == "pending_checkpoint_without_interrupt"
+        ]
+        assert len(errors) == 1
+        assert errors[0]["terminal_non_completed"] is True
+        assert errors[0]["pending_nodes"] == [
+            "evidence_judge",
+            "study_plan_profile_gate_main",
+        ]
+        assert [item for item in payloads if item.get("type") == "resource_final"] == []
+        assert [item for item in payloads if item.get("type") == "done"] == []
+        assert [
+            item
+            for item in payloads
+            if item.get("type") == "run_status"
+            and item.get("run_status") == "completed"
+        ] == []
+
+    @pytest.mark.anyio
     async def test_plan_review_interrupt_empty_next_draft_is_raw_value(self):
         """plan_review with a raw string interrupt must emit draft as
         the raw value, not the normalized wrapper dict."""

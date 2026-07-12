@@ -3458,6 +3458,62 @@ async def _stream_graph_events(
         )
         return
 
+    if snapshot_next:
+        pending_nodes = [
+            sanitize_error_message(item, max_chars=120) for item in snapshot_next
+        ]
+        pending_checkpoint_payload = {
+            "type": "error",
+            "error_type": "pending_checkpoint_without_interrupt",
+            "message": (
+                "Graph execution ended with pending checkpoint nodes but no "
+                "persisted interrupt. Completion was blocked."
+            ),
+            "terminal_non_completed": True,
+            "thread_id": thread_id,
+            "pending_nodes": pending_nodes,
+        }
+        emit_a3_trace(
+            logger,
+            "sse_pending_checkpoint_without_interrupt",
+            {
+                "thread_id": thread_id,
+                "pending_node_count": len(pending_nodes),
+                "pending_nodes": pending_nodes,
+            },
+            state=final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        pending_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Request processing blocked",
+            summary="Graph execution still has pending checkpoint nodes",
+            error_type="PendingCheckpointWithoutInterruptError",
+        )
+        await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "activity_timeline": activity_timeline,
+            },
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        if pending_activity_payload:
+            yield pending_activity_payload
+        yield f"data: {json.dumps(pending_checkpoint_payload, ensure_ascii=False)}\n\n"
+        finish_active_run(
+            thread_id,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "error_type": "pending_checkpoint_without_interrupt",
+            },
+        )
+        return
+
     final_request_context_window = {
         "current_request_id": request_context_events[-1].get("request_id", "")
         if request_context_events
