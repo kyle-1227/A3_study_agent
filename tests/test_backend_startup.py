@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from scripts import run_backend
 from src.database import event_loop as event_loop_module
@@ -26,10 +27,12 @@ def test_backend_launcher_passes_explicit_loop_factory(monkeypatch):
 
     run_backend.main(["--host", "0.0.0.0", "--port", "9000", "--reload"])
 
-    assert captured == {
-        "app": "app:app",
-        "host": "0.0.0.0",
-        "port": 9000,
-        "reload": True,
-        "loop": event_loop_module.postgres_compatible_event_loop,
-    }
+    workspace_root = Path(run_backend.__file__).resolve().parent.parent
+    assert captured["app"] == "app:app"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 9000
+    assert captured["reload"] is True
+    assert captured["loop"] is event_loop_module.postgres_compatible_event_loop
+    assert captured["reload_dirs"] == [str(workspace_root)]
+    assert str(workspace_root / "frontend") in captured["reload_excludes"]
+    assert str(workspace_root / "tests") in captured["reload_excludes"]

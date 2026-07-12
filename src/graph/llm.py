@@ -41,6 +41,7 @@ from src.observability.llm_input import (
     emit_context_usage_trace,
     raise_for_blocking_input_observation,
 )
+from src.observability.performance_runtime import performance_span
 from src.context_engineering.schema import ContextConfigError, ContextUsageError
 
 logger = logging.getLogger(__name__)
@@ -535,7 +536,16 @@ async def invoke_with_provider_transport_retry(
     retry_count = 0
     while True:
         try:
-            return await operation(), retry_count
+            with performance_span(
+                "llm",
+                f"llm.{llm_node}",
+                attributes={
+                    "attempt_count": retry_count + 1,
+                    "node_name": node_name,
+                },
+                coalesce_same_type=True,
+            ):
+                return await operation(), retry_count
         except Exception as exc:
             if not _is_provider_transport_retryable(exc) or retry_count >= max_retries:
                 if retry_count > 0 and _is_provider_transport_retryable(exc):

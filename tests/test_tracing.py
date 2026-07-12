@@ -595,18 +595,18 @@ class TestTracedRetrieval:
         assert len(spans) == 1
         assert spans[0].name == "rag.retrieve"
 
-    def test_records_query(self, in_memory_exporter):
-        """Span should have attribute 'rag.query'."""
+    def test_excludes_raw_query(self, in_memory_exporter):
+        """Retrieval spans must not persist the user's raw query."""
         from src.tracing.decorators import traced_retrieval
 
         with traced_retrieval(query="discriminant usage"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert spans[0].attributes["rag.query"] == "discriminant usage"
+        assert "rag.query" not in spans[0].attributes
 
-    def test_truncates_long_query(self, in_memory_exporter):
-        """Long queries should be truncated to 200 chars."""
+    def test_excludes_long_query(self, in_memory_exporter):
+        """A long query remains absent instead of being retained truncated."""
         from src.tracing.decorators import traced_retrieval
 
         long_query = "x" * 300
@@ -614,27 +614,28 @@ class TestTracedRetrieval:
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert len(spans[0].attributes["rag.query"]) == 200
+        assert "rag.query" not in spans[0].attributes
 
-    def test_records_subject(self, in_memory_exporter):
-        """Span should have attribute 'rag.subject'."""
+    def test_excludes_subject(self, in_memory_exporter):
+        """Retrieval spans must not persist a potentially identifying subject."""
         from src.tracing.decorators import traced_retrieval
 
         with traced_retrieval(query="q", subject="math"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert spans[0].attributes["rag.subject"] == "math"
+        assert "rag.subject" not in spans[0].attributes
 
-    def test_default_subject_is_all(self, in_memory_exporter):
-        """When subject is None, attribute should be 'all'."""
+    def test_retains_safe_top_k_without_subject(self, in_memory_exporter):
+        """The safe retrieval count remains available without subject content."""
         from src.tracing.decorators import traced_retrieval
 
         with traced_retrieval(query="q"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert spans[0].attributes["rag.subject"] == "all"
+        assert spans[0].attributes["rag.top_k"] == 5
+        assert "rag.subject" not in spans[0].attributes
 
     def test_caller_can_set_result_attributes(self, in_memory_exporter):
         """Caller should be able to set doc_count, is_hit, top_score."""
@@ -669,15 +670,15 @@ class TestTracedSearch:
         assert len(spans) == 1
         assert spans[0].name == "web.search"
 
-    def test_records_query(self, in_memory_exporter):
-        """Span should have attribute 'search.query'."""
+    def test_excludes_raw_query(self, in_memory_exporter):
+        """Search spans must not persist the user's raw query."""
         from src.tracing.decorators import traced_search
 
         with traced_search(query="machine learning practice trends"):
             pass
 
         spans = in_memory_exporter.get_finished_spans()
-        assert spans[0].attributes["search.query"] == "machine learning practice trends"
+        assert "search.query" not in spans[0].attributes
 
     def test_records_timeout(self, in_memory_exporter):
         """Span should have attribute 'search.timeout_sec'."""

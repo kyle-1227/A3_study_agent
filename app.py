@@ -19,9 +19,10 @@ from urllib.parse import unquote
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
+from pydantic import ValidationError
 
 from src.context_engineering.schema import sanitize_error_message
 from src.context_engineering.input_manifest import (
@@ -33,6 +34,7 @@ from src.context_engineering.input_manifest import (
 )
 from src.context_engineering.influence import influence_status_payload
 from src.context_engineering.policy_mode import validate_context_runtime_policy
+from src.context_engineering.thread_window import build_thread_context_window_v2
 from src.context_engineering.workspace import workspace_status_payload
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -119,6 +121,18 @@ from src.observability.graph_manifest import (
     graph_manifest_error_payload,
     graph_manifest_ref_payload,
 )
+from src.observability.checkpointer_proxy import observe_checkpointer
+from src.observability.performance_config import (
+    load_performance_observability_config,
+)
+from src.observability.performance_contracts import FrontendPerformanceBatchV1
+from src.observability.performance_service import (
+    FrontendPerformanceRejected,
+    configure_performance_service,
+    current_frontend_performance_capability,
+    get_performance_service,
+    observe_request_performance,
+)
 from src.tools.document_tool import (
     get_code_practice_artifact_dir,
     get_exercise_artifact_dir,
@@ -130,6 +144,9 @@ from src.tools.video_animation_tool import get_video_animation_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+FRONTEND_PERFORMANCE_ENDPOINT_PATH = (
+    load_performance_observability_config().frontend_ingestion.endpoint_path
+)
 PROVIDER_RETRY_TRACE_STAGES = {
     "provider_transport_retry_attempt",
     "provider_transport_error",
@@ -449,6 +466,13 @@ def _emit_graph_config_trace(graph, config: dict, state: dict) -> None:
 async def lifespan(app: FastAPI):
     """Manage async resources: tracing, PostgreSQL checkpointer, graph."""
     setup_tracing()
+    performance_config = load_performance_observability_config()
+    performance_service = configure_performance_service(performance_config)
+    app.state.performance_observability_enabled = performance_config.enabled
+    app.state.frontend_performance_ingestion_enabled = (
+        performance_config.frontend_ingestion.enabled
+    )
+    app.state.performance_service = performance_service
     runtime_context_policy = validate_context_runtime_policy()
     app.state.context_policy_mode = runtime_context_policy.mode
     app.state.context_policy_environment = runtime_context_policy.environment
@@ -500,9 +524,10 @@ async def lifespan(app: FastAPI):
             logger.warning("LangGraph checkpointer disabled by configuration")
             ckp_type = "disabled"
 
+        graph_checkpointer = observe_checkpointer(checkpointer)
         app.state.checkpointer_enabled = bool(checkpointer)
         app.state.checkpointer_type = ckp_type
-        graph = get_compiled_graph(checkpointer=checkpointer)
+        graph = get_compiled_graph(checkpointer=graph_checkpointer)
         setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
         setattr(graph, "_a3_checkpointer_type", ckp_type)
         try:
@@ -904,6 +929,7 @@ def _thread_status_from_snapshot(
     )
     missing_fields = _missing_run_control_fields(values)
     request_context_window, thread_context_window = _context_window_status(values)
+    thread_context_window_v2 = build_thread_context_window_v2(values)
     if missing_fields:
         return ThreadStatusResponse(
             thread_id=thread_id,
@@ -944,6 +970,7 @@ def _thread_status_from_snapshot(
             else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
+            thread_context_window_v2=thread_context_window_v2,
             profile_completion_request=profile_completion_request,
             missing_run_control_fields=missing_fields,
             message="legacy checkpoint does not include run-control fields",
@@ -1002,6 +1029,7 @@ def _thread_status_from_snapshot(
         else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
+        thread_context_window_v2=thread_context_window_v2,
         profile_completion_request=profile_completion_request,
         missing_run_control_fields=[],
     )
@@ -1086,6 +1114,9 @@ def _thread_status_from_active_run(
             "workspace_artifact_count": 0,
             "workspace_updated_at": "",
         },
+        thread_context_window_v2=active_run.get("thread_context_window_v2")
+        if isinstance(active_run.get("thread_context_window_v2"), dict)
+        else build_thread_context_window_v2(active_run),
         profile_completion_request=profile_completion_request
         if isinstance(profile_completion_request, dict)
         else {},
@@ -2146,10 +2177,21 @@ async def _stream_graph_events(
                         "background_context_window": background_window,
                     }
                 )
+                thread_window_v2 = build_thread_context_window_v2(
+                    manifest_state_context,
+                    target_node=str(
+                        payload.get("node_name") or payload.get("llm_node") or ""
+                    ),
+                )
+                update_active_run(
+                    thread_id,
+                    {"thread_context_window_v2": thread_window_v2},
+                )
                 sse_payload = {
                     "type": "llm_input_manifest",
                     **payload,
                     "background_context_window": background_window,
+                    "thread_context_window_v2": thread_window_v2,
                 }
                 drained.append(
                     f"data: {json.dumps(sse_payload, ensure_ascii=False)}\n\n"
@@ -2284,7 +2326,23 @@ async def _stream_graph_events(
                         "background_context_window": background_window,
                     }
                 )
-                payload = {"type": "context_usage_report", **report_payload}
+                thread_window_v2 = build_thread_context_window_v2(
+                    manifest_state_context,
+                    target_node=str(
+                        report_payload.get("node_name")
+                        or report_payload.get("llm_node")
+                        or ""
+                    ),
+                )
+                update_active_run(
+                    thread_id,
+                    {"thread_context_window_v2": thread_window_v2},
+                )
+                payload = {
+                    "type": "context_usage_report",
+                    **report_payload,
+                    "thread_context_window_v2": thread_window_v2,
+                }
                 drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
                 continue
             if stage == "context_usage_report_error":
@@ -3406,13 +3464,24 @@ async def _stream_graph_events(
         "current_node": "",
         "last_event_count": len(request_context_events),
     }
+    runtime_final_state = {
+        **final_state,
+        "thread_id": thread_id,
+        "request_id": request_id,
+    }
     qa_payload = qa_final_payload(final_state)
-    resource_payload = _resource_final_payload(final_state)
+    resource_payload = _resource_final_payload(runtime_final_state)
+    terminal_resource_state = runtime_final_state
     if terminal_resource_output:
-        terminal_resource_payload = _resource_final_payload(terminal_resource_output)
+        terminal_resource_state = {
+            **terminal_resource_output,
+            "thread_id": thread_id,
+            "request_id": request_id,
+        }
+        terminal_resource_payload = _resource_final_payload(terminal_resource_state)
         if terminal_resource_payload:
             resource_payload = terminal_resource_payload
-    diagnostic_state = terminal_resource_output or final_state
+    diagnostic_state = terminal_resource_state
     resource_diagnostic_payload = (
         completed_without_resource_payload(diagnostic_state)
         if not resource_payload
@@ -3420,12 +3489,15 @@ async def _stream_graph_events(
     )
     final_activity_payloads: list[str] = []
     if activity_enabled and resource_payload:
+        resource_terminal_status = str(
+            resource_payload.get("terminal_status") or "unknown"
+        )
         artifact_activity = build_activity_event(
             thread_id=thread_id,
             request_id=request_id,
             sequence=activity_sequence + 1,
             kind="artifact",
-            status="completed",
+            status="failed" if resource_terminal_status == "failed" else "completed",
             activity_key=f"resource_final:{resource_payload.get('resource_id', '')}",
             title="Generated resource ready",
             summary="Renderable resource payload finalized",
@@ -3433,6 +3505,7 @@ async def _stream_graph_events(
             safe_details={
                 "resource_id": resource_payload.get("resource_id", ""),
                 "resource_type": resource_payload.get("resource_type", ""),
+                "terminal_status": resource_terminal_status,
             },
         )
         final_activity_payloads.append(await _record_activity(artifact_activity))
@@ -3519,7 +3592,7 @@ async def _stream_graph_events(
             logger,
             "sse_qa_final",
             {"sent": True, **qa_final_trace_payload(qa_payload)},
-            state=final_state,
+            state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
         yield f"data: {json.dumps(qa_payload, ensure_ascii=False)}\n\n"
@@ -3532,6 +3605,8 @@ async def _stream_graph_events(
                 "resource_id": resource_payload.get("resource_id", ""),
                 "payload_hash": resource_payload.get("payload_hash", ""),
                 "resource_type": resource_payload.get("resource_type", ""),
+                "terminal_status": resource_payload.get("terminal_status", "unknown"),
+                "validation": resource_payload.get("validation", {}),
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),
@@ -3559,7 +3634,7 @@ async def _stream_graph_events(
                 ),
                 "controlled_stop": bool(resource_payload.get("controlled_stop")),
             },
-            state=final_state,
+            state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
         yield f"data: {json.dumps(resource_payload, ensure_ascii=False)}\n\n"
@@ -3577,7 +3652,7 @@ async def _stream_graph_events(
                     "requested_resource_types", []
                 ),
             },
-            state=final_state,
+            state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
         yield f"data: {json.dumps(resource_diagnostic_payload, ensure_ascii=False)}\n\n"
@@ -3597,12 +3672,36 @@ async def _stream_graph_events(
         finish_active_run(thread_id, {"run_status": RUN_STATUS_COMPLETED})
 
 
-async def generate_sse(
+def _stream_context_payload(
+    *,
+    request_id: str,
+    thread_id: str,
+    graph_version: str,
+) -> dict:
+    payload = {
+        "type": "stream_context",
+        "schema_version": "stream_context_v1",
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "graph_version": graph_version,
+    }
+    # ``stream_context_v1`` has always required a graph version. Keep that
+    # contract intact: a browser capability is additive only to a valid event.
+    if graph_version:
+        capability = current_frontend_performance_capability()
+        if capability:
+            payload["performance_telemetry"] = capability
+    return payload
+
+
+async def _generate_sse_impl(
     query: str,
     graph,
-    thread_id: str | None = None,
+    thread_id: str,
     user_id: str | None = None,
     graph_version: str = "",
+    *,
+    request_id: str,
 ) -> AsyncGenerator[str, None]:
     """Stream LangGraph events as Server-Sent Events (SSE).
 
@@ -3623,9 +3722,6 @@ async def generate_sse(
         thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
         user_id: Optional user ID for profile context injection and recording.
     """
-    if thread_id is None:
-        thread_id = str(uuid.uuid4())
-    request_id = str(uuid.uuid4())
     config = make_thread_config(thread_id)
     run_control_registry.clear_stop_signal(thread_id)
 
@@ -3732,6 +3828,7 @@ async def generate_sse(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
+            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             "context_usage": {},
             "context_usage_history": status_values.get("context_usage_history")
             if isinstance(status_values.get("context_usage_history"), list)
@@ -3769,14 +3866,12 @@ async def generate_sse(
 
     thread_payload = {"type": "thread_id", "thread_id": thread_id}
     yield f"data: {json.dumps(thread_payload, ensure_ascii=False)}\n\n"
+    stream_context_payload = _stream_context_payload(
+        request_id=request_id,
+        thread_id=thread_id,
+        graph_version=graph_version,
+    )
     if graph_version:
-        stream_context_payload = {
-            "type": "stream_context",
-            "schema_version": "stream_context_v1",
-            "request_id": request_id,
-            "thread_id": thread_id,
-            "graph_version": graph_version,
-        }
         yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
         yield (
             "data: "
@@ -3835,7 +3930,34 @@ async def generate_sse(
             logger.exception("Profile recording failed (non-fatal) user=%s", user_id)
 
 
-async def generate_resume_sse(
+async def generate_sse(
+    query: str,
+    graph,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    graph_version: str = "",
+) -> AsyncGenerator[str, None]:
+    """Stream one new request inside a complete request performance root."""
+
+    resolved_thread_id = thread_id or str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
+    with observe_request_performance(
+        request_id=request_id,
+        thread_id=resolved_thread_id,
+        user_id=user_id or "",
+    ):
+        async for chunk in _generate_sse_impl(
+            query,
+            graph,
+            thread_id=resolved_thread_id,
+            user_id=user_id,
+            graph_version=graph_version,
+            request_id=request_id,
+        ):
+            yield chunk
+
+
+async def _generate_resume_sse_impl(
     edited_plan: str,
     feedback: str | None,
     graph,
@@ -3843,6 +3965,8 @@ async def generate_resume_sse(
     memory_use_choice: str | None = None,
     profile_completion: dict | None = None,
     graph_version: str = "",
+    *,
+    resume_request_id: str,
 ) -> AsyncGenerator[str, None]:
     """Resume an interrupted graph and stream remaining events as SSE.
 
@@ -3913,7 +4037,6 @@ async def generate_resume_sse(
         resume_value = edited_plan
 
     resume_input = Command(resume=resume_value)
-    resume_request_id = str(uuid.uuid4())
     _emit_graph_config_trace(
         graph,
         config,
@@ -3941,6 +4064,7 @@ async def generate_resume_sse(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
+            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
             else {},
@@ -3978,14 +4102,12 @@ async def generate_resume_sse(
         },
     )
 
+    stream_context_payload = _stream_context_payload(
+        request_id=resume_request_id,
+        thread_id=thread_id,
+        graph_version=graph_version,
+    )
     if graph_version:
-        stream_context_payload = {
-            "type": "stream_context",
-            "schema_version": "stream_context_v1",
-            "request_id": resume_request_id,
-            "thread_id": thread_id,
-            "graph_version": graph_version,
-        }
         yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
         yield (
             "data: "
@@ -4008,6 +4130,35 @@ async def generate_resume_sse(
         preserve_context_history=True,
     ):
         yield chunk
+
+
+async def generate_resume_sse(
+    edited_plan: str,
+    feedback: str | None,
+    graph,
+    thread_id: str,
+    memory_use_choice: str | None = None,
+    profile_completion: dict | None = None,
+    graph_version: str = "",
+) -> AsyncGenerator[str, None]:
+    """Resume one request inside a complete request performance root."""
+
+    resume_request_id = str(uuid.uuid4())
+    with observe_request_performance(
+        request_id=resume_request_id,
+        thread_id=thread_id,
+    ):
+        async for chunk in _generate_resume_sse_impl(
+            edited_plan,
+            feedback,
+            graph,
+            thread_id,
+            memory_use_choice=memory_use_choice,
+            profile_completion=profile_completion,
+            graph_version=graph_version,
+            resume_request_id=resume_request_id,
+        ):
+            yield chunk
 
 
 async def get_thread_status_payload(graph, thread_id: str) -> ThreadStatusResponse:
@@ -4053,11 +4204,12 @@ async def request_thread_stop(graph, thread_id: str, reason: str) -> dict:
     }
 
 
-async def generate_continue_sse(
+async def _generate_continue_sse_impl(
     graph,
     thread_id: str,
     *,
     graph_version: str = "",
+    continue_request_id: str,
 ) -> AsyncGenerator[str, None]:
     config = make_thread_config(thread_id)
     state_snapshot = await graph.aget_state(config)
@@ -4112,6 +4264,7 @@ async def generate_continue_sse(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
+            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
             else {},
@@ -4170,15 +4323,12 @@ async def generate_continue_sse(
         state={"thread_id": thread_id, "session_id": thread_id},
         env_flag="LOG_A3_TRACE",
     )
-    continue_request_id = str(uuid.uuid4())
+    stream_context_payload = _stream_context_payload(
+        request_id=continue_request_id,
+        thread_id=thread_id,
+        graph_version=graph_version,
+    )
     if graph_version:
-        stream_context_payload = {
-            "type": "stream_context",
-            "schema_version": "stream_context_v1",
-            "request_id": continue_request_id,
-            "thread_id": thread_id,
-            "graph_version": graph_version,
-        }
         yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
         yield (
             "data: "
@@ -4211,6 +4361,28 @@ async def generate_continue_sse(
         preserve_context_history=True,
     ):
         yield chunk
+
+
+async def generate_continue_sse(
+    graph,
+    thread_id: str,
+    *,
+    graph_version: str = "",
+) -> AsyncGenerator[str, None]:
+    """Continue one stopped request inside a complete request performance root."""
+
+    continue_request_id = str(uuid.uuid4())
+    with observe_request_performance(
+        request_id=continue_request_id,
+        thread_id=thread_id,
+    ):
+        async for chunk in _generate_continue_sse_impl(
+            graph,
+            thread_id,
+            graph_version=graph_version,
+            continue_request_id=continue_request_id,
+        ):
+            yield chunk
 
 
 def _app_graph_version(fastapi_app: FastAPI) -> str:
@@ -4248,6 +4420,66 @@ async def graph_manifest_endpoint(request: Request):
         }
     )
     raise HTTPException(status_code=503, detail=detail)
+
+
+@app.post(FRONTEND_PERFORMANCE_ENDPOINT_PATH, status_code=204)
+async def frontend_performance_endpoint(request: Request):
+    """Accept one authenticated, content-free browser milestone batch."""
+
+    service = get_performance_service()
+    frontend_config = service.config.frontend_ingestion
+    if not frontend_config.enabled:
+        raise HTTPException(status_code=503, detail="frontend_performance_disabled")
+    raw = await request.body()
+    if len(raw) > frontend_config.max_payload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail="frontend_performance_payload_too_large",
+        )
+    try:
+        payload = FrontendPerformanceBatchV1.model_validate_json(raw)
+    except (ValidationError, ValueError) as exc:
+        emit_a3_trace(
+            logger,
+            "performance.frontend.batch.rejected",
+            {
+                "reason_code": "frontend_performance_payload_invalid",
+                "error_type": type(exc).__name__,
+                "payload_bytes": len(raw),
+            },
+            state={},
+            env_flag="LOG_PERFORMANCE_TRACE",
+            level="info",
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="frontend_performance_payload_invalid",
+        ) from exc
+    try:
+        service.accept_frontend_batch(
+            authorization=request.headers.get("authorization", ""),
+            origin=request.headers.get("origin", ""),
+            raw_size=len(raw),
+            payload=payload,
+        )
+    except FrontendPerformanceRejected as exc:
+        emit_a3_trace(
+            logger,
+            "performance.frontend.batch.rejected",
+            {
+                "reason_code": exc.code,
+                "status_code": exc.status_code,
+                "payload_bytes": len(raw),
+            },
+            state={
+                "request_id": payload.request_id,
+                "thread_id": payload.thread_id,
+            },
+            env_flag="LOG_PERFORMANCE_TRACE",
+            level="info",
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+    return Response(status_code=204)
 
 
 @app.post("/stream")
@@ -4659,5 +4891,18 @@ async def analytics_decisions(user_id: str, limit: int = 20, node: str = ""):
 
 if __name__ == "__main__":
     import uvicorn
+    from src.config.server_runtime_config import (
+        load_server_reload_config,
+        resolve_uvicorn_reload_options,
+    )
 
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    reload_config = load_server_reload_config()
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=8000,
+        **resolve_uvicorn_reload_options(
+            reload_config,
+            workspace_root=Path(__file__).resolve().parent,
+        ),
+    )

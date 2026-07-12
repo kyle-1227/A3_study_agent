@@ -31,7 +31,8 @@ def test_resource_final_builds_stable_id_hash_and_normalized_resource():
 
     assert first is not None
     assert second is not None
-    assert first["schema_version"] == 1
+    assert first["schema_version"] == 2
+    assert first["terminal_status"] == "unknown"
     assert first["resource_id"].startswith("resource:v1:")
     assert first["payload_hash"].startswith("payload:v1:")
     assert first["resource_id"] == second["resource_id"]
@@ -143,3 +144,69 @@ def test_structured_resource_types_consistent_with_artifact_keys():
             f"{key} in STRUCTURED_RESOURCE_ARTIFACT_KEYS but missing from "
             f"STRUCTURED_RESOURCE_TYPES"
         )
+
+
+@pytest.mark.parametrize(
+    ("bundle_status", "terminal_status"),
+    [
+        ("success", "success"),
+        ("partial_success", "partial_success"),
+        ("failed", "failed"),
+        ("blocked_insufficient_evidence", "controlled_stop"),
+    ],
+)
+def test_resource_final_carries_explicit_bundle_terminal_truth(
+    bundle_status: str,
+    terminal_status: str,
+):
+    payload = normalize_resource_final_payload(
+        {
+            "type": "resource_final",
+            "resource_type": "bundle",
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "resource_generation_status": bundle_status,
+            "resource_bundle": {
+                "status": bundle_status,
+                "success_count": 1 if bundle_status == "success" else 0,
+                "partial_success_count": 1 if bundle_status == "partial_success" else 0,
+                "failed_count": 1 if bundle_status == "failed" else 0,
+                "blocked_count": 1
+                if bundle_status == "blocked_insufficient_evidence"
+                else 0,
+                "renderable_resource_count": 1
+                if bundle_status in {"success", "partial_success"}
+                else 0,
+                "renderable_count": 1
+                if bundle_status in {"success", "partial_success"}
+                else 0,
+                "downloadable_count": 0,
+                "resources": [],
+                "errors": [],
+            },
+        }
+    )
+
+    assert payload is not None
+    assert payload["terminal_status"] == terminal_status
+    assert payload["validation"]["failed_count"] == (
+        1 if bundle_status == "failed" else 0
+    )
+
+
+def test_invalid_explicit_terminal_status_is_rejected():
+    payload = normalize_resource_final_payload(
+        {
+            "type": "resource_final",
+            "resource_type": "mindmap",
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "terminal_status": "completed",
+            "mindmap": {
+                "title": "ML map",
+                "tree": {"title": "ML", "children": [{"title": "Models"}]},
+            },
+        }
+    )
+
+    assert payload is None

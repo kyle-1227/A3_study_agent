@@ -17,7 +17,6 @@ import {
   Image,
   Loader2,
   Map,
-  Mic,
   PauseCircle,
   PlayCircle,
   Plus,
@@ -28,9 +27,15 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ActivityStream } from "@/components/activity-stream"
+import { ThreadContextCapsule } from "@/components/thread-context-capsule"
 import { Button } from "@/components/ui/button"
 import { useScrollActivity } from "@/hooks/use-scroll-activity"
-import type { ActivityEvent, ContextUsageReport } from "@/lib/observability-contracts"
+import type {
+  ActivityEvent,
+  ContextUsageReport,
+  ThreadContextWindowV2,
+} from "@/lib/observability-contracts"
+import type { QAFinalEventV1 } from "@/lib/qa-final"
 import { cn } from "@/lib/utils"
 
 export interface Message {
@@ -51,11 +56,16 @@ export interface Message {
   studyPlan?: StudyPlanResult
   resourceFinalPayload?: Record<string, unknown>
   resourceFinalDedupeKey?: string
+  qaFinal?: QAFinalEventV1
+  qaFinalDedupeKey?: string
 }
 
 export type ResourceGenerationState =
   | "running"
   | "done"
+  | "success"
+  | "partial_success"
+  | "controlled_stop"
   | "completed_with_resource"
   | "completed_without_resource"
   | "error"
@@ -87,7 +97,7 @@ export interface ResourceGenerationStatus {
   error?: string
   waitingForReview?: boolean
   hasReceivedResourceFinal?: boolean
-  completionKind?: "with_resource" | "without_resource"
+  completionKind?: "with_resource" | "partial_resource" | "without_resource" | "controlled_stop"
   lastResourceType?: string
 }
 
@@ -178,6 +188,8 @@ interface ChatAreaProps {
   isLoading?: boolean
   canContinue?: boolean
   stopPending?: boolean
+  threadContextWindow?: ThreadContextWindowV2 | null
+  contextWindowCloseSignal?: string
 }
 
 export function ChatArea({
@@ -188,6 +200,8 @@ export function ChatArea({
   isLoading,
   canContinue,
   stopPending,
+  threadContextWindow,
+  contextWindowCloseSignal = "",
 }: ChatAreaProps) {
   const [input, setInput] = useState("")
   const [isToolsOpen, setIsToolsOpen] = useState(false)
@@ -350,15 +364,10 @@ export function ChatArea({
 
               <div className="flex-1" />
 
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 rounded-full text-muted-foreground hover:bg-card/70 hover:text-primary"
-                title="语音输入"
-              >
-                <Mic className="h-5 w-5" />
-              </Button>
+              <ThreadContextCapsule
+                window={threadContextWindow ?? null}
+                closeSignal={contextWindowCloseSignal}
+              />
               <Button
                 type={isLoading || canContinue ? "button" : "submit"}
                 size="icon"
@@ -959,7 +968,15 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
 }
 
 function isCompletedResourceState(state: ResourceGenerationState): boolean {
-  return state === "done" || state === "completed_with_resource" || state === "completed_without_resource"
+  return (
+    state === "done" ||
+    state === "success" ||
+    state === "partial_success" ||
+    state === "controlled_stop" ||
+    state === "completed_with_resource" ||
+    state === "completed_without_resource" ||
+    state === "failed"
+  )
 }
 
 function ResourceGenerationStepRow({ step }: { step: ResourceGenerationStep }) {
@@ -995,10 +1012,16 @@ function ResourceGenerationStepRow({ step }: { step: ResourceGenerationStep }) {
 
 function StatusIcon({ state }: { state: ResourceGenerationState }) {
   const className = "h-4 w-4 mt-0.5 shrink-0"
-  if (state === "done" || state === "completed_with_resource") {
+  if (state === "done" || state === "success" || state === "completed_with_resource") {
     return <CheckCircle2 className={cn(className, "text-[var(--success)]")} />
   }
-  if (state === "completed_without_resource") return <CircleAlert className={cn(className, "text-[var(--warning)]")} />
+  if (
+    state === "partial_success" ||
+    state === "controlled_stop" ||
+    state === "completed_without_resource"
+  ) {
+    return <CircleAlert className={cn(className, "text-[var(--warning)]")} />
+  }
   if (state === "error" || state === "failed") return <CircleAlert className={cn(className, "text-[var(--danger)]")} />
   if (state === "stopped") return <PauseCircle className={cn(className, "text-[var(--warning)]")} />
   if (state === "waiting_review" || state === "waiting_for_profile_completion" || state === "interrupted") {

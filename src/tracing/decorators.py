@@ -11,12 +11,14 @@ from typing import Any, Callable, Generator
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
+from src.observability.performance_runtime import performance_span
 from src.tracing.collector import get_tracer
 
 
 # ---------------------------------------------------------------------------
 # @traced_node — wraps LangGraph node functions (sync and async)
 # ---------------------------------------------------------------------------
+
 
 def traced_node(func: Callable) -> Callable:
     """Decorator that wraps a LangGraph node function with an OpenTelemetry span.
@@ -35,31 +37,47 @@ def traced_node(func: Callable) -> Callable:
             if "subject" in result:
                 span.set_attribute("graph.node.subject", result["subject"])
             if "keypoints" in result:
-                span.set_attribute("graph.node.keypoint_count", len(result["keypoints"]))
+                span.set_attribute(
+                    "graph.node.keypoint_count", len(result["keypoints"])
+                )
             if "context" in result:
                 span.set_attribute("graph.node.context_count", len(result["context"]))
             if "search_results" in result:
-                span.set_attribute("graph.node.search_result_count", len(result["search_results"]))
+                span.set_attribute(
+                    "graph.node.search_result_count", len(result["search_results"])
+                )
             if "messages" in result:
                 span.set_attribute("graph.node.message_count", len(result["messages"]))
             if "retry_count" in result:
                 span.set_attribute("graph.node.retry_count", result["retry_count"])
             if "hallucination_detected" in result:
-                span.set_attribute("graph.node.hallucination_detected", result["hallucination_detected"])
+                span.set_attribute(
+                    "graph.node.hallucination_detected",
+                    result["hallucination_detected"],
+                )
 
         span.set_status(StatusCode.OK)
 
     if asyncio.iscoroutinefunction(func):
+
         @functools.wraps(func)
         async def async_wrapper(state: dict, *args: Any, **kwargs: Any) -> dict:
             tracer = get_tracer()
-            with tracer.start_as_current_span(
-                f"graph.node.{func.__name__}",
-                attributes={
-                    "graph.node.name": func.__name__,
-                    "graph.node.input_keys": str(list(state.keys())),
-                },
-            ) as span:
+            with (
+                performance_span(
+                    "node",
+                    f"node.{func.__name__}",
+                    parent_policy="request",
+                    attributes={"node_name": func.__name__},
+                ),
+                tracer.start_as_current_span(
+                    f"graph.node.{func.__name__}",
+                    attributes={
+                        "graph.node.name": func.__name__,
+                        "graph.node.input_keys": str(list(state.keys())),
+                    },
+                ) as span,
+            ):
                 try:
                     result = await func(state, *args, **kwargs)
                     _record_result(span, result)
@@ -74,13 +92,21 @@ def traced_node(func: Callable) -> Callable:
     @functools.wraps(func)
     def sync_wrapper(state: dict, *args: Any, **kwargs: Any) -> dict:
         tracer = get_tracer()
-        with tracer.start_as_current_span(
-            f"graph.node.{func.__name__}",
-            attributes={
-                "graph.node.name": func.__name__,
-                "graph.node.input_keys": str(list(state.keys())),
-            },
-        ) as span:
+        with (
+            performance_span(
+                "node",
+                f"node.{func.__name__}",
+                parent_policy="request",
+                attributes={"node_name": func.__name__},
+            ),
+            tracer.start_as_current_span(
+                f"graph.node.{func.__name__}",
+                attributes={
+                    "graph.node.name": func.__name__,
+                    "graph.node.input_keys": str(list(state.keys())),
+                },
+            ) as span,
+        ):
             try:
                 result = func(state, *args, **kwargs)
                 _record_result(span, result)
@@ -97,6 +123,7 @@ def traced_node(func: Callable) -> Callable:
 # traced_llm_call — context manager for LLM invocations
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def traced_llm_call(
     model_name: str = "unknown",
@@ -108,13 +135,21 @@ def traced_llm_call(
     Yields the span so callers can set additional attributes (e.g. token counts).
     """
     tracer = get_tracer()
-    with tracer.start_as_current_span(
-        f"llm.invoke.{node_name}",
-        attributes={
-            "llm.model": model_name,
-            "llm.node": node_name,
-        },
-    ) as span:
+    with (
+        performance_span(
+            "llm",
+            f"llm.{node_name}",
+            attributes={"node_name": node_name},
+            coalesce_same_type=True,
+        ),
+        tracer.start_as_current_span(
+            f"llm.invoke.{node_name}",
+            attributes={
+                "llm.model": model_name,
+                "llm.node": node_name,
+            },
+        ) as span,
+    ):
         if temperature is not None:
             span.set_attribute("llm.temperature", temperature)
 
@@ -134,6 +169,7 @@ def traced_llm_call(
 # traced_retrieval — context manager for RAG retrieval
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def traced_retrieval(
     query: str,
@@ -142,14 +178,17 @@ def traced_retrieval(
 ) -> Generator[trace.Span, None, None]:
     """Context manager for RAG retrieval spans."""
     tracer = get_tracer()
-    with tracer.start_as_current_span(
-        "rag.retrieve",
-        attributes={
-            "rag.query": query[:200],
-            "rag.subject": subject or "all",
-            "rag.top_k": top_k,
-        },
-    ) as span:
+    with (
+        performance_span(
+            "retrieval",
+            "retrieval.rag",
+            attributes={"item_count": top_k},
+        ),
+        tracer.start_as_current_span(
+            "rag.retrieve",
+            attributes={"rag.top_k": top_k},
+        ) as span,
+    ):
         try:
             yield span
         except Exception as exc:
@@ -162,6 +201,7 @@ def traced_retrieval(
 # traced_search — context manager for web search
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def traced_search(
     query: str,
@@ -169,13 +209,13 @@ def traced_search(
 ) -> Generator[trace.Span, None, None]:
     """Context manager for web search spans."""
     tracer = get_tracer()
-    with tracer.start_as_current_span(
-        "web.search",
-        attributes={
-            "search.query": query[:200],
-            "search.timeout_sec": timeout,
-        },
-    ) as span:
+    with (
+        performance_span("search", "search.web"),
+        tracer.start_as_current_span(
+            "web.search",
+            attributes={"search.timeout_sec": timeout},
+        ) as span,
+    ):
         try:
             yield span
         except Exception as exc:

@@ -160,6 +160,9 @@ async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist
 
     assert report["input_estimated_tokens"] == legacy["input_estimated_tokens"]
     assert report["used_tokens"] == legacy["used_tokens"]
+    next_call = report["thread_context_window_v2"]["next_call_context_estimate"]
+    assert next_call["basis"] == "known_next_node"
+    assert next_call["target_node"] == "qa_agent"
     serialized_report = json.dumps(report, ensure_ascii=False)
     assert "secret-system-body" not in serialized_report
     assert "secret-user-question" not in serialized_report

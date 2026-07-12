@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -61,6 +63,16 @@ from src.graph.review_doc import (
     review_doc_rewrite,
     should_rewrite_review_doc,
 )
+from src.graph.resource_contracts import (
+    RESOURCE_ALIASES as _RESOURCE_ALIASES,
+    RESOURCE_TYPE_ORDER as _RESOURCE_TYPE_ORDER,
+    SUPPORTED_RESOURCE_TYPES as _SUPPORTED_RESOURCE_TYPES,
+    normalize_requested_resource_types,
+    normalize_resource_type,
+)
+from src.graph.resource_validation import (
+    validate_renderable_resource_result,
+)
 from src.graph.state import LearningState, RESOURCE_RESULTS_CLEAR
 from src.graph.study_plan import (
     route_after_study_plan_consensus,
@@ -91,41 +103,18 @@ from src.graph.video_script import (
     video_script_rewrite,
 )
 from src.observability.a3_trace import emit_a3_trace
+from src.observability.node_registry import get_node_runtime_metadata
+from src.observability.performance_runtime import performance_span
 from src.tools.search_tool import sanitize_error_message
 from src.tracing import traced_node
 
 logger = logging.getLogger(__name__)
 
-RESOURCE_TYPE_ORDER = (
-    "review_doc",
-    "mindmap",
-    "quiz",
-    "code_practice",
-    "video_script",
-    "video_animation",
-    "study_plan",
-)
-SUPPORTED_RESOURCE_TYPES = frozenset(RESOURCE_TYPE_ORDER)
-RESOURCE_ALIASES = {
-    "exercise": "quiz",
-    "exercises": "quiz",
-    "practice": "quiz",
-    "practice_questions": "quiz",
-    "review": "review_doc",
-    "review_document": "review_doc",
-    "doc": "review_doc",
-    "document": "review_doc",
-    "learning_plan": "study_plan",
-    "roadmap": "study_plan",
-    "mind_map": "mindmap",
-    "xmind": "mindmap",
-    "code": "code_practice",
-    "coding_practice": "code_practice",
-    "video": "video_animation",
-    "animation": "video_animation",
-    "video_animation": "video_animation",
-    "video_script": "video_script",
-}
+# Compatibility exports for existing callers; canonical ownership lives in
+# ``resource_contracts`` so planners no longer import the generation runtime.
+RESOURCE_ALIASES = _RESOURCE_ALIASES
+RESOURCE_TYPE_ORDER = _RESOURCE_TYPE_ORDER
+SUPPORTED_RESOURCE_TYPES = _SUPPORTED_RESOURCE_TYPES
 
 RESOURCE_OUTPUT_STATE_KEYS: dict[str, tuple[str, ...]] = {
     "mindmap": (
@@ -204,31 +193,37 @@ RESOURCE_OUTPUT_STATE_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
-def normalize_resource_type(value: Any) -> str:
-    """Normalize public resource aliases to the graph's canonical resource type."""
-    text = str(value or "").strip().lower().replace("-", "_")
-    if not text:
-        return ""
-    text = RESOURCE_ALIASES.get(text, text)
-    return text if text in SUPPORTED_RESOURCE_TYPES else ""
+@dataclass(frozen=True)
+class ResourceResultContract:
+    artifact_key: str
+    artifacts_key: str = ""
+    embedded_artifact_keys: tuple[tuple[str, str], ...] = ()
+    title_state_key: str = ""
 
 
-def normalize_requested_resource_types(*values: Any) -> list[str]:
-    """Return ordered, deduplicated canonical resource types."""
-    normalized: list[str] = []
+RESOURCE_RESULT_CONTRACTS: dict[str, ResourceResultContract] = {
+    "mindmap": ResourceResultContract(
+        artifact_key="mindmap_artifact",
+        title_state_key="mindmap_tree",
+    ),
+    "quiz": ResourceResultContract(artifact_key="exercise_artifact"),
+    "review_doc": ResourceResultContract(
+        artifact_key="review_doc_artifact",
+        artifacts_key="review_doc_artifacts",
+    ),
+    "study_plan": ResourceResultContract(
+        artifact_key="study_plan_artifact",
+        embedded_artifact_keys=(("document", "study_plan_document_artifact"),),
+    ),
+    "code_practice": ResourceResultContract(artifact_key="code_practice_artifact"),
+    "video_script": ResourceResultContract(artifact_key="video_script_artifact"),
+    "video_animation": ResourceResultContract(artifact_key="video_animation_artifact"),
+}
 
-    def add_one(item: Any) -> None:
-        resource_type = normalize_resource_type(item)
-        if resource_type and resource_type not in normalized:
-            normalized.append(resource_type)
-
-    for value in values:
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                add_one(item)
-        else:
-            add_one(value)
-    return normalized
+if set(RESOURCE_RESULT_CONTRACTS) != set(SUPPORTED_RESOURCE_TYPES):
+    raise RuntimeError(
+        "resource result contracts do not cover supported resource types"
+    )
 
 
 def _resource_plan_from_state(state: LearningState) -> list[dict]:
@@ -443,7 +438,18 @@ async def _run_resource_subnode(
         env_flag="LOG_GENERATION_SUMMARY",
     )
     try:
-        output = await func(local_state)
+        metadata = get_node_runtime_metadata(subnode)
+        render_span = (
+            performance_span(
+                "render",
+                f"render.{subnode}",
+                attributes={"resource_type": resource_type},
+            )
+            if metadata is not None and metadata.role == "output"
+            else nullcontext()
+        )
+        with render_span:
+            output = await func(local_state)
     except GraphInterrupt:
         end_influence_capture(capture_token)
         emit_a3_trace(
@@ -809,72 +815,95 @@ def _state_updates_for_resource(resource_type: str, local_state: dict) -> dict:
     }
 
 
-def _primary_artifact(resource_type: str, local_state: dict) -> dict:
-    if resource_type == "mindmap":
-        return dict(local_state.get("mindmap_artifact") or {})
-    if resource_type == "quiz":
-        return dict(local_state.get("exercise_artifact") or {})
-    if resource_type == "review_doc":
-        return dict(local_state.get("review_doc_artifact") or {})
-    if resource_type == "study_plan":
-        artifact = dict(local_state.get("study_plan_artifact") or {})
-        document = dict(local_state.get("study_plan_document_artifact") or {})
-        return {**artifact, "document": document}
-    if resource_type == "code_practice":
-        return dict(local_state.get("code_practice_artifact") or {})
-    if resource_type == "video_script":
-        return dict(local_state.get("video_script_artifact") or {})
-    if resource_type == "video_animation":
-        return dict(local_state.get("video_animation_artifact") or {})
-    return {}
+def _result_contract(resource_type: str) -> ResourceResultContract:
+    contract = RESOURCE_RESULT_CONTRACTS.get(resource_type)
+    if contract is None:
+        raise ValueError(f"resource result contract is not registered: {resource_type}")
+    return contract
 
 
-def _resource_title(resource_type: str, artifact: dict, local_state: dict) -> str:
-    if resource_type == "mindmap":
-        return str(
-            artifact.get("title")
-            or (local_state.get("mindmap_tree") or {}).get("title")
-            or "Mindmap"
-        )
-    if resource_type == "quiz":
-        return str(artifact.get("title") or "Leveled exercises")
-    if resource_type == "review_doc":
-        return str(artifact.get("title") or "Review document")
-    if resource_type == "study_plan":
-        return str(artifact.get("title") or "Personalized Study Plan")
-    if resource_type == "code_practice":
-        return str(artifact.get("title") or "Code practice")
-    if resource_type == "video_script":
-        return str(artifact.get("title") or "Teaching video script")
-    if resource_type == "video_animation":
-        return str(artifact.get("title") or "Teaching animation")
-    return resource_type
+def _primary_artifact(contract: ResourceResultContract, local_state: dict) -> dict:
+    artifact = dict(local_state.get(contract.artifact_key) or {})
+    for output_key, state_key in contract.embedded_artifact_keys:
+        artifact[output_key] = dict(local_state.get(state_key) or {})
+    return artifact
+
+
+def _artifact_collection(
+    contract: ResourceResultContract,
+    local_state: dict,
+) -> list[dict]:
+    if not contract.artifacts_key:
+        return []
+    return [
+        dict(item)
+        for item in (local_state.get(contract.artifacts_key) or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _resource_title(
+    resource_type: str,
+    contract: ResourceResultContract,
+    artifact: dict,
+    local_state: dict,
+) -> str:
+    title = str(artifact.get("title") or "").strip()
+    if not title and contract.title_state_key:
+        title_state = local_state.get(contract.title_state_key)
+        if isinstance(title_state, dict):
+            title = str(title_state.get("title") or "").strip()
+    return title or resource_type
 
 
 def _success_result(
     resource_type: str, local_state: dict, message_content: str, elapsed_ms: int
 ) -> dict:
-    artifact = _primary_artifact(resource_type, local_state)
+    contract = _result_contract(resource_type)
+    artifact = _primary_artifact(contract, local_state)
+    artifacts = _artifact_collection(contract, local_state)
+    state_updates = _state_updates_for_resource(resource_type, local_state)
+    validation = validate_renderable_resource_result(
+        resource_type,
+        artifact,
+        artifacts,
+        state_updates,
+    )
     influence_entries = influence_entries_for_scope(
         local_state.get("context_influence_ledger") or {},
         request_id=str(local_state.get("request_id") or ""),
         workflow=resource_type,
     )
+    if not validation.valid:
+        return {
+            "resource_type": resource_type,
+            "status": "failed",
+            "title": resource_type,
+            "artifact": {},
+            "artifacts": [],
+            "state_updates": {},
+            "message_content": "",
+            "message_preview": "",
+            "error_type": "ResourceValidationError",
+            "error_message_sanitized": validation.failure_reason,
+            "elapsed_ms": elapsed_ms,
+            "context_influence_entries": influence_entries,
+            "validation": validation.model_dump(mode="json"),
+        }
     return {
         "resource_type": resource_type,
-        "status": "success",
-        "title": _resource_title(resource_type, artifact, local_state),
+        "status": validation.terminal_status,
+        "title": _resource_title(resource_type, contract, artifact, local_state),
         "artifact": artifact,
-        "artifacts": list(local_state.get("review_doc_artifacts") or [])
-        if resource_type == "review_doc"
-        else [],
-        "state_updates": _state_updates_for_resource(resource_type, local_state),
+        "artifacts": artifacts,
+        "state_updates": state_updates,
         "message_content": message_content,
         "message_preview": message_content[:500],
         "error_type": None,
         "error_message_sanitized": None,
         "elapsed_ms": elapsed_ms,
         "context_influence_entries": influence_entries,
+        "validation": validation.model_dump(mode="json"),
     }
 
 
@@ -891,6 +920,7 @@ def _failed_result(resource_type: str, exc: BaseException, elapsed_ms: int) -> d
         "error_type": type(exc).__name__,
         "error_message_sanitized": sanitize_error_message(str(exc), max_chars=1200),
         "elapsed_ms": elapsed_ms,
+        "validation": None,
     }
 
 
@@ -946,11 +976,19 @@ async def resource_worker(state: LearningState) -> dict:
         )
         emit_a3_trace(
             logger,
-            "resource_generation.worker.success",
+            (
+                "resource_generation.worker.success"
+                if result["status"] in {"success", "partial_success"}
+                else "resource_generation.worker.failed"
+            ),
             {
                 "resource_type": resource_type,
                 "elapsed_ms": result["elapsed_ms"],
                 "message_chars": len(message_content),
+                "terminal_status": result["status"],
+                "renderable_count": (
+                    (result.get("validation") or {}).get("renderable_count", 0)
+                ),
             },
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
@@ -1090,7 +1128,9 @@ def _compose_resource_section(result: dict) -> list[str]:
 
 
 def _compose_bundle_message(
-    status: str, successes: list[dict], failures: list[dict]
+    status: str,
+    successes: list[dict],
+    failures: list[dict],
 ) -> str:
     if len(successes) == 1 and not failures:
         content = str(successes[0].get("message_content") or "").strip()
@@ -1287,6 +1327,7 @@ def _resource_summary(result: dict) -> dict:
         "error_message_sanitized": result.get("error_message_sanitized"),
         "elapsed_ms": result.get("elapsed_ms"),
         "metrics": _resource_metrics(result),
+        "validation": result.get("validation"),
     }
 
 
@@ -1307,7 +1348,13 @@ async def resource_bundle_output(state: LearningState) -> dict:
         for result in state.get("resource_branch_results") or []
         if isinstance(result, dict) and result.get("resource_type")
     ]
-    successes = [result for result in results if result.get("status") == "success"]
+    complete_successes = [
+        result for result in results if result.get("status") == "success"
+    ]
+    partial_successes = [
+        result for result in results if result.get("status") == "partial_success"
+    ]
+    renderable_results = [*complete_successes, *partial_successes]
     failures = [result for result in results if result.get("status") == "failed"]
     readiness = [
         item
@@ -1325,9 +1372,9 @@ async def resource_bundle_output(state: LearningState) -> dict:
         if item.get("readiness_state") == "blocked_insufficient_evidence"
     ]
 
-    if successes and (failures or blocked_resources):
+    if partial_successes or (renderable_results and (failures or blocked_resources)):
         status = "partial_success"
-    elif successes:
+    elif complete_successes:
         status = "success"
     elif blocked_resources and not failures:
         status = "blocked_insufficient_evidence"
@@ -1337,17 +1384,30 @@ async def resource_bundle_output(state: LearningState) -> dict:
         status = "skipped"
 
     state_updates: dict = {}
-    for result in successes:
+    for result in renderable_results:
         state_updates.update(result.get("state_updates") or {})
+
+    renderable_count = sum(
+        int((result.get("validation") or {}).get("renderable_count") or 0)
+        for result in renderable_results
+    )
+    downloadable_count = sum(
+        int((result.get("validation") or {}).get("downloadable_count") or 0)
+        for result in renderable_results
+    )
 
     bundle = {
         "type": "resource_bundle",
         "status": status,
         "requested_resource_types": requested,
-        "success_count": len(successes),
+        "success_count": len(complete_successes),
+        "partial_success_count": len(partial_successes),
         "failed_count": len(failures),
         "blocked_count": len(blocked_resources),
-        "resources": [_resource_summary(result) for result in successes],
+        "renderable_resource_count": len(renderable_results),
+        "renderable_count": renderable_count,
+        "downloadable_count": downloadable_count,
+        "resources": [_resource_summary(result) for result in renderable_results],
         "errors": [_resource_summary(result) for result in failures],
         "blocked_resources": blocked_resources,
     }
@@ -1357,25 +1417,27 @@ async def resource_bundle_output(state: LearningState) -> dict:
         {
             "stage": "resource_generation.bundle.complete",
             "status": status,
-            "success_count": len(successes),
+            "success_count": len(complete_successes),
+            "partial_success_count": len(partial_successes),
             "failed_count": len(failures),
             "blocked_count": len(blocked_resources),
+            "renderable_resource_count": len(renderable_results),
             "resource_count": len(results),
         }
     )
     debug.update(
         {
             "status": status,
-            "success_count": len(successes),
+            "success_count": len(complete_successes),
+            "partial_success_count": len(partial_successes),
             "failed_count": len(failures),
-            "blocked_count": len(blocked_resources),
             "partial_success": status == "partial_success",
             "branch_results": [_resource_summary(result) for result in results],
             "stages": stages,
         }
     )
     message = _append_blocked_resource_message(
-        _compose_bundle_message(status, successes, failures),
+        _compose_bundle_message(status, renderable_results, failures),
         status=status,
         blocked_resources=blocked_resources,
     )
@@ -1392,10 +1454,11 @@ async def resource_bundle_output(state: LearningState) -> dict:
         updates=(),
         entries=influence_entries,
     )
-    if successes:
+    if renderable_results:
         try:
             workspace_successes = [
-                {**result, "metrics": _resource_metrics(result)} for result in successes
+                {**result, "metrics": _resource_metrics(result)}
+                for result in renderable_results
             ]
             artifact_updates = build_workspace_artifact_update(
                 state,
@@ -1460,8 +1523,10 @@ async def resource_bundle_output(state: LearningState) -> dict:
         {
             "status": status,
             "requested_resource_types": requested,
-            "success_count": len(successes),
+            "success_count": len(complete_successes),
+            "partial_success_count": len(partial_successes),
             "failed_count": len(failures),
+            "renderable_resource_count": len(renderable_results),
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",

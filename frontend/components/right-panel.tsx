@@ -14,15 +14,12 @@ import {
   PauseCircle,
 } from "lucide-react"
 
-import { ContextUsagePanel } from "@/components/context-usage-panel"
 import { ManifestGraph } from "@/components/manifest-graph"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { activitiesForRequest } from "@/lib/activity-reducer"
-import type { ContextUsageState } from "@/lib/context-usage-state"
 import type {
   ActivityEvent,
-  BackgroundContextWindow,
   GraphManifest,
   GraphManifestUnavailable,
 } from "@/lib/observability-contracts"
@@ -38,8 +35,6 @@ interface RightPanelProps {
   logs: LogEntry[]
   activities: ActivityEvent[]
   tokenUsage: { input: number; output: number; total: number }
-  contextUsageState: ContextUsageState
-  backgroundContextWindow: BackgroundContextWindow | null
   graphManifest: GraphManifest | null
   graphManifestError: GraphManifestUnavailable | null
   graphManifestLoading: boolean
@@ -51,8 +46,6 @@ export function RightPanel({
   logs,
   activities,
   tokenUsage,
-  contextUsageState,
-  backgroundContextWindow,
   graphManifest,
   graphManifestError,
   graphManifestLoading,
@@ -196,10 +189,6 @@ export function RightPanel({
                 </div>
               ) : null}
 
-              <ContextUsagePanel
-                state={contextUsageState}
-                background={backgroundContextWindow}
-              />
             </div>
           </div>
 

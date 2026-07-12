@@ -135,6 +135,7 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
         "stop_reason",
         "request_context_window",
         "thread_context_window",
+        "thread_context_window_v2",
         "context_usage",
         "context_usage_history",
         "context_usage_report",

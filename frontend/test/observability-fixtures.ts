@@ -120,6 +120,74 @@ export function backgroundContextPayload(overrides: Record<string, unknown> = {}
   }
 }
 
+export function threadContextWindowV2Payload(overrides: Record<string, unknown> = {}) {
+  const section = {
+    section: "recent_messages",
+    source: "current_thread_state",
+    item_count: 2,
+    message_count: 2,
+    char_count: 400,
+    estimated_tokens: 100,
+    known: true,
+  }
+  return {
+    schema_version: 2,
+    contract: "thread_context_window_v2",
+    thread_id: "thread-fixture",
+    updated_at: NOW,
+    next_call_context_estimate: {
+      basis: "thread_baseline",
+      confidence: "low",
+      estimated: true,
+      estimated_at: NOW,
+      target_node: "",
+      unknown_sections: ["ce_block", "structured_output_contract"],
+      sections: [section],
+      estimated_input_tokens: 100,
+      estimated_output_reserved_tokens: 0,
+      estimated_used_tokens: 100,
+      max_context_tokens: 1000,
+      used_ratio: 0.1,
+      tokenizer_mode: "estimated_mixed",
+      state_fingerprint: `thread_context:v2:${"a".repeat(64)}`,
+      reused_manifest_statistics: false,
+      known_section_ratio: 0.3333,
+    },
+    last_llm_call_usage: {
+      present: true,
+      report_id: "context_usage:v1:fixture",
+      manifest_id: "llm_input_manifest:v1:fixture",
+      created_at: NOW,
+      node_name: "fixture_node",
+      llm_node: "fixture_llm_node",
+      model: "configured-model",
+      input_estimated_tokens: 100,
+      output_reserved_tokens: 20,
+      used_tokens: 120,
+      max_context_tokens: 1000,
+      used_ratio: 0.12,
+      estimated: true,
+      tokenizer_mode: "estimated_mixed",
+      sections: [section],
+    },
+    background_inventory: {
+      conversation_summary_present: true,
+      selected_memory_count: 1,
+      evidence_summary_count: 3,
+      artifact_summary_count: 2,
+      workspace_present: true,
+      workspace_active_subject: "machine learning",
+      workspace_evidence_summary_count: 3,
+      workspace_gap_count: 1,
+      workspace_artifact_count: 2,
+      workspace_updated_at: NOW,
+      manifest_count: 4,
+      influence_entry_count: 2,
+    },
+    ...overrides,
+  }
+}
+
 export function graphManifestPayload(overrides: Record<string, unknown> = {}) {
   return {
     schema_version: "graph_manifest_v1",

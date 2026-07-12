@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from src.config import get_setting
+from src.observability.performance_runtime import performance_span
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
@@ -174,23 +175,39 @@ def search_with_diagnostics(
         )
 
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(
-                TAVILY_SEARCH_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=_request_payload(query, result_limit),
-            )
-            status_code = response.status_code
-            if status_code >= 400:
-                raise httpx.HTTPStatusError(
-                    f"HTTP {status_code}",
-                    request=response.request,
-                    response=response,
+        with performance_span(
+            "search",
+            "search.tavily",
+            attributes={"item_count": result_limit},
+            coalesce_same_type=True,
+        ) as observed_span:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(
+                    TAVILY_SEARCH_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=_request_payload(query, result_limit),
                 )
-            raw = response.json()
+                status_code = response.status_code
+                if observed_span is not None:
+                    observed_span.attributes["status_code"] = status_code
+                if status_code >= 400:
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                raw = response.json()
+                results_raw = raw.get("results") if isinstance(raw, dict) else []
+                results = [
+                    _normalize_tavily_result(item)
+                    for item in (results_raw or [])
+                    if isinstance(item, dict)
+                ]
+                if observed_span is not None:
+                    observed_span.attributes["result_count"] = len(results)
     except httpx.TimeoutException:
         return _empty_diagnostics(
             query=query,
@@ -227,12 +244,6 @@ def search_with_diagnostics(
         )
 
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-    results_raw = raw.get("results") if isinstance(raw, dict) else []
-    results = [
-        _normalize_tavily_result(item)
-        for item in (results_raw or [])
-        if isinstance(item, dict)
-    ]
     return {
         "provider": "tavily",
         "query": query,

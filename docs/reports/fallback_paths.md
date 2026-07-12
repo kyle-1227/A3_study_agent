@@ -26,6 +26,20 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 - These findings are report-only. No legacy fallback was removed as part of
   the parent-child RAG foundation work.
 
+### 2026-07-12 Performance observability baseline
+
+- `src/tracing/collector.py` retains the legacy OpenTelemetry SQLite fallback
+  exporter and environment defaults. The new request-span performance registry
+  is independent of that exporter and does not treat exporter availability as
+  timing evidence.
+- This remains report-only: Phase 3 adds content-free span collection and
+  reports incomplete coverage when dependencies are unavailable; it does not
+  remove, extend, or rely on the legacy exporter fallback.
+- `src/tools/search_tool.py` retains a legacy configuration default for the
+  Tavily API-key environment variable. Phase 3 only wrapped the existing
+  request boundary in a content-free timing span; it did not extend the
+  default, add a search fallback, or alter retrieval behavior.
+
 ### 2026-07-08 LLM Input Manifest enforcement
 
 - Added manifest enforcement for active provider transport paths before any

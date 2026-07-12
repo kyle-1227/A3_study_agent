@@ -15,11 +15,19 @@ import { PlanReview } from "@/components/plan-review"
 import {
   isCompletedWithoutResourceDiagnostic,
   mergeResourceFinalIntoMessage,
+  parseResourceFinalEvent,
   resourceFinalDedupeKey,
+  resourceFinalOutcome,
   resourceMessageIdFromDedupeKey,
   type ResourceFinalEvent,
 } from "@/lib/resource-final"
 import { mergeActivityTimeline } from "@/lib/activity-reducer"
+import {
+  attachQAFinalToMessages,
+  parseQAFinalEvent,
+  qaFinalDedupeKey,
+  type QAFinalEventV1,
+} from "@/lib/qa-final"
 import {
   applyContextUsageError,
   applyContextUsageReport,
@@ -42,13 +50,17 @@ import {
   parseGraphManifest,
   parseGraphManifestRef,
   parseGraphManifestUnavailable,
+  parseFrontendPerformanceCapability,
   parseStreamContext,
+  parseThreadContextWindowV2,
   type ActivityEvent,
   type BackgroundContextWindow,
   type ContextUsageReportError,
   type GraphManifest,
   type GraphManifestUnavailable,
+  type ThreadContextWindowV2,
 } from "@/lib/observability-contracts"
+import { FrontendPerformanceTracker } from "@/lib/frontend-performance"
 import { requirePublicApiBaseUrl } from "@/lib/public-config"
 import {
   beginStreamLifecycle,
@@ -63,7 +75,6 @@ const A3_CHAT_HISTORY_KEY = "a3_chat_history"
 const A3_CURRENT_CHAT_ID_KEY = "a3_current_chat_id"
 const A3_CURRENT_THREAD_ID_KEY = "a3_current_thread_id"
 const A3_MESSAGES_KEY_PREFIX = "a3_messages:"
-const CONTROLLED_STOP_SUMMARY = "证据不足，已保存摘要并停止完整资源生成。"
 
 type ChatHistoryItem = {
   id: string
@@ -237,6 +248,13 @@ function createInitialResourceStatus(): ResourceGenerationStatus {
   }
 }
 
+function isResourceActivity(activity: ActivityEvent): boolean {
+  return (
+    activity.parent === "resource_worker" ||
+    typeof activity.safeDetails.resource_type === "string"
+  )
+}
+
 function ProfileCompletionDialog({
   request,
   isSubmitting,
@@ -321,6 +339,7 @@ export default function Home() {
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
   const [contextUsageState, setContextUsageState] = useState(EMPTY_CONTEXT_USAGE_STATE)
   const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
+  const [threadContextWindowV2, setThreadContextWindowV2] = useState<ThreadContextWindowV2 | null>(null)
   const [graphManifest, setGraphManifest] = useState<GraphManifest | null>(null)
   const [graphManifestError, setGraphManifestError] = useState<GraphManifestUnavailable | null>(null)
   const [graphManifestLoading, setGraphManifestLoading] = useState(false)
@@ -353,8 +372,11 @@ export default function Home() {
   const streamLifecycleRef = useRef<StreamLifecycleState>(IDLE_STREAM_LIFECYCLE)
   const graphManifestVersionRef = useRef("")
   const resourceFinalDedupeRef = useRef<Set<string>>(new Set())
+  const qaFinalDedupeRef = useRef<Set<string>>(new Set())
+  const requestIdRef = useRef("")
   const abortControllerRef = useRef<AbortController | null>(null)
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const frontendPerformanceTrackerRef = useRef<FrontendPerformanceTracker | null>(null)
 
   const clearStopTimeout = useCallback(() => {
     if (stopTimeoutRef.current) {
@@ -371,6 +393,44 @@ export default function Home() {
       return
     }
     if (isBrowser()) localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, threadId)
+  }, [])
+
+  const beginFrontendPerformanceTracking = useCallback(() => {
+    const tracker = new FrontendPerformanceTracker(window.performance)
+    frontendPerformanceTrackerRef.current = tracker
+    return tracker
+  }, [])
+
+  const deliverFrontendPerformance = useCallback((tracker: FrontendPerformanceTracker) => {
+    void tracker
+      .deliver(fetch, API_BASE_URL)
+      .then((result) => {
+        if (result.status !== "incomplete") return
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[PERF] Browser performance sample incomplete: ${result.reason}`,
+            ts: timestamp(),
+          },
+        ])
+      })
+      .catch((error: unknown) => {
+        const errorType = error instanceof Error ? error.name : "PerformanceDeliveryError"
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[PERF] Browser performance sample incomplete: ${errorType}`,
+            ts: timestamp(),
+          },
+        ])
+      })
+  }, [])
+
+  const setActiveRequestId = useCallback((requestId: string) => {
+    requestIdRef.current = requestId
+    setCurrentRequestId(requestId)
   }, [])
 
   useEffect(() => {
@@ -433,27 +493,109 @@ export default function Home() {
 
     setMessages((prev) =>
       prev.map((msg) =>
-        msg.id === messageId && msg.role === "assistant"
-          ? { ...msg, resourceStatus: updater(msg.resourceStatus ?? createInitialResourceStatus()) }
+        msg.id === messageId && msg.role === "assistant" && msg.resourceStatus
+          ? { ...msg, resourceStatus: updater(msg.resourceStatus) }
           : msg
       )
     )
   }, [])
 
-  const attachResourceFinalToAssistant = useCallback((event: ResourceFinalEvent) => {
+  const ensureAssistantResourceStatus = useCallback((
+    messageId: string,
+    updater: (status: ResourceGenerationStatus) => ResourceGenerationStatus,
+  ) => {
+    if (!messageId) return
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId && msg.role === "assistant"
+          ? { ...msg, resourceStatus: updater(msg.resourceStatus ?? createInitialResourceStatus()) }
+          : msg
+      ),
+    )
+  }, [])
+
+  const attachQAFinalToAssistant = useCallback((event: QAFinalEventV1, source: "stream" | "restore") => {
+    if (source === "stream") {
+      if (threadIdRef.current && event.threadId !== threadIdRef.current) {
+        throw new ContractParseError("qa_final_binding", "thread_id does not match active stream")
+      }
+      if (requestIdRef.current && event.requestId !== requestIdRef.current) {
+        throw new ContractParseError("qa_final_binding", "request_id does not match active stream")
+      }
+    } else if (threadIdRef.current && event.threadId !== threadIdRef.current) {
+      throw new ContractParseError("qa_final_binding", "thread_id does not match restored thread")
+    }
+    const dedupeKey = qaFinalDedupeKey(event)
+    if (qaFinalDedupeRef.current.has(dedupeKey)) return false
+    qaFinalDedupeRef.current.add(dedupeKey)
+    setMessages((current) => {
+      try {
+        return attachQAFinalToMessages(
+          current,
+          event,
+          source === "stream" ? assistantMessageIdRef.current : "",
+        ).messages
+      } catch (error) {
+        qaFinalDedupeRef.current.delete(dedupeKey)
+        queueMicrotask(() => {
+          setLogs((logs) => [
+            ...logs,
+            {
+              type: "warning",
+              message: `[CONTRACT] QA final binding rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        })
+        return current
+      }
+    })
+    return true
+  }, [])
+
+  const attachResourceFinalToAssistant = useCallback((
+    event: ResourceFinalEvent,
+    source: "stream" | "restore",
+  ) => {
+    if (source === "stream") {
+      if (threadIdRef.current && event.thread_id !== threadIdRef.current) {
+        throw new ContractParseError(
+          "resource_final_binding",
+          "thread_id does not match active stream",
+        )
+      }
+      if (requestIdRef.current && event.request_id !== requestIdRef.current) {
+        throw new ContractParseError(
+          "resource_final_binding",
+          "request_id does not match active stream",
+        )
+      }
+    } else if (threadIdRef.current && event.thread_id !== threadIdRef.current) {
+      throw new ContractParseError(
+        "resource_final_binding",
+        "thread_id does not match restored thread",
+      )
+    }
     const dedupeKey = resourceFinalDedupeKey(event)
     if (resourceFinalDedupeRef.current.has(dedupeKey)) {
       return { attached: false, dedupeKey }
     }
     resourceFinalDedupeRef.current.add(dedupeKey)
 
-    const existingAssistantId = assistantMessageIdRef.current
+    const existingAssistantId = source === "stream" ? assistantMessageIdRef.current : ""
     const messageId = existingAssistantId || resourceMessageIdFromDedupeKey(dedupeKey)
     if (!existingAssistantId) assistantMessageIdRef.current = messageId
 
     setMessages((prev) => {
       if (prev.some((msg) => msg.resourceFinalDedupeKey === dedupeKey)) return prev
-      const baseMessage: Message = {
+      const requestTarget = prev.find(
+        (message) =>
+          message.role === "assistant" &&
+          message.requestId === event.request_id &&
+          message.threadId === event.thread_id,
+      )
+      const targetMessageId = requestTarget?.id || messageId
+      const baseMessage: Message = requestTarget || {
         id: messageId,
         role: "assistant",
         content: "",
@@ -463,7 +605,7 @@ export default function Home() {
       }
       let foundTarget = false
       const nextMessages = prev.map((msg) => {
-        if (msg.id !== messageId) return msg
+        if (msg.id !== targetMessageId) return msg
         foundTarget = true
         return mergeResourceFinalIntoMessage(msg, event, API_BASE_URL)
       })
@@ -482,7 +624,8 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setCurrentRequestId("")
+    setThreadContextWindowV2(null)
+    setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -490,6 +633,7 @@ export default function Home() {
     setMemoryConfirmation(null)
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
+    qaFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
@@ -503,7 +647,8 @@ export default function Home() {
     setActivityTimeline([])
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setCurrentRequestId("")
+    setThreadContextWindowV2(null)
+    setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -511,6 +656,7 @@ export default function Home() {
     setMemoryConfirmation(null)
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
+    qaFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(threadId)
     setLogs((prev) => [
@@ -535,7 +681,8 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setCurrentRequestId("")
+    setThreadContextWindowV2(null)
+    setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
     setIsInterrupted(false)
@@ -543,6 +690,7 @@ export default function Home() {
     setMemoryConfirmation(null)
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
+    qaFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
@@ -570,12 +718,14 @@ export default function Home() {
       setTokenUsage({ input: 0, output: 0, total: 0 })
       setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
       setBackgroundContextWindow(null)
-      setCurrentRequestId("")
+      setThreadContextWindowV2(null)
+    setActiveRequestId("")
       setIsInterrupted(false)
       setInterruptDraft("")
       setMemoryConfirmation(null)
       setProfileCompletion(null)
-      resourceFinalDedupeRef.current.clear()
+    resourceFinalDedupeRef.current.clear()
+    qaFinalDedupeRef.current.clear()
       assistantMessageIdRef.current = ""
       setActiveThreadId(null)
       pendingChatTitleRef.current = ""
@@ -663,6 +813,12 @@ export default function Home() {
   /** Process a single SSE data payload shared between /stream and /resume */
   const processSSEEvent = useCallback((data: any) => {
     const asstId = assistantMessageIdRef.current
+    const performanceTracker = frontendPerformanceTrackerRef.current
+    const performanceWasTerminal = performanceTracker?.isTerminal() ?? false
+    performanceTracker?.recordEvent(data.type)
+    if (!performanceWasTerminal && performanceTracker?.isTerminal()) {
+      deliverFrontendPerformance(performanceTracker)
+    }
     streamLifecycleRef.current = reduceStreamLifecycle(streamLifecycleRef.current, data)
     if (["done", "error", "interrupt"].includes(streamLifecycleRef.current.terminalEvent)) {
       setIsLoading(false)
@@ -788,13 +944,29 @@ export default function Home() {
           applyContextUsageError(current, contextUsageContractFailure(error)),
         )
       }
+      if (data.thread_context_window_v2) {
+        try {
+          setThreadContextWindowV2(
+            parseThreadContextWindowV2(data.thread_context_window_v2),
+          )
+        } catch (error) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Thread context v2 rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        }
+      }
       return
     }
 
     if (data.type === "stream_context") {
       try {
         const streamContext = parseStreamContext(data)
-        setCurrentRequestId(streamContext.requestId)
+        setActiveRequestId(streamContext.requestId)
         setActiveThreadId(streamContext.threadId)
         setMessages((current) =>
           current.map((message) =>
@@ -809,6 +981,26 @@ export default function Home() {
         )
         if (graphManifestVersionRef.current !== streamContext.graphVersion) {
           void fetchGraphManifest(streamContext.graphVersion)
+        }
+        if (data.performance_telemetry !== undefined) {
+          try {
+            performanceTracker?.bind(
+              parseFrontendPerformanceCapability(data.performance_telemetry),
+              {
+                requestId: streamContext.requestId,
+                threadId: streamContext.threadId,
+              },
+            )
+          } catch (error) {
+            setLogs((current) => [
+              ...current,
+              {
+                type: "warning",
+                message: `[CONTRACT] Frontend performance capability rejected: ${contractFailureReason(error)}`,
+                ts: timestamp(),
+              },
+            ])
+          }
         }
       } catch (error) {
         setLogs((current) => [
@@ -839,13 +1031,16 @@ export default function Home() {
     if (data.type === "activity_event") {
       try {
         const activity = parseActivityEvent(data)
-        setCurrentRequestId(activity.requestId)
+        setActiveRequestId(activity.requestId)
         setActivityTimeline((current) => mergeActivityTimeline(current, [activity]))
         setMessages((current) =>
           attachActivityToAssistantMessage(current, activity, assistantMessageIdRef.current),
         )
         if (activity.node) {
-          updateAssistantResourceStatus(asstId, (status) => {
+          const updateResourceStatus = isResourceActivity(activity)
+            ? ensureAssistantResourceStatus
+            : updateAssistantResourceStatus
+          updateResourceStatus(asstId, (status) => {
             const steps = [...status.steps]
             const stepState: ResourceGenerationStep["state"] =
               activity.status === "failed" || activity.status === "interrupted"
@@ -910,6 +1105,22 @@ export default function Home() {
           },
         ])
       }
+      if (data.thread_context_window_v2) {
+        try {
+          setThreadContextWindowV2(
+            parseThreadContextWindowV2(data.thread_context_window_v2),
+          )
+        } catch (error) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Thread context v2 rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        }
+      }
       setLogs((prev) => [
         ...prev,
         {
@@ -952,7 +1163,7 @@ export default function Home() {
         setInterruptDraft("")
         if (data.thread_id) setActiveThreadId(data.thread_id)
         setIsLoading(false)
-        updateAssistantResourceStatus(asstId, (status) => ({
+        ensureAssistantResourceStatus(asstId, (status) => ({
           ...status,
           state: "waiting_for_profile_completion",
           summary: "等待补充生成学习计划所需的学习信息。",
@@ -1035,6 +1246,23 @@ export default function Home() {
       return
     }
 
+    if (data.type === "qa_final") {
+      try {
+        const qaFinal = parseQAFinalEvent(data)
+        attachQAFinalToAssistant(qaFinal, "stream")
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] QA final rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      return
+    }
+
     if (data.type === "token") {
       setMessages((prev) =>
         prev.map((msg) =>
@@ -1106,7 +1334,7 @@ export default function Home() {
     }
 
     if (isCompletedWithoutResourceDiagnostic(data)) {
-      updateAssistantResourceStatus(asstId, (status) => ({
+      ensureAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "completed_without_resource",
         summary: "资源流程已完成，但没有收到可渲染的资源 payload。",
@@ -1117,20 +1345,47 @@ export default function Home() {
     }
 
     if (data.type === "resource_final") {
-      const result = attachResourceFinalToAssistant(data as ResourceFinalEvent)
+      let event: ResourceFinalEvent
+      try {
+        event = parseResourceFinalEvent(data)
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Resource final rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+        return
+      }
+      let result
+      try {
+        result = attachResourceFinalToAssistant(event, "stream")
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Resource final binding rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+        return
+      }
       if (!result.attached) return
       const targetMessageId = result.messageId || asstId
-      const resourceType = typeof data.resource_type === "string" ? data.resource_type : ""
-      const isEvidenceControlledStop = resourceType === "evidence_summary" && data.controlled_stop === true
-      updateAssistantResourceStatus(targetMessageId, (status) => ({
+      const outcome = resourceFinalOutcome(event)
+      if (!outcome) return
+      ensureAssistantResourceStatus(targetMessageId, (status) => ({
         ...status,
-        state: "completed_with_resource",
-        summary: isEvidenceControlledStop ? CONTROLLED_STOP_SUMMARY : "个性化学习资源已生成。",
+        state: outcome.state,
+        summary: outcome.summary,
         waitingForReview: false,
-        error: undefined,
-        hasReceivedResourceFinal: true,
-        completionKind: "with_resource",
-        lastResourceType: resourceType,
+        error: outcome.state === "failed" ? outcome.summary : undefined,
+        hasReceivedResourceFinal: outcome.hasReceivedResourceFinal,
+        completionKind: outcome.completionKind,
+        lastResourceType: event.resource_type,
       }))
       return
     }
@@ -1141,13 +1396,16 @@ export default function Home() {
         state:
           status.state === "error" ||
           status.state === "failed" ||
+          status.state === "success" ||
+          status.state === "partial_success" ||
+          status.state === "controlled_stop" ||
           status.state === "stopped" ||
           status.state === "stopping" ||
           status.state === "completed_with_resource" ||
           status.state === "completed_without_resource"
             ? status.state
             : "done",
-        summary: status.summary === CONTROLLED_STOP_SUMMARY ? status.summary : "个性化学习资源生成状态已更新。",
+        summary: status.summary,
         waitingForReview: false,
       }))
       return
@@ -1198,6 +1456,7 @@ export default function Home() {
   }, [
     attachResourceFinalToAssistant,
     clearStopTimeout,
+    deliverFrontendPerformance,
     fetchGraphManifest,
     setActiveThreadId,
     updateAssistantResourceStatus,
@@ -1314,12 +1573,30 @@ export default function Home() {
         ])
       }
       try {
+        const threadWindow =
+          status.thread_context_window_v2 &&
+          Object.keys(status.thread_context_window_v2).length > 0
+            ? parseThreadContextWindowV2(status.thread_context_window_v2)
+            : null
+        setThreadContextWindowV2(threadWindow)
+      } catch (error) {
+        setThreadContextWindowV2(null)
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Stored thread context v2 rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      try {
         const parsedTimeline = parseActivityTimeline(status.activity_timeline ?? [])
         setActivityTimeline(parsedTimeline.items)
         setMessages((current) =>
           restoreActivitiesToMessages(current, parsedTimeline.items, threadId),
         )
-        setCurrentRequestId(parsedTimeline.items.at(-1)?.requestId ?? "")
+        setActiveRequestId(parsedTimeline.items.at(-1)?.requestId ?? "")
         if (parsedTimeline.rejectedCount > 0) {
           setLogs((current) => [
             ...current,
@@ -1344,8 +1621,34 @@ export default function Home() {
       if (typeof status.graph_version === "string" && status.graph_version) {
         void fetchGraphManifest(status.graph_version)
       }
+      if (status.last_qa_response?.type === "qa_final") {
+        try {
+          attachQAFinalToAssistant(parseQAFinalEvent(status.last_qa_response), "restore")
+        } catch (error) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Stored QA final rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        }
+      }
       if (status.last_resource_final_payload?.type === "resource_final") {
-        attachResourceFinalToAssistant(status.last_resource_final_payload as ResourceFinalEvent)
+        try {
+          const event = parseResourceFinalEvent(status.last_resource_final_payload)
+          attachResourceFinalToAssistant(event, "restore")
+        } catch (error) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Stored resource final rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        }
       }
       const pendingInterruptType =
         typeof status.pending_interrupt_type === "string" ? status.pending_interrupt_type : ""
@@ -1413,6 +1716,7 @@ export default function Home() {
 
     try {
       streamHadErrorRef.current = false
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -1427,7 +1731,7 @@ export default function Home() {
       assistantMessageIdRef.current = assistantMessageId
       setMessages((prev) => [
         ...prev,
-        { id: assistantMessageId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
+        { id: assistantMessageId, role: "assistant", content: "" },
       ])
 
       await consumeSSEStream(body)
@@ -1458,7 +1762,7 @@ export default function Home() {
         abortControllerRef.current = null
       }
     }
-  }, [clearStopTimeout, selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream, userId])
+  }, [beginFrontendPerformanceTracking, clearStopTimeout, selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream, userId])
 
   const handleStopGeneration = useCallback(async () => {
     const threadId = threadIdRef.current
@@ -1542,13 +1846,14 @@ export default function Home() {
     assistantMessageIdRef.current = assistantMessageId
     setMessages((prev) => [
       ...prev,
-      { id: assistantMessageId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
+      { id: assistantMessageId, role: "assistant", content: "" },
     ])
 
     const abortController = new AbortController()
     abortControllerRef.current = abortController
 
     try {
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/continue`, {
         method: "POST",
         headers: { ...getAuthHeaders() },
@@ -1574,7 +1879,7 @@ export default function Home() {
       }
       refreshThreadStatus(threadId)
     }
-  }, [clearStopTimeout, consumeSSEStream, fetchWithErrorHandling, refreshThreadStatus])
+  }, [beginFrontendPerformanceTracking, clearStopTimeout, consumeSSEStream, fetchWithErrorHandling, refreshThreadStatus])
 
   const handleResume = useCallback(async (editedPlan: string) => {
     const threadId = threadIdRef.current
@@ -1593,6 +1898,7 @@ export default function Home() {
     ])
 
     try {
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -1619,7 +1925,7 @@ export default function Home() {
       setIsResuming(false)
       setIsLoading(false)
     }
-  }, [fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
 
   const handleFeedback = useCallback(async (feedback: string) => {
     const threadId = threadIdRef.current
@@ -1638,6 +1944,7 @@ export default function Home() {
     ])
 
     try {
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -1655,7 +1962,7 @@ export default function Home() {
       assistantMessageIdRef.current = newAsstId
       setMessages((prev) => [
         ...prev,
-        { id: newAsstId, role: "assistant", content: "", resourceStatus: createInitialResourceStatus() },
+        { id: newAsstId, role: "assistant", content: "" },
       ])
 
       await consumeSSEStream(body)
@@ -1673,7 +1980,7 @@ export default function Home() {
       setIsResuming(false)
       setIsLoading(false)
     }
-  }, [fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
 
   const handleMemoryConfirmation = useCallback(async (choice: "use" | "ignore") => {
     const threadId = threadIdRef.current
@@ -1697,6 +2004,7 @@ export default function Home() {
     ])
 
     try {
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -1721,7 +2029,7 @@ export default function Home() {
       setIsMemoryConfirming(false)
       setIsLoading(false)
     }
-  }, [fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
 
   const handleProfileCompletion = useCallback(async (completion: Record<string, string>) => {
     const threadId = threadIdRef.current
@@ -1744,6 +2052,7 @@ export default function Home() {
     ])
 
     try {
+      beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -1768,7 +2077,7 @@ export default function Home() {
       setIsProfileCompleting(false)
       setIsLoading(false)
     }
-  }, [consumeSSEStream, fetchWithErrorHandling])
+  }, [beginFrontendPerformanceTracking, consumeSSEStream, fetchWithErrorHandling])
 
   return (
     <div className="a3-app-shell flex overflow-hidden">
@@ -1800,6 +2109,8 @@ export default function Home() {
           isLoading={isLoading && !isInterrupted}
           canContinue={canContinue && !isLoading && !isInterrupted}
           stopPending={stopPending}
+          threadContextWindow={threadContextWindowV2}
+          contextWindowCloseSignal={`${currentThreadId || ""}:${currentRequestId}:${isLoading ? "running" : "idle"}`}
         />
         {isInterrupted && (
           <PlanReview
@@ -1863,8 +2174,6 @@ export default function Home() {
         logs={logs}
         activities={activityTimeline}
         tokenUsage={tokenUsage}
-        contextUsageState={contextUsageState}
-        backgroundContextWindow={backgroundContextWindow}
         graphManifest={graphManifest}
         graphManifestError={graphManifestError}
         graphManifestLoading={graphManifestLoading}

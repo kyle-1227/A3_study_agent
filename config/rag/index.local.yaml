@@ -1,0 +1,168 @@
+bm25:
+  artifact_format: jsonl
+  dictionary_hash: 7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8
+  tokenizer: jieba_builtin_precise_v1
+  tokenizer_version: 0.42.1
+catalog:
+  cache_directory_names:
+  - __pycache__
+  - .cache
+  - .pytest_cache
+  - .ipynb_checkpoints
+  data_root: D:\software competition\A3_study_agent\data
+  exclude_cache_directories: true
+  exclude_hidden: true
+  exclude_needs_ocr: true
+  exclude_unclassified: true
+  excluded_exact_names:
+  - evaluation
+  excluded_prefixes: []
+  needs_ocr_directory_name: _needs_ocr
+  normalization_version: subject_id_v1
+  supported_extensions:
+  - .pdf
+  - .md
+  - .txt
+  symlink_policy: reject
+  unclassified_directory_name: unclassified
+chunk_policies:
+  2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f:
+    atomic_blocks:
+      hard_max_chars: 3200
+      policy_version: atomic_v1
+      protected_types:
+      - code
+      - table
+      - formula
+      - list
+    child:
+      algorithm_version: span_recursive_v1
+      length_policy: unicode_codepoints
+      overlap: 100
+      separators:
+      - '
+
+
+        '
+      - '
+
+        '
+      - 。
+      - ' '
+      size: 600
+      whitespace_policy: preserve
+    cleaning:
+      algorithm_version: page_clean_v1
+      collapse_blank_lines: true
+      footer_bottom_lines: 1
+      header_top_lines: 1
+      normalize_newlines: true
+      paragraph_deduplication: false
+      repeated_line_min_pages: 2
+      repeated_line_min_ratio: 0.5
+      strip_outer_blank_lines: true
+      strip_trailing_whitespace: true
+    extraction:
+      algorithm_version: page_extract_v1
+      pdf_extraction_method: configured_pdf_text
+      text_extraction_method: configured_utf8_text
+    metadata_contract_version: parent_child_metadata_v1
+    page_assembly:
+      algorithm_version: page_assembly_v1
+      page_separator: "\n\f\n"
+    parent:
+      algorithm_version: span_recursive_v1
+      length_policy: unicode_codepoints
+      overlap: 200
+      separators:
+      - '
+
+
+        '
+      - '
+
+        '
+      - 。
+      - ' '
+      size: 2400
+      whitespace_policy: preserve
+    structure:
+      detector_version: structure_detector_v1
+      major_boundary_levels:
+      - 1
+      - 2
+      merge_version: merge_v1
+      pattern_set_version: patterns_v1
+      short_unit_chars: 300
+embedding:
+  api_key_env: RAG_EMBEDDING_API_KEY
+  base_url: https://openrouter.ai/api/v1
+  batch_size: 32
+  distance_metric: cosine
+  document_input_type: document
+  endpoint_path: /embeddings
+  expected_dimension: 1024
+  input_type_field: input_type
+  model: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  normalization_contract: provider_output_as_is_v1
+  protocol: openai_embeddings_v1
+  provider: openrouter
+  query_input_type: query
+  retry:
+    initial_backoff_seconds: 0.5
+    max_attempts: 3
+    max_backoff_seconds: 4.0
+    multiplier: 2.0
+  timeout_seconds: 30.0
+reranker:
+  api_key_env: RAG_RERANKER_API_KEY
+  base_url: https://openrouter.ai/api/v1
+  batch_size: 40
+  endpoint_path: /rerank
+  model: nvidia/llama-nemotron-rerank-vl-1b-v2:free
+  protocol: ranked_index_scores_v1
+  provider: openrouter
+  retry:
+    initial_backoff_seconds: 0.5
+    max_attempts: 3
+    max_backoff_seconds: 4.0
+    multiplier: 2.0
+  score_max: 1.0
+  score_min: 0.0
+  timeout_seconds: 30.0
+retrieval:
+  bm25_top_k: 40
+  bm25_weight: 1.0
+  context_item_max_chars: 3200
+  cross_branch_rrf_k: 60
+  full_parent_max_chars: 2400
+  hit_window_chars_per_side: 800
+  judge_preview_max_chars: 600
+  max_children_per_parent: 2
+  max_parents_per_source: 2
+  multi_subject_max_parents: 10
+  multi_subject_per_subject_top_k: 3
+  parent_support_lambda: 0.25
+  reranker_top_n: 20
+  rrf_k: 60
+  subject_coverage_quota: 1
+  unique_parent_top_k: 5
+  vector_top_k: 40
+  vector_weight: 1.0
+schema_version: rag_index_config_v1
+storage:
+  collection_name: a3_parent_child_children
+  index_root: D:\software competition\A3_study_agent\indexes\parent_child
+  owner_marker_schema_version: generation_owner_v1
+  parent_store_busy_timeout_seconds: 5.0
+  parent_store_schema_version: parent_store_v1
+  registry_busy_timeout_seconds: 5.0
+  registry_path: D:\software competition\A3_study_agent\indexes\parent_child\generation_registry.sqlite
+  registry_schema_version: generation_registry_v1
+  retention_generations: 3
+subject_policy_map:
+  big_data: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
+  computer: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
+  machine_learning: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
+  math: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
+  python: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f

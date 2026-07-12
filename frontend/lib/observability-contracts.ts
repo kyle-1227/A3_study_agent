@@ -97,6 +97,14 @@ export interface StreamContext {
   graphVersion: string
 }
 
+export interface FrontendPerformanceCapability {
+  schemaVersion: "frontend_performance_capability_v1"
+  endpoint: string
+  traceId: string
+  token: string
+  expiresAt: string
+}
+
 export interface GraphManifestRef {
   schemaVersion: "graph_manifest_ref_v1"
   graphVersion: string
@@ -215,6 +223,78 @@ export interface BackgroundContextWindow {
   workspaceUpdatedAt: string
 }
 
+export interface ContextSectionEstimate {
+  section: string
+  source: string
+  itemCount: number
+  messageCount: number
+  charCount: number
+  estimatedTokens: number
+  known: boolean
+}
+
+export interface NextCallContextEstimate {
+  basis: "known_next_node" | "thread_baseline"
+  confidence: "high" | "medium" | "low"
+  estimated: boolean
+  estimatedAt: string
+  targetNode: string
+  unknownSections: string[]
+  sections: ContextSectionEstimate[]
+  estimatedInputTokens: number
+  estimatedOutputReservedTokens: number
+  estimatedUsedTokens: number
+  maxContextTokens: number
+  usedRatio: number
+  tokenizerMode: string
+  stateFingerprint: string
+  reusedManifestStatistics: boolean
+  knownSectionRatio: number
+}
+
+export interface LastLLMCallUsage {
+  present: boolean
+  reportId: string
+  manifestId: string
+  createdAt: string
+  nodeName: string
+  llmNode: string
+  model: string
+  inputEstimatedTokens: number
+  outputReservedTokens: number
+  usedTokens: number
+  maxContextTokens: number
+  usedRatio: number
+  estimated: boolean
+  tokenizerMode: string
+  sections: ContextSectionEstimate[]
+}
+
+export interface BackgroundInventory {
+  conversationSummaryPresent: boolean
+  selectedMemoryCount: number
+  evidenceSummaryCount: number
+  artifactSummaryCount: number
+  workspacePresent: boolean
+  workspaceActiveSubject: string
+  workspaceEvidenceSummaryCount: number
+  workspaceGapCount: number
+  workspaceArtifactCount: number
+  workspaceUpdatedAt: string
+  manifestCount: number
+  influenceEntryCount: number
+}
+
+export interface ThreadContextWindowV2 {
+  schemaVersion: 2
+  contract: "thread_context_window_v2"
+  threadId: string
+  updatedAt: string
+  nextCallContextEstimate: NextCallContextEstimate
+  lastLlmCallUsage: LastLLMCallUsage
+  backgroundInventory: BackgroundInventory
+}
+
 export interface ParsedCollection<T> {
   items: T[]
   rejectedCount: number
@@ -315,6 +395,39 @@ export function parseStreamContext(value: unknown): StreamContext {
     requestId: requiredString(data, "request_id", "stream_context_v1"),
     threadId: requiredString(data, "thread_id", "stream_context_v1"),
     graphVersion: versionedGraphId(data, "graph_version", "stream_context_v1"),
+  }
+}
+
+export function parseFrontendPerformanceCapability(value: unknown): FrontendPerformanceCapability {
+  const data = record(value, "frontend_performance_capability_v1")
+  literal(
+    data,
+    "schema_version",
+    "frontend_performance_capability_v1",
+    "frontend_performance_capability_v1",
+  )
+  if (data.enabled !== true) {
+    fail("frontend_performance_capability_v1", "enabled must be true")
+  }
+  const endpoint = requiredString(data, "endpoint", "frontend_performance_capability_v1")
+  if (!/^\/[a-z0-9/_-]{1,119}$/.test(endpoint)) {
+    fail("frontend_performance_capability_v1", "endpoint is invalid")
+  }
+  const traceId = requiredString(data, "trace_id", "frontend_performance_capability_v1")
+  if (!/^trace:v1:[a-f0-9]{64}$/.test(traceId)) {
+    fail("frontend_performance_capability_v1", "trace_id is invalid")
+  }
+  const token = requiredString(data, "token", "frontend_performance_capability_v1")
+  if (token.length > 2048 || !/^[A-Za-z0-9._-]+$/.test(token)) {
+    fail("frontend_performance_capability_v1", "token is invalid")
+  }
+  const expiresAt = utcTimestamp(data, "expires_at", "frontend_performance_capability_v1")
+  return {
+    schemaVersion: "frontend_performance_capability_v1",
+    endpoint,
+    traceId,
+    token,
+    expiresAt,
   }
 }
 
@@ -631,6 +744,152 @@ export function parseBackgroundContextWindow(value: unknown): BackgroundContextW
   }
 }
 
+export function parseThreadContextWindowV2(value: unknown): ThreadContextWindowV2 {
+  const contract = "thread_context_window_v2"
+  const data = record(value, contract)
+  if (data.schema_version !== 2) fail(contract, "schema_version must equal 2")
+  literal(data, "contract", "thread_context_window_v2", contract)
+  return {
+    schemaVersion: 2,
+    contract: "thread_context_window_v2",
+    threadId: requiredString(data, "thread_id", contract),
+    updatedAt: utcTimestamp(data, "updated_at", contract),
+    nextCallContextEstimate: parseNextCallContextEstimate(
+      data.next_call_context_estimate,
+    ),
+    lastLlmCallUsage: parseLastLlmCallUsage(data.last_llm_call_usage),
+    backgroundInventory: parseBackgroundInventory(data.background_inventory),
+  }
+}
+
+function parseNextCallContextEstimate(value: unknown): NextCallContextEstimate {
+  const contract = "next_call_context_estimate_v1"
+  const data = record(value, contract)
+  const stateFingerprint = requiredString(data, "state_fingerprint", contract)
+  if (!stateFingerprint.startsWith("thread_context:v2:")) {
+    fail(contract, "state_fingerprint prefix is invalid")
+  }
+  return {
+    basis: enumValue(
+      data,
+      "basis",
+      ["known_next_node", "thread_baseline"] as const,
+      contract,
+    ),
+    confidence: enumValue(
+      data,
+      "confidence",
+      ["high", "medium", "low"] as const,
+      contract,
+    ),
+    estimated: booleanValue(data, "estimated", contract),
+    estimatedAt: utcTimestamp(data, "estimated_at", contract),
+    targetNode: optionalString(data, "target_node", contract),
+    unknownSections: stringArray(data, "unknown_sections", contract),
+    sections: parseContextSectionEstimates(data.sections, contract),
+    estimatedInputTokens: integer(data, "estimated_input_tokens", contract, 0),
+    estimatedOutputReservedTokens: integer(
+      data,
+      "estimated_output_reserved_tokens",
+      contract,
+      0,
+    ),
+    estimatedUsedTokens: integer(data, "estimated_used_tokens", contract, 0),
+    maxContextTokens: integer(data, "max_context_tokens", contract, 0),
+    usedRatio: nonNegativeNumber(data, "used_ratio", contract),
+    tokenizerMode: requiredString(data, "tokenizer_mode", contract),
+    stateFingerprint,
+    reusedManifestStatistics: booleanValue(
+      data,
+      "reused_manifest_statistics",
+      contract,
+    ),
+    knownSectionRatio: boundedRatio(data, "known_section_ratio", contract),
+  }
+}
+
+function parseLastLlmCallUsage(value: unknown): LastLLMCallUsage {
+  const contract = "last_llm_call_usage_v1"
+  const data = record(value, contract)
+  const present = booleanValue(data, "present", contract)
+  return {
+    present,
+    reportId: optionalString(data, "report_id", contract),
+    manifestId: optionalString(data, "manifest_id", contract),
+    createdAt: present ? utcTimestamp(data, "created_at", contract) : "",
+    nodeName: optionalString(data, "node_name", contract),
+    llmNode: optionalString(data, "llm_node", contract),
+    model: optionalString(data, "model", contract),
+    inputEstimatedTokens: integer(data, "input_estimated_tokens", contract, 0),
+    outputReservedTokens: integer(data, "output_reserved_tokens", contract, 0),
+    usedTokens: integer(data, "used_tokens", contract, 0),
+    maxContextTokens: integer(data, "max_context_tokens", contract, 0),
+    usedRatio: nonNegativeNumber(data, "used_ratio", contract),
+    estimated: booleanValue(data, "estimated", contract),
+    tokenizerMode: optionalString(data, "tokenizer_mode", contract),
+    sections: parseContextSectionEstimates(data.sections, contract),
+  }
+}
+
+function parseBackgroundInventory(value: unknown): BackgroundInventory {
+  const contract = "background_inventory_v1"
+  const data = record(value, contract)
+  return {
+    conversationSummaryPresent: booleanValue(
+      data,
+      "conversation_summary_present",
+      contract,
+    ),
+    selectedMemoryCount: integer(data, "selected_memory_count", contract, 0),
+    evidenceSummaryCount: integer(data, "evidence_summary_count", contract, 0),
+    artifactSummaryCount: integer(data, "artifact_summary_count", contract, 0),
+    workspacePresent: booleanValue(data, "workspace_present", contract),
+    workspaceActiveSubject: optionalString(
+      data,
+      "workspace_active_subject",
+      contract,
+    ),
+    workspaceEvidenceSummaryCount: integer(
+      data,
+      "workspace_evidence_summary_count",
+      contract,
+      0,
+    ),
+    workspaceGapCount: integer(data, "workspace_gap_count", contract, 0),
+    workspaceArtifactCount: integer(
+      data,
+      "workspace_artifact_count",
+      contract,
+      0,
+    ),
+    workspaceUpdatedAt: optionalString(data, "workspace_updated_at", contract),
+    manifestCount: integer(data, "manifest_count", contract, 0),
+    influenceEntryCount: integer(data, "influence_entry_count", contract, 0),
+  }
+}
+
+function parseContextSectionEstimates(
+  value: unknown,
+  parentContract: string,
+): ContextSectionEstimate[] {
+  if (!Array.isArray(value) || value.length > 16) {
+    fail(parentContract, "sections must be an array with at most 16 items")
+  }
+  return value.map((item) => {
+    const contract = "context_section_estimate_v1"
+    const data = record(item, contract)
+    return {
+      section: requiredString(data, "section", contract),
+      source: requiredString(data, "source", contract),
+      itemCount: integer(data, "item_count", contract, 0),
+      messageCount: integer(data, "message_count", contract, 0),
+      charCount: integer(data, "char_count", contract, 0),
+      estimatedTokens: integer(data, "estimated_tokens", contract, 0),
+      known: booleanValue(data, "known", contract),
+    }
+  })
+}
+
 function parseGraphNode(value: unknown): GraphManifestNode {
   const data = record(value, "graph_manifest_node")
   return {
@@ -843,6 +1102,16 @@ function nonNegativeNumber(
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     fail(contract, `${key} must be a non-negative number`)
   }
+  return value
+}
+
+function boundedRatio(
+  data: Record<string, unknown>,
+  key: string,
+  contract: string,
+): number {
+  const value = nonNegativeNumber(data, key, contract)
+  if (value > 1) fail(contract, `${key} must be <= 1`)
   return value
 }
 

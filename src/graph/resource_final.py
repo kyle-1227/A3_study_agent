@@ -10,12 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from src.context_engineering.workspace import sanitize_workspace_text
 
-RESOURCE_FINAL_SCHEMA_VERSION = 1
+RESOURCE_FINAL_SCHEMA_VERSION = 2
 RESOURCE_ID_PREFIX = "resource:v1"
 PAYLOAD_HASH_PREFIX = "payload:v1"
 RESOURCE_TEXT_LIMIT = 12_000
@@ -65,6 +65,20 @@ STRUCTURED_RESOURCE_TYPES: frozenset[str] = frozenset(
 )
 _ANSWER_ONLY_RESOURCE_TYPES: frozenset[str] = frozenset({"evidence_summary"})
 
+ResourceFinalTerminalStatus = Literal[
+    "success",
+    "partial_success",
+    "failed",
+    "controlled_stop",
+    "unknown",
+]
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"success", "partial_success", "failed", "controlled_stop", "unknown"}
+)
+_CONTROLLED_STOP_STATUSES: frozenset[str] = frozenset(
+    {"blocked_insufficient_evidence", "controlled_stop"}
+)
+
 
 def normalize_resource_final_payload(
     legacy_payload: Mapping[str, Any] | None,
@@ -100,7 +114,16 @@ def normalize_resource_final_payload(
         max_chars=120,
         fallback="",
     )
-    resource = _build_resource_object(safe_payload, resource_type=resource_type)
+    terminal_status = _resolve_terminal_status(safe_payload, state_payload)
+    if terminal_status is None:
+        return None
+    validation = _validation_summary(safe_payload, state_payload)
+    resource = _build_resource_object(
+        safe_payload,
+        resource_type=resource_type,
+        terminal_status=terminal_status,
+        validation=validation,
+    )
     # Reject structured resource types whose normalized payload is empty.
     if resource_type in STRUCTURED_RESOURCE_TYPES and not resource.get("payload"):
         return None
@@ -121,6 +144,8 @@ def normalize_resource_final_payload(
             "request_id": request_id,
             "resource_id": resource_id,
             "payload_hash": payload_hash,
+            "terminal_status": terminal_status,
+            "validation": validation,
             "resource": resource,
             "render_hints": resource.get("render_hints", {}),
         }
@@ -140,7 +165,14 @@ def resource_run_was_requested(state: Mapping[str, Any] | None) -> bool:
         max_chars=80,
         fallback="",
     )
-    if status in {"success", "partial_success", "failed", "error"}:
+    if status in {
+        "success",
+        "partial_success",
+        "failed",
+        "error",
+        "blocked_insufficient_evidence",
+        "controlled_stop",
+    }:
         return True
     plan = state.get("resource_generation_plan")
     if isinstance(plan, Mapping) and plan.get("tasks"):
@@ -209,7 +241,11 @@ def stable_resource_id(
 
 
 def _build_resource_object(
-    payload: Mapping[str, Any], *, resource_type: str
+    payload: Mapping[str, Any],
+    *,
+    resource_type: str,
+    terminal_status: ResourceFinalTerminalStatus,
+    validation: Mapping[str, int],
 ) -> dict[str, Any]:
     render_payload = _extract_render_payload(payload, resource_type=resource_type)
     artifact_refs = _collect_artifact_refs(render_payload)
@@ -247,8 +283,75 @@ def _build_resource_object(
             "primary_card": resource_type,
             "legacy_fields": legacy_fields,
             "has_downloads": bool(artifact_refs),
+            "terminal_status": terminal_status,
+            "validation": dict(validation),
         },
     }
+
+
+def _resolve_terminal_status(
+    payload: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> ResourceFinalTerminalStatus | None:
+    explicit = sanitize_workspace_text(
+        payload.get("terminal_status"), max_chars=40, fallback=""
+    )
+    if explicit:
+        return explicit if explicit in _TERMINAL_STATUSES else None
+
+    if (
+        payload.get("controlled_stop") is True
+        or state.get("evidence_controlled_stop") is True
+    ):
+        return "controlled_stop"
+
+    bundle_status = sanitize_workspace_text(
+        _nested_get(payload, ("resource_bundle", "status")),
+        max_chars=40,
+        fallback="",
+    )
+    status = bundle_status or sanitize_workspace_text(
+        payload.get("resource_generation_status")
+        or state.get("resource_generation_status"),
+        max_chars=40,
+        fallback="",
+    )
+    if status in _CONTROLLED_STOP_STATUSES:
+        return "controlled_stop"
+    if status == "error":
+        return "failed"
+    if status in {"success", "partial_success", "failed"}:
+        return status
+
+    # Legacy persisted payloads may predate terminal truth. Keep them renderable
+    # without promoting an unknown outcome to success.
+    return "unknown"
+
+
+def _validation_summary(
+    payload: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> dict[str, int]:
+    bundle = payload.get("resource_bundle")
+    if not isinstance(bundle, Mapping):
+        candidate = state.get("resource_bundle_artifact")
+        bundle = candidate if isinstance(candidate, Mapping) else {}
+    keys = (
+        "success_count",
+        "partial_success_count",
+        "failed_count",
+        "blocked_count",
+        "renderable_resource_count",
+        "renderable_count",
+        "downloadable_count",
+    )
+    return {key: _bounded_count(bundle.get(key)) for key in keys}
+
+
+def _bounded_count(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 0
+    return min(max(value, 0), 10_000)
 
 
 def _extract_render_payload(

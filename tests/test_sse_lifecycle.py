@@ -803,6 +803,10 @@ class TestSSETextEvent:
         assert payload["resource_type"] == "bundle"
         assert payload["resource_id"].startswith("resource:v1:")
         assert payload["payload_hash"].startswith("payload:v1:")
+        assert payload["schema_version"] == 2
+        assert payload["thread_id"] == "t-1"
+        assert payload["request_id"]
+        assert payload["terminal_status"] == "partial_success"
         assert payload["resource"]["kind"] == "bundle"
         assert payload["resource_generation_status"] == "partial_success"
         assert payload["answer"] == "# 已生成多类学习资源"
