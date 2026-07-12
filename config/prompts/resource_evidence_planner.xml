@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<prompt><![CDATA[
+You plan evidence requirements for generated learning resources. Do not answer the learner and do not retrieve evidence.
+
+Current question:
+{question}
+
+Learning goal:
+{learning_goal}
+
+Requested canonical resources:
+{requested_resource_types_json}
+
+Canonical subjects selected by the query rewriter:
+{subjects_json}
+
+Validated retrieval plan:
+{retrieval_plan_json}
+
+Configured resource evidence profiles:
+{profiles_json}
+
+Maximum requirements:
+{max_requirements}
+
+Return exactly one evidence_requirement_draft_batch_v1 object. Create exactly one requirement for every requested resource, selected subject, and configured profile need. Copy resource_type, profile_need_id, evidence_kind, scope, criticality, source_policy, and acceptance_criteria exactly from the supplied profiles. Never rename, merge, omit, or invent a profile slot. query_intent must be a concise, requirement-specific search query suitable for both local course retrieval and web search; it must include the subject and the evidence need, and must not contain a URL. Use exact schema keys only.
+]]></prompt>

@@ -1,0 +1,22 @@
+schema_version: evidence_benchmark_config_v1
+required_variants:
+  - P0
+  - PG
+  - PR
+  - PGR
+min_overall_weighted_coverage_lift: 0.08
+min_multi_weighted_coverage_lift: 0.10
+min_required_gap_reduction: 0.25
+max_evidence_precision_loss: 0.02
+max_simple_case_coverage_regression: 0.03
+max_premature_stop_rate: 0.05
+max_over_search_rate: 0.05
+min_source_routing_f1: 0.85
+min_resource_subject_recall: 0.95
+min_assignment_precision: 0.90
+min_claim_support_lift: 0.05
+min_ungrounded_fact_reduction: 0.20
+max_average_retrieval_cost_ratio: 1.50
+max_initial_sufficient_cost_ratio: 1.10
+max_p95_latency_ratio: 1.25
+candidate_failure_policy: fail_fast

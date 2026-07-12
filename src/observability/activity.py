@@ -16,27 +16,78 @@ from src.observability.contracts import (
     ActivityKind,
     ActivityStatus,
 )
+from src.observability.evidence_trace import (
+    is_evidence_trace_stage,
+    validate_evidence_trace_event,
+)
 from src.observability.node_registry import get_node_runtime_metadata
 
 ACTIVITY_TIMELINE_ITEM_LIMIT = 200
 ACTIVITY_TIMELINE_CHAR_LIMIT = 96_000
 
 _SAFE_DETAIL_FIELDS = {
+    "accepted_evidence_count",
+    "assigned_evidence_count",
+    "assignment_fingerprint",
+    "blocked_resource_count",
+    "budget_max_rounds",
+    "budget_max_tasks",
+    "budget_remaining_rounds",
+    "budget_remaining_tasks",
+    "budget_used_tasks",
+    "candidate_count",
+    "complete_count",
+    "consecutive_no_progress_rounds",
+    "coverage_fingerprint",
+    "current_complete_count",
+    "current_missing_count",
+    "current_partial_count",
+    "deduplicated_count",
     "error_type",
     "finish_reason",
     "interrupt_type",
     "item_count",
+    "latency_ms",
+    "ledger_count",
+    "ledger_fingerprint",
+    "local_candidate_count",
+    "local_task_count",
     "manifest_id",
     "max_retries",
+    "missing_count",
+    "missing_requirement_count",
+    "new_accepted_evidence_count",
+    "next_local_task_count",
+    "next_web_task_count",
     "output_mode",
+    "orchestration_fingerprint",
+    "partial_count",
+    "previous_complete_count",
+    "previous_missing_count",
+    "previous_partial_count",
+    "profile_fingerprint",
+    "progressed",
+    "query_batch_fingerprint",
+    "ready_resource_count",
+    "reason_code",
     "report_id",
+    "requirement_count",
     "resource_id",
+    "resource_count",
     "resource_type",
     "retry_count",
+    "round_index",
+    "rounds_completed",
+    "source",
     "status_code",
+    "subject_count",
+    "task_count",
+    "total_search_tasks",
     "trace_call_id",
     "trace_seq",
     "warning_level",
+    "web_candidate_count",
+    "web_task_count",
 }
 
 _RESOURCE_TRACE_STATUS: dict[str, ActivityStatus] = {
@@ -44,6 +95,41 @@ _RESOURCE_TRACE_STATUS: dict[str, ActivityStatus] = {
     "success": "completed",
     "failed": "failed",
     "interrupted": "interrupted",
+}
+
+_EVIDENCE_TRACE_TITLES: dict[str, str] = {
+    "evidence_orchestration.plan.accepted": "Evidence plan accepted",
+    "evidence_orchestration.round.started": "Evidence retrieval round started",
+    "evidence_orchestration.source.completed": "Evidence source completed",
+    "evidence_orchestration.source.empty": "Evidence source returned no results",
+    "evidence_orchestration.source.failed": "Evidence source failed",
+    "evidence_orchestration.round.merged": "Evidence round merged",
+    "evidence_orchestration.coverage.judged": "Evidence coverage judged",
+    "evidence_orchestration.progress.evaluated": "Evidence progress evaluated",
+    "evidence_orchestration.route.decided": "Evidence route decided",
+    "evidence_orchestration.resource.assigned": "Resource evidence assigned",
+    "evidence_orchestration.terminal": "Evidence orchestration completed",
+    "evidence_orchestration.failed": "Evidence orchestration failed",
+}
+
+_EVIDENCE_TRACE_NODES: dict[str, str] = {
+    "evidence_orchestration.plan.accepted": "resource_evidence_planner",
+    "evidence_orchestration.round.started": "retrieval_round_router",
+    "evidence_orchestration.round.merged": "retrieval_round_merge",
+    "evidence_orchestration.coverage.judged": "requirement_evidence_judge",
+    "evidence_orchestration.progress.evaluated": "requirement_evidence_judge",
+    "evidence_orchestration.route.decided": "evidence_repair_planner",
+    "evidence_orchestration.resource.assigned": "resource_evidence_assignment",
+    "evidence_orchestration.terminal": "resource_evidence_assignment",
+    "evidence_orchestration.failed": "resource_evidence_assignment",
+}
+
+_EVIDENCE_FAILURE_NODES: dict[str, str] = {
+    "orchestration": "resource_evidence_planner",
+    "local": "local_rag_search_batch",
+    "web": "web_research_search_batch",
+    "judge": "requirement_evidence_judge",
+    "assignment": "resource_evidence_assignment",
 }
 
 
@@ -172,6 +258,55 @@ def activity_from_trace_event(
     common_details = {
         key: event.get(key) for key in _SAFE_DETAIL_FIELDS if key in event
     }
+
+    if is_evidence_trace_stage(stage):
+        validated = validate_evidence_trace_event(event, emitted=True)
+        evidence_payload = validated.model_dump(mode="json")
+        evidence_details = {
+            key: evidence_payload[key]
+            for key in _SAFE_DETAIL_FIELDS
+            if key in evidence_payload
+        }
+        source = _safe_text(evidence_payload.get("source"), 40)
+        if stage.startswith("evidence_orchestration.source."):
+            evidence_node = (
+                "local_rag_search_batch"
+                if source == "local"
+                else "web_research_search_batch"
+            )
+        elif stage == "evidence_orchestration.failed":
+            evidence_node = _EVIDENCE_FAILURE_NODES[source]
+        else:
+            evidence_node = _EVIDENCE_TRACE_NODES[stage]
+        activity_status: ActivityStatus = (
+            "failed"
+            if stage
+            in {
+                "evidence_orchestration.source.failed",
+                "evidence_orchestration.failed",
+            }
+            else "running"
+            if stage == "evidence_orchestration.round.started"
+            else "completed"
+        )
+        identity_parts = [stage]
+        for field_name in ("round_index", "source", "resource_type"):
+            if field_name in evidence_payload:
+                identity_parts.append(f"{field_name}:{evidence_payload[field_name]}")
+        return build_activity_event(
+            thread_id=thread_id,
+            request_id=request_id,
+            sequence=sequence,
+            kind="evidence_progress",
+            status=activity_status,
+            activity_key=":".join(identity_parts),
+            title=_EVIDENCE_TRACE_TITLES[stage],
+            summary="Content-free evidence orchestration progress",
+            node=evidence_node,
+            duration_ms=evidence_payload.get("latency_ms"),
+            safe_details=evidence_details,
+            now=now,
+        )
 
     if stage in {"resource_subnode.start", "resource_subnode.end"}:
         subnode = _required_text(event.get("subnode"), "subnode", 160)

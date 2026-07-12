@@ -378,6 +378,31 @@ def initial_request_reset_transient_state() -> dict:
         "parent_child_generation_id": "",
         "parent_child_retrieval_fingerprint": "",
         "parent_child_hydration": {},
+        # resource-aware evidence orchestration candidate
+        "rag_generation_route": "",
+        "evidence_orchestration_fingerprint": "",
+        "evidence_orchestration_status": "",
+        "evidence_requested_resource_types": [],
+        "evidence_requested_subjects": [],
+        "evidence_requirements": [],
+        "evidence_current_round": 0,
+        "evidence_current_tasks": [],
+        "evidence_all_tasks": [],
+        "evidence_retrieval_signatures": [],
+        "evidence_candidate_records": [],
+        "evidence_ledger": [],
+        "evidence_coverage": {},
+        "evidence_previous_coverage": {},
+        "evidence_source_outcomes": [],
+        "evidence_parent_child_rounds": [],
+        "evidence_repair_plans": [],
+        "evidence_consecutive_no_progress_rounds": 0,
+        "evidence_orchestration_route": "",
+        "evidence_terminal_status": "",
+        "evidence_terminal_reason_code": "",
+        "evidence_hydration_count": 0,
+        "evidence_local_batch": {},
+        "evidence_web_batch": {},
         # context
         "context": CONTEXT_CLEAR,
         # resource artifacts
@@ -446,6 +471,10 @@ def initial_request_reset_transient_state() -> dict:
         "resource_bundle_artifact": {},
         "resource_generation_debug": {},
         "resource_generation_status": "",
+        "resource_evidence_readiness": [],
+        "resource_evidence_assignments": [],
+        "ready_resource_types": [],
+        "blocked_resource_types": [],
         "learning_path": {},
         "curriculum_context": "",
         "quiz_results": [],
@@ -783,6 +812,30 @@ class LearningState(TypedDict):
     parent_child_generation_id: str  # Generation pinned for this request
     parent_child_retrieval_fingerprint: str  # Retrieval policy fingerprint
     parent_child_hydration: dict  # Content-free post-Judge hydration summary
+    rag_generation_route: str  # Explicit candidate graph route selected by graph build
+    evidence_orchestration_fingerprint: str  # Joint policy/profile/index fingerprint
+    evidence_orchestration_status: str  # planned / retrieving / repairing / terminal
+    evidence_requested_resource_types: list[str]  # Original canonical resource request
+    evidence_requested_subjects: list[str]  # Canonical subjects bound to requirements
+    evidence_requirements: list[dict]  # Strict compiled EvidenceRequirement rows
+    evidence_current_round: int  # Initial round=0; supplements=1..configured maximum
+    evidence_current_tasks: list[dict]  # Strict tasks dispatched in the active round
+    evidence_all_tasks: list[dict]  # Cumulative bounded RetrievalTask inventory
+    evidence_retrieval_signatures: list[str]  # Exact no-repeat signatures
+    evidence_candidate_records: list[dict]  # Requirement-bound candidate snapshots
+    evidence_ledger: list[dict]  # Content-free accepted/rejected evidence ledger
+    evidence_coverage: dict  # Current RequirementCoverageBatch
+    evidence_previous_coverage: dict  # Prior round RequirementCoverageBatch
+    evidence_source_outcomes: list[dict]  # Completed versus empty source outcomes
+    evidence_parent_child_rounds: list[dict]  # Child-only snapshots awaiting hydration
+    evidence_repair_plans: list[dict]  # Strict EvidenceRepairPlan history
+    evidence_consecutive_no_progress_rounds: int  # Supplement no-progress guard
+    evidence_orchestration_route: str  # retrieve / repair / terminal
+    evidence_terminal_status: str  # Explicit bounded terminal state
+    evidence_terminal_reason_code: str  # Content-free terminal reason
+    evidence_hydration_count: int  # Must transition from zero to one exactly once
+    evidence_local_batch: dict  # Active-round local branch output
+    evidence_web_batch: dict  # Active-round web branch output
     plan: str  # Generated plans
     resource_generation_plan: dict  # Parallel resource generation plan
     resource_branch_results: Annotated[
@@ -793,6 +846,10 @@ class LearningState(TypedDict):
         dict  # Resource generation execution status/debug summary
     )
     resource_generation_status: str  # success / partial_success / failed / skipped
+    resource_evidence_readiness: list[dict]  # Per-resource code-derived readiness
+    resource_evidence_assignments: list[dict]  # Evidence refs for ready resources
+    ready_resource_types: list[str]  # Workers permitted to run
+    blocked_resource_types: list[str]  # Explicit insufficient-evidence resources
     learning_path: dict  # Curriculum Engine: LearningPath serialized
     curriculum_context: str  # KG-aware context string for study_plan_planner
     quiz_results: list[

@@ -1,0 +1,100 @@
+schema_version: resource_evidence_profiles_v1
+profiles:
+  - resource_type: review_doc
+    needs:
+      - need_id: authoritative_concepts
+        evidence_kind: conceptual_foundation
+        scope: per_subject
+        criticality: required
+        source_policy: local_then_web_on_gap
+        acceptance_criteria: Supports the central definitions, mechanisms, and boundaries needed by the review.
+      - need_id: independent_crosscheck
+        evidence_kind: corroborating_explanation
+        scope: per_subject
+        criticality: supporting
+        source_policy: local_and_web
+        acceptance_criteria: Corroborates important claims from an independent source without contradicting primary evidence.
+  - resource_type: mindmap
+    needs:
+      - need_id: concept_relations
+        evidence_kind: concept_relationships
+        scope: per_subject
+        criticality: required
+        source_policy: local_only
+        acceptance_criteria: Establishes the named concepts and explicit hierarchical or causal relationships between them.
+      - need_id: hierarchy_crosscheck
+        evidence_kind: structural_crosscheck
+        scope: per_subject
+        criticality: supporting
+        source_policy: local_then_web_on_gap
+        acceptance_criteria: Confirms that the proposed hierarchy and cross-links are technically consistent.
+  - resource_type: quiz
+    needs:
+      - need_id: assessable_facts
+        evidence_kind: assessable_claims
+        scope: per_subject
+        criticality: required
+        source_policy: local_only
+        acceptance_criteria: Supports unambiguous facts or procedures from which answerable questions can be derived.
+      - need_id: misconception_distractors
+        evidence_kind: misconception_boundaries
+        scope: per_subject
+        criticality: supporting
+        source_policy: local_and_web
+        acceptance_criteria: Distinguishes correct rules from plausible misconceptions without inventing unsupported distractors.
+  - resource_type: code_practice
+    needs:
+      - need_id: api_semantics
+        evidence_kind: executable_semantics
+        scope: per_subject
+        criticality: required
+        source_policy: local_then_web_on_gap
+        acceptance_criteria: Supports the exact language, library, or interface semantics exercised by the task.
+      - need_id: executable_patterns
+        evidence_kind: implementation_patterns
+        scope: per_subject
+        criticality: required
+        source_policy: local_and_web
+        acceptance_criteria: Provides technically compatible implementation patterns and constraints for a verifiable solution.
+  - resource_type: video_script
+    needs:
+      - need_id: narrative_facts
+        evidence_kind: narrative_claims
+        scope: per_subject
+        criticality: required
+        source_policy: local_then_web_on_gap
+        acceptance_criteria: Supports every central explanatory claim in the planned narrative sequence.
+      - need_id: illustrative_examples
+        evidence_kind: explanatory_examples
+        scope: per_subject
+        criticality: supporting
+        source_policy: local_and_web
+        acceptance_criteria: Supplies accurate examples that clarify the subject without expanding beyond supported facts.
+  - resource_type: video_animation
+    needs:
+      - need_id: visualizable_process
+        evidence_kind: process_structure
+        scope: per_subject
+        criticality: required
+        source_policy: local_then_web_on_gap
+        acceptance_criteria: Defines a sequence, transformation, or relationship that can be represented visually without distortion.
+      - need_id: scene_accuracy
+        evidence_kind: visual_constraints
+        scope: per_subject
+        criticality: required
+        source_policy: local_and_web
+        acceptance_criteria: Supports the labels, ordering, quantities, and causal transitions shown in each technical scene.
+  - resource_type: study_plan
+    needs:
+      - need_id: prerequisite_sequence
+        evidence_kind: prerequisite_structure
+        scope: per_subject
+        criticality: required
+        source_policy: local_only
+        acceptance_criteria: Establishes prerequisite dependencies and a defensible learning sequence for the requested scope.
+      - need_id: current_learning_resources
+        evidence_kind: current_resource_guidance
+        scope: per_subject
+        criticality: supporting
+        source_policy: web_only
+        acceptance_criteria: Identifies current, accessible learning references that align with the planned stages.

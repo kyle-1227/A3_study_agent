@@ -246,6 +246,51 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
     ]
 
 
+def _resource_assignment_for_worker(
+    state: LearningState,
+    resource_type: str,
+) -> tuple[dict, list[dict]] | None:
+    """Return the strict candidate assignment and its resource-scoped context."""
+
+    orchestration_resources = state.get("evidence_requested_resource_types") or []
+    if not orchestration_resources:
+        return None
+    assignments = [
+        item
+        for item in (state.get("resource_evidence_assignments") or [])
+        if isinstance(item, dict) and item.get("resource_type") == resource_type
+    ]
+    if len(assignments) != 1:
+        raise ValueError(
+            "resource-aware worker requires exactly one ready evidence assignment"
+        )
+    assignment = assignments[0]
+    evidence_ids = {
+        str(item) for item in (assignment.get("evidence_ids") or []) if str(item)
+    }
+    if not evidence_ids:
+        raise ValueError("resource-aware worker assignment has no evidence ids")
+    scoped_context: list[dict] = []
+    for item in state.get("context") or []:
+        if not isinstance(item, dict):
+            continue
+        item_evidence_ids = {
+            str(value)
+            for value in (
+                item.get("evidence_ids")
+                or ([item.get("evidence_id")] if item.get("evidence_id") else [])
+            )
+            if str(value)
+        }
+        if item_evidence_ids & evidence_ids:
+            scoped_context.append(item)
+    if not scoped_context:
+        raise ValueError(
+            "resource-aware worker assignment resolved to an empty approved context"
+        )
+    return assignment, scoped_context
+
+
 def _debug_base(state: LearningState, tasks: list[dict]) -> dict:
     run_id = str(state.get("request_id") or uuid4())
     resource_types = [task["resource_type"] for task in tasks]
@@ -293,10 +338,17 @@ async def resource_orchestrator(state: LearningState) -> dict:
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
     )
+    plan = {
+        "tasks": tasks,
+        "blocked_resource_types": list(state.get("blocked_resource_types") or []),
+        "requested_resource_types": list(
+            state.get("evidence_requested_resource_types") or resource_types
+        ),
+    }
     return {
         "requested_resource_type": resource_types[0] if resource_types else "",
         "requested_resource_types": resource_types,
-        "resource_generation_plan": {"tasks": tasks},
+        "resource_generation_plan": plan,
         "resource_branch_results": RESOURCE_RESULTS_CLEAR,
         "resource_bundle_artifact": {},
         "resource_generation_debug": debug,
@@ -874,6 +926,15 @@ async def resource_worker(state: LearningState) -> dict:
         local_state = dict(state)
         local_state["requested_resource_type"] = resource_type
         local_state["requested_resource_types"] = [resource_type]
+        assignment_result = _resource_assignment_for_worker(
+            state,
+            resource_type,
+        )
+        if assignment_result is not None:
+            assignment, scoped_context = assignment_result
+            local_state["resource_evidence_assignment"] = assignment
+            local_state["context"] = scoped_context
+            local_state["graded_evidence"] = scoped_context
         if resource_type == "study_plan":
             _assert_study_plan_profile_complete(local_state)
         message_content = await RESOURCE_RUNNERS[resource_type](local_state)
@@ -1069,6 +1130,40 @@ def _compose_bundle_message(
     return "\n".join(lines).strip()
 
 
+def _append_blocked_resource_message(
+    message: str,
+    *,
+    status: str,
+    blocked_resources: list[dict],
+) -> str:
+    """Append explicit evidence blocking without changing legacy bundle wording."""
+
+    if not blocked_resources:
+        return message
+    lines = (
+        [message, "", "## 证据不足，未生成", ""]
+        if message
+        else [
+            "# 证据不足，资源生成已停止",
+            "",
+        ]
+    )
+    for item in blocked_resources:
+        resource_type = item.get("resource_type") or "unknown"
+        lines.append(f"- {resource_type}: 所需证据尚未满足，已明确阻断生成。")
+    lines.extend(
+        [
+            "",
+            (
+                "所有请求的资源都因证据不足而停止，未生成降级内容。"
+                if status == "blocked_insufficient_evidence"
+                else "其余资源保持阻断，不会输出降级内容。"
+            ),
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
 def _resource_metrics(result: dict) -> dict:
     resource_type = result.get("resource_type")
     raw_artifact = result.get("artifact")
@@ -1198,9 +1293,14 @@ def _resource_summary(result: dict) -> dict:
 @traced_node
 async def resource_bundle_output(state: LearningState) -> dict:
     """Aggregate resource worker results into one final user-visible bundle."""
-    requested = normalize_requested_resource_types(
-        state.get("requested_resource_types") or [],
-        state.get("requested_resource_type") or "",
+    evidence_requested = list(state.get("evidence_requested_resource_types") or [])
+    requested = (
+        evidence_requested
+        if evidence_requested
+        else normalize_requested_resource_types(
+            state.get("requested_resource_types") or [],
+            state.get("requested_resource_type") or "",
+        )
     )
     results = [
         result
@@ -1209,11 +1309,28 @@ async def resource_bundle_output(state: LearningState) -> dict:
     ]
     successes = [result for result in results if result.get("status") == "success"]
     failures = [result for result in results if result.get("status") == "failed"]
+    readiness = [
+        item
+        for item in (state.get("resource_evidence_readiness") or [])
+        if isinstance(item, dict)
+    ]
+    blocked_resources = [
+        {
+            "resource_type": item.get("resource_type"),
+            "status": "blocked_insufficient_evidence",
+            "blocked_requirement_ids": item.get("blocked_requirement_ids") or [],
+            "reason_code": item.get("reason_code") or "",
+        }
+        for item in readiness
+        if item.get("readiness_state") == "blocked_insufficient_evidence"
+    ]
 
-    if successes and failures:
+    if successes and (failures or blocked_resources):
         status = "partial_success"
     elif successes:
         status = "success"
+    elif blocked_resources and not failures:
+        status = "blocked_insufficient_evidence"
     elif requested or results:
         status = "failed"
     else:
@@ -1229,8 +1346,10 @@ async def resource_bundle_output(state: LearningState) -> dict:
         "requested_resource_types": requested,
         "success_count": len(successes),
         "failed_count": len(failures),
+        "blocked_count": len(blocked_resources),
         "resources": [_resource_summary(result) for result in successes],
         "errors": [_resource_summary(result) for result in failures],
+        "blocked_resources": blocked_resources,
     }
     debug = dict(state.get("resource_generation_debug") or {})
     stages = list(debug.get("stages") or [])
@@ -1240,6 +1359,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
             "status": status,
             "success_count": len(successes),
             "failed_count": len(failures),
+            "blocked_count": len(blocked_resources),
             "resource_count": len(results),
         }
     )
@@ -1248,12 +1368,17 @@ async def resource_bundle_output(state: LearningState) -> dict:
             "status": status,
             "success_count": len(successes),
             "failed_count": len(failures),
+            "blocked_count": len(blocked_resources),
             "partial_success": status == "partial_success",
             "branch_results": [_resource_summary(result) for result in results],
             "stages": stages,
         }
     )
-    message = _compose_bundle_message(status, successes, failures)
+    message = _append_blocked_resource_message(
+        _compose_bundle_message(status, successes, failures),
+        status=status,
+        blocked_resources=blocked_resources,
+    )
     bundle["message"] = message
     artifact_updates: dict[str, Any] = {}
     influence_entries = [

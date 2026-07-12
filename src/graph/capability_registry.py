@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from src.context_engineering.workspace import sanitize_workspace_text
-from src.graph.resource_generation import RESOURCE_TYPE_ORDER, SUPPORTED_RESOURCE_TYPES
+from src.graph.resource_contracts import RESOURCE_TYPE_ORDER, SUPPORTED_RESOURCE_TYPES
 from src.observability.node_registry import (
     get_registered_node_metadata,
     get_resource_workflow_nodes,

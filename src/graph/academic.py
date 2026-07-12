@@ -15,7 +15,7 @@ import logging
 import re
 import time
 from collections import Counter, defaultdict
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
@@ -3920,9 +3920,13 @@ async def _execute_web_research_tasks(
     state: LearningState,
     tasks: list[WebResearchTask],
     original_user_query: str,
+    timeout: float,
+    max_results: int,
 ) -> tuple[list[dict], list[dict]]:
-    timeout = float(_retrieval_setting("web.timeout_seconds", _web_timeout_seconds()))
-    max_results = _web_research_v2_max_results_per_task()
+    if timeout <= 0:
+        raise ValueError("web research timeout must be positive")
+    if max_results <= 0:
+        raise ValueError("web research max_results must be positive")
     sources: list[dict] = []
     stages: list[dict] = []
     for task in tasks:
@@ -4035,6 +4039,176 @@ async def _execute_web_research_tasks(
             )
             sources.append(raw_source.model_dump(mode="json"))
     return sources, stages
+
+
+class ValidatedWebResearchBatchResult(TypedDict):
+    """Typed handoff from direct Web execution to evidence orchestration."""
+
+    status: Literal["skipped", "empty", "completed"]
+    candidates: list[dict[str, object]]
+    originals: dict[str, dict[str, object]]
+    task_count: int
+    raw_source_count: int
+    deduplicated_count: int
+
+
+class ValidatedWebResearchExecutionError(RuntimeError):
+    """Direct, preplanned web execution failed without a planner fallback."""
+
+    def __init__(self, *, code: str, error_type: str) -> None:
+        self.code = code
+        self.error_type = error_type
+        super().__init__(f"{code}: {error_type}")
+
+
+async def execute_validated_web_research_tasks(
+    *,
+    state: LearningState,
+    tasks: list[WebResearchTask],
+    original_user_query: str,
+    timeout: float,
+    max_results_per_task: int,
+    max_concurrent_tasks: int,
+) -> ValidatedWebResearchBatchResult:
+    """Execute validated Web tasks directly, without invoking the Web planner."""
+
+    if timeout <= 0:
+        raise ValueError("web research timeout must be positive")
+    if max_results_per_task <= 0:
+        raise ValueError("max_results_per_task must be positive")
+    if max_concurrent_tasks <= 0:
+        raise ValueError("max_concurrent_tasks must be positive")
+    if not tasks:
+        return {
+            "status": "skipped",
+            "candidates": [],
+            "originals": {},
+            "task_count": 0,
+            "raw_source_count": 0,
+            "deduplicated_count": 0,
+        }
+
+    semaphore = asyncio.Semaphore(max_concurrent_tasks)
+
+    async def execute_one(
+        task: WebResearchTask,
+    ) -> tuple[list[dict], list[dict]]:
+        async with semaphore:
+            return await _execute_web_research_tasks(
+                state=state,
+                tasks=[task],
+                original_user_query=original_user_query,
+                timeout=timeout,
+                max_results=max_results_per_task,
+            )
+
+    per_task_results = await asyncio.gather(
+        *(execute_one(task) for task in tasks),
+    )
+    raw_sources: list[dict] = []
+    executor_stages: list[dict] = []
+    for task_sources, task_stages in per_task_results:
+        raw_sources.extend(task_sources)
+        executor_stages.extend(task_stages)
+
+    failed_stage = next(
+        (stage for stage in executor_stages if stage.get("error_type")),
+        None,
+    )
+    if failed_stage is not None:
+        error_type = failed_stage.get("error_type")
+        if not isinstance(error_type, str) or not error_type.strip():
+            raise ValueError(
+                "failed web source stage must include a non-blank error_type"
+            )
+        raise ValidatedWebResearchExecutionError(
+            code="web_source_execution_failed",
+            error_type=error_type,
+        )
+    if not raw_sources:
+        return {
+            "status": "empty",
+            "candidates": [],
+            "originals": {},
+            "task_count": len(tasks),
+            "raw_source_count": 0,
+            "deduplicated_count": 0,
+        }
+
+    sources_by_task: dict[str, list[dict]] = defaultdict(list)
+    for source in raw_sources:
+        task_id = source.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("web source must preserve a non-blank task_id")
+        sources_by_task[task_id].append(source)
+    deduped_sources: list[dict] = []
+    duplicate_url_count = 0
+    for task in tasks:
+        task_sources, task_dedupe_debug = _dedupe_web_sources_by_canonical_url(
+            sources_by_task.get(task.task_id, [])
+        )
+        deduped_sources.extend(task_sources)
+        task_duplicate_count = task_dedupe_debug.get("duplicate_url_count")
+        if (
+            isinstance(task_duplicate_count, bool)
+            or not isinstance(task_duplicate_count, int)
+            or task_duplicate_count < 0
+        ):
+            raise ValueError(
+                "web source dedupe must return a non-negative duplicate_url_count"
+            )
+        duplicate_url_count += task_duplicate_count
+    fetched_sources, _fetch_stages = _fetch_web_sources_from_provider_content(
+        deduped_sources
+    )
+    curated_sources, _curate_debug = _curate_web_sources(fetched_sources)
+    if not curated_sources:
+        return {
+            "status": "empty",
+            "candidates": [],
+            "originals": {},
+            "task_count": len(tasks),
+            "raw_source_count": len(raw_sources),
+            "deduplicated_count": duplicate_url_count,
+        }
+
+    summaries, summarizer_stages = await _summarize_web_sources(
+        state=state,
+        sources=curated_sources,
+        original_user_query=original_user_query,
+    )
+    failed_summarizer_stage = next(
+        (stage for stage in summarizer_stages if stage.get("status") == "failed"),
+        None,
+    )
+    if failed_summarizer_stage is not None:
+        error_type = failed_summarizer_stage.get("error_type")
+        if not isinstance(error_type, str) or not error_type.strip():
+            raise ValueError(
+                "failed web source summarizer stage must include a non-blank error_type"
+            )
+        raise ValidatedWebResearchExecutionError(
+            code="web_source_summarizer_failed",
+            error_type=error_type,
+        )
+
+    docs = _build_web_docs_from_summaries(
+        sources=curated_sources,
+        summaries=summaries,
+    )
+    candidates = _build_web_evidence_candidates_from_research_docs(docs)
+    originals: dict[str, dict[str, object]] = {
+        candidate.evidence_id: doc
+        for candidate, doc in zip(candidates, docs, strict=True)
+    }
+    return {
+        "status": "completed" if candidates else "empty",
+        "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
+        "originals": originals,
+        "task_count": len(tasks),
+        "raw_source_count": len(raw_sources),
+        "deduplicated_count": duplicate_url_count,
+    }
 
 
 def _dedupe_web_sources_by_canonical_url(
@@ -5075,6 +5249,10 @@ async def _run_web_research_v2(
         state=state,
         tasks=tasks,
         original_user_query=original_user_query,
+        timeout=float(
+            _retrieval_setting("web.timeout_seconds", _web_timeout_seconds())
+        ),
+        max_results=_web_research_v2_max_results_per_task(),
     )
     for stage in executor_stages:
         _append_web_research_stage(debug, state, stage)

@@ -71,3 +71,7 @@ Every path/config/output argument is explicit. Generation build can only produce
 ## Tool availability
 
 Python, pytest, Ruff, and mypy are available. Semgrep, import-linter, Pyright, ty, Gitleaks, Bandit, and Vulture are missing; they must not be interpreted as passing gates.
+
+## 2026-07-12 joint evidence candidate update
+
+The Parent-Child runtime is now also bound into an explicit resource-aware evidence candidate through `build_resource_evidence_parent_child_graph(runtime)` and `get_compiled_resource_evidence_parent_child_graph(runtime, *, checkpointer)`. This new graph plans evidence after resource and subject selection, supports at most two targeted supplement rounds, performs terminal-only one-shot parent hydration, and blocks only resources whose required evidence remains incomplete. The older Parent-Child graph remains available as the P0/ablation route, and `app.py` still serves the legacy graph. Activation remains blocked by the production index/gold prerequisites above and by the new P0/PG/PR/PGR gate documented in `evidence_orchestration_implementation_status.md`.

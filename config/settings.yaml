@@ -1129,6 +1129,13 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
     reask_enabled: true
+  resource_evidence_planner:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 24000
+    reask_business_validation: true
   memory_use_decider:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []
@@ -1192,6 +1199,13 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+    reask_business_validation: true
+  requirement_evidence_judge:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 24000
     reask_business_validation: true
   study_plan_emotional_intel:
     output_mode: deepseek_tool_call_strict

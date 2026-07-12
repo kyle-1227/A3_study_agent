@@ -23,10 +23,12 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
-from src.graph.resource_generation import (
+from src.graph.resource_contracts import (
     SUPPORTED_RESOURCE_TYPES,
-    dispatch_resource_workers,
     normalize_requested_resource_types,
+)
+from src.graph.resource_generation import (
+    dispatch_resource_workers,
     resource_preflight_router,
     resource_bundle_output,
     resource_orchestrator,
@@ -40,8 +42,10 @@ from src.graph.supervisor import handle_unknown, route_after_supervisor, supervi
 from src.run_control import wrap_interruptible_node
 
 if TYPE_CHECKING:
+    from src.graph.evidence_orchestration import EvidenceOrchestrationRuntime
     from src.graph.parent_child_nodes import ParentChildGraphRuntime
 else:
+    EvidenceOrchestrationRuntime = object
     ParentChildGraphRuntime = object
 
 
@@ -215,6 +219,203 @@ def build_parent_child_graph(runtime: ParentChildGraphRuntime) -> StateGraph:
     )
 
 
+def build_resource_evidence_parent_child_graph(
+    runtime: EvidenceOrchestrationRuntime,
+) -> StateGraph:
+    """Build the joint Parent-Child plus resource-evidence candidate graph."""
+
+    from src.graph.evidence_orchestration import (
+        EvidenceOrchestrationRuntime as EvidenceOrchestrationRuntimeType,
+        make_evidence_repair_planner_node,
+        make_local_rag_search_batch_node,
+        make_rag_generation_router_node,
+        make_requirement_evidence_judge_node,
+        make_resource_evidence_assignment_node,
+        make_resource_evidence_planner_node,
+        make_retrieval_round_merge_node,
+        make_retrieval_round_router_node,
+        make_terminal_parent_hydration_node,
+        make_web_research_search_batch_node,
+        route_after_requirement_evidence_judge,
+    )
+    from src.graph.parent_child_nodes import (
+        make_parent_child_hydration_node,
+        make_parent_child_rag_node,
+    )
+
+    if not isinstance(runtime, EvidenceOrchestrationRuntimeType):
+        raise TypeError("runtime must be a validated EvidenceOrchestrationRuntime")
+
+    graph = StateGraph(LearningState)
+
+    def add_interruptible_node(node_name: str, node_fn) -> None:
+        interruptible = wrap_interruptible_node(node_name, node_fn)
+        graph.add_node(
+            node_name,
+            wrap_context_influence_node(node_name, interruptible),
+        )
+
+    legacy_parent_hydration = make_parent_child_hydration_node(runtime.parent_child)
+    terminal_parent_hydration = make_terminal_parent_hydration_node(runtime)
+
+    async def joint_parent_hydration(state: LearningState) -> dict:
+        if state.get("rag_generation_route") == "resource_evidence_parent_child":
+            return await terminal_parent_hydration(state)
+        return await legacy_parent_hydration(state)
+
+    add_interruptible_node("supervisor", supervisor_node)
+    add_interruptible_node("episodic_memory_retriever", episodic_memory_retriever)
+    add_interruptible_node("episodic_memory_writer", episodic_memory_writer)
+    add_interruptible_node("memory_use_decider", memory_use_decider)
+    add_interruptible_node("search_query_rewriter", search_query_rewriter)
+    add_interruptible_node("academic_router", academic_router)
+    add_interruptible_node(
+        "rag_retrieve",
+        make_parent_child_rag_node(runtime.parent_child),
+    )
+    add_interruptible_node("web_search", web_search)
+    add_interruptible_node("evidence_judge", evidence_judge)
+    add_interruptible_node(
+        "rag_generation_router",
+        make_rag_generation_router_node(runtime),
+    )
+    add_interruptible_node(
+        "resource_evidence_planner",
+        make_resource_evidence_planner_node(runtime),
+    )
+    add_interruptible_node(
+        "retrieval_round_router",
+        make_retrieval_round_router_node(runtime),
+    )
+    add_interruptible_node(
+        "local_rag_search_batch",
+        make_local_rag_search_batch_node(runtime),
+    )
+    add_interruptible_node(
+        "web_research_search_batch",
+        make_web_research_search_batch_node(runtime),
+    )
+    add_interruptible_node(
+        "retrieval_round_merge",
+        make_retrieval_round_merge_node(runtime),
+    )
+    add_interruptible_node(
+        "requirement_evidence_judge",
+        make_requirement_evidence_judge_node(runtime),
+    )
+    add_interruptible_node(
+        "evidence_repair_planner",
+        make_evidence_repair_planner_node(runtime),
+    )
+    add_interruptible_node(
+        "parent_child_parent_hydration",
+        joint_parent_hydration,
+    )
+    add_interruptible_node(
+        "resource_evidence_assignment",
+        make_resource_evidence_assignment_node(runtime),
+    )
+    add_interruptible_node("evidence_summary_output", evidence_summary_output)
+    add_interruptible_node("generate_answer", generate_answer)
+    add_interruptible_node("evaluate_hallucination", evaluate_hallucination)
+    add_interruptible_node("rewrite_query", rewrite_query)
+    add_interruptible_node("emotional_response", emotional_response)
+    add_interruptible_node("qa_agent", qa_agent)
+    add_interruptible_node("resource_preflight_router", resource_preflight_router)
+    add_interruptible_node(
+        "study_plan_profile_gate_main",
+        study_plan_profile_gate_main,
+    )
+    add_interruptible_node("resource_orchestrator", resource_orchestrator)
+    add_interruptible_node("resource_worker", resource_worker)
+    add_interruptible_node("resource_bundle_output", resource_bundle_output)
+    add_interruptible_node("handle_unknown", handle_unknown)
+
+    graph.set_entry_point("supervisor")
+    graph.add_conditional_edges(
+        "supervisor",
+        route_after_supervisor,
+        {
+            "academic": "episodic_memory_retriever",
+            "emotional": "emotional_response",
+            "qa": "qa_agent",
+            "invalid": "handle_unknown",
+        },
+    )
+    graph.add_edge("episodic_memory_retriever", "memory_use_decider")
+    graph.add_edge("memory_use_decider", "search_query_rewriter")
+    graph.add_conditional_edges(
+        "search_query_rewriter",
+        route_after_candidate_query_rewrite,
+        {
+            "academic": "academic_router",
+            "resource_evidence": "rag_generation_router",
+        },
+    )
+
+    graph.add_edge("academic_router", "rag_retrieve")
+    graph.add_edge("academic_router", "web_search")
+    graph.add_edge(["rag_retrieve", "web_search"], "evidence_judge")
+    graph.add_edge("evidence_judge", "parent_child_parent_hydration")
+
+    graph.add_edge("rag_generation_router", "resource_evidence_planner")
+    graph.add_edge("resource_evidence_planner", "retrieval_round_router")
+    graph.add_edge("retrieval_round_router", "local_rag_search_batch")
+    graph.add_edge("retrieval_round_router", "web_research_search_batch")
+    graph.add_edge(
+        ["local_rag_search_batch", "web_research_search_batch"],
+        "retrieval_round_merge",
+    )
+    graph.add_edge("retrieval_round_merge", "requirement_evidence_judge")
+    graph.add_conditional_edges(
+        "requirement_evidence_judge",
+        route_after_requirement_evidence_judge,
+        {
+            "repair": "evidence_repair_planner",
+            "terminal": "parent_child_parent_hydration",
+        },
+    )
+    graph.add_edge("evidence_repair_planner", "retrieval_round_router")
+
+    graph.add_conditional_edges(
+        "parent_child_parent_hydration",
+        route_after_joint_parent_hydration,
+        {
+            "answer": "generate_answer",
+            "qa": "qa_agent",
+            "resources": "resource_evidence_assignment",
+            "evidence_summary_output": "evidence_summary_output",
+        },
+    )
+    graph.add_edge("resource_evidence_assignment", "resource_preflight_router")
+    graph.add_conditional_edges(
+        "resource_preflight_router",
+        route_after_resource_preflight,
+        {
+            "study_plan_profile_gate_main": "study_plan_profile_gate_main",
+            "resource_orchestrator": "resource_orchestrator",
+        },
+    )
+    graph.add_edge("study_plan_profile_gate_main", "resource_orchestrator")
+    graph.add_conditional_edges("resource_orchestrator", dispatch_resource_workers)
+    graph.add_edge("resource_worker", "resource_bundle_output")
+    graph.add_edge("resource_bundle_output", END)
+
+    graph.add_edge("evidence_summary_output", END)
+    graph.add_edge("generate_answer", "evaluate_hallucination")
+    graph.add_conditional_edges(
+        "evaluate_hallucination",
+        should_retry_or_end,
+        {"retry": "rewrite_query", "end": "episodic_memory_writer"},
+    )
+    graph.add_edge("episodic_memory_writer", END)
+    graph.add_edge("rewrite_query", "academic_router")
+    graph.add_edge("emotional_response", END)
+    graph.add_edge("qa_agent", END)
+    graph.add_edge("handle_unknown", END)
+    return graph
+
+
 def route_after_evidence_judge(state: LearningState) -> str:
     """Route judged evidence to answer generation, resource chains, or controlled stop."""
     response_mode = str(state.get("response_mode") or "").strip()
@@ -253,6 +454,33 @@ def route_after_query_rewrite(state: LearningState) -> str:
     return "academic"
 
 
+def route_after_candidate_query_rewrite(state: LearningState) -> str:
+    """Route explicit resource requests to the joint evidence candidate only."""
+
+    response_mode = str(state.get("response_mode") or "").strip()
+    requested = normalize_requested_resource_types(
+        state.get("requested_resource_types") or [],
+        state.get("requested_resource_type") or "",
+    )
+    if response_mode == "resource":
+        if not requested:
+            raise ValueError("resource response mode requires canonical resource types")
+        return "resource_evidence"
+    if response_mode in {"", "qa"}:
+        return "academic"
+    raise ValueError("candidate query rewrite received an invalid response_mode")
+
+
+def route_after_joint_parent_hydration(state: LearningState) -> str:
+    """Separate terminal resource assignment from the legacy response route."""
+
+    if state.get("rag_generation_route") == "resource_evidence_parent_child":
+        if state.get("evidence_orchestration_route") != "terminal":
+            raise ValueError("resource evidence hydration requires a terminal route")
+        return "resources"
+    return route_after_evidence_judge(state)
+
+
 def get_compiled_graph(checkpointer=None):
     """Build and compile the graph, ready for invocation.
 
@@ -271,3 +499,15 @@ def get_compiled_parent_child_graph(
     """Compile the explicit candidate graph; callers must supply all dependencies."""
 
     return build_parent_child_graph(runtime).compile(checkpointer=checkpointer)
+
+
+def get_compiled_resource_evidence_parent_child_graph(
+    runtime: EvidenceOrchestrationRuntime,
+    *,
+    checkpointer,
+):
+    """Compile the joint candidate; callers must inject every strict dependency."""
+
+    return build_resource_evidence_parent_child_graph(runtime).compile(
+        checkpointer=checkpointer
+    )

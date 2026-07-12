@@ -1,0 +1,21 @@
+schema_version: evidence_orchestration_config_v1
+max_supplement_rounds: 2
+max_search_tasks_per_round: 6
+max_total_search_tasks: 18
+max_concurrent_tasks: 4
+max_results_per_task: 3
+max_requirements_per_request: 12
+max_ledger_entries: 54
+max_evidence_per_requirement: 4
+max_consecutive_no_progress_rounds: 1
+required_task_priority: high
+supporting_task_priority: medium
+retrieval_priority_weights:
+  high: 1.0
+  medium: 0.7
+  low: 0.4
+query_fingerprint_algorithm: sha256_v1
+evidence_dedupe_policy: exact_identity_v1
+generation_policy: per_resource_ready
+candidate_failure_policy: fail_fast
+source_error_policy: fail_fast

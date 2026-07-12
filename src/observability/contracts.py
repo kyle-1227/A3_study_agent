@@ -16,6 +16,7 @@ ActivityKind = Literal[
     "llm",
     "tool",
     "retrieval",
+    "evidence_progress",
     "context",
     "review",
     "interrupt",
