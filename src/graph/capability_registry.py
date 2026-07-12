@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Mapping
 
 from src.context_engineering.workspace import sanitize_workspace_text
-from src.graph.resource_contracts import RESOURCE_TYPE_ORDER, SUPPORTED_RESOURCE_TYPES
+from src.graph.qa_suggestion_registry import (
+    QASuggestionAction as CapabilityAction,
+    get_qa_suggestion_action,
+    get_qa_suggestion_actions,
+    get_qa_suggestion_resource_types,
+)
 from src.observability.node_registry import (
     get_registered_node_metadata,
     get_resource_workflow_nodes,
@@ -16,55 +20,17 @@ from src.observability.node_registry import (
 CAPABILITY_CONTEXT_SCHEMA_VERSION = 1
 
 
-@dataclass(frozen=True)
-class CapabilityAction:
-    action_id: str
-    label: str
-    description: str
-    requires_resource_type: bool
-
-
-_CAPABILITY_ACTIONS = (
-    CapabilityAction(
-        action_id="ask_followup",
-        label="Ask a follow-up",
-        description="Clarify the current question or learning objective.",
-        requires_resource_type=False,
-    ),
-    CapabilityAction(
-        action_id="continue_qa",
-        label="Continue the question",
-        description="Continue question answering in the current scope.",
-        requires_resource_type=False,
-    ),
-    CapabilityAction(
-        action_id="generate_resource",
-        label="Generate a learning resource",
-        description="Start one registered learning-resource workflow.",
-        requires_resource_type=True,
-    ),
-)
-
-
 def get_capability_actions() -> tuple[CapabilityAction, ...]:
-    return _CAPABILITY_ACTIONS
+    return get_qa_suggestion_actions()
 
 
 def get_registered_capability_action(action_id: object) -> CapabilityAction | None:
-    normalized = str(action_id or "").strip()
-    return next(
-        (item for item in _CAPABILITY_ACTIONS if item.action_id == normalized),
-        None,
-    )
+    return get_qa_suggestion_action(action_id)
 
 
 def get_registered_resource_types() -> tuple[str, ...]:
     """Return the canonical, ordered resource registry."""
-    return tuple(
-        resource_type
-        for resource_type in RESOURCE_TYPE_ORDER
-        if resource_type in SUPPORTED_RESOURCE_TYPES
-    )
+    return get_qa_suggestion_resource_types()
 
 
 def build_safe_capability_context(
@@ -106,7 +72,7 @@ def build_safe_capability_context(
                 "description": action.description,
                 "requires_resource_type": action.requires_resource_type,
             }
-            for action in _CAPABILITY_ACTIONS
+            for action in get_capability_actions()
         ],
         "resource_types": list(resource_types),
         "resource_workflow_stage_counts": {

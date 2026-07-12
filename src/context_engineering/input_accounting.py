@@ -23,6 +23,7 @@ class AccountedMessage:
     fingerprint: str
     contains_injected_context: bool
     contains_capability_context: bool
+    contains_qa_suggestion_registry: bool
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ def build_llm_input_accounting(messages: list[Any]) -> LLMInputAccounting:
             fingerprint=fingerprint,
             contains_injected_context="<INJECTED_CONTEXT>" in content,
             contains_capability_context="<CAPABILITY_CONTEXT>" in content,
+            contains_qa_suggestion_registry="<QA_SUGGESTION_REGISTRY>" in content,
         )
         accounted.append(item)
         identity.append(

@@ -120,6 +120,7 @@ from src.observability.graph_manifest import (
     build_graph_manifest,
     graph_manifest_error_payload,
     graph_manifest_ref_payload,
+    graph_manifest_status_payload,
 )
 from src.observability.checkpointer_proxy import observe_checkpointer
 from src.observability.performance_config import (
@@ -4407,6 +4408,13 @@ def _app_graph_version(fastapi_app: FastAPI) -> str:
 async def graph_manifest_endpoint(request: Request):
     manifest = getattr(request.app.state, "graph_manifest", None)
     if isinstance(manifest, GraphManifest):
+        emit_a3_trace(
+            logger,
+            "graph_manifest.served",
+            graph_manifest_status_payload(manifest),
+            state={},
+            env_flag="LOG_A3_TRACE",
+        )
         return manifest
     error = getattr(request.app.state, "graph_manifest_error", None)
     detail = (

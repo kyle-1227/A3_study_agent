@@ -18,6 +18,7 @@ import { ManifestGraph } from "@/components/manifest-graph"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { activitiesForRequest } from "@/lib/activity-reducer"
+import type { GraphViewMode } from "@/lib/graph-layout"
 import type {
   ActivityEvent,
   GraphManifest,
@@ -73,6 +74,7 @@ export function RightPanel({
         : activities.slice(-40),
     [activities, currentRequestId],
   )
+  const graphFitViewSignal = `${viewTab}:${isCollapsed}:${isLogsCollapsed}:${splitPct}`
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -165,6 +167,7 @@ export function RightPanel({
                     error={graphManifestError}
                     loading={graphManifestLoading}
                     activities={requestActivities}
+                    fitViewSignal={graphFitViewSignal}
                   />
                 )}
               </ScrollArea>
@@ -294,12 +297,15 @@ function GraphSurface({
   error,
   loading,
   activities,
+  fitViewSignal,
 }: {
   manifest: GraphManifest | null
   error: GraphManifestUnavailable | null
   loading: boolean
   activities: readonly ActivityEvent[]
+  fitViewSignal: string
 }) {
+  const [viewMode, setViewMode] = useState<GraphViewMode>("full_graph")
   if (loading) {
     return (
       <div className="flex h-80 items-center justify-center rounded-lg border border-border bg-[var(--surface-subtle)] text-xs text-muted-foreground">
@@ -323,8 +329,69 @@ function GraphSurface({
       </div>
     )
   }
+  const visibleNodeCount = manifest.nodes.filter((node) => node.visible).length
   return (
-    <ManifestGraph manifest={manifest} error={null} loading={false} activities={activities} />
+    <section className="space-y-2" aria-label="图视图">
+      <div className="flex items-center justify-between gap-2">
+        <div
+          className="inline-flex rounded-md border border-border bg-[var(--surface-muted)] p-0.5"
+          role="group"
+          aria-label="图视图范围"
+        >
+          <GraphViewModeButton
+            active={viewMode === "current_path"}
+            onClick={() => setViewMode("current_path")}
+          >
+            当前路径
+          </GraphViewModeButton>
+          <GraphViewModeButton
+            active={viewMode === "full_graph"}
+            onClick={() => setViewMode("full_graph")}
+          >
+            完整图
+          </GraphViewModeButton>
+        </div>
+        <span
+          data-testid="graph-visible-node-count"
+          className="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+          aria-live="polite"
+        >
+          可见节点 {visibleNodeCount}
+        </span>
+      </div>
+      <ManifestGraph
+        manifest={manifest}
+        error={null}
+        loading={false}
+        activities={activities}
+        viewMode={viewMode}
+        fitViewSignal={fitViewSignal}
+      />
+    </section>
+  )
+}
+
+function GraphViewModeButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-sm px-2 py-1 text-[11px] transition-colors",
+        active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-primary",
+      )}
+      aria-pressed={active}
+    >
+      {children}
+    </button>
   )
 }
 

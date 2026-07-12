@@ -108,8 +108,8 @@ export function parseQAFinalEvent(value: unknown): QAFinalEventV1 {
   if (!GROUNDING_STATUSES.has(groundingStatus)) {
     fail(contract, "grounding_status is invalid")
   }
-  if (!Array.isArray(response.suggestions) || response.suggestions.length < 1 || response.suggestions.length > 3) {
-    fail(contract, "suggestions must contain between 1 and 3 items")
+  if (!Array.isArray(response.suggestions) || response.suggestions.length > 3) {
+    fail(contract, "suggestions must contain at most 3 items")
   }
   const suggestions = response.suggestions.map((item, index) =>
     parseSuggestion(item, `${contract}.suggestions.${index}`),

@@ -155,6 +155,17 @@ def graph_manifest_ref_payload(graph_version: str) -> dict[str, str]:
     }
 
 
+def graph_manifest_status_payload(manifest: GraphManifest) -> dict[str, int | str]:
+    """Return safe topology counts for manifest-delivery observability."""
+    return {
+        "schema_version": GRAPH_MANIFEST_SCHEMA_VERSION,
+        "graph_version": manifest.graph_version,
+        "node_count": len(manifest.nodes),
+        "visible_node_count": sum(1 for node in manifest.nodes if node.visible),
+        "edge_count": len(manifest.edges),
+    }
+
+
 def _manifest_node(node_id: str, *, logical: bool) -> GraphManifestNode:
     metadata = get_node_runtime_metadata(node_id)
     if metadata is None:

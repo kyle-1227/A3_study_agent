@@ -13,6 +13,7 @@ from src.observability.graph_manifest import (
     GraphManifestBuildError,
     build_graph_manifest,
     graph_manifest_error_payload,
+    graph_manifest_status_payload,
 )
 from src.observability.node_registry import get_resource_workflow_nodes
 
@@ -96,6 +97,52 @@ def test_manifest_unavailable_contract_is_safe_and_typed():
         "reason": "topology unavailable",
         "error_type": "TopologyError",
     }
+
+
+def test_manifest_status_payload_records_nonempty_visible_topology_only():
+    manifest = _build_manifest()
+    payload = graph_manifest_status_payload(manifest)
+
+    assert payload["graph_version"] == manifest.graph_version
+    assert payload["node_count"] == len(manifest.nodes)
+    assert payload["visible_node_count"] == sum(
+        1 for node in manifest.nodes if node.visible
+    )
+    assert payload["visible_node_count"] > 0
+    assert payload["edge_count"] == len(manifest.edges)
+
+
+@pytest.mark.anyio
+async def test_graph_manifest_endpoint_returns_nonempty_cached_topology(monkeypatch):
+    import app as app_module
+
+    manifest = _build_manifest()
+    trace_events: list[tuple[str, dict]] = []
+
+    def capture_trace(_logger, stage, payload, **_kwargs):
+        trace_events.append((stage, payload))
+
+    monkeypatch.setattr(app_module, "emit_a3_trace", capture_trace)
+    sentinel = object()
+    previous = getattr(app_module.app.state, "graph_manifest", sentinel)
+    app_module.app.state.graph_manifest = manifest
+    try:
+        response = await app_module.graph_manifest_endpoint(
+            SimpleNamespace(app=app_module.app)
+        )
+    finally:
+        if previous is sentinel:
+            delattr(app_module.app.state, "graph_manifest")
+        else:
+            app_module.app.state.graph_manifest = previous
+
+    assert response.graph_version == manifest.graph_version
+    assert len(response.nodes) > 0
+    assert len(response.edges) > 0
+    assert trace_events[-1][0] == "graph_manifest.served"
+    assert trace_events[-1][1]["visible_node_count"] == sum(
+        1 for node in manifest.nodes if node.visible
+    )
 
 
 def test_graph_manifest_forbids_schema_drift():

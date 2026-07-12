@@ -184,6 +184,7 @@ def build_llm_input_manifest(
             _memory_profile_section(state_payload),
             _context_influence_section(state_payload),
             _capability_context_section(input_accounting),
+            _qa_suggestion_registry_section(input_accounting),
             _ce_block_section(
                 input_accounting,
                 context_apply_applied,
@@ -726,6 +727,26 @@ def _capability_context_section(
         "char_count": capability_chars,
         "estimated_tokens": sum(
             message.estimated_tokens for message in capability_messages
+        ),
+    }
+
+
+def _qa_suggestion_registry_section(
+    accounting: LLMInputAccounting,
+) -> LLMInputManifestSection:
+    registry_messages = tuple(
+        message
+        for message in accounting.messages
+        if message.contains_qa_suggestion_registry
+    )
+    registry_chars = sum(message.char_count for message in registry_messages)
+    return {
+        "section": "qa_suggestion_registry",
+        "present": registry_chars > 0,
+        "item_count": 1 if registry_chars > 0 else 0,
+        "char_count": registry_chars,
+        "estimated_tokens": sum(
+            message.estimated_tokens for message in registry_messages
         ),
     }
 

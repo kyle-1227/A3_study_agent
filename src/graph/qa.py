@@ -15,8 +15,12 @@ from src.context_engineering.policy_mode import resolve_context_runtime_policy
 from src.context_engineering.workspace import sanitize_workspace_text, utc_now_iso
 from src.graph.capability_registry import (
     build_safe_capability_context,
-    get_registered_capability_action,
-    get_registered_resource_types,
+)
+from src.graph.qa_suggestion_registry import (
+    build_safe_qa_suggestion_registry,
+    get_qa_suggestion_action,
+    get_qa_suggestion_resource_types,
+    qa_suggestion_validation_guidance,
 )
 from src.graph.state import LearningState
 from src.llm.structured_output import (
@@ -54,7 +58,7 @@ class QAResponse(BaseModel):
     answer: str = Field(min_length=1, max_length=16000)
     uncertainty_note: str = Field(default="", max_length=2000)
     grounding_status: QAGroundingStatus
-    suggestions: list[QASuggestion] = Field(min_length=1, max_length=3)
+    suggestions: list[QASuggestion] = Field(default_factory=list, max_length=3)
 
 
 class QAFinalEvent(BaseModel):
@@ -83,20 +87,31 @@ def validate_qa_response(
         return "root expected QAResponse"
     if not parsed.answer.strip():
         return "answer must not be empty"
-    if not 1 <= len(parsed.suggestions) <= 3:
-        return "suggestions must contain between 1 and 3 items"
+    if len(parsed.suggestions) > 3:
+        return "suggestions must contain at most 3 items"
 
-    registered_resources = set(get_registered_resource_types())
+    registered_resources = set(get_qa_suggestion_resource_types())
     for index, suggestion in enumerate(parsed.suggestions):
-        action = get_registered_capability_action(suggestion.action)
+        if not suggestion.label.strip():
+            return f"suggestions[{index}].label must not be blank"
+        action = get_qa_suggestion_action(suggestion.action)
         if action is None:
-            return f"suggestions[{index}].action is not registered"
-        resource_type = suggestion.resource_type.strip()
+            return (
+                f"suggestions[{index}].action is invalid; "
+                f"{qa_suggestion_validation_guidance()}"
+            )
+        resource_type = suggestion.resource_type
         if action.requires_resource_type:
             if resource_type not in registered_resources:
-                return f"suggestions[{index}].resource_type is not registered"
+                return (
+                    f"suggestions[{index}].resource_type is invalid; "
+                    f"{qa_suggestion_validation_guidance()}"
+                )
         elif resource_type:
-            return f"suggestions[{index}].resource_type is not allowed for this action"
+            return (
+                f"suggestions[{index}].resource_type is not allowed for "
+                f"action={action.action_id}; {qa_suggestion_validation_guidance()}"
+            )
 
     if qa_scope == "academic":
         if kept_evidence_count > 0:
@@ -145,7 +160,10 @@ async def qa_agent(state: LearningState) -> dict:
     if not question:
         raise ValueError("qa_agent requires a current user question")
 
-    messages: list[Any] = [SystemMessage(content=load_prompt("qa_agent"))]
+    messages: list[Any] = [
+        SystemMessage(content=load_prompt("qa_agent")),
+        SystemMessage(content=build_safe_qa_suggestion_registry()),
+    ]
     capability_context_present = typed_scope == "a3_agent"
     if capability_context_present:
         runtime_metadata = state.get("runtime_capability_metadata")

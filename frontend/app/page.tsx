@@ -68,6 +68,7 @@ import {
   reduceStreamLifecycle,
   type StreamLifecycleState,
 } from "@/lib/stream-lifecycle"
+import { mergeSafeFailureContent } from "@/lib/assistant-failure"
 
 const API_BASE_URL = requirePublicApiBaseUrl()
 
@@ -1413,6 +1414,13 @@ export default function Home() {
 
     if (data.type === "error") {
       streamHadErrorRef.current = true
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === asstId && message.role === "assistant"
+            ? mergeSafeFailureContent(message)
+            : message,
+        ),
+      )
       updateAssistantResourceStatus(asstId, (status) => ({
         ...status,
         state: "failed",

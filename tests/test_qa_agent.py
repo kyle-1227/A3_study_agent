@@ -23,6 +23,10 @@ from src.graph.qa import (
     qa_final_payload,
     validate_qa_response,
 )
+from src.graph.qa_suggestion_registry import (
+    build_safe_qa_suggestion_registry,
+    get_qa_suggestion_resource_types,
+)
 
 
 def _response(
@@ -32,18 +36,23 @@ def _response(
     action: str = "continue_qa",
     resource_type: str = "",
     answer: str = "A bounded answer.",
+    suggestions: list[QASuggestion] | None = None,
 ) -> QAResponse:
     return QAResponse(
         answer=answer,
         uncertainty_note=uncertainty_note,
         grounding_status=grounding_status,
-        suggestions=[
-            QASuggestion(
-                label="Continue",
-                action=action,
-                resource_type=resource_type,
-            )
-        ],
+        suggestions=(
+            suggestions
+            if suggestions is not None
+            else [
+                QASuggestion(
+                    label="Continue",
+                    action=action,
+                    resource_type=resource_type,
+                )
+            ]
+        ),
     )
 
 
@@ -116,29 +125,120 @@ def test_general_live_qa_must_disclose_missing_live_verification():
     )
 
 
-def test_unknown_suggestion_action_and_resource_are_rejected():
-    unknown_action = _response(
-        grounding_status="general_knowledge",
-        action="invented_action",
+@pytest.mark.parametrize(
+    "action",
+    ["explain_algorithm_complexity", "learn", "explain_algorithm"],
+)
+def test_deepseek_style_unknown_suggestion_action_is_rejected_with_correction_values(
+    action: str,
+):
+    unknown_action = _response(grounding_status="general_knowledge", action=action)
+
+    error = validate_qa_response(
+        unknown_action,
+        qa_scope="general",
+        kept_evidence_count=0,
+        requires_live_verification=False,
     )
+
+    assert "suggestions[0].action is invalid" in error
+    assert "ask_followup" in error
+    assert "continue_qa" in error
+    assert "generate_resource" in error
+    assert "review_doc" in error
+    assert "study_plan" in error
+
+
+def test_unknown_suggestion_resource_is_rejected_with_correction_values():
     unknown_resource = _response(
         grounding_status="general_knowledge",
         action="generate_resource",
         resource_type="invented_resource",
     )
 
-    assert "action is not registered" in validate_qa_response(
-        unknown_action,
-        qa_scope="general",
-        kept_evidence_count=0,
-        requires_live_verification=False,
-    )
-    assert "resource_type is not registered" in validate_qa_response(
+    error = validate_qa_response(
         unknown_resource,
         qa_scope="general",
         kept_evidence_count=0,
         requires_live_verification=False,
     )
+    assert "suggestions[0].resource_type is invalid" in error
+    assert "allowed resource_type values" in error
+    assert "quiz" in error
+
+
+def test_qa_suggestion_correction_is_preserved_in_structured_reask():
+    from src.llm.structured_output import (
+        StructuredLLMResult,
+        _build_reask_instruction,
+    )
+
+    business_error = validate_qa_response(
+        _response(
+            grounding_status="general_knowledge",
+            action="explain_algorithm_complexity",
+        ),
+        qa_scope="general",
+        kept_evidence_count=0,
+        requires_live_verification=False,
+    )
+    result = StructuredLLMResult(
+        success=False,
+        parsed=None,
+        node_name="qa_agent",
+        llm_node="qa_agent",
+        schema_name="QAResponse",
+        provider="configured-provider",
+        model="configured-model",
+        output_mode="deepseek_tool_call_strict",
+        failure_phase="business_validation_error",
+        business_validation_error=business_error,
+    )
+
+    correction = _build_reask_instruction(
+        result=result,
+        schema_name="QAResponse",
+        previous_error_summary=business_error,
+    )
+
+    assert (
+        "allowed action values: [ask_followup, continue_qa, generate_resource]"
+        in correction
+    )
+    assert "allowed resource_type values" in correction
+    assert "review_doc" in correction
+
+
+def test_empty_suggestions_are_valid_for_direct_qa_answer():
+    response = _response(
+        grounding_status="general_knowledge",
+        suggestions=[],
+    )
+
+    assert (
+        validate_qa_response(
+            response,
+            qa_scope="general",
+            kept_evidence_count=0,
+            requires_live_verification=False,
+        )
+        == ""
+    )
+
+
+def test_qa_suggestion_registry_is_safe_minimal_and_uses_canonical_resources():
+    registry = build_safe_qa_suggestion_registry()
+
+    assert registry.startswith("<QA_SUGGESTION_REGISTRY>")
+    assert registry.endswith("</QA_SUGGESTION_REGISTRY>")
+    assert "<CAPABILITY_CONTEXT>" not in registry
+    payload = json.loads(
+        registry.removeprefix("<QA_SUGGESTION_REGISTRY>\n").removesuffix(
+            "\n</QA_SUGGESTION_REGISTRY>"
+        )
+    )
+    assert payload["suggestions_optional"] is True
+    assert tuple(payload["resource_types"]) == get_qa_suggestion_resource_types()
 
 
 def test_capability_context_uses_runtime_registries_and_excludes_secrets():
@@ -196,7 +296,11 @@ async def test_general_qa_agent_uses_one_structured_contract(monkeypatch):
     assert kwargs["llm_node"] == "qa_agent"
     assert kwargs["schema"] is QAResponse
     assert kwargs["fallback_modes"] == []
-    assert len(kwargs["messages"]) == 2
+    assert len(kwargs["messages"]) == 3
+    assert "<QA_SUGGESTION_REGISTRY>" in kwargs["messages"][1].content
+    assert not any(
+        "<CAPABILITY_CONTEXT>" in message.content for message in kwargs["messages"]
+    )
     assert result["final_response_type"] == "qa"
     assert QAFinalEvent.model_validate(result["last_qa_response"])
 
@@ -233,8 +337,9 @@ async def test_a3_qa_agent_inserts_capability_context_before_user(monkeypatch):
     )
 
     messages = mock_invoke.await_args.kwargs["messages"]
-    assert len(messages) == 3
-    assert "<CAPABILITY_CONTEXT>" in messages[1].content
+    assert len(messages) == 4
+    assert "<QA_SUGGESTION_REGISTRY>" in messages[1].content
+    assert "<CAPABILITY_CONTEXT>" in messages[2].content
     assert isinstance(messages[-1], HumanMessage)
 
 
@@ -311,6 +416,7 @@ def test_manifest_identifies_capability_context_without_storing_content():
         model="configured-model",
         messages=[
             {"role": "system", "content": "Structured output contract"},
+            {"role": "system", "content": build_safe_qa_suggestion_registry()},
             {"role": "system", "content": capability},
             {"role": "user", "content": "question"},
         ],
@@ -322,6 +428,7 @@ def test_manifest_identifies_capability_context_without_storing_content():
     )
 
     assert "capability_context" in manifest["section_names"]
+    assert "qa_suggestion_registry" in manifest["section_names"]
     section = next(
         item for item in manifest["sections"] if item["section"] == "capability_context"
     )
@@ -340,7 +447,7 @@ def test_qa_agent_is_in_structured_active_rollout():
     assert "qa_agent" in config["active_nodes"]
 
 
-def test_qa_structured_message_order_is_contract_capability_ce_then_user():
+def test_qa_structured_message_order_is_contract_registry_capability_ce_then_user():
     from src.llm.structured_output import _prepare_structured_messages_with_context
 
     capability = build_safe_capability_context(
@@ -350,12 +457,14 @@ def test_qa_structured_message_order_is_contract_capability_ce_then_user():
             "checkpointer_type": "none",
         },
     )
+    registry = build_safe_qa_suggestion_registry()
     result = _prepare_structured_messages_with_context(
         node_name="qa_agent",
         llm_node="qa_agent",
         messages=[
             {"role": "system", "content": "Structured output contract"},
             {"role": "system", "content": "QA business prompt"},
+            {"role": "system", "content": registry},
             {"role": "system", "content": capability},
             {"role": "user", "content": "question"},
         ],
@@ -370,6 +479,7 @@ def test_qa_structured_message_order_is_contract_capability_ce_then_user():
     assert result.debug["structured_context_apply_status"] == "applied"
     assert result.messages[0]["content"] == "Structured output contract"
     assert result.messages[1]["content"] == "QA business prompt"
-    assert "<CAPABILITY_CONTEXT>" in result.messages[2]["content"]
+    assert "<QA_SUGGESTION_REGISTRY>" in result.messages[2]["content"]
+    assert "<CAPABILITY_CONTEXT>" in result.messages[3]["content"]
     assert "<INJECTED_CONTEXT>" in result.messages[-2]["content"]
     assert result.messages[-1] == {"role": "user", "content": "question"}

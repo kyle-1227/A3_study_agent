@@ -19,7 +19,7 @@ function wireEvent(overrides: Record<string, unknown> = {}): Record<string, unkn
       answer: "The assistant supports grounded learning workflows.",
       uncertainty_note: "",
       grounding_status: "capability_registry",
-      suggestions: [{ label: "Create a plan", action: "resource", resource_type: "study_plan" }],
+      suggestions: [{ label: "Create a plan", action: "generate_resource", resource_type: "study_plan" }],
     },
     thread_id: "thread-1",
     request_id: "request-1",
@@ -45,6 +45,19 @@ describe("qa final contract", () => {
     expect(() => event({ unexpected: true })).toThrow(/unexpected field/)
     expect(() => event({ qa_id: "qa:v1:not-a-hash" })).toThrow(/qa_id/)
     expect(() => event({ created_at: "2026-07-12T08:00:00" })).toThrow(/UTC/)
+  })
+
+  it("accepts an empty suggestion list for a direct QA answer", () => {
+    const parsed = event({
+      response: {
+        answer: "A direct answer needs no suggested next step.",
+        uncertainty_note: "",
+        grounding_status: "general_knowledge",
+        suggestions: [],
+      },
+    })
+
+    expect(parsed.response.suggestions).toEqual([])
   })
 
   it("binds the answer to the matching assistant request without resource state", () => {

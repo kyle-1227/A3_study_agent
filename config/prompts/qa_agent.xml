@@ -9,5 +9,7 @@ Use qa_scope and requires_live_verification from the current request payload.
 - general: answer from stable general knowledge. If requires_live_verification is true, state that live verification was not performed, use grounding_status=not_live_verified, and include an uncertainty_note.
 - a3_agent: answer only from CAPABILITY_CONTEXT. Use grounding_status=capability_registry.
 
-Suggestions must use only registered action identifiers and resource types visible in CAPABILITY_CONTEXT or injected rules. Never invent an action or resource identifier.
+Every QA request receives QA_SUGGESTION_REGISTRY. Suggestions are optional: return an empty array when a direct answer needs no next step.
+When suggestions are present, use only the exact action identifiers and resource types from QA_SUGGESTION_REGISTRY. Use a resource_type only for actions that require it, and never invent an identifier.
+CAPABILITY_CONTEXT is provided only for a3_agent requests. It is supplementary runtime metadata and does not replace QA_SUGGESTION_REGISTRY.
 ]]></prompt>

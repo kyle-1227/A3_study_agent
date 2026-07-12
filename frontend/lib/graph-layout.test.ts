@@ -33,4 +33,21 @@ describe("graph manifest layout", () => {
     expect(layout.nodes.map((node) => node.id)).toEqual(["start_node"])
     expect(layout.edges).toEqual([])
   })
+
+  it("renders a deterministic current path without silently substituting the full graph", () => {
+    const manifest = parseGraphManifest(graphManifestPayload())
+    const path = layoutGraphManifest(manifest, {
+      viewMode: "current_path",
+      activeNodeIds: ["start_node", "output_node"],
+    })
+    const empty = layoutGraphManifest(manifest, {
+      viewMode: "current_path",
+      activeNodeIds: [],
+    })
+
+    expect(path.viewMode).toBe("current_path")
+    expect(path.nodes.map((node) => node.id)).toEqual(["start_node", "output_node"])
+    expect(empty.nodes).toEqual([])
+    expect(empty.edges).toEqual([])
+  })
 })
