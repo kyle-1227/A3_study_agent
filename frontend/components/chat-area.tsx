@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import {
   Bot,
@@ -33,9 +33,10 @@ import { useScrollActivity } from "@/hooks/use-scroll-activity"
 import type {
   ActivityEvent,
   ContextUsageReport,
-  ThreadContextWindowV2,
 } from "@/lib/observability-contracts"
 import type { QAFinalEventV1 } from "@/lib/qa-final"
+import { splitStreamingMarkdown } from "@/lib/streaming-markdown"
+import type { ThreadContextWindowV3 } from "@/lib/thread-context-window-v3"
 import { cn } from "@/lib/utils"
 
 export interface Message {
@@ -182,18 +183,20 @@ export interface StudyPlanResult {
 
 interface ChatAreaProps {
   messages: Message[]
+  liveTurnContent?: string
   onSendMessage: (content: string) => void
   onStopGeneration?: () => void
   onContinueThread?: () => void
   isLoading?: boolean
   canContinue?: boolean
   stopPending?: boolean
-  threadContextWindow?: ThreadContextWindowV2 | null
+  threadContextWindow?: ThreadContextWindowV3 | null
   contextWindowCloseSignal?: string
 }
 
 export function ChatArea({
   messages,
+  liveTurnContent = "",
   onSendMessage,
   onStopGeneration,
   onContinueThread,
@@ -210,10 +213,11 @@ export function ChatArea({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const router = useRouter()
   const isScrolling = useScrollActivity(scrollContainerRef)
+  const renderedLiveTurnContent = useAnimationFrameValue(liveTurnContent)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages])
+  }, [messages, renderedLiveTurnContent])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -278,7 +282,25 @@ export function ChatArea({
               </div>
             </div>
           ) : (
-            messages.map((message) => <MessageBubble key={message.id} message={message} />)
+            messages.map((message, index) => {
+              const isLiveProjection = Boolean(
+                renderedLiveTurnContent &&
+                  index === messages.length - 1 &&
+                  message.role === "assistant" &&
+                  !message.content,
+              )
+              return (
+                <MessageBubble
+                  key={message.id}
+                  message={
+                    isLiveProjection
+                      ? { ...message, content: renderedLiveTurnContent }
+                      : message
+                  }
+                  streaming={isLiveProjection}
+                />
+              )
+            })
           )}
 
           {isLoading && messages[messages.length - 1]?.role === "user" && (
@@ -434,7 +456,54 @@ const markdownComponents: Components = {
   hr: () => <hr className="my-3 border-border" />,
 }
 
-function MessageBubble({ message }: { message: Message }) {
+const StreamingMarkdownFragment = memo(function StreamingMarkdownFragment({
+  value,
+}: {
+  value: string
+}) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      {value}
+    </ReactMarkdown>
+  )
+})
+
+function StreamingMarkdown({ value }: { value: string }) {
+  const parts = useMemo(() => splitStreamingMarkdown(value), [value])
+  return (
+    <>
+      {parts.stablePrefix ? <StreamingMarkdownFragment value={parts.stablePrefix} /> : null}
+      {parts.unstableSuffix ? <StreamingMarkdownFragment value={parts.unstableSuffix} /> : null}
+    </>
+  )
+}
+
+function useAnimationFrameValue(value: string): string {
+  const [rendered, setRendered] = useState(value)
+  const frameRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current)
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null
+      setRendered(value)
+    })
+    return () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current)
+        frameRef.current = null
+      }
+    }
+  }, [value])
+  return rendered
+}
+
+function MessageBubble({
+  message,
+  streaming = false,
+}: {
+  message: Message
+  streaming?: boolean
+}) {
   const isUser = message.role === "user"
   const hasAssistantPayload = Boolean(
     message.content ||
@@ -511,9 +580,13 @@ function MessageBubble({ message }: { message: Message }) {
             )}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                  {message.content}
-                </ReactMarkdown>
+                {streaming ? (
+                  <StreamingMarkdown value={message.content} />
+                ) : (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {message.content}
+                  </ReactMarkdown>
+                )}
               </div>
             ) : !hasAssistantPayload ? (
               <p className="text-muted-foreground">正在生成个性化学习资源...</p>

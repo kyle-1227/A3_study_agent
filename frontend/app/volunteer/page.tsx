@@ -21,6 +21,10 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { getVolunteerHistory, saveVolunteerHistory, type VolunteerHistoryItem } from "@/components/left-sidebar"
+import { consumeAgentStreamV2 } from "@/lib/agent-stream-client"
+import { reduceLiveTurn, type LiveTurnState } from "@/lib/live-turn"
+import { parseQAFinalEvent } from "@/lib/qa-final"
+import { parseResourceFinalEvent } from "@/lib/resource-final"
 import { cn } from "@/lib/utils"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
@@ -91,6 +95,17 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
 
+function displayedVolunteerContent(
+  message: ChatMessage,
+  index: number,
+  messageCount: number,
+  liveContent: string,
+): string {
+  if (message.content) return message.content
+  if (index === messageCount - 1 && message.role === "assistant") return liveContent
+  return ""
+}
+
 function loadMessages(chatId: string): ChatMessage[] {
   try {
     const raw = localStorage.getItem(CHAT_PREFIX + chatId)
@@ -129,11 +144,13 @@ function VolunteerPageInner() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
+  const [liveTurn, setLiveTurn] = useState<LiveTurnState | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedChatRef = useRef(false)
+  const liveTurnRef = useRef<LiveTurnState | null>(null)
 
   const canStart = Boolean(targetRegion && homeRegion)
 
@@ -168,7 +185,7 @@ function VolunteerPageInner() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })
-  }, [messages])
+  }, [messages, liveTurn?.provisionalAnswer])
 
   useEffect(() => {
     if (currentChatId && messages.length > 0) {
@@ -194,6 +211,8 @@ function VolunteerPageInner() {
   const handleStartChat = () => {
     if (!canStart) return
 
+    liveTurnRef.current = null
+    setLiveTurn(null)
     const chatId = Date.now().toString()
     const initialMessages: ChatMessage[] = [
       {
@@ -211,6 +230,8 @@ function VolunteerPageInner() {
   }
 
   const handleBackToSelect = () => {
+    liveTurnRef.current = null
+    setLiveTurn(null)
     setPhase("select")
     setMessages([])
     setUploadedFiles([])
@@ -255,49 +276,92 @@ function VolunteerPageInner() {
 
     const assistantId = (Date.now() + 1).toString()
     setMessages([...updatedMessages, { id: assistantId, role: "assistant", content: "" }])
+    const requestId = crypto.randomUUID()
+    liveTurnRef.current = null
+    setLiveTurn(null)
 
     try {
       const response = await fetch(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, request_id: requestId }),
       })
 
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`)
       }
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
+      await consumeAgentStreamV2({
+        initialBody: response.body,
+        onEvent: (event) => {
+          const next = reduceLiveTurn(liveTurnRef.current, event)
+          liveTurnRef.current = next
+          setLiveTurn(next)
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split("\n\n")
-        buffer = parts.pop() || ""
-
-        for (const part of parts) {
-          if (!part.startsWith("data: ")) continue
-          try {
-            const data = JSON.parse(part.slice(6))
-            if (data.type === "token") {
-              setMessages((prev) =>
-                prev.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + data.content } : msg)),
-              )
-            } else if (data.type === "text") {
-              setMessages((prev) =>
-                prev.map((msg) => (msg.id === assistantId ? { ...msg, content: data.content } : msg)),
-              )
+          if (event.type === "qa_final") {
+            const qaFinal = parseQAFinalEvent({ type: "qa_final", ...event.data })
+            if (qaFinal.requestId !== event.requestId || qaFinal.threadId !== event.threadId) {
+              throw new Error("qa_final identity does not match stream envelope")
             }
-          } catch {
-            // Skip malformed chunks; the stream may still continue normally.
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? { ...message, content: qaFinal.response.answer }
+                  : message,
+              ),
+            )
+          } else if (event.type === "resource_final") {
+            const resourceFinal = parseResourceFinalEvent({
+              type: "resource_final",
+              ...event.data,
+            })
+            if (
+              resourceFinal.request_id !== event.requestId ||
+              resourceFinal.thread_id !== event.threadId
+            ) {
+              throw new Error("resource_final identity does not match stream envelope")
+            }
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content:
+                        resourceFinal.answer ||
+                        resourceFinal.resource.summary ||
+                        resourceFinal.resource.title,
+                    }
+                  : message,
+              ),
+            )
+          } else if (event.type === "stream_error") {
+            const message =
+              typeof event.data.message === "string"
+                ? event.data.message
+                : "agent stream failed"
+            throw new Error(message)
+          } else if (event.type === "stream_done") {
+            liveTurnRef.current = null
+            setLiveTurn(null)
           }
-        }
-      }
+        },
+        reconnect: async (streamId, lastEventId, signal) => {
+          const replay = await fetch(
+            `${API_BASE_URL}/streams/${encodeURIComponent(streamId)}`,
+            {
+              headers: { "Last-Event-ID": lastEventId, ...getAuthHeaders() },
+              signal,
+            },
+          )
+          if (!replay.ok || !replay.body) {
+            throw new Error(`Stream replay failed: HTTP ${replay.status}`)
+          }
+          return replay.body
+        },
+      })
     } catch {
+      liveTurnRef.current = null
+      setLiveTurn(null)
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantId ? { ...msg, content: "抱歉，咨询请求遇到异常，请稍后重试。" } : msg,
@@ -462,7 +526,7 @@ function VolunteerPageInner() {
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4">
         <div className="mx-auto flex max-w-3xl flex-col gap-5 py-6">
-          {messages.map((message) => (
+          {messages.map((message, index) => (
             <div
               key={message.id}
               className={cn("flex items-start gap-3", message.role === "user" && "flex-row-reverse")}
@@ -499,8 +563,20 @@ function VolunteerPageInner() {
                     ))}
                   </div>
                 )}
-                {message.content ? (
-                  <div className="whitespace-pre-wrap">{message.content}</div>
+                {displayedVolunteerContent(
+                  message,
+                  index,
+                  messages.length,
+                  liveTurn?.provisionalAnswer ?? "",
+                ) ? (
+                  <div className="whitespace-pre-wrap">
+                    {displayedVolunteerContent(
+                      message,
+                      index,
+                      messages.length,
+                      liveTurn?.provisionalAnswer ?? "",
+                    )}
+                  </div>
                 ) : (
                   <div className="flex items-center gap-1.5 py-1">
                     <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--primary)]/60 [animation-delay:0ms]" />

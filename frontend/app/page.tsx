@@ -69,6 +69,19 @@ import {
   type StreamLifecycleState,
 } from "@/lib/stream-lifecycle"
 import { mergeSafeFailureContent } from "@/lib/assistant-failure"
+import {
+  type AgentStreamEventV2,
+} from "@/lib/agent-stream-contracts"
+import { consumeAgentStreamV2 } from "@/lib/agent-stream-client"
+import {
+  parseThreadContextWindowV3,
+  type ThreadContextWindowV3,
+} from "@/lib/thread-context-window-v3"
+import {
+  LiveTurnSequenceError,
+  reduceLiveTurn,
+  type LiveTurnState,
+} from "@/lib/live-turn"
 
 const API_BASE_URL = requirePublicApiBaseUrl()
 
@@ -341,12 +354,14 @@ export default function Home() {
   const [contextUsageState, setContextUsageState] = useState(EMPTY_CONTEXT_USAGE_STATE)
   const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
   const [threadContextWindowV2, setThreadContextWindowV2] = useState<ThreadContextWindowV2 | null>(null)
+  const [threadContextWindowV3, setThreadContextWindowV3] = useState<ThreadContextWindowV3 | null>(null)
   const [graphManifest, setGraphManifest] = useState<GraphManifest | null>(null)
   const [graphManifestError, setGraphManifestError] = useState<GraphManifestUnavailable | null>(null)
   const [graphManifestLoading, setGraphManifestLoading] = useState(false)
   const [currentRequestId, setCurrentRequestId] = useState("")
   const [canContinue, setCanContinue] = useState(false)
   const [stopPending, setStopPending] = useState(false)
+  const [liveTurn, setLiveTurn] = useState<LiveTurnState | null>(null)
 
   // HIL state
   const [isInterrupted, setIsInterrupted] = useState(false)
@@ -378,6 +393,7 @@ export default function Home() {
   const abortControllerRef = useRef<AbortController | null>(null)
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const frontendPerformanceTrackerRef = useRef<FrontendPerformanceTracker | null>(null)
+  const liveTurnRef = useRef<LiveTurnState | null>(null)
 
   const clearStopTimeout = useCallback(() => {
     if (stopTimeoutRef.current) {
@@ -433,6 +449,15 @@ export default function Home() {
     requestIdRef.current = requestId
     setCurrentRequestId(requestId)
   }, [])
+
+  const beginRequestStream = useCallback((requestId: string) => {
+    liveTurnRef.current = null
+    setLiveTurn(null)
+    setThreadContextWindowV3((current) =>
+      current ? { ...current, updating: true } : null,
+    )
+    setActiveRequestId(requestId)
+  }, [setActiveRequestId])
 
   useEffect(() => {
     const storedHistory = normalizeChatHistory(readJSON<unknown>(A3_CHAT_HISTORY_KEY, []))
@@ -626,6 +651,9 @@ export default function Home() {
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
     setThreadContextWindowV2(null)
+    setThreadContextWindowV3(null)
+    liveTurnRef.current = null
+    setLiveTurn(null)
     setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
@@ -649,6 +677,9 @@ export default function Home() {
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
     setThreadContextWindowV2(null)
+    setThreadContextWindowV3(null)
+    liveTurnRef.current = null
+    setLiveTurn(null)
     setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
@@ -683,6 +714,9 @@ export default function Home() {
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
     setThreadContextWindowV2(null)
+    setThreadContextWindowV3(null)
+    liveTurnRef.current = null
+    setLiveTurn(null)
     setActiveRequestId("")
     setCanContinue(false)
     setStopPending(false)
@@ -720,6 +754,9 @@ export default function Home() {
       setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
       setBackgroundContextWindow(null)
       setThreadContextWindowV2(null)
+      setThreadContextWindowV3(null)
+      liveTurnRef.current = null
+      setLiveTurn(null)
     setActiveRequestId("")
       setIsInterrupted(false)
       setInterruptDraft("")
@@ -925,6 +962,24 @@ export default function Home() {
         clearStopTimeout()
         return
       }
+    }
+
+    if (data.type === "thread_context_window_v3") {
+      try {
+        setThreadContextWindowV3(
+          parseThreadContextWindowV3(data.thread_context_window_v3),
+        )
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Thread context v3 rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      return
     }
 
     if (data.type === "context_usage_report") {
@@ -1470,41 +1525,97 @@ export default function Home() {
     updateAssistantResourceStatus,
   ])
 
-  /** Read an SSE response body and dispatch events via processSSEEvent */
-  const consumeSSEStream = useCallback(async (body: ReadableStream<Uint8Array>) => {
+  /** Reduce one public V2 event before translating its committed/progress payload. */
+  const processAgentStreamEvent = useCallback((event: AgentStreamEventV2) => {
+    const current = liveTurnRef.current
+    const sameStream =
+      current !== null &&
+      current.streamId === event.streamId &&
+      current.requestId === event.requestId &&
+      current.threadId === event.threadId
+    if (sameStream && event.sequence <= current.lastSequence) return
+    if (current !== null && !sameStream) return
+
+    let next: LiveTurnState
+    try {
+      next = reduceLiveTurn(current, event)
+    } catch (error) {
+      const reason =
+        error instanceof LiveTurnSequenceError ? error.message : contractFailureReason(error)
+      setLogs((items) => [
+        ...items,
+        {
+          type: "error",
+          message: `[STREAM GAP] ${reason}`,
+          ts: timestamp(),
+        },
+      ])
+      throw error
+    }
+    liveTurnRef.current = next
+    setLiveTurn(next)
+
+    if (event.type === "stream_start") {
+      setActiveRequestId(event.requestId)
+      processSSEEvent({ type: "thread_id", thread_id: event.threadId })
+      return
+    }
+    if (event.type === "content_block_start" || event.type === "content_block_delta" || event.type === "content_block_stop") {
+      return
+    }
+    if (
+      event.type === "activity_update" ||
+      event.type === "tool_progress" ||
+      event.type === "artifact_progress"
+    ) {
+      const kind = event.data.kind
+      const payload = event.data.payload
+      if (typeof kind !== "string" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new LiveTurnSequenceError(`${event.type} payload is invalid`)
+      }
+      processSSEEvent({ type: kind, ...(payload as Record<string, unknown>) })
+      return
+    }
+    if (event.type === "stopped") {
+      processSSEEvent({ type: "run_status", run_status: "stopped", ...event.data })
+      return
+    }
+    if (event.type === "stream_error") {
+      processSSEEvent({ type: "error", ...event.data })
+      return
+    }
+    if (event.type === "stream_done") {
+      processSSEEvent({ type: "done", ...event.data })
+      liveTurnRef.current = null
+      setLiveTurn(null)
+      return
+    }
+    processSSEEvent({ type: event.type, ...event.data })
+  }, [processSSEEvent, setActiveRequestId])
+
+  /** Read, validate, replay-dedupe, and reconnect an agent_stream_v2 response. */
+  const consumeSSEStream = useCallback(async (
+    initialBody: ReadableStream<Uint8Array>,
+    signal?: AbortSignal,
+  ) => {
     streamLifecycleRef.current = beginStreamLifecycle()
     setContextUsageState((current) => beginContextUsageUpdate(current))
-    const reader = body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ""
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const parts = buffer.split("\n\n")
-      buffer = parts.pop() || ""
-
-      for (const part of parts) {
-        if (part.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(part.slice(6))
-            processSSEEvent(data)
-          } catch (error) {
-            setLogs((current) => [
-              ...current,
-              {
-                type: "warning",
-                message: `[SSE] Malformed event rejected: ${contractFailureReason(error)}`,
-                ts: timestamp(),
-              },
-            ])
-          }
+    await consumeAgentStreamV2({
+      initialBody,
+      onEvent: processAgentStreamEvent,
+      signal,
+      reconnect: async (streamId, lastEventId, reconnectSignal) => {
+        const response = await fetch(`${API_BASE_URL}/streams/${encodeURIComponent(streamId)}`, {
+          headers: { "Last-Event-ID": lastEventId, ...getAuthHeaders() },
+          signal: reconnectSignal,
+        })
+        if (!response.ok || !response.body) {
+          throw new Error(`Stream replay failed: HTTP ${response.status}`)
         }
-      }
-    }
-  }, [processSSEEvent])
+        return response.body
+      },
+    })
+  }, [processAgentStreamEvent])
 
   /** Fetch helper with shared HTTP error handling. Returns response body or null on handled error. */
   const fetchWithErrorHandling = useCallback(async (url: string, init: RequestInit): Promise<ReadableStream<Uint8Array> | null> => {
@@ -1594,6 +1705,21 @@ export default function Home() {
           {
             type: "warning",
             message: `[CONTRACT] Stored thread context v2 rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      try {
+        setThreadContextWindowV3(
+          parseThreadContextWindowV3(status.thread_context_window_v3),
+        )
+      } catch (error) {
+        setThreadContextWindowV3(null)
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Stored thread context v3 rejected: ${contractFailureReason(error)}`,
             ts: timestamp(),
           },
         ])
@@ -1695,6 +1821,8 @@ export default function Home() {
 
   const handleSendMessage = useCallback(async (content: string) => {
     const threadId = threadIdRef.current
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     assistantMessageIdRef.current = ""
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -1728,7 +1856,12 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ query: content, thread_id: threadId, user_id: userId }),
+        body: JSON.stringify({
+          query: content,
+          request_id: requestId,
+          thread_id: threadId,
+          user_id: userId,
+        }),
         signal: abortController.signal,
       })
 
@@ -1742,7 +1875,7 @@ export default function Home() {
         { id: assistantMessageId, role: "assistant", content: "" },
       ])
 
-      await consumeSSEStream(body)
+      await consumeSSEStream(body, abortController.signal)
 
       setLogs((prev) => [
         ...prev,
@@ -1770,7 +1903,7 @@ export default function Home() {
         abortControllerRef.current = null
       }
     }
-  }, [beginFrontendPerformanceTracking, clearStopTimeout, selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream, userId])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, clearStopTimeout, selectedChatId, messages.length, fetchWithErrorHandling, consumeSSEStream, userId])
 
   const handleStopGeneration = useCallback(async () => {
     const threadId = threadIdRef.current
@@ -1844,6 +1977,8 @@ export default function Home() {
       return
     }
 
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     setIsLoading(true)
     setCanContinue(false)
     setStopPending(false)
@@ -1864,11 +1999,12 @@ export default function Home() {
       beginFrontendPerformanceTracking()
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/continue`, {
         method: "POST",
-        headers: { ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ request_id: requestId }),
         signal: abortController.signal,
       })
       if (!body) return
-      await consumeSSEStream(body)
+      await consumeSSEStream(body, abortController.signal)
       setLogs((prev) => [
         ...prev,
         { type: streamHadErrorRef.current ? "error" : "info", message: "[RUN] Continue stream ended.", ts: timestamp() },
@@ -1887,7 +2023,7 @@ export default function Home() {
       }
       refreshThreadStatus(threadId)
     }
-  }, [beginFrontendPerformanceTracking, clearStopTimeout, consumeSSEStream, fetchWithErrorHandling, refreshThreadStatus])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, clearStopTimeout, consumeSSEStream, fetchWithErrorHandling, refreshThreadStatus])
 
   const handleResume = useCallback(async (editedPlan: string) => {
     const threadId = threadIdRef.current
@@ -1899,6 +2035,8 @@ export default function Home() {
       return
     }
 
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     setIsResuming(true)
     setLogs((prev) => [
       ...prev,
@@ -1910,7 +2048,11 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ thread_id: threadId, edited_plan: editedPlan }),
+        body: JSON.stringify({
+          request_id: requestId,
+          thread_id: threadId,
+          edited_plan: editedPlan,
+        }),
       })
 
       if (!body) return
@@ -1933,7 +2075,7 @@ export default function Home() {
       setIsResuming(false)
       setIsLoading(false)
     }
-  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, fetchWithErrorHandling, consumeSSEStream])
 
   const handleFeedback = useCallback(async (feedback: string) => {
     const threadId = threadIdRef.current
@@ -1945,6 +2087,8 @@ export default function Home() {
       return
     }
 
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     setIsResuming(true)
     setLogs((prev) => [
       ...prev,
@@ -1956,7 +2100,7 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ thread_id: threadId, feedback }),
+        body: JSON.stringify({ request_id: requestId, thread_id: threadId, feedback }),
       })
 
       if (!body) return
@@ -1988,7 +2132,7 @@ export default function Home() {
       setIsResuming(false)
       setIsLoading(false)
     }
-  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, fetchWithErrorHandling, consumeSSEStream])
 
   const handleMemoryConfirmation = useCallback(async (choice: "use" | "ignore") => {
     const threadId = threadIdRef.current
@@ -2000,6 +2144,8 @@ export default function Home() {
       return
     }
 
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     setIsMemoryConfirming(true)
     setIsLoading(true)
     setLogs((prev) => [
@@ -2016,7 +2162,11 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ thread_id: threadId, memory_use_choice: choice }),
+        body: JSON.stringify({
+          request_id: requestId,
+          thread_id: threadId,
+          memory_use_choice: choice,
+        }),
       })
 
       if (!body) return
@@ -2037,7 +2187,7 @@ export default function Home() {
       setIsMemoryConfirming(false)
       setIsLoading(false)
     }
-  }, [beginFrontendPerformanceTracking, fetchWithErrorHandling, consumeSSEStream])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, fetchWithErrorHandling, consumeSSEStream])
 
   const handleProfileCompletion = useCallback(async (completion: Record<string, string>) => {
     const threadId = threadIdRef.current
@@ -2049,6 +2199,8 @@ export default function Home() {
       return
     }
 
+    const requestId = crypto.randomUUID()
+    beginRequestStream(requestId)
     const nonEmptyCompletion = Object.fromEntries(
       Object.entries(completion).filter(([, value]) => value.trim().length > 0),
     )
@@ -2064,7 +2216,11 @@ export default function Home() {
       const body = await fetchWithErrorHandling(`${API_BASE_URL}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-        body: JSON.stringify({ thread_id: threadId, profile_completion: nonEmptyCompletion }),
+        body: JSON.stringify({
+          request_id: requestId,
+          thread_id: threadId,
+          profile_completion: nonEmptyCompletion,
+        }),
       })
 
       if (!body) return
@@ -2085,7 +2241,7 @@ export default function Home() {
       setIsProfileCompleting(false)
       setIsLoading(false)
     }
-  }, [beginFrontendPerformanceTracking, consumeSSEStream, fetchWithErrorHandling])
+  }, [beginFrontendPerformanceTracking, beginRequestStream, consumeSSEStream, fetchWithErrorHandling])
 
   return (
     <div className="a3-app-shell flex overflow-hidden">
@@ -2111,13 +2267,14 @@ export default function Home() {
       <div className="flex min-w-0 flex-1 flex-col h-full">
         <ChatArea
           messages={messages}
+          liveTurnContent={liveTurn?.provisionalAnswer ?? ""}
           onSendMessage={handleSendMessage}
           onStopGeneration={handleStopGeneration}
           onContinueThread={handleContinueThread}
           isLoading={isLoading && !isInterrupted}
           canContinue={canContinue && !isLoading && !isInterrupted}
           stopPending={stopPending}
-          threadContextWindow={threadContextWindowV2}
+          threadContextWindow={threadContextWindowV3}
           contextWindowCloseSignal={`${currentThreadId || ""}:${currentRequestId}:${isLoading ? "running" : "idle"}`}
         />
         {isInterrupted && (
