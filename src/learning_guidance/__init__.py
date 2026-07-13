@@ -1,0 +1,49 @@
+"""Strict learner-guidance domain contracts and dependency boundary."""
+
+from src.learning_guidance.contracts import (
+    LearnerGoalSignalV1,
+    LearnerHistoryEventV1,
+    LearnerHistorySnapshotV1,
+    LearnerPathEngineRequestV1,
+    LearnerPathPlanV1,
+    LearnerPathPlannerOutputV1,
+    LearnerPathStepV1,
+    LearnerPreferenceSignalV1,
+    LearnerProfileSnapshotV1,
+    LearnerSkillSignalV1,
+    RecommendationMode,
+    RecommendationResourceContextV1,
+    RecommendationScoreFactorsV1,
+    RecommendationScoreWeightsV1,
+    ResourceRecommendationBatchV1,
+    ResourceRecommendationEngineRequestV1,
+    ResourceRecommendationItemV1,
+    ResourceRecommendationOutputV1,
+)
+from src.learning_guidance.runtime import (
+    LearningGuidanceContractError,
+    LearningGuidanceRuntime,
+)
+
+__all__ = [
+    "LearnerGoalSignalV1",
+    "LearnerHistoryEventV1",
+    "LearnerHistorySnapshotV1",
+    "LearnerPathEngineRequestV1",
+    "LearnerPathPlanV1",
+    "LearnerPathPlannerOutputV1",
+    "LearnerPathStepV1",
+    "LearnerPreferenceSignalV1",
+    "LearnerProfileSnapshotV1",
+    "LearnerSkillSignalV1",
+    "LearningGuidanceContractError",
+    "LearningGuidanceRuntime",
+    "RecommendationMode",
+    "RecommendationResourceContextV1",
+    "RecommendationScoreFactorsV1",
+    "RecommendationScoreWeightsV1",
+    "ResourceRecommendationBatchV1",
+    "ResourceRecommendationEngineRequestV1",
+    "ResourceRecommendationItemV1",
+    "ResourceRecommendationOutputV1",
+]

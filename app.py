@@ -4380,6 +4380,7 @@ async def _generate_stream_drafts_impl(
         "context": CONTEXT_CLEAR,
         **initial_request_reset_transient_state(),
     }
+    state_input["user_id"] = _explicit_user_id_state_value(user_id)
     if graph_version:
         state_input["graph_version"] = graph_version
     runtime_checkpointer_type = _graph_checkpointer_type(graph)
@@ -4709,6 +4710,12 @@ def _new_thread_id_for_request(request_id: str) -> str:
     """Keep retries without a client thread_id bound to one stable thread."""
 
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"a3-study-agent:request:{request_id}"))
+
+
+def _explicit_user_id_state_value(user_id: str | None) -> str:
+    """Preserve only the request user id; never derive identity from thread state."""
+
+    return user_id if user_id is not None else ""
 
 
 async def _generate_resume_stream_drafts_impl(

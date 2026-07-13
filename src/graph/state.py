@@ -351,6 +351,7 @@ def initial_request_reset_transient_state() -> dict:
     """
     return {
         # routing
+        "user_id": "",
         "intent": "unknown",
         "response_mode": "",
         "qa_scope": "",
@@ -524,9 +525,12 @@ def initial_request_reset_transient_state() -> dict:
         "blocked_resource_types": [],
         "learning_path": {},
         "curriculum_context": "",
+        "learner_path_planner_output": {},
         "quiz_results": [],
         "adaptive_tasks": [],
         "recommendations": [],
+        "recommendation_resource_context": [],
+        "resource_recommendation_output": {},
         "review_schedule": [],
         # run control
         "schema_version": "run_control_v1",
@@ -631,6 +635,7 @@ class LearningState(TypedDict):
     request_id: str  # Per-request trace identifier
     session_id: str  # Session identifier for trace grouping
     thread_id: str  # LangGraph thread identifier
+    user_id: str  # Explicit authenticated learner id; never derived from thread_id
     graph_version: str  # Deterministic compiled graph manifest version
     schema_version: str  # Run-control state schema version
     run_status: str  # running / stopping / stopped / completed / error
@@ -917,11 +922,16 @@ class LearningState(TypedDict):
     blocked_resource_types: list[str]  # Explicit insufficient-evidence resources
     learning_path: dict  # Curriculum Engine: LearningPath serialized
     curriculum_context: str  # KG-aware context string for study_plan_planner
+    learner_path_planner_output: dict  # Strict learner_path_planner_output_v1
     quiz_results: list[
         dict
     ]  # Assessment: recent quiz attempts with error classifications
     adaptive_tasks: list[dict]  # Assessment: generated adaptive practice tasks
     recommendations: list[dict]  # Recommendation Engine: ranked recommendations
+    recommendation_resource_context: list[
+        dict
+    ]  # Generated resources explicitly available to automatic recommendation
+    resource_recommendation_output: dict  # Strict resource_recommendation_output_v1
     review_schedule: list[dict]  # Assessment: due spaced repetition review items
     retry_count: int  # Hallucination retry counter
     hallucination_detected: bool  # Hallucination flag
