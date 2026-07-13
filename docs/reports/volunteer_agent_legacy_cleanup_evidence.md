@@ -134,7 +134,7 @@ compaction、Context Window V3、完整 transcript/checkpoint、`LearningState.c
 | 真实 gold | 本地未跟踪 `human_gold_v2.jsonl` 有 100 行，但 `historical_annotated_v2.jsonl` 为空；未有通过资格/数据所有者确认 | **未满足** |
 | P0/PG/PR/PGR 结果 | 只有 evaluator/config/门定义，未发现四变体真实 gold result bundle | **未满足** |
 | 真实 provider E2E | 现有报告没有给出新正式图从启动到 QA/资源/重连/评估的真实 provider 端到端通过证据 | **未满足** |
-| checkpoint migration | 迁移 CLI、旧节点 alias 周期和零旧 checkpoint 证明尚未完成 | **未满足** |
+| checkpoint migration | 已实现严格、默认 dry-run 的依赖注入迁移核心与 `--apply` 全批预验证；生产 checkpointer/graph/projector/schema validator adapter、旧节点 alias 周期、逐 checkpoint 写失败幂等恢复和零旧 checkpoint 证明仍未完成 | **未满足** |
 
 因此，当前允许推进“替代链路实现、志愿前端下线、迁移工具与测试”；禁止删除当前正式图、
 旧 checkpoint reader/alias 前置能力或任何仍被新链路实际消费的状态。
