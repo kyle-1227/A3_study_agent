@@ -1,12 +1,10 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
 import {
   BrainCircuit,
   ChevronLeft,
   ChevronRight,
-  GraduationCap,
   LogIn,
   LogOut,
   MessageSquare,
@@ -28,13 +26,6 @@ interface ChatHistoryItem {
   updatedAt?: number
 }
 
-export interface VolunteerHistoryItem {
-  id: string
-  title: string
-  targetRegion: string
-  homeRegion: string
-}
-
 interface LeftSidebarProps {
   chatHistory: ChatHistoryItem[]
   onNewChat: () => void
@@ -46,23 +37,6 @@ interface LeftSidebarProps {
   nickname?: string | null
   onStartOnboarding?: () => void
   onClearUser?: () => void
-}
-
-const VOLUNTEER_STORAGE_KEY = "volunteer_chat_history"
-
-export function getVolunteerHistory(): VolunteerHistoryItem[] {
-  if (typeof window === "undefined") return []
-  try {
-    const raw = localStorage.getItem(VOLUNTEER_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-
-export function saveVolunteerHistory(items: VolunteerHistoryItem[]) {
-  if (typeof window === "undefined") return
-  localStorage.setItem(VOLUNTEER_STORAGE_KEY, JSON.stringify(items))
 }
 
 export function LeftSidebar({
@@ -78,33 +52,10 @@ export function LeftSidebar({
   onClearUser,
 }: LeftSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
-  const [volunteerHistory, setVolunteerHistory] = useState<VolunteerHistoryItem[]>([])
-  const router = useRouter()
 
   useEffect(() => {
     if (window.matchMedia("(max-width: 767px)").matches) setIsCollapsed(true)
   }, [])
-
-  useEffect(() => {
-    setVolunteerHistory(getVolunteerHistory())
-    const onStorage = () => setVolunteerHistory(getVolunteerHistory())
-    window.addEventListener("storage", onStorage)
-    return () => window.removeEventListener("storage", onStorage)
-  }, [])
-
-  useEffect(() => {
-    const onFocus = () => setVolunteerHistory(getVolunteerHistory())
-    window.addEventListener("focus", onFocus)
-    return () => window.removeEventListener("focus", onFocus)
-  }, [])
-
-  const handleNewVolunteer = () => {
-    router.push("/volunteer")
-  }
-
-  const handleSelectVolunteer = (id: string) => {
-    router.push(`/volunteer?chatId=${encodeURIComponent(id)}`)
-  }
 
   return (
     <aside
@@ -135,15 +86,6 @@ export function LeftSidebar({
               title="发起新对话"
             >
               <MessageSquarePlus className="h-5 w-5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleNewVolunteer}
-              className="h-10 w-10 text-primary hover:bg-sidebar-accent"
-              title="志愿填报"
-            >
-              <GraduationCap className="h-5 w-5" />
             </Button>
           </div>
         </>
@@ -185,43 +127,6 @@ export function LeftSidebar({
                 </div>
               </div>
             </div>
-          </div>
-
-          <div className="px-4 pb-3">
-            <div className="flex items-center justify-between pb-2">
-              <span className="text-xs font-semibold text-muted-foreground">志愿填报</span>
-              <button
-                type="button"
-                onClick={handleNewVolunteer}
-                className="rounded px-1.5 py-0.5 text-xs font-medium text-primary hover:bg-sidebar-accent"
-              >
-                + 新建
-              </button>
-            </div>
-            {volunteerHistory.length > 0 ? (
-              <div className="flex max-h-36 flex-col gap-0.5 overflow-y-auto">
-                {volunteerHistory.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => handleSelectVolunteer(item.id)}
-                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                  >
-                    <GraduationCap className="h-4 w-4 shrink-0 text-primary" />
-                    <div className="min-w-0">
-                      <span className="block truncate">{item.title}</span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
-                        {item.homeRegion} -&gt; {item.targetRegion}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="rounded-lg bg-sidebar-accent/50 px-3 py-2 text-xs text-muted-foreground">
-                暂无志愿填报记录
-              </p>
-            )}
           </div>
 
           <div className="px-4 pb-4">

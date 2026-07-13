@@ -1,7 +1,6 @@
 "use client"
 
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { useRouter } from "next/navigation"
 import {
   Bot,
   BrainCircuit,
@@ -217,7 +216,6 @@ export function ChatArea({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const router = useRouter()
   const isScrolling = useScrollActivity(scrollContainerRef)
   const renderedLiveTurnContent = useAnimationFrameValue(liveTurnContent)
 
@@ -382,18 +380,6 @@ export function ChatArea({
                   </div>
                 )}
               </div>
-
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => router.push("/volunteer")}
-                className="h-9 w-9 rounded-full px-0 text-muted-foreground hover:bg-card/70 hover:text-primary md:w-auto md:px-3"
-                title="志愿填报"
-              >
-                <GraduationCap className="h-4 w-4" />
-                <span className="hidden text-sm md:inline">志愿填报</span>
-              </Button>
 
               <div className="flex-1" />
 
