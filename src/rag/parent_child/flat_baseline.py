@@ -27,6 +27,10 @@ from src.rag.parent_child._storage_io import (
     sha256_bytes,
 )
 from src.rag.parent_child.bm25_artifact import digest_identifier_set
+from src.rag.parent_child.embedding_batches import (
+    EmbeddingBatchExecutionError,
+    iter_bounded_document_embedding_batches,
+)
 from src.rag.parent_child.manifests import EmbeddingManifestIdentity
 from src.rag.parent_child.retrieval import RerankCandidate, RerankScore
 
@@ -388,6 +392,7 @@ def write_flat_baseline_collection(
     manifest: FlatBaselineManifest,
     embedding_provider: DocumentEmbeddingProvider,
     batch_size: int,
+    max_in_flight_batches: int,
 ) -> None:
     """Create a new verified flat Chroma collection; existing paths are rejected."""
 
@@ -395,6 +400,10 @@ def write_flat_baseline_collection(
         raise FlatBaselineError("flat baseline build requires at least one document")
     if batch_size <= 0:
         raise ValueError("flat baseline batch_size must be positive")
+    if type(max_in_flight_batches) is not int or not 1 <= max_in_flight_batches <= 4:
+        raise ValueError(
+            "flat baseline max_in_flight_batches must be an integer from 1 to 4"
+        )
     if persist_directory.exists() or persist_directory.is_symlink():
         raise FlatBaselineError(
             "flat baseline persist directory must not already exist"
@@ -423,32 +432,42 @@ def write_flat_baseline_collection(
                 embedding_function=None,
                 get_or_create=False,
             )
-            for start in range(0, len(documents), batch_size):
-                batch = tuple(documents[start : start + batch_size])
-                try:
-                    vectors = embedding_provider.embed_documents(
-                        [item.content for item in batch]
+            try:
+                for embedded_batch in iter_bounded_document_embedding_batches(
+                    texts=tuple(item.content for item in documents),
+                    batch_size=batch_size,
+                    max_in_flight_batches=max_in_flight_batches,
+                    embed_documents=embedding_provider.embed_documents,
+                ):
+                    batch = tuple(
+                        documents[
+                            embedded_batch.batch_start : embedded_batch.batch_start
+                            + embedded_batch.batch_size
+                        ]
                     )
-                except Exception as exc:
-                    raise FlatBaselineError(
-                        "flat baseline embedding provider failed"
-                    ) from exc
-                if len(vectors) != len(batch):
-                    raise FlatBaselineError(
-                        "flat baseline embedding response cardinality mismatch"
+                    vectors = embedded_batch.result
+                    if not isinstance(vectors, list) or len(vectors) != len(batch):
+                        raise FlatBaselineError(
+                            "flat baseline embedding response cardinality mismatch"
+                        )
+                    normalized = [
+                        _validate_embedding_vector(
+                            vector, dimension=manifest.embedding.dimension
+                        )
+                        for vector in vectors
+                    ]
+                    collection.add(
+                        ids=[item.metadata.chunk_id for item in batch],
+                        documents=[item.content for item in batch],
+                        metadatas=[
+                            item.metadata.to_chroma_metadata() for item in batch
+                        ],
+                        embeddings=normalized,
                     )
-                normalized = [
-                    _validate_embedding_vector(
-                        vector, dimension=manifest.embedding.dimension
-                    )
-                    for vector in vectors
-                ]
-                collection.add(
-                    ids=[item.metadata.chunk_id for item in batch],
-                    documents=[item.content for item in batch],
-                    metadatas=[item.metadata.to_chroma_metadata() for item in batch],
-                    embeddings=normalized,
-                )
+            except EmbeddingBatchExecutionError as exc:
+                raise FlatBaselineError(
+                    "flat baseline embedding provider failed"
+                ) from exc
             actual_ids = read_flat_collection_ids(
                 collection=collection,
                 expected_count=manifest.chunk_count,

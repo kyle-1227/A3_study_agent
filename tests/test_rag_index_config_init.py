@@ -174,6 +174,8 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "2.0",
         "--embedding-batch-size",
         "20",
+        "--embedding-max-in-flight-batches",
+        "1",
         "--embedding-expected-dimension",
         "1024",
         "--embedding-distance-metric",
@@ -385,6 +387,16 @@ def test_init_rejects_project_escape_and_symlink_policy_fragment(
 def test_init_cli_requires_explicit_provider_and_policy_inputs() -> None:
     with pytest.raises(SystemExit):
         _parser().parse_args([])
+
+
+def test_init_cli_requires_explicit_embedding_concurrency(tmp_path: Path) -> None:
+    project_root, policy_path = _project(tmp_path)
+    arguments = _arguments(project_root, policy_path)
+    index = arguments.index("--embedding-max-in-flight-batches")
+    del arguments[index : index + 2]
+
+    with pytest.raises(SystemExit):
+        main(arguments)
 
 
 def test_init_cli_requires_explicit_provider_routing(tmp_path: Path) -> None:

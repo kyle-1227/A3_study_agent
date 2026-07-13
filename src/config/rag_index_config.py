@@ -208,6 +208,7 @@ class EmbeddingConfig(StrictRagConfigModel):
     timeout_seconds: PositiveFloat
     retry: RetryConfig
     batch_size: PositiveInt
+    max_in_flight_batches: Annotated[PositiveInt, Field(le=4)]
     expected_dimension: PositiveInt
     distance_metric: Literal["cosine", "l2", "ip"]
     normalization_contract: NonBlankStr

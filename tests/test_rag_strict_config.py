@@ -158,6 +158,7 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "timeout_seconds": 30.0,
             "retry": _retry_payload(),
             "batch_size": 32,
+            "max_in_flight_batches": 1,
             "expected_dimension": 1024,
             "distance_metric": "cosine",
             "normalization_contract": "unit_length_v1",
@@ -210,6 +211,20 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "subject_coverage_quota": 1,
         },
     }
+
+
+@pytest.mark.parametrize("max_in_flight_batches", (0, 5))
+def test_embedding_config_requires_bounded_explicit_concurrency(
+    tmp_path: Path,
+    max_in_flight_batches: int,
+) -> None:
+    payload = _index_payload(tmp_path)
+    embedding = payload["embedding"]
+    assert isinstance(embedding, dict)
+    embedding["max_in_flight_batches"] = max_in_flight_batches
+
+    with pytest.raises(ValidationError, match="max_in_flight_batches"):
+        RagIndexConfig.model_validate(payload)
 
 
 def _candidate_grid_payload() -> dict[str, object]:

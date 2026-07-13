@@ -307,6 +307,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     embedding.add_argument("--embedding-retry-multiplier", type=float, required=True)
     embedding.add_argument("--embedding-batch-size", type=int, required=True)
+    embedding.add_argument(
+        "--embedding-max-in-flight-batches",
+        type=int,
+        required=True,
+    )
     embedding.add_argument("--embedding-expected-dimension", type=int, required=True)
     embedding.add_argument(
         "--embedding-distance-metric",
@@ -487,6 +492,7 @@ def _embedding_from_args(args: argparse.Namespace) -> EmbeddingConfig:
         timeout_seconds=args.embedding_timeout_seconds,
         retry=_retry_from_args(args, "embedding"),
         batch_size=args.embedding_batch_size,
+        max_in_flight_batches=args.embedding_max_in_flight_batches,
         expected_dimension=args.embedding_expected_dimension,
         distance_metric=args.embedding_distance_metric,
         normalization_contract=args.embedding_normalization_contract,

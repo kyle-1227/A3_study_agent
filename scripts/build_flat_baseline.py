@@ -252,6 +252,7 @@ def build_flat_baseline(
             manifest=manifest,
             embedding_provider=embedding,
             batch_size=config.embedding.batch_size,
+            max_in_flight_batches=config.embedding.max_in_flight_batches,
         )
     finally:
         embedding.close()

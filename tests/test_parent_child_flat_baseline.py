@@ -141,6 +141,7 @@ def test_flat_baseline_chroma_round_trip_pages_full_collection_and_runs_all_requ
         manifest=manifest,
         embedding_provider=embedding,
         batch_size=2,
+        max_in_flight_batches=1,
     )
 
     runtime = FlatBaselineRuntime(

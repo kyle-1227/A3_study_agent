@@ -148,6 +148,7 @@ def test_chroma_writer_persists_and_verifies_exact_children(tmp_path: Path) -> N
         distance_metric="cosine",
         expected_dimension=3,
         batch_size=1,
+        max_in_flight_batches=1,
         embedding_provider=embedding,
     )
 
@@ -206,6 +207,7 @@ def test_chroma_writer_rejects_invalid_child_set_before_creation(
             distance_metric="cosine",
             expected_dimension=3,
             batch_size=8,
+            max_in_flight_batches=1,
             embedding_provider=DeterministicEmbedding(3),
         )
     assert not persist_directory.exists()
@@ -224,6 +226,7 @@ def test_chroma_writer_rejects_embedding_dimension_mismatch(tmp_path: Path) -> N
             distance_metric="cosine",
             expected_dimension=3,
             batch_size=8,
+            max_in_flight_batches=1,
             embedding_provider=WrongDimensionEmbedding(),
         )
 
@@ -243,6 +246,7 @@ def test_chroma_writer_is_staging_only_and_immutable(tmp_path: Path) -> None:
             distance_metric="cosine",
             expected_dimension=3,
             batch_size=8,
+            max_in_flight_batches=1,
             embedding_provider=DeterministicEmbedding(3),
         )
 
@@ -259,6 +263,7 @@ def test_chroma_writer_is_staging_only_and_immutable(tmp_path: Path) -> None:
             distance_metric="cosine",
             expected_dimension=3,
             batch_size=8,
+            max_in_flight_batches=1,
             embedding_provider=DeterministicEmbedding(3),
         )
 
@@ -331,5 +336,6 @@ def test_chroma_writer_detects_document_roundtrip_corruption(
             distance_metric="cosine",
             expected_dimension=3,
             batch_size=8,
+            max_in_flight_batches=1,
             embedding_provider=DeterministicEmbedding(3),
         )

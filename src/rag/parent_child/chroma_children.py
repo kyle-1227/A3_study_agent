@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.rag.parent_child._storage_io import validate_generation_id
 from src.rag.parent_child.bm25_artifact import digest_identifier_set
+from src.rag.parent_child.embedding_batches import (
+    EmbeddingBatchExecutionError,
+    iter_bounded_document_embedding_batches,
+)
 from src.rag.parent_child.exceptions import ParentChildError
 from src.rag.parent_child.models import ChildDocument
 
@@ -149,6 +153,7 @@ def _validate_writer_inputs(
     distance_metric: str,
     expected_dimension: int,
     batch_size: int,
+    max_in_flight_batches: int,
 ) -> None:
     _validate_collection_name(collection_name)
     if distance_metric not in {"cosine", "l2", "ip"}:
@@ -157,6 +162,10 @@ def _validate_writer_inputs(
         raise ChromaInputContractError("expected_dimension must be a positive integer")
     if type(batch_size) is not int or batch_size <= 0:
         raise ChromaInputContractError("batch_size must be a positive integer")
+    if type(max_in_flight_batches) is not int or not 1 <= max_in_flight_batches <= 4:
+        raise ChromaInputContractError(
+            "max_in_flight_batches must be an integer from 1 to 4"
+        )
 
 
 def _prepare_children(
@@ -198,22 +207,13 @@ def _prepare_children(
     return tuple(sorted(prepared, key=lambda item: item.child_id))
 
 
-def _embed_batch(
-    embedding_provider: DocumentEmbeddingProvider,
+def _validate_embedding_batch(
+    vectors: object,
     batch: Sequence[_ExpectedChild],
     *,
     expected_dimension: int,
     batch_start: int,
 ) -> list[list[float]]:
-    try:
-        vectors = embedding_provider.embed_documents(
-            [expected.document for expected in batch]
-        )
-    except Exception:
-        raise ChromaEmbeddingContractError(
-            "document embedding failed for "
-            f"batch_start={batch_start}, batch_size={len(batch)}"
-        ) from None
     if not isinstance(vectors, list) or len(vectors) != len(batch):
         raise ChromaEmbeddingContractError(
             "embedding result cardinality must equal input cardinality"
@@ -413,6 +413,7 @@ def write_child_chroma_artifact(
     distance_metric: DistanceMetric,
     expected_dimension: int,
     batch_size: int,
+    max_in_flight_batches: int,
     embedding_provider: DocumentEmbeddingProvider,
 ) -> ChromaChildrenArtifact:
     """Create and fully verify one immutable child collection in staging."""
@@ -423,6 +424,7 @@ def write_child_chroma_artifact(
         distance_metric=distance_metric,
         expected_dimension=expected_dimension,
         batch_size=batch_size,
+        max_in_flight_batches=max_in_flight_batches,
     )
     staging_root, persist_path, relative_path = _validate_staging_paths(
         generation_staging_root=generation_staging_root,
@@ -455,20 +457,33 @@ def write_child_chroma_artifact(
                 embedding_function=None,
                 get_or_create=False,
             )
-            for start in range(0, len(prepared), batch_size):
-                batch = prepared[start : start + batch_size]
-                vectors = _embed_batch(
-                    embedding_provider,
-                    batch,
-                    expected_dimension=expected_dimension,
-                    batch_start=start,
-                )
-                collection.add(
-                    ids=[item.child_id for item in batch],
-                    documents=[item.document for item in batch],
-                    metadatas=[item.metadata for item in batch],
-                    embeddings=vectors,
-                )
+            try:
+                for embedded_batch in iter_bounded_document_embedding_batches(
+                    texts=tuple(item.document for item in prepared),
+                    batch_size=batch_size,
+                    max_in_flight_batches=max_in_flight_batches,
+                    embed_documents=embedding_provider.embed_documents,
+                ):
+                    batch = prepared[
+                        embedded_batch.batch_start : embedded_batch.batch_start
+                        + embedded_batch.batch_size
+                    ]
+                    vectors = _validate_embedding_batch(
+                        embedded_batch.result,
+                        batch,
+                        expected_dimension=expected_dimension,
+                        batch_start=embedded_batch.batch_start,
+                    )
+                    collection.add(
+                        ids=[item.child_id for item in batch],
+                        documents=[item.document for item in batch],
+                        metadatas=[item.metadata for item in batch],
+                        embeddings=vectors,
+                    )
+            except EmbeddingBatchExecutionError:
+                raise ChromaEmbeddingContractError(
+                    "document embedding failed during bounded batch execution"
+                ) from None
             collection_names = {item.name for item in client.list_collections()}
             if collection_names != {collection_name}:
                 raise ChromaVerificationError(

@@ -78,6 +78,7 @@ def test_sealed_chroma_vector_and_subject_bm25_resources_round_trip(
         distance_metric="cosine",
         expected_dimension=2,
         batch_size=2,
+        max_in_flight_batches=1,
         embedding_provider=_DocumentEmbedding(),
     )
     vector = ChromaChildSearchChannel(

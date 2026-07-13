@@ -391,6 +391,7 @@ class GenerationBuilder:
                 distance_metric=self._config.embedding.distance_metric,
                 expected_dimension=self._config.embedding.expected_dimension,
                 batch_size=self._config.embedding.batch_size,
+                max_in_flight_batches=(self._config.embedding.max_in_flight_batches),
                 embedding_provider=self._embedding_provider,
             )
             chroma_ms = _elapsed_ms(stage_start)
