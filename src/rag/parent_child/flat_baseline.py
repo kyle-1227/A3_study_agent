@@ -8,7 +8,7 @@ can compare it with a parent-child generation without consulting active state.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -284,6 +284,103 @@ def _collection_metadata(*, manifest: FlatBaselineManifest) -> dict[str, str | i
     }
 
 
+def _iter_flat_collection_pages(
+    *,
+    collection: object,
+    expected_count: int,
+    page_size: int,
+    include: tuple[Literal["documents", "metadatas"], ...],
+) -> Iterator[tuple[tuple[str, ...], dict[str, object]]]:
+    """Read every flat Chroma row in explicit bounded pages.
+
+    Chroma translates an unbounded ``Collection.get`` into a SQL query whose
+    variable count can exceed SQLite's limit for a production-sized corpus.
+    Pagination is therefore a persistence protocol invariant, not a best-effort
+    optimization.  Each page must be complete and disjoint; callers still
+    verify their full ID-set digest after this iterator returns.
+    """
+
+    if expected_count <= 0:
+        raise FlatBaselineError("flat Chroma expected count must be positive")
+    if page_size <= 0:
+        raise FlatBaselineError("flat Chroma read page size must be positive")
+    get = getattr(collection, "get", None)
+    if not callable(get):
+        raise FlatBaselineError("flat Chroma collection does not expose get")
+
+    seen_identifiers: set[str] = set()
+    for offset in range(0, expected_count, page_size):
+        limit = min(page_size, expected_count - offset)
+        try:
+            payload = get(limit=limit, offset=offset, include=list(include))
+        except Exception as exc:
+            raise FlatBaselineError("flat Chroma paged get failed") from exc
+        if not isinstance(payload, dict):
+            raise FlatBaselineError("flat Chroma paged get payload is invalid")
+        raw_identifiers = payload.get("ids")
+        if not isinstance(raw_identifiers, list) or len(raw_identifiers) != limit:
+            raise FlatBaselineError("flat Chroma paged get cardinality mismatch")
+        identifiers: list[str] = []
+        for raw_identifier in raw_identifiers:
+            if not isinstance(raw_identifier, str) or not raw_identifier:
+                raise FlatBaselineError("flat Chroma paged get identifier is invalid")
+            if raw_identifier in seen_identifiers:
+                raise FlatBaselineError("flat Chroma paged get returned duplicate ID")
+            identifiers.append(raw_identifier)
+        seen_identifiers.update(identifiers)
+        yield tuple(identifiers), dict(payload)
+
+    if len(seen_identifiers) != expected_count:
+        raise FlatBaselineError("flat Chroma paged get did not cover expected IDs")
+
+
+def read_flat_collection_ids(
+    *, collection: object, expected_count: int, page_size: int
+) -> tuple[str, ...]:
+    """Return the full persisted ID set without an unbounded Chroma query."""
+
+    identifiers: list[str] = []
+    for page_identifiers, _ in _iter_flat_collection_pages(
+        collection=collection,
+        expected_count=expected_count,
+        page_size=page_size,
+        include=(),
+    ):
+        identifiers.extend(page_identifiers)
+    return tuple(identifiers)
+
+
+def read_flat_collection_documents(
+    *, collection: object, expected_count: int, page_size: int
+) -> tuple[FlatBaselineDocument, ...]:
+    """Decode every persisted flat document through the bounded-read contract."""
+
+    documents: list[FlatBaselineDocument] = []
+    for identifiers, payload in _iter_flat_collection_pages(
+        collection=collection,
+        expected_count=expected_count,
+        page_size=page_size,
+        include=("documents", "metadatas"),
+    ):
+        raw_documents = payload.get("documents")
+        raw_metadatas = payload.get("metadatas")
+        if not (
+            isinstance(raw_documents, list)
+            and isinstance(raw_metadatas, list)
+            and len(raw_documents) == len(raw_metadatas) == len(identifiers)
+        ):
+            raise FlatBaselineError("flat Chroma paged document payload is invalid")
+        documents.extend(
+            _decode_document(identifier, document, metadata)
+            for identifier, document, metadata in zip(
+                identifiers, raw_documents, raw_metadatas, strict=True
+            )
+        )
+    if len(documents) != expected_count:
+        raise FlatBaselineError("flat Chroma paged document count mismatch")
+    return tuple(documents)
+
+
 def write_flat_baseline_collection(
     *,
     documents: Sequence[FlatBaselineDocument],
@@ -352,8 +449,11 @@ def write_flat_baseline_collection(
                     metadatas=[item.metadata.to_chroma_metadata() for item in batch],
                     embeddings=normalized,
                 )
-            persisted = collection.get(include=["documents", "metadatas"])
-            actual_ids = tuple(str(item) for item in (persisted.get("ids") or []))
+            actual_ids = read_flat_collection_ids(
+                collection=collection,
+                expected_count=manifest.chunk_count,
+                page_size=batch_size,
+            )
             if (
                 len(actual_ids) != manifest.chunk_count
                 or digest_identifier_set(actual_ids) != manifest.chunk_id_set_sha256
@@ -380,6 +480,7 @@ class FlatBaselineRuntime:
         query_embedding_provider: QueryEmbeddingProvider,
         reranker: FlatReranker,
         tokenizer: Callable[[str], Sequence[str]],
+        read_page_size: int,
     ) -> None:
         if persist_directory.is_symlink() or not persist_directory.is_dir():
             raise FlatBaselineError(
@@ -403,15 +504,10 @@ class FlatBaselineRuntime:
             self.close()
             raise FlatBaselineError("flat baseline collection metadata mismatch")
         try:
-            payload = self._collection.get(include=["documents", "metadatas"])
-            ids = payload.get("ids") or []
-            docs = payload.get("documents") or []
-            metas = payload.get("metadatas") or []
-            if not (len(ids) == len(docs) == len(metas) == manifest.chunk_count):
-                raise FlatBaselineError("flat baseline collection cardinality mismatch")
-            corpus = tuple(
-                _decode_document(identifier, document, metadata)
-                for identifier, document, metadata in zip(ids, docs, metas, strict=True)
+            corpus = read_flat_collection_documents(
+                collection=self._collection,
+                expected_count=manifest.chunk_count,
+                page_size=read_page_size,
             )
             if (
                 digest_identifier_set(tuple(item.metadata.chunk_id for item in corpus))

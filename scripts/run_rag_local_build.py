@@ -1328,6 +1328,7 @@ def _validate_flat_baseline(
         FlatBaselineChunkMetadata,
         FlatBaselineDocument,
         FlatBaselineManifest,
+        read_flat_collection_ids,
     )
     from src.rag.parent_child.provider_clients import StrictEmbeddingClient
 
@@ -1350,11 +1351,11 @@ def _validate_flat_baseline(
             raise LocalBuildError("FlatChromaCountMismatch")
         if collection.metadata != expected_metadata:
             raise LocalBuildError("FlatChromaMetadataMismatch")
-        all_records = collection.get(include=["metadatas"])
-        raw_ids = all_records.get("ids")
-        if not isinstance(raw_ids, list) or len(raw_ids) != manifest.chunk_count:
-            raise LocalBuildError("FlatChromaIdsInvalid")
-        ids = tuple(str(item) for item in raw_ids)
+        ids = read_flat_collection_ids(
+            collection=collection,
+            expected_count=manifest.chunk_count,
+            page_size=context.config.embedding.batch_size,
+        )
         sample_ids = _sample_ids(ids)
         sample = collection.get(
             ids=list(sample_ids), include=["documents", "metadatas", "embeddings"]
@@ -1730,6 +1731,7 @@ def _run_smoke_retrieval(
             query_embedding_provider=embedding,
             reranker=reranker,
             tokenizer=tokenizer,
+            read_page_size=context.config.embedding.batch_size,
         )
         candidate_runtime = load_generation_runtime(
             config=context.config,

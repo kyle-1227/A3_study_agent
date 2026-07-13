@@ -374,6 +374,7 @@ def run_benchmark(
             query_embedding_provider=embedding,
             reranker=reranker,
             tokenizer=tokenizer,
+            read_page_size=config.embedding.batch_size,
         )
         baseline_binding = BenchmarkRunBinding(
             schema_version="benchmark_run_binding_v1",

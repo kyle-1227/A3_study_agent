@@ -6,9 +6,11 @@ from pathlib import Path
 from src.rag.parent_child.flat_baseline import (
     FlatBaselineChunkMetadata,
     FlatBaselineDocument,
+    FlatBaselineError,
     FlatBaselineRuntime,
     build_flat_baseline_manifest,
     make_flat_chunk_id,
+    read_flat_collection_ids,
     write_flat_baseline_collection,
 )
 from src.rag.parent_child.manifests import EmbeddingManifestIdentity
@@ -37,6 +39,35 @@ class _Reranker:
             )
             for index, candidate in enumerate(candidates)
         )
+
+
+class _PagedIdentifierCollection:
+    def __init__(self, identifiers: tuple[str, ...], *, page_size: int) -> None:
+        self._identifiers = identifiers
+        self._page_size = page_size
+        self.calls: list[tuple[int, int, tuple[object, ...]]] = []
+
+    def get(
+        self, *, limit: int | None = None, offset: int | None = None, include: object
+    ) -> dict[str, object]:
+        if limit is None or offset is None:
+            raise AssertionError("bounded collection reads require limit and offset")
+        if limit > self._page_size:
+            raise AssertionError("collection read exceeded its declared page size")
+        if not isinstance(include, list):
+            raise AssertionError("collection include must be an explicit list")
+        self.calls.append((limit, offset, tuple(include)))
+        return {"ids": list(self._identifiers[offset : offset + limit])}
+
+
+class _LateDuplicateIdentifierCollection(_PagedIdentifierCollection):
+    def get(
+        self, *, limit: int | None = None, offset: int | None = None, include: object
+    ) -> dict[str, object]:
+        payload = super().get(limit=limit, offset=offset, include=include)
+        if offset == 4:
+            payload["ids"] = [self._identifiers[0]]
+        return payload
 
 
 def _document(*, name: str, content: str, chunk_index: int) -> FlatBaselineDocument:
@@ -76,12 +107,15 @@ def _document(*, name: str, content: str, chunk_index: int) -> FlatBaselineDocum
     )
 
 
-def test_flat_baseline_chroma_round_trip_runs_all_required_channels(
+def test_flat_baseline_chroma_round_trip_pages_full_collection_and_runs_all_required_channels(
     tmp_path: Path,
 ) -> None:
     documents = (
         _document(name="c", content="calculus alpha", chunk_index=0),
         _document(name="d", content="calculus beta", chunk_index=1),
+        _document(name="e", content="calculus gamma", chunk_index=2),
+        _document(name="f", content="calculus delta", chunk_index=3),
+        _document(name="a", content="calculus epsilon", chunk_index=4),
     )
     manifest = build_flat_baseline_manifest(
         collection_name="flat_test",
@@ -115,23 +149,59 @@ def test_flat_baseline_chroma_round_trip_runs_all_required_channels(
         query_embedding_provider=embedding,
         reranker=_Reranker(),
         tokenizer=lambda text: tuple(text.split()),
+        read_page_size=2,
     )
     try:
         result = runtime.retrieve(
             query="calculus",
             subject="math",
-            vector_top_k=2,
-            bm25_top_k=2,
-            reranker_top_n=2,
+            vector_top_k=5,
+            bm25_top_k=5,
+            reranker_top_n=5,
         )
     finally:
         runtime.close()
 
-    assert tuple(hit.rank for hit in result.hits) == (1, 2)
+    assert tuple(hit.rank for hit in result.hits) == (1, 2, 3, 4, 5)
     assert {hit.document.metadata.source_relpath for hit in result.hits} == {
         "math/c.txt",
         "math/d.txt",
+        "math/e.txt",
+        "math/f.txt",
+        "math/a.txt",
     }
     assert result.vector_ms >= 0.0
     assert result.bm25_ms >= 0.0
     assert result.reranker_ms >= 0.0
+
+
+def test_flat_baseline_full_read_requires_explicit_bounded_pages() -> None:
+    collection = _PagedIdentifierCollection(
+        ("flat_a", "flat_b", "flat_c", "flat_d", "flat_e"), page_size=2
+    )
+
+    identifiers = read_flat_collection_ids(
+        collection=collection,
+        expected_count=5,
+        page_size=2,
+    )
+
+    assert identifiers == ("flat_a", "flat_b", "flat_c", "flat_d", "flat_e")
+    assert collection.calls == [(2, 0, ()), (2, 2, ()), (1, 4, ())]
+
+
+def test_flat_baseline_full_read_rejects_late_page_duplicate_identifier() -> None:
+    collection = _LateDuplicateIdentifierCollection(
+        ("flat_a", "flat_b", "flat_c", "flat_d", "flat_e"), page_size=2
+    )
+
+    try:
+        read_flat_collection_ids(
+            collection=collection,
+            expected_count=5,
+            page_size=2,
+        )
+    except FlatBaselineError as exc:
+        assert str(exc) == "flat Chroma paged get returned duplicate ID"
+    else:
+        raise AssertionError("late-page duplicate IDs must fail the full read")
