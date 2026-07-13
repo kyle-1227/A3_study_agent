@@ -23,6 +23,22 @@ class ProviderTransportError(ProviderClientError):
     """The configured endpoint failed after its explicit retry policy."""
 
 
+class ProviderReportedError(ProviderTransportError):
+    """The configured provider returned a strict error envelope."""
+
+    def __init__(
+        self,
+        *,
+        code: int,
+        retryable: bool,
+        attempts_exhausted: bool,
+    ) -> None:
+        self.code = code
+        self.retryable = retryable
+        self.attempts_exhausted = attempts_exhausted
+        super().__init__("provider returned an explicit error envelope")
+
+
 class ProviderProtocolError(ProviderClientError):
     """The configured endpoint returned a response outside its strict schema."""
 
@@ -127,6 +143,29 @@ class _OpenRouterRerankerResponse(_StrictResponse):
     usage: _OpenRouterRerankerUsage
 
 
+_RETRYABLE_PROVIDER_ERROR_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def _strict_provider_error_code(payload: object) -> int | None:
+    """Recognize only OpenRouter's exact, redacted error-envelope boundary."""
+
+    if not isinstance(payload, dict) or set(payload) != {"error"}:
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict) or set(error) not in (
+        {"code", "message"},
+        {"code", "message", "metadata"},
+    ):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    if type(code) is not int or not isinstance(message, str) or not message:
+        return None
+    if "metadata" in error and not isinstance(error.get("metadata"), dict):
+        return None
+    return code
+
+
 class _StrictJsonHttpClient:
     def __init__(
         self,
@@ -177,19 +216,37 @@ class _StrictJsonHttpClient:
                 self._last_http_status = response.status_code
                 if 200 <= response.status_code < 300:
                     try:
-                        return response.json()
+                        decoded = response.json()
                     except ValueError as exc:
                         raise ProviderProtocolError(
                             "provider response is not valid JSON"
                         ) from exc
-                last_reason = f"http_{response.status_code}"
-                retryable = response.status_code in {408, 429} or (
-                    500 <= response.status_code < 600
-                )
-                if not retryable:
-                    raise ProviderTransportError(
-                        f"provider request failed: {last_reason}"
+                    provider_error_code = _strict_provider_error_code(decoded)
+                    if provider_error_code is None:
+                        return decoded
+                    last_reason = f"provider_error_{provider_error_code}"
+                    retryable = provider_error_code in _RETRYABLE_PROVIDER_ERROR_CODES
+                    if not retryable:
+                        raise ProviderReportedError(
+                            code=provider_error_code,
+                            retryable=False,
+                            attempts_exhausted=False,
+                        )
+                    if attempt == self._retry.max_attempts:
+                        raise ProviderReportedError(
+                            code=provider_error_code,
+                            retryable=True,
+                            attempts_exhausted=True,
+                        )
+                else:
+                    last_reason = f"http_{response.status_code}"
+                    retryable = response.status_code in {408, 429} or (
+                        500 <= response.status_code < 600
                     )
+                    if not retryable:
+                        raise ProviderTransportError(
+                            f"provider request failed: {last_reason}"
+                        )
             if not retryable or attempt == self._retry.max_attempts:
                 raise ProviderTransportError(
                     "provider request exhausted explicit retry policy: " + last_reason
@@ -437,6 +494,7 @@ __all__ = [
     "ProviderClientError",
     "ProviderEmbeddingDimensionError",
     "ProviderProtocolError",
+    "ProviderReportedError",
     "ProviderTransportError",
     "StrictEmbeddingClient",
     "StrictRerankerClient",

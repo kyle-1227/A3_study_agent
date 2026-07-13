@@ -9,6 +9,7 @@ from src.config.rag_index_config import EmbeddingConfig, RerankerConfig, RetryCo
 from src.rag.parent_child.provider_clients import (
     ProviderEmbeddingDimensionError,
     ProviderProtocolError,
+    ProviderReportedError,
     StrictEmbeddingClient,
     StrictRerankerClient,
 )
@@ -183,6 +184,108 @@ def test_provider_retries_only_configured_endpoint_and_same_request() -> None:
         "https://provider.invalid/v1/embeddings",
         "https://provider.invalid/v1/embeddings",
     ]
+    assert sleeps == [0.1]
+
+
+def test_provider_retries_strict_retryable_error_envelope() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "error": {
+                        "code": 503,
+                        "message": "temporary provider failure",
+                        "metadata": {},
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "model": "configured-embedding",
+                "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0]}],
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            },
+        )
+
+    client = StrictEmbeddingClient(
+        config=_embedding_config(),
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=sleeps.append,
+    )
+    try:
+        assert client.embed_documents(["alpha"]) == [[1.0, 0.0]]
+    finally:
+        client.close()
+    assert calls == 2
+    assert sleeps == [0.1]
+
+
+def test_provider_does_not_retry_deterministic_error_envelope() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"error": {"code": 400, "message": "input token contract failed"}},
+        )
+
+    client = StrictEmbeddingClient(
+        config=_embedding_config(),
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=sleeps.append,
+    )
+    try:
+        with pytest.raises(ProviderReportedError) as error:
+            client.embed_documents(["alpha"])
+        assert error.value.code == 400
+        assert error.value.retryable is False
+        assert error.value.attempts_exhausted is False
+    finally:
+        client.close()
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_provider_reports_retryable_error_envelope_exhaustion() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"error": {"code": 503, "message": "temporary provider failure"}},
+        )
+
+    client = StrictEmbeddingClient(
+        config=_embedding_config(),
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=sleeps.append,
+    )
+    try:
+        with pytest.raises(ProviderReportedError) as error:
+            client.embed_documents(["alpha"])
+        assert error.value.code == 503
+        assert error.value.retryable is True
+        assert error.value.attempts_exhausted is True
+    finally:
+        client.close()
+    assert calls == 2
     assert sleeps == [0.1]
 
 
