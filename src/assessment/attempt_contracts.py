@@ -150,6 +150,50 @@ class AssessmentCheckpointResourcesV1(BaseModel):
         return self
 
 
+class AssessmentQuizSourceItemV1(BaseModel):
+    """Private validated quiz source used to build public and checkpoint views."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    question_id: str = Field(pattern=_QUESTION_ID_PATTERN)
+    question_type: Literal["free_text", "single_choice"]
+    level: Literal["basic", "intermediate", "application", "self_check"]
+    question: str = Field(min_length=1, max_length=10_000)
+    choices: tuple[str, ...] = Field(max_length=20)
+    answer: str = Field(min_length=1, max_length=10_000)
+    explanation: str = Field(min_length=1, max_length=10_000)
+    pitfall: str = Field(min_length=1, max_length=10_000)
+    tags: tuple[str, ...] = Field(min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_quiz_source(self) -> AssessmentQuizSourceItemV1:
+        text_values = (
+            self.question,
+            self.answer,
+            self.explanation,
+            self.pitfall,
+        )
+        if any(not value.strip() for value in text_values):
+            raise ValueError("quiz source text fields must not be blank")
+        if any(not value.strip() for value in (*self.choices, *self.tags)):
+            raise ValueError("quiz source choices and tags must not contain blanks")
+        if len(set(self.choices)) != len(self.choices):
+            raise ValueError("quiz source choices must be unique")
+        if len(set(self.tags)) != len(self.tags):
+            raise ValueError("quiz source tags must be unique")
+        if self.question_type == "free_text":
+            if self.choices:
+                raise ValueError("free_text quiz source cannot define choices")
+        else:
+            if len(self.choices) < 2:
+                raise ValueError(
+                    "single_choice quiz source requires at least two choices"
+                )
+            if self.answer not in self.choices:
+                raise ValueError("single_choice answer must exactly match one choice")
+        return self
+
+
 class AssessmentErrorClassificationV1(BaseModel):
     """Validated output required from the injected error classifier."""
 
@@ -398,6 +442,7 @@ __all__ = [
     "AssessmentEvaluationInputV1",
     "AssessmentFinalV1",
     "AssessmentQuestionRecordV1",
+    "AssessmentQuizSourceItemV1",
     "AssessmentResourceRecordV1",
     "PrivateExerciseAnswerKeyV1",
     "PublicExerciseCardV1",
