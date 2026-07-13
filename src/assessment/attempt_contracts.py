@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.assessment.identity import stable_exercise_question_id
+
 ASSESSMENT_ATTEMPT_SCHEMA_VERSION = "assessment_attempt_v1"
 ASSESSMENT_FINAL_SCHEMA_VERSION = "assessment_final_v1"
 
@@ -191,6 +193,15 @@ class AssessmentQuizSourceItemV1(BaseModel):
                 )
             if self.answer not in self.choices:
                 raise ValueError("single_choice answer must exactly match one choice")
+        expected_question_id = stable_exercise_question_id(
+            level=self.level,
+            question_type=self.question_type,
+            question=self.question,
+            choices=self.choices,
+            tags=self.tags,
+        )
+        if self.question_id != expected_question_id:
+            raise ValueError("question_id does not match the public question content")
         return self
 
 

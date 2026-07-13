@@ -1905,12 +1905,6 @@ def _legacy_resource_final_payload(final_state: dict) -> dict | None:
                 answer = _render_exercise_markdown(
                     title,
                     exercise_items,
-                    review_reason=str(
-                        exercise_artifact.get("review_reason")
-                        or final_state.get("exercise_review_reason")
-                        or ""
-                    ),
-                    quality_warning=bool(exercise_artifact.get("quality_warning")),
                 )
                 payload["answer"] = answer
             payload["exercise_items"] = exercise_items
@@ -2038,12 +2032,6 @@ def _legacy_resource_final_payload(final_state: dict) -> dict | None:
             answer = _render_exercise_markdown(
                 title,
                 exercise_items,
-                review_reason=str(
-                    exercise_artifact.get("review_reason")
-                    or final_state.get("exercise_review_reason")
-                    or ""
-                ),
-                quality_warning=bool(exercise_artifact.get("quality_warning")),
             )
             payload["answer"] = answer
         payload["exercise_items"] = exercise_items

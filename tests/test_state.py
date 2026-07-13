@@ -156,6 +156,8 @@ class TestTaskWorkspaceReducers:
         assert "context_usage_reports" not in reset
         assert "activity_timeline" not in reset
         assert "last_qa_response" not in reset
+        assert "assessment_checkpoint_resources" not in reset
+        assert reset["exercise_resource_v3"] == {}
         assert reset["response_mode"] == ""
         assert reset["qa_scope"] == ""
         assert reset["requires_live_verification"] is False

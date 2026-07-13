@@ -31,6 +31,7 @@ from src.context_engineering.workspace import (
     build_workspace_artifact_update,
     workspace_trace_payload,
 )
+from src.graph.assessment_quiz import validate_assessment_quiz_runtime_binding_v1
 from src.graph.code_practice import (
     code_practice_agent,
     code_practice_output,
@@ -130,6 +131,7 @@ RESOURCE_OUTPUT_STATE_KEYS: dict[str, tuple[str, ...]] = {
         "exercise_outline",
         "exercise_items",
         "exercise_artifact",
+        "exercise_resource_v3",
         "exercise_review_verdict",
         "exercise_review_reason",
         "exercise_revision_notes",
@@ -890,6 +892,16 @@ def _success_result(
             "context_influence_entries": influence_entries,
             "validation": validation.model_dump(mode="json"),
         }
+    if resource_type == "quiz":
+        validate_assessment_quiz_runtime_binding_v1(
+            thread_id=local_state.get("thread_id"),
+            exercise_items=local_state.get("exercise_items"),
+            exercise_artifact=local_state.get("exercise_artifact"),
+            exercise_resource_v3=local_state.get("exercise_resource_v3"),
+            assessment_checkpoint_resources=local_state.get(
+                "assessment_checkpoint_resources"
+            ),
+        )
     return {
         "resource_type": resource_type,
         "status": validation.terminal_status,
@@ -942,6 +954,7 @@ async def resource_worker(state: LearningState) -> dict:
     """Generate exactly one resource branch and return a reducer-safe result."""
     task = dict(state.get("resource_task") or {})
     resource_type = normalize_resource_type(task.get("resource_type"))
+    private_checkpoint_update: dict | None = None
     start = time.perf_counter()
     emit_a3_trace(
         logger,
@@ -974,6 +987,16 @@ async def resource_worker(state: LearningState) -> dict:
             message_content,
             int((time.perf_counter() - start) * 1000),
         )
+        if resource_type == "quiz" and result["status"] in {
+            "success",
+            "partial_success",
+        }:
+            raw_checkpoint = local_state.get("assessment_checkpoint_resources")
+            if not isinstance(raw_checkpoint, dict) or not raw_checkpoint:
+                raise ValueError(
+                    "successful quiz did not produce assessment checkpoint state"
+                )
+            private_checkpoint_update = raw_checkpoint
         emit_a3_trace(
             logger,
             (
@@ -1024,7 +1047,10 @@ async def resource_worker(state: LearningState) -> dict:
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
         )
-    return {"resource_branch_results": [result]}
+    worker_update: dict[str, Any] = {"resource_branch_results": [result]}
+    if private_checkpoint_update is not None:
+        worker_update["assessment_checkpoint_resources"] = private_checkpoint_update
+    return worker_update
 
 
 def _resource_display_name(resource_type: str) -> str:

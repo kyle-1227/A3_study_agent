@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from src.assessment.checkpoint import validate_public_exercise_cards_v1
+
 
 RESOURCE_FINAL_V3_SCHEMA_VERSION = "resource_final_v3"
 RESOURCE_FINAL_V3_PAYLOAD_HASH_PREFIX = "payload:v3"
@@ -133,6 +135,29 @@ class ResourceFinalV3Mindmap(_ResourceFinalV3ResourceBase):
 class ResourceFinalV3Quiz(_ResourceFinalV3ResourceBase):
     expected_payload_keys = frozenset({"exercise_artifact", "exercise_items"})
     kind: Literal["quiz"]
+
+    @model_validator(mode="after")
+    def validate_public_quiz_payload(self) -> ResourceFinalV3Quiz:
+        if set(self.payload) != self.expected_payload_keys:
+            raise ValueError(
+                "quiz payload must contain only exercise_artifact and exercise_items"
+            )
+        artifact = self.payload.get("exercise_artifact")
+        if not isinstance(artifact, dict):
+            raise ValueError("quiz exercise_artifact must be an object")
+        if set(artifact) != {"schema_version", "title", "items"}:
+            raise ValueError("quiz exercise_artifact contains unsupported fields")
+        if artifact.get("schema_version") != "exercise_public_artifact_v1":
+            raise ValueError("quiz exercise_artifact schema_version is invalid")
+        if artifact.get("title") != self.title:
+            raise ValueError("quiz exercise_artifact title must match resource title")
+        cards = validate_public_exercise_cards_v1(self.payload.get("exercise_items"))
+        artifact_cards = validate_public_exercise_cards_v1(artifact.get("items"))
+        if cards != artifact_cards:
+            raise ValueError(
+                "quiz exercise_artifact items must match exercise_items exactly"
+            )
+        return self
 
 
 class ResourceFinalV3ReviewDocument(_ResourceFinalV3ResourceBase):

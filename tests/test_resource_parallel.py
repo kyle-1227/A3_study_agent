@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,15 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
 
+from src.assessment.attempt_contracts import AssessmentQuizSourceItemV1
 from src.context_engineering.influence import (
     build_influence_entry,
     merge_context_influence_ledger,
 )
+from src.assessment.identity import stable_exercise_question_id
 from src.graph import resource_generation as rg
+from src.graph.assessment_quiz import build_assessment_quiz_projection_v1
+from src.graph.resource_final_v3 import ResourceFinalV3ResourceValidation
 from src.graph.resource_generation import (
     dispatch_resource_workers,
     normalize_requested_resource_types,
@@ -25,6 +30,77 @@ from src.graph.resource_generation import (
 )
 from src.graph.state import resource_branch_results_reducer
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+
+
+def _public_quiz_item() -> dict:
+    question = "Q"
+    tags = ["testing"]
+    return {
+        "schema_version": "exercise_card_v1",
+        "question_id": stable_exercise_question_id(
+            level="basic",
+            question_type="free_text",
+            question=question,
+            choices=(),
+            tags=tags,
+        ),
+        "question_type": "free_text",
+        "level": "basic",
+        "question": question,
+        "choices": [],
+        "tags": tags,
+    }
+
+
+def _quiz_binding(*, thread_id: str, request_id: str) -> dict:
+    public = _public_quiz_item()
+    source = AssessmentQuizSourceItemV1(
+        question_id=public["question_id"],
+        question_type="free_text",
+        level="basic",
+        question="Q",
+        choices=(),
+        answer="SERVER_ONLY_ANSWER",
+        explanation="Private explanation.",
+        pitfall="Private pitfall.",
+        tags=("testing",),
+    )
+    projection = build_assessment_quiz_projection_v1(
+        thread_id=thread_id,
+        request_id=request_id,
+        title="Mock Quiz",
+        summary="One validated public exercise card.",
+        source_items=(source,),
+        artifact_refs={},
+        validation=ResourceFinalV3ResourceValidation(
+            schema_version="resource_validation_v1",
+            resource_type="quiz",
+            valid=True,
+            terminal_status="success",
+            renderable_count=1,
+            downloadable_count=0,
+            verified_local_count=0,
+            remote_unverified_count=0,
+            failure_reason="",
+            warnings=(),
+        ),
+    )
+    return {
+        "exercise_items": [public],
+        "exercise_artifact": {
+            "schema_version": "exercise_public_artifact_v1",
+            "title": "Mock Quiz",
+            "items": [public],
+            "resource_id": projection.public_resource.resource_id,
+            "payload_hash": projection.public_resource.payload_hash,
+        },
+        "exercise_resource_v3": projection.public_resource.model_dump(mode="json"),
+        "assessment_checkpoint_resources": {
+            "schema_version": "assessment_checkpoint_resources_v1",
+            "thread_id": thread_id,
+            "resources": [projection.checkpoint_resource.model_dump(mode="json")],
+        },
+    }
 
 
 def test_normalize_requested_resource_types_dedupes_and_aliases():
@@ -125,8 +201,12 @@ async def test_resource_worker_success_uses_runner_without_writing_messages(
     monkeypatch,
 ):
     async def fake_quiz_runner(local_state):
-        local_state["exercise_items"] = [{"question": "Q", "answer": "A"}]
-        local_state["exercise_artifact"] = {"title": "Mock Quiz"}
+        local_state.update(
+            _quiz_binding(
+                thread_id=local_state["thread_id"],
+                request_id=local_state["request_id"],
+            )
+        )
         return "## Mock Quiz\n\nQuestion body"
 
     monkeypatch.setitem(rg.RESOURCE_RUNNERS, "quiz", fake_quiz_runner)
@@ -134,6 +214,8 @@ async def test_resource_worker_success_uses_runner_without_writing_messages(
     result = await resource_worker(
         {
             "messages": [HumanMessage(content="make a quiz")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
             "resource_task": {"task_id": "resource:quiz", "resource_type": "quiz"},
         }
     )
@@ -142,20 +224,109 @@ async def test_resource_worker_success_uses_runner_without_writing_messages(
     assert branch["resource_type"] == "quiz"
     assert branch["status"] == "success"
     assert branch["artifact"]["title"] == "Mock Quiz"
-    assert branch["state_updates"]["exercise_items"] == [
-        {"question": "Q", "answer": "A"}
-    ]
+    assert branch["state_updates"]["exercise_items"] == [_public_quiz_item()]
+    assert "assessment_checkpoint_resources" not in branch["state_updates"]
+    assert result["assessment_checkpoint_resources"]["thread_id"] == "thread-1"
+    assert "SERVER_ONLY_ANSWER" not in str(branch)
     assert "messages" not in result
+
+
+async def test_resource_worker_rejects_quiz_without_v3_checkpoint_binding(
+    monkeypatch,
+):
+    async def incomplete_quiz_runner(local_state):
+        public = _public_quiz_item()
+        local_state["exercise_items"] = [public]
+        local_state["exercise_artifact"] = {
+            "title": "Incomplete Quiz",
+            "items": [public],
+        }
+        return "## Incomplete Quiz"
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "quiz", incomplete_quiz_runner)
+
+    result = await resource_worker(
+        {
+            "messages": [HumanMessage(content="make a quiz")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "resource_task": {"task_id": "resource:quiz", "resource_type": "quiz"},
+        }
+    )
+
+    branch = result["resource_branch_results"][0]
+    assert branch["status"] == "failed"
+    assert branch["error_type"] == "AssessmentQuizProjectionError"
+    assert "assessment_checkpoint_resources" not in result
+
+
+async def test_resource_bundle_output_does_not_copy_private_quiz_checkpoint():
+    binding = _quiz_binding(thread_id="thread-1", request_id="request-1")
+    branch = {
+        "resource_type": "quiz",
+        "status": "success",
+        "title": "Mock Quiz",
+        "artifact": binding["exercise_artifact"],
+        "artifacts": [],
+        "state_updates": {
+            key: value
+            for key, value in binding.items()
+            if key != "assessment_checkpoint_resources"
+        },
+        "message_content": "Generated quiz: Mock Quiz",
+        "message_preview": "Generated quiz: Mock Quiz",
+        "error_type": None,
+        "error_message_sanitized": None,
+        "elapsed_ms": 10,
+        "validation": {
+            "schema_version": "resource_validation_v1",
+            "resource_type": "quiz",
+            "valid": True,
+            "terminal_status": "success",
+            "renderable_count": 1,
+            "downloadable_count": 0,
+            "verified_local_count": 0,
+            "remote_unverified_count": 0,
+            "failure_reason": "",
+            "warnings": [],
+        },
+    }
+    result = await resource_bundle_output(
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "requested_resource_types": ["quiz"],
+            "resource_generation_debug": {"stages": []},
+            "assessment_checkpoint_resources": binding[
+                "assessment_checkpoint_resources"
+            ],
+            "resource_branch_results": [branch],
+        }
+    )
+
+    public_surface = {
+        **result,
+        "messages": [message.content for message in result.get("messages", [])],
+    }
+    public_json = json.dumps(public_surface, ensure_ascii=False, sort_keys=True)
+    assert "SERVER_ONLY_ANSWER" not in public_json
+    assert "assessment_checkpoint_resources" not in result
 
 
 async def test_resource_worker_emits_safe_internal_subnode_traces(monkeypatch):
     async def fake_node(local_state):
-        local_state["exercise_items"] = [{"question": "Q", "answer": "A"}]
+        local_state["exercise_items"] = [_public_quiz_item()]
         local_state["exercise_artifact"] = {"title": "Mock Quiz"}
         return {}
 
-    async def fake_output(_local_state):
-        return {"messages": [AIMessage(content="## Mock Quiz")]}
+    async def fake_output(local_state):
+        return {
+            **_quiz_binding(
+                thread_id=local_state["thread_id"],
+                request_id=local_state["request_id"],
+            ),
+            "messages": [AIMessage(content="## Mock Quiz")],
+        }
 
     monkeypatch.setattr(rg, "exercise_planner", fake_node)
     monkeypatch.setattr(rg, "exercise_agent", fake_node)
@@ -171,6 +342,7 @@ async def test_resource_worker_emits_safe_internal_subnode_traces(monkeypatch):
                 "messages": [HumanMessage(content="make a quiz")],
                 "resource_task": {"task_id": "resource:quiz", "resource_type": "quiz"},
                 "request_id": "req-1",
+                "thread_id": "thread-1",
             }
         )
     finally:

@@ -1056,6 +1056,7 @@ llm:
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
+    max_generation_rounds: 3
     max_tokens: 4096
     thinking: disabled
     streaming: false
@@ -1383,11 +1384,6 @@ emotional:
 mindmap:
   temperature: 0.2                      # Structured JSON tree generation
   reviewer_temperature: 0.0             # Deterministic mindmap quality review
-  max_generation_rounds: 3              # Initial generation + up to 2 rewrites
-
-exercise:
-  temperature: 0.2                      # Structured leveled exercise generation
-  reviewer_temperature: 0.0             # Deterministic exercise quality review
   max_generation_rounds: 3              # Initial generation + up to 2 rewrites
 
 rag:

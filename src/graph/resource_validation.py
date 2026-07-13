@@ -14,6 +14,10 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.assessment.checkpoint import (
+    AssessmentCheckpointError,
+    validate_public_exercise_cards_v1,
+)
 from src.config import get_setting
 from src.graph.study_plan import StudyPlanArtifact, validate_study_plan_artifact
 from src.tools.document_tool import (
@@ -32,6 +36,9 @@ ReferenceVerification = Literal[
     "remote_unverified",
     "invalid",
 ]
+_PRIVATE_ASSESSMENT_KEYS = frozenset(
+    {"answer", "explanation", "pitfall", "answer_key", "accepted_answers"}
+)
 
 
 class ResourceValidationResultV1(BaseModel):
@@ -137,30 +144,61 @@ def _quiz_validator(
     state: Mapping[str, Any],
 ) -> ResourceValidationResultV1:
     items = state.get("exercise_items") or artifact.get("items") or []
-    valid_items = (
-        [
-            item
-            for item in items
-            if isinstance(item, Mapping) and _nonempty_text(item.get("question"))
-        ]
-        if isinstance(items, Sequence) and not isinstance(items, str | bytes)
-        else []
-    )
     references = _validate_references(
         (artifact,),
         root_resolver=get_exercise_artifact_dir,
         field_pairs=(("markdown_url", "filename"), ("docx_url", "docx_filename")),
         allowed_suffixes=_allowed_suffixes("quiz"),
     )
+    if _contains_private_assessment_key(artifact):
+        return _validation_model(
+            "quiz",
+            terminal_status="failed",
+            renderable_count=0,
+            references=references,
+            failure_reason="quiz.private_answer_exposed",
+            warnings=("quiz.private_answer_exposed",),
+        )
+    try:
+        cards = validate_public_exercise_cards_v1(items)
+        artifact_cards = validate_public_exercise_cards_v1(artifact.get("items"))
+    except AssessmentCheckpointError:
+        return _validation_model(
+            "quiz",
+            terminal_status="failed",
+            renderable_count=0,
+            references=references,
+            failure_reason="quiz.public_cards_invalid",
+            warnings=("quiz.public_cards_invalid",),
+        )
+    public_items = [card.model_dump(mode="json") for card in cards]
+    public_artifact_items = [card.model_dump(mode="json") for card in artifact_cards]
+    if public_items != public_artifact_items:
+        return _validation_model(
+            "quiz",
+            terminal_status="failed",
+            renderable_count=0,
+            references=references,
+            failure_reason="quiz.public_cards_mismatch",
+            warnings=("quiz.public_cards_mismatch",),
+        )
     return _result(
         "quiz",
-        inline_count=1 if valid_items else 0,
+        inline_count=1,
         references=references,
-        degraded=bool(items) and len(valid_items) != len(items),
-        warnings=("quiz.invalid_items",)
-        if items and len(valid_items) != len(items)
-        else (),
     )
+
+
+def _contains_private_assessment_key(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            str(key) in _PRIVATE_ASSESSMENT_KEYS
+            or _contains_private_assessment_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return any(_contains_private_assessment_key(item) for item in value)
+    return False
 
 
 def _review_doc_validator(

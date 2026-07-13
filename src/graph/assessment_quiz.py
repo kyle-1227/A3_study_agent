@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-
-from pydantic import ValidationError
 
 from src.assessment.attempt_contracts import (
     AssessmentQuestionRecordV1,
@@ -13,6 +12,11 @@ from src.assessment.attempt_contracts import (
     AssessmentResourceRecordV1,
     PrivateExerciseAnswerKeyV1,
     PublicExerciseCardV1,
+)
+from src.assessment.checkpoint import (
+    AssessmentCheckpointError,
+    validate_assessment_checkpoint_resources_v1,
+    validate_public_exercise_cards_v1,
 )
 from src.graph.resource_final_v3 import (
     JsonValue,
@@ -38,6 +42,15 @@ class AssessmentQuizProjectionError(ValueError):
         super().__init__(message)
 
 
+def build_public_exercise_cards_v1(
+    source_items: Sequence[AssessmentQuizSourceItemV1 | Mapping[str, object]],
+) -> tuple[PublicExerciseCardV1, ...]:
+    """Validate private source items before deriving their client-safe cards."""
+
+    parsed_items = _validated_source_items(source_items)
+    return tuple(_public_card(item) for item in parsed_items)
+
+
 def build_assessment_quiz_projection_v1(
     *,
     thread_id: str,
@@ -46,10 +59,7 @@ def build_assessment_quiz_projection_v1(
     summary: str,
     source_items: Sequence[AssessmentQuizSourceItemV1 | Mapping[str, object]],
     artifact_refs: Mapping[str, str],
-    downloadable_count: int,
-    verified_local_count: int,
-    remote_unverified_count: int,
-    warnings: tuple[str, ...],
+    validation: ResourceFinalV3ResourceValidation,
 ) -> AssessmentQuizProjectionV1:
     """Build public cards and private keys without serializing answers publicly."""
 
@@ -63,41 +73,21 @@ def build_assessment_quiz_projection_v1(
             code="quiz_projection_text_missing",
             message="title and summary must not be blank",
         )
-    if not source_items:
+    if validation.resource_type != "quiz":
         raise AssessmentQuizProjectionError(
-            code="quiz_projection_items_missing",
-            message="source_items must not be empty",
+            code="quiz_projection_validation_type_mismatch",
+            message="validation.resource_type must be quiz",
         )
-
-    parsed_items = tuple(_validate_source_item(item) for item in source_items)
-    question_ids = tuple(item.question_id for item in parsed_items)
-    if len(question_ids) != len(set(question_ids)):
-        raise AssessmentQuizProjectionError(
-            code="quiz_projection_duplicate_question_id",
-            message="source_items must contain unique question_id values",
-        )
-
+    parsed_items = _validated_source_items(source_items)
     public_cards = tuple(_public_card(item) for item in parsed_items)
     public_items: list[JsonValue] = [
         card.model_dump(mode="json") for card in public_cards
     ]
-    validation = ResourceFinalV3ResourceValidation(
-        schema_version="resource_validation_v1",
-        resource_type="quiz",
-        valid=True,
-        terminal_status="success",
-        renderable_count=1,
-        downloadable_count=downloadable_count,
-        verified_local_count=verified_local_count,
-        remote_unverified_count=remote_unverified_count,
-        failure_reason="",
-        warnings=warnings,
-    )
     resource = build_resource_final_v3_resource(
         thread_id=thread_id,
         request_id=request_id,
         kind="quiz",
-        status="success",
+        status=validation.terminal_status,
         title=title,
         summary=summary,
         payload={
@@ -135,16 +125,144 @@ def build_assessment_quiz_projection_v1(
     )
 
 
+def validate_assessment_quiz_runtime_binding_v1(
+    *,
+    thread_id: object,
+    exercise_items: object,
+    exercise_artifact: object,
+    exercise_resource_v3: object,
+    assessment_checkpoint_resources: object,
+) -> None:
+    """Require one public Quiz resource to be bound to its private answer keys."""
+
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_thread_missing",
+            message="successful quiz requires a non-blank thread_id",
+        )
+    cards = validate_public_exercise_cards_v1(exercise_items)
+    if not isinstance(exercise_artifact, Mapping):
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_artifact_invalid",
+            message="successful quiz requires a public exercise artifact",
+        )
+    artifact_cards = validate_public_exercise_cards_v1(exercise_artifact.get("items"))
+    if cards != artifact_cards:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_artifact_mismatch",
+            message="exercise artifact cards must match public exercise_items",
+        )
+    if not isinstance(exercise_resource_v3, Mapping):
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_resource_v3_invalid",
+            message="successful quiz requires a strict Resource Final V3 resource",
+        )
+    try:
+        resource = ResourceFinalV3Quiz.model_validate_json(
+            _mapping_json(exercise_resource_v3),
+            strict=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_resource_v3_invalid",
+            message="successful quiz requires a strict Resource Final V3 resource",
+        ) from exc
+    if exercise_artifact.get("resource_id") != resource.resource_id:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_resource_id_mismatch",
+            message="exercise artifact and Resource Final V3 resource_id must match",
+        )
+    if exercise_artifact.get("payload_hash") != resource.payload_hash:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_payload_hash_mismatch",
+            message="exercise artifact and Resource Final V3 payload_hash must match",
+        )
+    if not isinstance(assessment_checkpoint_resources, Mapping):
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_checkpoint_invalid",
+            message="successful quiz requires a strict private checkpoint resource",
+        )
+    try:
+        checkpoint = validate_assessment_checkpoint_resources_v1(
+            assessment_checkpoint_resources
+        )
+    except AssessmentCheckpointError as exc:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_checkpoint_invalid",
+            message="successful quiz requires a strict private checkpoint resource",
+        ) from exc
+    if checkpoint.thread_id != thread_id:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_checkpoint_thread_mismatch",
+            message="quiz checkpoint thread_id must match runtime thread_id",
+        )
+    checkpoint_resource = next(
+        (
+            item
+            for item in checkpoint.resources
+            if item.resource_id == resource.resource_id
+        ),
+        None,
+    )
+    if checkpoint_resource is None:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_checkpoint_resource_missing",
+            message="quiz checkpoint does not contain the public resource_id",
+        )
+    checkpoint_cards = tuple(item.card for item in checkpoint_resource.questions)
+    if checkpoint_cards != cards:
+        raise AssessmentQuizProjectionError(
+            code="quiz_runtime_checkpoint_cards_mismatch",
+            message="quiz checkpoint cards must match the public resource cards",
+        )
+
+
 def _validate_source_item(
     value: AssessmentQuizSourceItemV1 | Mapping[str, object],
 ) -> AssessmentQuizSourceItemV1:
     try:
-        return AssessmentQuizSourceItemV1.model_validate(value, strict=True)
-    except (TypeError, ValidationError) as exc:
+        payload: Mapping[str, object] = (
+            value.model_dump(mode="json")
+            if isinstance(value, AssessmentQuizSourceItemV1)
+            else value
+        )
+        return AssessmentQuizSourceItemV1.model_validate_json(
+            _mapping_json(payload),
+            strict=True,
+        )
+    except (TypeError, ValueError) as exc:
         raise AssessmentQuizProjectionError(
             code="quiz_projection_source_item_invalid",
             message="source item violates AssessmentQuizSourceItemV1",
         ) from exc
+
+
+def _validated_source_items(
+    source_items: Sequence[AssessmentQuizSourceItemV1 | Mapping[str, object]],
+) -> tuple[AssessmentQuizSourceItemV1, ...]:
+    if not source_items:
+        raise AssessmentQuizProjectionError(
+            code="quiz_projection_items_missing",
+            message="source_items must not be empty",
+        )
+    parsed_items = tuple(_validate_source_item(item) for item in source_items)
+    question_ids = tuple(item.question_id for item in parsed_items)
+    if len(question_ids) != len(set(question_ids)):
+        raise AssessmentQuizProjectionError(
+            code="quiz_projection_duplicate_question_id",
+            message="source_items must contain unique question_id values",
+        )
+    return parsed_items
+
+
+def _mapping_json(value: Mapping[str, object]) -> str:
+    return json.dumps(
+        dict(value),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _public_card(item: AssessmentQuizSourceItemV1) -> PublicExerciseCardV1:
@@ -177,4 +295,6 @@ __all__ = [
     "AssessmentQuizProjectionError",
     "AssessmentQuizProjectionV1",
     "build_assessment_quiz_projection_v1",
+    "build_public_exercise_cards_v1",
+    "validate_assessment_quiz_runtime_binding_v1",
 ]

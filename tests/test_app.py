@@ -716,7 +716,17 @@ class TestResourceFinalPayloadArtifacts:
             {
                 "requested_resource_type": "quiz",
                 "messages": [SimpleNamespace(content="练习题正文")],
-                "exercise_items": [{"question": "Q1"}],
+                "exercise_items": [
+                    {
+                        "schema_version": "exercise_card_v1",
+                        "question_id": "question:v1:" + "1" * 64,
+                        "question_type": "free_text",
+                        "level": "basic",
+                        "question": "Q1",
+                        "choices": [],
+                        "tags": ["Python"],
+                    }
+                ],
                 "exercise_artifact": {"title": "Python 练习题"},
             }
         )
@@ -740,6 +750,48 @@ class TestResourceFinalPayloadArtifacts:
         assert (
             mindmap_payload and mindmap_payload["mindmap"]["title"] == "Python 思维导图"
         )
+
+    def test_quiz_payload_never_exposes_checkpoint_answer_keys(self):
+        import json
+
+        from app import _resource_final_payload
+
+        public_card = {
+            "schema_version": "exercise_card_v1",
+            "question_id": "question:v1:" + "1" * 64,
+            "question_type": "free_text",
+            "level": "basic",
+            "question": "Explain gradient descent.",
+            "choices": (),
+            "tags": ("optimization",),
+        }
+        payload = _resource_final_payload(
+            {
+                "requested_resource_type": "quiz",
+                "messages": [SimpleNamespace(content="## Public quiz")],
+                "exercise_items": [public_card],
+                "exercise_artifact": {
+                    "schema_version": "exercise_public_artifact_v1",
+                    "title": "Machine learning quiz",
+                    "items": [public_card],
+                },
+                "assessment_checkpoint_resources": {
+                    "schema_version": "assessment_checkpoint_resources_v1",
+                    "thread_id": "thread-1",
+                    "resources": [
+                        {
+                            "answer_key": "SERVER_ONLY_SECRET_ANSWER",
+                        }
+                    ],
+                },
+            }
+        )
+
+        assert payload is not None
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        assert "SERVER_ONLY_SECRET_ANSWER" not in serialized
+        assert "assessment_checkpoint_resources" not in payload
+        assert '"answer_key"' not in serialized
 
 
 class TestStructuredResourceArtifactGuard:

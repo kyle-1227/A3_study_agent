@@ -4,10 +4,31 @@ from pathlib import Path
 
 import pytest
 
+from src.assessment.identity import stable_exercise_question_id
 from src.graph.resource_validation import (
     RESOURCE_VALIDATORS,
     validate_renderable_resource_result,
 )
+
+
+def _public_quiz_card() -> dict:
+    question = "Explain gradient descent."
+    tags = ["optimization"]
+    return {
+        "schema_version": "exercise_card_v1",
+        "question_id": stable_exercise_question_id(
+            level="basic",
+            question_type="free_text",
+            question=question,
+            choices=(),
+            tags=tags,
+        ),
+        "question_type": "free_text",
+        "level": "basic",
+        "question": question,
+        "choices": [],
+        "tags": tags,
+    }
 
 
 @pytest.fixture
@@ -102,7 +123,11 @@ def test_registry_is_independent_and_covers_all_resource_types():
             },
             {},
         ),
-        ("quiz", {"title": "Quiz"}, {"exercise_items": [{"question": "Q1"}]}),
+        (
+            "quiz",
+            {"title": "Quiz", "items": [_public_quiz_card()]},
+            {"exercise_items": [_public_quiz_card()]},
+        ),
         ("review_doc", {"title": "Review", "markdown": "# Review"}, {}),
         (
             "code_practice",
@@ -148,6 +173,37 @@ def test_empty_and_root_only_resources_are_not_success(
 
     assert empty.terminal_status == "failed"
     assert root_only.terminal_status == "failed"
+
+
+def test_quiz_rejects_private_answer_fields_and_public_card_mismatch(
+    artifact_roots: dict[str, Path],
+):
+    public_card = _public_quiz_card()
+    leaked_card = {**public_card, "answer": "server-only answer"}
+    leaked = validate_renderable_resource_result(
+        "quiz",
+        {"title": "Quiz", "items": [leaked_card]},
+        [],
+        {"exercise_items": [leaked_card]},
+    )
+    mismatched = validate_renderable_resource_result(
+        "quiz",
+        {"title": "Quiz", "items": [public_card]},
+        [],
+        {
+            "exercise_items": [
+                {
+                    **public_card,
+                    "question": "A changed public question.",
+                }
+            ]
+        },
+    )
+
+    assert leaked.terminal_status == "failed"
+    assert leaked.failure_reason == "quiz.private_answer_exposed"
+    assert mismatched.terminal_status == "failed"
+    assert mismatched.failure_reason == "quiz.public_cards_invalid"
 
 
 def test_verified_local_file_and_remote_only_reference_have_distinct_truth(

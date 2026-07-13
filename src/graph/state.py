@@ -9,6 +9,7 @@ from langchain_core.messages import BaseMessage, ToolMessage, message_to_dict
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from src.assessment.checkpoint import assessment_checkpoint_resources_reducer
 from src.context_engineering.workspace import (
     TASK_WORKSPACE_CLEAR as _TASK_WORKSPACE_CLEAR,
     merge_task_workspace,
@@ -464,6 +465,7 @@ def initial_request_reset_transient_state() -> dict:
         "exercise_outline": "",
         "exercise_items": [],
         "exercise_artifact": {},
+        "exercise_resource_v3": {},
         "exercise_review_verdict": "",
         "exercise_review_reason": "",
         "exercise_revision_notes": "",
@@ -722,6 +724,9 @@ class LearningState(TypedDict):
     last_resource_final_payload: Annotated[
         dict, latest_dict_reducer
     ]  # Last sanitized renderable resource_final payload
+    assessment_checkpoint_resources: Annotated[
+        dict, assessment_checkpoint_resources_reducer
+    ]  # Durable server-only quiz cards and private answer keys for this thread
     last_qa_response: Annotated[
         dict, latest_dict_reducer
     ]  # Last bounded renderable qa_final payload
@@ -770,6 +775,7 @@ class LearningState(TypedDict):
     exercise_outline: str  # Planner-produced exercise blueprint
     exercise_items: list[dict]  # Reviewed exercise item drafts
     exercise_artifact: dict  # Generated exercise metadata/content
+    exercise_resource_v3: dict  # Public Resource Final V3 quiz projection
     exercise_review_verdict: str  # "approve" / "reject"
     exercise_review_reason: str  # Exercise reviewer reasoning
     exercise_revision_notes: str  # Feedback for exercise_agent regeneration
@@ -911,6 +917,7 @@ class LearningState(TypedDict):
     resource_branch_results: Annotated[
         list[dict], resource_branch_results_reducer
     ]  # Parallel resource worker results
+    resource_task: dict  # Dynamic Send payload owned by one resource worker
     resource_bundle_artifact: dict  # Aggregated multi-resource artifact metadata
     resource_generation_debug: (
         dict  # Resource generation execution status/debug summary
