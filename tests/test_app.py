@@ -103,12 +103,18 @@ class TestInputValidation:
         from src.schemas import ChatRequest
 
         with pytest.raises(ValidationError):
-            ChatRequest(query="x" * 5000)
+            ChatRequest(
+                query="x" * 5000,
+                request_id="00000000-0000-4000-8000-000000000001",
+            )
 
     def test_chat_request_accepts_normal_query(self):
         from src.schemas import ChatRequest
 
-        req = ChatRequest(query="normal length question")
+        req = ChatRequest(
+            query="normal length question",
+            request_id="00000000-0000-4000-8000-000000000001",
+        )
         assert req.query == "normal length question"
 
     def test_resume_request_rejects_oversized_plan(self):
@@ -116,18 +122,30 @@ class TestInputValidation:
         from src.schemas import ResumeRequest
 
         with pytest.raises(ValidationError):
-            ResumeRequest(thread_id="t-1", edited_plan="x" * 20000)
+            ResumeRequest(
+                thread_id="t-1",
+                request_id="00000000-0000-4000-8000-000000000001",
+                edited_plan="x" * 20000,
+            )
 
     def test_resume_request_accepts_normal_plan(self):
         from src.schemas import ResumeRequest
 
-        req = ResumeRequest(thread_id="t-1", edited_plan="## Normal plan")
+        req = ResumeRequest(
+            thread_id="t-1",
+            request_id="00000000-0000-4000-8000-000000000001",
+            edited_plan="## Normal plan",
+        )
         assert req.edited_plan == "## Normal plan"
 
     def test_resume_request_accepts_memory_use_choice(self):
         from src.schemas import ResumeRequest
 
-        req = ResumeRequest(thread_id="t-1", memory_use_choice="use")
+        req = ResumeRequest(
+            thread_id="t-1",
+            request_id="00000000-0000-4000-8000-000000000001",
+            memory_use_choice="use",
+        )
         assert req.memory_use_choice == "use"
 
     def test_resume_request_accepts_profile_completion(self):
@@ -135,6 +153,7 @@ class TestInputValidation:
 
         req = ResumeRequest(
             thread_id="t-1",
+            request_id="00000000-0000-4000-8000-000000000001",
             profile_completion={
                 "learning_goal": "Master ML basics",
                 "current_foundation": "Python",
@@ -144,6 +163,15 @@ class TestInputValidation:
 
         assert req.profile_completion is not None
         assert req.profile_completion.learning_goal == "Master ML basics"
+
+    def test_request_id_is_required_and_must_be_uuid(self):
+        from pydantic import ValidationError
+        from src.schemas import ChatRequest
+
+        with pytest.raises(ValidationError):
+            ChatRequest(query="missing id")
+        with pytest.raises(ValidationError):
+            ChatRequest(query="bad id", request_id="not-a-uuid")
 
 
 class TestResourceFinalPayloadCore:
@@ -248,6 +276,7 @@ class TestDevMemoryClear:
             WORKSPACE_EVENTS_CLEAR,
             LLM_INPUT_MANIFESTS_CLEAR,
             CONTEXT_INFLUENCE_LEDGER_CLEAR,
+            SESSION_CONTEXT_MEMORY_LEDGER_CLEAR,
         )
 
         graph = AsyncMock()
@@ -273,6 +302,11 @@ class TestDevMemoryClear:
         assert values["llm_input_manifest"] == {}
         assert values["llm_input_manifests"] is LLM_INPUT_MANIFESTS_CLEAR
         assert values["thread_context_ledger"] is DICT_CLEAR
+        assert (
+            values["session_context_memory_ledger"]
+            is SESSION_CONTEXT_MEMORY_LEDGER_CLEAR
+        )
+        assert values["thread_context_window_v3"] == {}
         assert values["background_context_window"] == {}
         assert values["context_continuity"] == {}
         assert values["context_influence_ledger"] is CONTEXT_INFLUENCE_LEDGER_CLEAR
@@ -297,6 +331,8 @@ class TestDevMemoryClear:
                 "llm_input_manifest",
                 "llm_input_manifests",
                 "thread_context_ledger",
+                "session_context_memory_ledger",
+                "thread_context_window_v3",
                 "background_context_window",
                 "context_continuity",
                 "context_influence_ledger",

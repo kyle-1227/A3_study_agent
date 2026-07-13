@@ -177,7 +177,10 @@ class TestChatRequestWithThreadId:
         """ChatRequest should work without thread_id (backward-compatible)."""
         from src.schemas import ChatRequest
 
-        req = ChatRequest(query="hello")
+        req = ChatRequest(
+            query="hello",
+            request_id="00000000-0000-4000-8000-000000000001",
+        )
         assert req.query == "hello"
         assert req.thread_id is None
 
@@ -185,7 +188,11 @@ class TestChatRequestWithThreadId:
         """ChatRequest should accept an optional thread_id."""
         from src.schemas import ChatRequest
 
-        req = ChatRequest(query="hello", thread_id="abc-123")
+        req = ChatRequest(
+            query="hello",
+            request_id="00000000-0000-4000-8000-000000000001",
+            thread_id="abc-123",
+        )
         assert req.thread_id == "abc-123"
 
 

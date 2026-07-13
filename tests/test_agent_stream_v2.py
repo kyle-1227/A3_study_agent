@@ -89,18 +89,18 @@ def test_journal_replays_without_silent_eviction() -> None:
     sequencer = _sequencer()
     journal = StreamJournal(
         stream_id="stream-1",
-        max_events=2,
+        max_events=4,
         max_bytes=10000,
         ttl_seconds=60,
     )
     first = sequencer.emit("stream_start")
-    second = sequencer.emit("qa_final", {"payload_hash": "abc"})
+    second = sequencer.emit("activity_update", {"kind": "node"})
     journal.append(first)
     journal.append(second)
 
     assert [event.sequence for event in journal.after(1)] == [2]
     with pytest.raises(StreamJournalCapacityError, match="event limit"):
-        journal.append(sequencer.emit("stream_done"))
+        journal.append(sequencer.emit("activity_update", {"kind": "node"}))
     with pytest.raises(StreamJournalSequenceError, match="ahead"):
         journal.after(3)
 
@@ -108,11 +108,11 @@ def test_journal_replays_without_silent_eviction() -> None:
 def test_journal_expiry_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     journal = StreamJournal(
         stream_id="stream-1",
-        max_events=2,
+        max_events=4,
         max_bytes=10000,
         ttl_seconds=1,
-        created_monotonic=100.0,
     )
+    journal.seal(completed_monotonic=100.0)
     monkeypatch.setattr("src.streaming.journal.time.monotonic", lambda: 102.0)
     with pytest.raises(StreamJournalExpiredError, match="expired"):
         journal.after(0)

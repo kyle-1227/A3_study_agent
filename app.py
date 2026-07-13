@@ -5,6 +5,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 # The application loads .env before importing project modules that read settings at import time.
 
+import hashlib
 import json
 import logging
 import os
@@ -34,7 +35,14 @@ from src.context_engineering.input_manifest import (
 )
 from src.context_engineering.influence import influence_status_payload
 from src.context_engineering.policy_mode import validate_context_runtime_policy
+from src.context_engineering.session_memory import (
+    ContextInjectionRecordV1,
+    SessionContextMemoryLedgerV1,
+    new_session_context_memory_ledger,
+    record_context_injection,
+)
 from src.context_engineering.thread_window import build_thread_context_window_v2
+from src.context_engineering.thread_window_v3 import build_thread_context_window_v3
 from src.context_engineering.workspace import workspace_status_payload
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -57,6 +65,7 @@ from src.graph.state import (
     GENERATED_ARTIFACTS_CLEAR,
     LLM_INPUT_MANIFESTS_CLEAR,
     MEMORY_CLEAR,
+    SESSION_CONTEXT_MEMORY_LEDGER_CLEAR,
     TASK_WORKSPACE_CLEAR,
     WORKSPACE_EVENTS_CLEAR,
     initial_request_reset_transient_state,
@@ -89,6 +98,7 @@ from src.run_control import (
 )
 from src.schemas import (
     ChatRequest,
+    ContinueRequest,
     OnboardRequest,
     ResumeRequest,
     StopRequest,
@@ -138,6 +148,16 @@ from src.streaming.provisional import (
     reset_provisional_event_sink,
     set_provisional_event_sink,
 )
+from src.streaming.contracts import StreamContractError
+from src.streaming.journal import StreamJournalExpiredError
+from src.streaming.session import (
+    StreamSessionConflictError,
+    StreamSessionExpiredError,
+    StreamSessionManager,
+    StreamSessionNotFoundError,
+)
+from src.streaming.settings import load_streaming_runtime_config
+from src.streaming.sse import parse_last_event_id
 from src.tools.document_tool import (
     get_code_practice_artifact_dir,
     get_exercise_artifact_dir,
@@ -149,6 +169,8 @@ from src.tools.video_animation_tool import get_video_animation_artifact_dir
 from src.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+STREAMING_RUNTIME_CONFIG = load_streaming_runtime_config()
+stream_session_manager = StreamSessionManager(STREAMING_RUNTIME_CONFIG)
 FRONTEND_PERFORMANCE_ENDPOINT_PATH = (
     load_performance_observability_config().frontend_ingestion.endpoint_path
 )
@@ -889,6 +911,44 @@ def _artifact_count(by_type: object, generated: object) -> int:
     return total
 
 
+def _session_context_memory_ledger(
+    values: dict,
+    *,
+    thread_id: str,
+) -> SessionContextMemoryLedgerV1:
+    raw = values.get("session_context_memory_ledger")
+    if isinstance(raw, dict) and raw:
+        ledger = SessionContextMemoryLedgerV1.model_validate(raw)
+        if ledger.thread_id != thread_id:
+            raise ValueError("session context memory ledger thread_id mismatch")
+        return ledger
+    return new_session_context_memory_ledger(thread_id)
+
+
+def _thread_context_window_v3(
+    values: dict,
+    *,
+    thread_id: str,
+    updating: bool,
+) -> dict:
+    ledger = _session_context_memory_ledger(values, thread_id=thread_id)
+    return build_thread_context_window_v3(
+        ledger,
+        updating=updating,
+    ).model_dump(mode="json")
+
+
+def _active_session_context_fields(values: dict, *, thread_id: str) -> dict:
+    ledger = _session_context_memory_ledger(values, thread_id=thread_id)
+    return {
+        "session_context_memory_ledger": ledger.model_dump(mode="json"),
+        "thread_context_window_v3": build_thread_context_window_v3(
+            ledger,
+            updating=True,
+        ).model_dump(mode="json"),
+    }
+
+
 def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) -> dict:
     """Combine current run control with persistent thread context for status UI."""
     values = dict(snapshot_values or {})
@@ -901,6 +961,8 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
     previous_usage_report = values.get("context_usage_report")
     previous_usage_reports = values.get("context_usage_reports")
     previous_activity_timeline = values.get("activity_timeline")
+    previous_session_memory_ledger = values.get("session_context_memory_ledger")
+    previous_thread_window_v3 = values.get("thread_context_window_v3")
     values.update(initial_run_values or {})
     if isinstance(previous_history, list):
         values["context_usage_history"] = previous_history
@@ -920,6 +982,10 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
         values["context_usage_reports"] = previous_usage_reports
     if isinstance(previous_activity_timeline, list):
         values["activity_timeline"] = previous_activity_timeline
+    if isinstance(previous_session_memory_ledger, dict):
+        values["session_context_memory_ledger"] = previous_session_memory_ledger
+    if isinstance(previous_thread_window_v3, dict):
+        values["thread_context_window_v3"] = previous_thread_window_v3
     return values
 
 
@@ -935,6 +1001,11 @@ def _thread_status_from_snapshot(
     missing_fields = _missing_run_control_fields(values)
     request_context_window, thread_context_window = _context_window_status(values)
     thread_context_window_v2 = build_thread_context_window_v2(values)
+    thread_context_window_v3 = _thread_context_window_v3(
+        values,
+        thread_id=thread_id,
+        updating=False,
+    )
     if missing_fields:
         return ThreadStatusResponse(
             thread_id=thread_id,
@@ -976,6 +1047,7 @@ def _thread_status_from_snapshot(
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
             thread_context_window_v2=thread_context_window_v2,
+            thread_context_window_v3=thread_context_window_v3,
             profile_completion_request=profile_completion_request,
             missing_run_control_fields=missing_fields,
             message="legacy checkpoint does not include run-control fields",
@@ -1035,6 +1107,7 @@ def _thread_status_from_snapshot(
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
         thread_context_window_v2=thread_context_window_v2,
+        thread_context_window_v3=thread_context_window_v3,
         profile_completion_request=profile_completion_request,
         missing_run_control_fields=[],
     )
@@ -1046,6 +1119,16 @@ def _thread_status_from_active_run(
     request_context_window = active_run.get("request_context_window")
     thread_context_window = active_run.get("thread_context_window")
     profile_completion_request = active_run.get("profile_completion_request")
+    active_window_v3 = active_run.get("thread_context_window_v3")
+    thread_context_window_v3 = (
+        active_window_v3
+        if isinstance(active_window_v3, dict) and active_window_v3
+        else _thread_context_window_v3(
+            active_run,
+            thread_id=thread_id,
+            updating=True,
+        )
+    )
     return ThreadStatusResponse(
         thread_id=thread_id,
         schema_version=RUN_CONTROL_SCHEMA_VERSION,
@@ -1122,6 +1205,7 @@ def _thread_status_from_active_run(
         thread_context_window_v2=active_run.get("thread_context_window_v2")
         if isinstance(active_run.get("thread_context_window_v2"), dict)
         else build_thread_context_window_v2(active_run),
+        thread_context_window_v3=thread_context_window_v3,
         profile_completion_request=profile_completion_request
         if isinstance(profile_completion_request, dict)
         else {},
@@ -1386,6 +1470,68 @@ async def _update_llm_manifest_state_from_trace(
         dict(background_window),
         llm_input_manifests,
     )
+
+
+async def _update_session_context_memory_from_trace(
+    graph,
+    config: dict,
+    *,
+    thread_id: str,
+    event: dict,
+    state_context: dict,
+) -> dict:
+    """Persist one actual provider-dispatch item and its V3 projection atomically."""
+
+    record = ContextInjectionRecordV1.model_validate(
+        {
+            key: event.get(key)
+            for key in (
+                "schema_version",
+                "record_id",
+                "dispatch_id",
+                "request_id",
+                "call_id",
+                "attempt",
+                "manifest_id",
+                "thread_id",
+                "item",
+                "dispatched_at",
+            )
+        }
+    )
+    if record.thread_id != thread_id:
+        raise ValueError("context injection trace thread_id mismatch")
+    active_run = get_active_run(thread_id)
+    ledger_values = (
+        active_run
+        if isinstance(active_run, dict)
+        and isinstance(active_run.get("session_context_memory_ledger"), dict)
+        else state_context
+    )
+    ledger = _session_context_memory_ledger(ledger_values, thread_id=thread_id)
+    updated_ledger = record_context_injection(ledger, record)
+    window_v3 = build_thread_context_window_v3(
+        updated_ledger,
+        updating=False,
+    ).model_dump(mode="json")
+    state_update = {
+        "session_context_memory_ledger": updated_ledger.model_dump(mode="json"),
+        "thread_context_window_v3": window_v3,
+    }
+    await safe_update_thread_state(
+        graph,
+        config,
+        state_update,
+        state={
+            "request_id": record.request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
+    )
+    if isinstance(active_run, dict):
+        update_active_run(thread_id, state_update)
+    state_context.update(state_update)
+    return window_v3
 
 
 def _last_ai_message_content(final_state: dict) -> str:
@@ -1731,6 +1877,8 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "llm_input_manifest",
         "llm_input_manifests",
         "thread_context_ledger",
+        "session_context_memory_ledger",
+        "thread_context_window_v3",
         "background_context_window",
         "context_continuity",
         "context_influence_ledger",
@@ -1753,6 +1901,8 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "llm_input_manifest": {},
         "llm_input_manifests": LLM_INPUT_MANIFESTS_CLEAR,
         "thread_context_ledger": DICT_CLEAR,
+        "session_context_memory_ledger": SESSION_CONTEXT_MEMORY_LEDGER_CLEAR,
+        "thread_context_window_v3": {},
         "background_context_window": {},
         "context_continuity": {},
         "context_influence_ledger": CONTEXT_INFLUENCE_LEDGER_CLEAR,
@@ -2027,6 +2177,26 @@ async def _stream_graph_events(
                 worker_interrupted_seen = True
             if isinstance(stage, str) and stage.startswith("context_"):
                 request_context_events.append(_safe_context_event_summary(event))
+            if stage == "context_injection.dispatched":
+                window_v3 = await _update_session_context_memory_from_trace(
+                    graph,
+                    config,
+                    thread_id=thread_id,
+                    event=event,
+                    state_context=manifest_state_context,
+                )
+                drained.append(
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "thread_context_window_v3",
+                            "thread_context_window_v3": window_v3,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                continue
             if stage in WORKSPACE_TRACE_STAGES:
                 payload = {
                     "type": "workspace_context",
@@ -3642,6 +3812,15 @@ async def _stream_graph_events(
         if isinstance(ledger, dict):
             completed_values["thread_context_ledger"] = ledger
 
+    session_memory_ledger = manifest_state_context.get("session_context_memory_ledger")
+    if isinstance(session_memory_ledger, dict) and session_memory_ledger:
+        completed_values["session_context_memory_ledger"] = session_memory_ledger
+        completed_values["thread_context_window_v3"] = _thread_context_window_v3(
+            manifest_state_context,
+            thread_id=thread_id,
+            updating=False,
+        )
+
     active_run = get_active_run(thread_id)
     completed_thread_window = (
         dict(active_run.get("thread_context_window") or {})
@@ -3906,6 +4085,7 @@ async def _generate_sse_impl(
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
             "thread_context_window_v2": build_thread_context_window_v2(status_values),
+            **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": {},
             "context_usage_history": status_values.get("context_usage_history")
             if isinstance(status_values.get("context_usage_history"), list)
@@ -4034,6 +4214,49 @@ async def generate_sse(
             yield chunk
 
 
+async def _new_request_stream_source(
+    *,
+    query: str,
+    graph,
+    thread_id: str,
+    user_id: str | None,
+    graph_version: str,
+    request_id: str,
+) -> AsyncGenerator[str, None]:
+    with observe_request_performance(
+        request_id=request_id,
+        thread_id=thread_id,
+        user_id=user_id or "",
+    ):
+        async for chunk in _generate_sse_impl(
+            query,
+            graph,
+            thread_id=thread_id,
+            user_id=user_id,
+            graph_version=graph_version,
+            request_id=request_id,
+        ):
+            yield chunk
+
+
+def _stream_request_fingerprint(operation: str, payload: dict) -> str:
+    """Hash request semantics without retaining raw request content in the journal."""
+
+    encoded = json.dumps(
+        {"operation": operation, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _new_thread_id_for_request(request_id: str) -> str:
+    """Keep retries without a client thread_id bound to one stable thread."""
+
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"a3-study-agent:request:{request_id}"))
+
+
 async def _generate_resume_sse_impl(
     edited_plan: str,
     feedback: str | None,
@@ -4142,6 +4365,7 @@ async def _generate_resume_sse_impl(
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
             "thread_context_window_v2": build_thread_context_window_v2(status_values),
+            **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
             else {},
@@ -4234,6 +4458,31 @@ async def generate_resume_sse(
             profile_completion=profile_completion,
             graph_version=graph_version,
             resume_request_id=resume_request_id,
+        ):
+            yield chunk
+
+
+async def _resume_stream_source(
+    *,
+    edited_plan: str,
+    feedback: str | None,
+    graph,
+    thread_id: str,
+    memory_use_choice: str | None,
+    profile_completion: dict | None,
+    graph_version: str,
+    request_id: str,
+) -> AsyncGenerator[str, None]:
+    with observe_request_performance(request_id=request_id, thread_id=thread_id):
+        async for chunk in _generate_resume_sse_impl(
+            edited_plan,
+            feedback,
+            graph,
+            thread_id,
+            memory_use_choice=memory_use_choice,
+            profile_completion=profile_completion,
+            graph_version=graph_version,
+            resume_request_id=request_id,
         ):
             yield chunk
 
@@ -4342,6 +4591,7 @@ async def _generate_continue_sse_impl(
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
             "thread_context_window_v2": build_thread_context_window_v2(status_values),
+            **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
             else {},
@@ -4462,6 +4712,23 @@ async def generate_continue_sse(
             yield chunk
 
 
+async def _continue_stream_source(
+    *,
+    graph,
+    thread_id: str,
+    graph_version: str,
+    request_id: str,
+) -> AsyncGenerator[str, None]:
+    with observe_request_performance(request_id=request_id, thread_id=thread_id):
+        async for chunk in _generate_continue_sse_impl(
+            graph,
+            thread_id,
+            graph_version=graph_version,
+            continue_request_id=request_id,
+        ):
+            yield chunk
+
+
 def _app_graph_version(fastapi_app: FastAPI) -> str:
     value = getattr(fastapi_app.state, "graph_version", "")
     if isinstance(value, str) and value.strip():
@@ -4569,37 +4836,95 @@ async def frontend_performance_endpoint(request: Request):
 @app.post("/stream")
 async def stream_endpoint(chat: ChatRequest, request: Request):
     graph_version = _app_graph_version(request.app)
+    request_id = str(chat.request_id)
+    if not chat.query.strip():
+        raise HTTPException(status_code=422, detail="query_must_not_be_blank")
+    if chat.thread_id is not None and not chat.thread_id.strip():
+        raise HTTPException(status_code=422, detail="thread_id_must_not_be_blank")
+    thread_id = chat.thread_id or _new_thread_id_for_request(request_id)
+    operation = "new_request"
+    request_fingerprint = _stream_request_fingerprint(
+        operation,
+        {"query": chat.query, "user_id": chat.user_id},
+    )
+    stream_id = str(uuid.uuid4())
+    try:
+        session = await stream_session_manager.create(
+            stream_id=stream_id,
+            request_id=request_id,
+            thread_id=thread_id,
+            operation=operation,
+            request_fingerprint=request_fingerprint,
+            source=_new_request_stream_source(
+                query=chat.query,
+                graph=request.app.state.graph,
+                thread_id=thread_id,
+                user_id=chat.user_id,
+                graph_version=graph_version,
+                request_id=request_id,
+            ),
+        )
+        response_body = session.subscribe(after_sequence=0)
+    except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
+        raise HTTPException(status_code=410, detail="stream_request_expired") from exc
+    except StreamSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return StreamingResponse(
-        generate_sse(
-            chat.query,
-            request.app.state.graph,
-            thread_id=chat.thread_id,
-            user_id=chat.user_id,
-            graph_version=graph_version,
-        ),
+        response_body,
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @app.post("/resume")
 async def resume_endpoint(req: ResumeRequest, request: Request):
     graph_version = _app_graph_version(request.app)
+    if not req.thread_id.strip():
+        raise HTTPException(status_code=422, detail="thread_id_must_not_be_blank")
     profile_completion = (
         req.profile_completion.model_dump()
         if req.profile_completion is not None
         else None
     )
+    request_id = str(req.request_id)
+    operation = "resume"
+    request_fingerprint = _stream_request_fingerprint(
+        operation,
+        {
+            "edited_plan": req.edited_plan,
+            "feedback": req.feedback,
+            "memory_use_choice": req.memory_use_choice,
+            "profile_completion": profile_completion,
+        },
+    )
+    stream_id = str(uuid.uuid4())
+    try:
+        session = await stream_session_manager.create(
+            stream_id=stream_id,
+            request_id=request_id,
+            thread_id=req.thread_id,
+            operation=operation,
+            request_fingerprint=request_fingerprint,
+            source=_resume_stream_source(
+                edited_plan=req.edited_plan,
+                feedback=req.feedback,
+                graph=request.app.state.graph,
+                thread_id=req.thread_id,
+                memory_use_choice=req.memory_use_choice,
+                profile_completion=profile_completion,
+                graph_version=graph_version,
+                request_id=request_id,
+            ),
+        )
+        response_body = session.subscribe(after_sequence=0)
+    except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
+        raise HTTPException(status_code=410, detail="stream_request_expired") from exc
+    except StreamSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return StreamingResponse(
-        generate_resume_sse(
-            req.edited_plan,
-            req.feedback,
-            request.app.state.graph,
-            req.thread_id,
-            memory_use_choice=req.memory_use_choice,
-            profile_completion=profile_completion,
-            graph_version=graph_version,
-        ),
+        response_body,
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -4614,15 +4939,63 @@ async def thread_status_endpoint(thread_id: str, request: Request):
 
 
 @app.post("/threads/{thread_id}/continue")
-async def continue_thread_endpoint(thread_id: str, request: Request):
+async def continue_thread_endpoint(
+    thread_id: str,
+    req: ContinueRequest,
+    request: Request,
+):
     graph_version = _app_graph_version(request.app)
+    if not thread_id.strip():
+        raise HTTPException(status_code=422, detail="thread_id_must_not_be_blank")
+    request_id = str(req.request_id)
+    operation = "continue"
+    request_fingerprint = _stream_request_fingerprint(operation, {})
+    stream_id = str(uuid.uuid4())
+    try:
+        session = await stream_session_manager.create(
+            stream_id=stream_id,
+            request_id=request_id,
+            thread_id=thread_id,
+            operation=operation,
+            request_fingerprint=request_fingerprint,
+            source=_continue_stream_source(
+                graph=request.app.state.graph,
+                thread_id=thread_id,
+                graph_version=graph_version,
+                request_id=request_id,
+            ),
+        )
+        response_body = session.subscribe(after_sequence=0)
+    except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
+        raise HTTPException(status_code=410, detail="stream_request_expired") from exc
+    except StreamSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return StreamingResponse(
-        generate_continue_sse(
-            request.app.state.graph,
-            thread_id,
-            graph_version=graph_version,
-        ),
+        response_body,
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/streams/{stream_id}")
+async def reconnect_stream_endpoint(stream_id: str, request: Request):
+    try:
+        session = await stream_session_manager.get(stream_id)
+        after_sequence = parse_last_event_id(
+            request.headers.get("last-event-id", ""),
+            expected_stream_id=stream_id,
+        )
+        response_body = session.subscribe(after_sequence=after_sequence)
+    except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
+        raise HTTPException(status_code=410, detail="stream_session_expired") from exc
+    except StreamSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="stream_session_not_found") from exc
+    except StreamContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StreamingResponse(
+        response_body,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+from src.context_engineering.thread_window_v3 import ThreadContextWindowV3
 
 
 class ChatRequest(BaseModel):
     """Incoming chat request from the frontend."""
 
     query: str = Field(max_length=4096)
+    request_id: UUID
     thread_id: str | None = None
     user_id: str | None = None
 
@@ -19,6 +23,7 @@ class ResumeRequest(BaseModel):
     """Resume a graph interrupted by Human-in-the-loop."""
 
     thread_id: str
+    request_id: UUID
     edited_plan: str = Field(default="", max_length=16384)
     feedback: str | None = Field(default=None, max_length=4096)
     memory_use_choice: Literal["use", "ignore"] | None = None
@@ -40,6 +45,12 @@ class StopRequest(BaseModel):
     """Request a safe stop at the next LangGraph node boundary."""
 
     reason: str = Field(default="user_stop", max_length=512)
+
+
+class ContinueRequest(BaseModel):
+    """Idempotency identity for continuing one stopped graph."""
+
+    request_id: UUID
 
 
 class ThreadStatusResponse(BaseModel):
@@ -67,6 +78,7 @@ class ThreadStatusResponse(BaseModel):
     request_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window_v2: dict[str, Any] = Field(default_factory=dict)
+    thread_context_window_v3: ThreadContextWindowV3
     context_influence_ledger: dict[str, Any] = Field(default_factory=dict)
     last_resource_final_payload: dict[str, Any] = Field(default_factory=dict)
     last_qa_response: dict[str, Any] = Field(default_factory=dict)

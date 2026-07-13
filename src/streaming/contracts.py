@@ -19,7 +19,6 @@ AgentStreamEventType: TypeAlias = Literal[
     "activity_update",
     "tool_progress",
     "artifact_progress",
-    "context_window_v3",
     "qa_final",
     "resource_final",
     "interrupt",
