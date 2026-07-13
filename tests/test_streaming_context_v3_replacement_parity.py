@@ -12,19 +12,18 @@ from src.context_engineering.thread_window_v3 import build_thread_context_window
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_both_streaming_pages_use_shared_v2_client_without_legacy_parsers():
-    page_paths = [
-        REPO_ROOT / "frontend" / "app" / "page.tsx",
-        REPO_ROOT / "frontend" / "app" / "volunteer" / "page.tsx",
-    ]
-    for path in page_paths:
-        source = path.read_text(encoding="utf-8")
-        assert 'from "@/lib/agent-stream-client"' in source
-        assert "consumeAgentStreamV2" in source
-        assert '.split("\\n\\n")' not in source
-        assert ".split('\\n\\n')" not in source
-        assert 'case "token"' not in source
-        assert 'case "text"' not in source
+def test_only_main_streaming_page_uses_v2_client_without_legacy_parsers():
+    main_page = REPO_ROOT / "frontend" / "app" / "page.tsx"
+    retired_volunteer_page = REPO_ROOT / "frontend" / "app" / "volunteer" / "page.tsx"
+
+    assert not retired_volunteer_page.exists()
+    source = main_page.read_text(encoding="utf-8")
+    assert 'from "@/lib/agent-stream-client"' in source
+    assert "consumeAgentStreamV2" in source
+    assert '.split("\\n\\n")' not in source
+    assert ".split('\\n\\n')" not in source
+    assert 'case "token"' not in source
+    assert 'case "text"' not in source
 
 
 @pytest.mark.anyio

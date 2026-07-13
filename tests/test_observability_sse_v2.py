@@ -62,10 +62,12 @@ def _graph(
     *,
     state_values: dict | None = None,
     activity: bool = True,
+    node_ids: frozenset[str] = frozenset(),
     snapshot=None,
 ):
     graph = MagicMock()
     graph._a3_activity_events_enabled = activity
+    graph._a3_node_ids = node_ids
     graph._a3_graph_version = GRAPH_VERSION
     graph._a3_checkpointer_enabled = False
     graph._a3_checkpointer_type = "disabled"
@@ -85,7 +87,8 @@ async def test_activity_sse_updates_same_node_and_stream_ids_and_persists_timeli
         [
             _node_event("supervisor", "on_chain_start"),
             _node_event("supervisor", "on_chain_end"),
-        ]
+        ],
+        node_ids=frozenset({"supervisor"}),
     )
     collected = []
     async for item in _stream_graph_event_drafts(

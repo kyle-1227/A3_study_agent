@@ -136,6 +136,8 @@ async def test_context_usage_error_sse_does_not_break_stream():
         }
 
     graph = MagicMock()
+    graph._a3_activity_events_enabled = True
+    graph._a3_node_ids = frozenset({"supervisor", "resource_bundle_output"})
     graph.astream_events = MagicMock(return_value=events())
     graph.aget_state = AsyncMock(
         return_value=_snapshot({"schema_version": "run_control_v1"})
@@ -161,5 +163,11 @@ async def test_context_usage_error_sse_does_not_break_stream():
             "warning": "model context window is unknown",
         }
     ]
-    assert any(payload.get("type") == "node_event" for payload in payloads)
+    assert any(
+        payload.get("type") == "activity_event"
+        and payload.get("kind") == "node"
+        and payload.get("node") == "resource_bundle_output"
+        and payload.get("status") == "running"
+        for payload in payloads
+    )
     assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
