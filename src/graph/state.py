@@ -604,6 +604,18 @@ class LearningState(TypedDict):
     conversation_summary: Annotated[
         str, latest_string_reducer
     ]  # Compact multi-turn conversation summary
+    conversation_summary_v2: Annotated[
+        dict, latest_dict_reducer
+    ]  # Validated semantic summary bound to the active compact boundary
+    compact_boundary: Annotated[
+        dict, latest_dict_reducer
+    ]  # Content-free identities replaced in provider-bound model views
+    compaction_result: Annotated[
+        dict, latest_dict_reducer
+    ]  # Latest committed full-compaction measurement and recovery descriptor
+    last_provider_dispatch: Annotated[
+        dict, latest_dict_reducer
+    ]  # Latest actual trigger-eligible provider-bound input measurement
     evidence_summary_memory: Annotated[
         list[dict], evidence_memory_reducer
     ]  # Bounded evidence memory

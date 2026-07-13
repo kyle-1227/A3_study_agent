@@ -289,6 +289,10 @@ class TestDevMemoryClear:
         graph.aupdate_state.assert_awaited_once()
         _, values = graph.aupdate_state.await_args.args
         assert values["conversation_summary"] == ""
+        assert values["conversation_summary_v2"] == {}
+        assert values["compact_boundary"] == {}
+        assert values["compaction_result"] == {}
+        assert values["last_provider_dispatch"] == {}
         assert values["evidence_summary_memory"] is MEMORY_CLEAR
         assert values["evidence_gap_memory"] is MEMORY_CLEAR
         assert values["episodic_memory_results"] == []
@@ -318,6 +322,10 @@ class TestDevMemoryClear:
             "thread_id": "thread-1",
             "cleared_fields": [
                 "conversation_summary",
+                "conversation_summary_v2",
+                "compact_boundary",
+                "compaction_result",
+                "last_provider_dispatch",
                 "evidence_summary_memory",
                 "evidence_gap_memory",
                 "episodic_memory_results",

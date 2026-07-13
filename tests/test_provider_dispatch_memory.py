@@ -120,3 +120,27 @@ async def test_observe_only_manifest_emits_no_injection_record(monkeypatch) -> N
         reset_trace_event_sink(token)
 
     assert not any(event["stage"] == "context_injection.dispatched" for event in events)
+
+
+@pytest.mark.anyio
+async def test_compaction_summary_dispatch_is_not_a_future_trigger(monkeypatch) -> None:
+    monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda _node: 0)
+    events: list[dict] = []
+    token = set_trace_event_sink(events)
+    try:
+        await invoke_with_provider_transport_retry(
+            AsyncMock(return_value="ok"),
+            node_name="conversation_compactor",
+            llm_node="conversation_compactor",
+            provider="deepseek_official",
+            model="deepseek-v4-pro",
+            llm_input_manifest=_manifest(applied=False),
+            state={"request_id": "request-1", "thread_id": "thread-1"},
+        )
+    finally:
+        reset_trace_event_sink(token)
+
+    dispatch = next(
+        event for event in events if event["stage"] == "provider_dispatch.started"
+    )
+    assert dispatch["trigger_eligible"] is False

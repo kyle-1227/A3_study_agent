@@ -2293,7 +2293,10 @@ async def _invoke_one_mode(
         )
     except ContextApplyError as exc:
         raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
-    model_view = build_model_view_projection(structured_context_result.messages)
+    model_view = build_model_view_projection(
+        structured_context_result.messages,
+        state=state or {},
+    )
     messages = model_view.messages
     emit_a3_trace(
         logger,

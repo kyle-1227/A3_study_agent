@@ -548,6 +548,10 @@ async def invoke_with_provider_transport_retry(
             dispatch_id = f"provider-dispatch:v1:{provider_call_id}:{attempt}"
             dispatched_at = datetime.now(timezone.utc)
             call_purpose = str(llm_input_manifest.get("call_purpose") or "")
+            trigger_eligible = (
+                call_purpose in {"plain_llm", "structured_llm"}
+                and node_name != "conversation_compactor"
+            )
             emit_a3_trace(
                 logger,
                 "provider_dispatch.started",
@@ -567,7 +571,7 @@ async def invoke_with_provider_transport_retry(
                     "estimated": bool(
                         llm_input_manifest.get("input_tokens_estimated", True)
                     ),
-                    "trigger_eligible": call_purpose in {"plain_llm", "structured_llm"},
+                    "trigger_eligible": trigger_eligible,
                     "dispatched_at": dispatched_at.isoformat(),
                 },
                 state=state or {},
@@ -866,7 +870,10 @@ async def invoke_plain_llm_fail_fast(
             prepared.resolved_policy.summary,
             state_payload,
         )
-    model_view = build_model_view_projection(prepared.messages_for_llm)
+    model_view = build_model_view_projection(
+        prepared.messages_for_llm,
+        state=state_payload,
+    )
     messages_for_llm = model_view.messages
     emit_a3_trace(
         logger,

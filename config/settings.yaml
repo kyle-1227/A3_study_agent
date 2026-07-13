@@ -219,6 +219,13 @@ context_engineering:
     schema_version: 1
     micro_compaction_enabled: true
     retain_recent_rounds: 3
+  full_compaction:
+    schema_version: 1
+    enabled: true
+    retain_recent_rounds: 3
+    summary_llm_node: conversation_compactor
+    output_mode: deepseek_tool_call_strict
+    max_summary_input_chars: 128000
   thresholds:
     warning_ratio: 0.70
     critical_ratio: 0.85
@@ -958,6 +965,16 @@ retrieval:
     search_optimization_reserved: true
 
 llm:
+  conversation_compactor:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 4096
+    thinking: disabled
+    streaming: false
   qa_agent:
     provider: deepseek_official
     model: "deepseek-v4-pro"
@@ -1156,6 +1173,14 @@ llm_outputs:
     max_raw_chars: 12000
     reask_enabled: true
     reask_business_validation: true
+  conversation_compactor:
+    output_mode: deepseek_tool_call_strict
+    fallback_modes: []
+    failure_policy: block
+    max_retries: 0
+    transport_max_retries: 2
+    max_raw_chars: 1
+    reask_enabled: false
   qa_agent:
     output_mode: deepseek_tool_call_strict
     fallback_modes: []

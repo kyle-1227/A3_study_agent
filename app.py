@@ -26,6 +26,15 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from src.context_engineering.schema import sanitize_error_message
+from src.context_engineering.compaction import (
+    CompactionResultV1,
+    ProviderBoundUsageV1,
+    build_compact_boundary,
+    evaluate_full_compaction,
+    get_full_compaction_config,
+    provider_bound_usage_from_trace,
+    summary_fingerprint,
+)
 from src.context_engineering.input_manifest import (
     background_context_status_payload,
     build_background_context_window,
@@ -38,9 +47,11 @@ from src.context_engineering.policy_mode import validate_context_runtime_policy
 from src.context_engineering.session_memory import (
     ContextInjectionRecordV1,
     SessionContextMemoryLedgerV1,
+    apply_context_memory_compaction,
     new_session_context_memory_ledger,
     record_context_injection,
 )
+from src.context_engineering.model_view import build_model_view_projection
 from src.context_engineering.thread_window import build_thread_context_window_v2
 from src.context_engineering.thread_window_v3 import build_thread_context_window_v3
 from src.context_engineering.workspace import workspace_status_payload
@@ -75,6 +86,7 @@ from src.graph.resource_final import (
     normalize_resource_final_payload,
 )
 from src.graph.qa import qa_final_payload, qa_final_trace_payload
+from src.llm.compaction import invoke_conversation_compaction
 from src.profile import get_profile_manager
 from src.run_control import (
     RUN_CONTROL_FIELDS,
@@ -1534,6 +1546,192 @@ async def _update_session_context_memory_from_trace(
     return window_v3
 
 
+async def _update_last_provider_dispatch_from_trace(
+    graph,
+    config: dict,
+    *,
+    thread_id: str,
+    event: dict,
+    state_context: dict,
+) -> ProviderBoundUsageV1:
+    """Persist the latest actual business-provider input for future compaction."""
+
+    usage = provider_bound_usage_from_trace(event)
+    if usage.thread_id != thread_id:
+        raise ValueError("provider dispatch trace thread_id mismatch")
+    payload = usage.model_dump(mode="json")
+    await safe_update_thread_state(
+        graph,
+        config,
+        {"last_provider_dispatch": payload},
+        state={
+            "request_id": usage.request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
+    )
+    active_run = get_active_run(thread_id)
+    if isinstance(active_run, dict):
+        update_active_run(thread_id, {"last_provider_dispatch": payload})
+    state_context["last_provider_dispatch"] = payload
+    return usage
+
+
+async def _prepare_full_compaction_for_new_request(
+    graph,
+    config: dict,
+    *,
+    thread_id: str,
+    request_id: str,
+    snapshot_values: dict,
+    state_input: dict,
+) -> tuple[dict, dict | None]:
+    """Commit a validated full compaction before starting a new graph run."""
+
+    compaction_config = get_full_compaction_config()
+    decision = evaluate_full_compaction(
+        snapshot_values.get("last_provider_dispatch"),
+        config=compaction_config,
+    )
+    emit_a3_trace(
+        logger,
+        "full_compaction.decision",
+        decision.model_dump(mode="json"),
+        state={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
+        env_flag="LOG_A3_TRACE",
+    )
+    if not decision.eligible:
+        return dict(snapshot_values), None
+
+    history_messages = snapshot_values.get("messages")
+    if not isinstance(history_messages, list):
+        history_messages = []
+    request_messages = state_input.get("messages")
+    if not isinstance(request_messages, list):
+        raise ValueError("new request messages are unavailable for compaction")
+    model_history = [*history_messages, *request_messages]
+    boundary = build_compact_boundary(
+        model_history,
+        thread_id=thread_id,
+        request_id=request_id,
+        trigger_dispatch_id=decision.dispatch_id,
+        retain_recent_rounds=compaction_config.retain_recent_rounds,
+    )
+    if boundary is None:
+        emit_a3_trace(
+            logger,
+            "full_compaction.skipped",
+            {
+                "reason": "insufficient_history",
+                "dispatch_id": decision.dispatch_id,
+                "retained_recent_rounds": compaction_config.retain_recent_rounds,
+            },
+            state={
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "session_id": thread_id,
+            },
+            env_flag="LOG_A3_TRACE",
+        )
+        return dict(snapshot_values), None
+
+    summary = await invoke_conversation_compaction(
+        boundary=boundary,
+        messages=model_history,
+        state=snapshot_values,
+        config=compaction_config,
+    )
+    before_projection = build_model_view_projection(
+        model_history,
+        state=snapshot_values,
+    )
+    candidate_state = {
+        **snapshot_values,
+        "thread_id": thread_id,
+        "session_id": thread_id,
+        "compact_boundary": boundary.model_dump(mode="json"),
+        "conversation_summary_v2": summary.model_dump(mode="json"),
+        "conversation_summary": summary.summary,
+    }
+    after_projection = build_model_view_projection(
+        model_history,
+        state=candidate_state,
+    )
+
+    ledger = _session_context_memory_ledger(
+        snapshot_values,
+        thread_id=thread_id,
+    )
+    retained_item_ids = list(ledger.active_items)
+    compacted_at = datetime.now(timezone.utc)
+    updated_ledger = apply_context_memory_compaction(
+        ledger,
+        boundary_id=boundary.boundary_id,
+        retained_logical_item_ids=retained_item_ids,
+        compacted_at=compacted_at,
+        before_tokens=ledger.retained_memory_tokens,
+        after_tokens=ledger.retained_memory_tokens,
+    )
+    result = CompactionResultV1(
+        status="compacted",
+        boundary_id=boundary.boundary_id,
+        trigger_dispatch_id=decision.dispatch_id,
+        compacted_at=compacted_at,
+        trigger_input_tokens=decision.observed_input_tokens,
+        context_window_limit_tokens=decision.context_window_limit_tokens,
+        trigger_ratio=decision.observed_ratio,
+        compact_ratio=decision.compact_ratio,
+        model_view_before_tokens=(before_projection.projection.output_estimated_tokens),
+        model_view_after_tokens=after_projection.projection.output_estimated_tokens,
+        compacted_message_count=len(boundary.compacted_messages),
+        retained_message_count=boundary.retained_message_count,
+        summary_fingerprint=summary_fingerprint(summary),
+        ledger_before_tokens=ledger.retained_memory_tokens,
+        ledger_after_tokens=updated_ledger.retained_memory_tokens,
+    )
+    window_v3 = build_thread_context_window_v3(
+        updated_ledger,
+        updating=False,
+    ).model_dump(mode="json")
+    state_update = {
+        "conversation_summary": summary.summary,
+        "conversation_summary_v2": summary.model_dump(mode="json"),
+        "compact_boundary": boundary.model_dump(mode="json"),
+        "compaction_result": result.model_dump(mode="json"),
+        "session_context_memory_ledger": updated_ledger.model_dump(mode="json"),
+        "thread_context_window_v3": window_v3,
+    }
+    await safe_update_thread_state(
+        graph,
+        config,
+        state_update,
+        state={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
+        as_node="supervisor",
+    )
+    state_input.update(state_update)
+    updated_values = {**snapshot_values, **state_update}
+    emit_a3_trace(
+        logger,
+        "full_compaction.committed",
+        result.model_dump(mode="json"),
+        state={
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread_id,
+        },
+        env_flag="LOG_A3_TRACE",
+    )
+    return updated_values, result.model_dump(mode="json")
+
+
 def _last_ai_message_content(final_state: dict) -> str:
     for msg in reversed(final_state.get("messages") or []):
         content = getattr(msg, "content", "")
@@ -1864,6 +2062,10 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
     config = make_thread_config(thread_id)
     cleared_fields = [
         "conversation_summary",
+        "conversation_summary_v2",
+        "compact_boundary",
+        "compaction_result",
+        "last_provider_dispatch",
         "evidence_summary_memory",
         "evidence_gap_memory",
         "episodic_memory_results",
@@ -1888,6 +2090,10 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
     ]
     values = {
         "conversation_summary": "",
+        "conversation_summary_v2": {},
+        "compact_boundary": {},
+        "compaction_result": {},
+        "last_provider_dispatch": {},
         "evidence_summary_memory": MEMORY_CLEAR,
         "evidence_gap_memory": MEMORY_CLEAR,
         "episodic_memory_results": [],
@@ -2177,6 +2383,16 @@ async def _stream_graph_events(
                 worker_interrupted_seen = True
             if isinstance(stage, str) and stage.startswith("context_"):
                 request_context_events.append(_safe_context_event_summary(event))
+            if stage == "provider_dispatch.started":
+                if event.get("trigger_eligible") is True:
+                    await _update_last_provider_dispatch_from_trace(
+                        graph,
+                        config,
+                        thread_id=thread_id,
+                        event=event,
+                        state_context=manifest_state_context,
+                    )
+                continue
             if stage == "context_injection.dispatched":
                 window_v3 = await _update_session_context_memory_from_trace(
                     graph,
@@ -4065,8 +4281,56 @@ async def _generate_sse_impl(
         return
 
     run_state_snapshot = await graph.aget_state(config)
+    snapshot_values = _state_values(run_state_snapshot)
+    try:
+        (
+            compacted_values,
+            compaction_payload,
+        ) = await _prepare_full_compaction_for_new_request(
+            graph,
+            config,
+            thread_id=thread_id,
+            request_id=request_id,
+            snapshot_values=snapshot_values,
+            state_input=state_input,
+        )
+    except Exception as exc:
+        emit_a3_trace(
+            logger,
+            "full_compaction.failed",
+            {
+                "error_type": type(exc).__name__,
+                "recoverable": False,
+            },
+            state={
+                "request_id": request_id,
+                "thread_id": thread_id,
+                "session_id": thread_id,
+            },
+            env_flag="LOG_A3_TRACE",
+        )
+        await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+            },
+            state=state_input,
+            persist_checkpoint=True,
+        )
+        payload = {
+            "type": "error",
+            "error_type": "full_compaction_failed",
+            "message": "full_compaction_failed",
+            "recoverable": False,
+            "thread_id": thread_id,
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return
     status_values = _new_request_status_values(
-        _state_values(run_state_snapshot),
+        compacted_values,
         initial_run_values,
     )
     request_context_window, thread_context_window = _context_window_status(
@@ -4118,6 +4382,18 @@ async def _generate_sse_impl(
             )
             if isinstance(status_values.get("last_resource_final_payload"), dict)
             else {},
+            "last_provider_dispatch": status_values.get("last_provider_dispatch")
+            if isinstance(status_values.get("last_provider_dispatch"), dict)
+            else {},
+            "compact_boundary": status_values.get("compact_boundary")
+            if isinstance(status_values.get("compact_boundary"), dict)
+            else {},
+            "conversation_summary_v2": status_values.get("conversation_summary_v2")
+            if isinstance(status_values.get("conversation_summary_v2"), dict)
+            else {},
+            "compaction_result": status_values.get("compaction_result")
+            if isinstance(status_values.get("compaction_result"), dict)
+            else {},
         },
     )
 
@@ -4141,6 +4417,22 @@ async def _generate_sse_impl(
         "thread_id": thread_id,
     }
     yield f"data: {json.dumps(running_payload, ensure_ascii=False)}\n\n"
+    if compaction_payload:
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "compaction_status",
+                    "compaction_result": compaction_payload,
+                    "thread_context_window_v3": status_values.get(
+                        "thread_context_window_v3",
+                        {},
+                    ),
+                },
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
 
     # Record user input as episodic memory (non-fatal, fire-and-forget)
     if user_id:
