@@ -96,7 +96,10 @@ def _model_to_dict(model: BaseModel) -> dict:
 
 def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
-    return ", ".join(str(item) for item in keypoints if str(item).strip()) or "No explicit keypoints."
+    return (
+        ", ".join(str(item) for item in keypoints if str(item).strip())
+        or "No explicit keypoints."
+    )
 
 
 def _format_context(context: list[dict]) -> str:
@@ -104,8 +107,15 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:800]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:800]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -119,10 +129,7 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
 
 
 def _is_web_evidence(item: dict) -> bool:
-    return (
-        item.get("source_type") == "web"
-        or item.get("type") == "web_evidence"
-    )
+    return item.get("source_type") == "web" or item.get("type") == "web_evidence"
 
 
 def _web_evidence_items(context: list[dict]) -> list[dict]:
@@ -142,101 +149,6 @@ def _tree_stats(tree: dict[str, Any]) -> tuple[int, int]:
         return count, max_depth
 
     return visit(tree, 1)
-
-
-def _state_terms(state: LearningState) -> list[str]:
-    terms: list[str] = []
-    for key in ("expanded_keypoints", "keypoints"):
-        values = state.get(key, []) or []
-        if isinstance(values, list):
-            for item in values:
-                text = str(item).strip()
-                if text and text not in terms:
-                    terms.append(text)
-    return terms
-
-
-def _fallback_subject_title(state: LearningState) -> str:
-    subject = str(state.get("primary_subject") or state.get("subject") or "").strip()
-    query = _last_human_query(state)
-    lowered = (subject or query).lower()
-    if subject.lower() in {"python", "py"} or "python" in lowered:
-        return "Python"
-    if subject:
-        return subject[:40]
-    terms = _state_terms(state)
-    if terms:
-        return terms[0][:40]
-    return "课程知识"
-
-
-def _node(title: str, children: list[str] | None = None, note: str | None = None) -> dict[str, Any]:
-    node: dict[str, Any] = {"title": title, "children": []}
-    if note:
-        node["note"] = note
-    for child in children or []:
-        node["children"].append({"title": child, "children": []})
-    return node
-
-
-def _python_fallback_tree() -> dict[str, Any]:
-    return {
-        "title": "Python 复习思维导图",
-        "children": [
-            _node("基础语法", ["变量与赋值", "缩进与代码块", "注释与命名规范"]),
-            _node("数据类型", ["数字与字符串", "列表、元组、字典、集合", "可变与不可变对象"]),
-            _node("控制流", ["条件判断", "for / while 循环", "break / continue / else"]),
-            _node("函数", ["参数与返回值", "作用域与闭包", "lambda 与高阶函数"]),
-            _node("面向对象编程", ["类与对象", "继承与多态", "特殊方法"]),
-            _node("模块与包", ["import 机制", "标准库使用", "第三方包管理"]),
-            _node("文件操作", ["文本文件读写", "路径处理", "with 上下文管理器"]),
-            _node("异常处理", ["try / except", "finally 与 else", "自定义异常"]),
-            _node("常见练习题方向", ["函数封装题", "数据结构处理题", "文件与异常综合题"]),
-        ],
-    }
-
-
-def _generic_fallback_tree(state: LearningState) -> dict[str, Any]:
-    subject = _fallback_subject_title(state)
-    terms = _state_terms(state)
-    context_terms: list[str] = []
-    for item in (state.get("context") or [])[:4]:
-        title = str(item.get("title") or item.get("source") or item.get("subject") or "").strip()
-        if title and title not in context_terms:
-            context_terms.append(title[:40])
-    concept_children = (terms[:3] or context_terms[:3] or ["核心概念", "基础定义", "关键术语"])
-    practice_children = terms[3:6] or ["基础题", "进阶题", "综合应用题"]
-    return {
-        "title": f"{subject}复习思维导图",
-        "children": [
-            _node("复习目标", ["明确考试范围", "梳理知识结构", "定位薄弱环节"]),
-            _node("核心知识点", concept_children),
-            _node("概念关系", ["前置知识", "并列概念", "应用场景"]),
-            _node("重点方法", ["基本步骤", "常见模式", "解题策略"]),
-            _node("易错点", ["概念混淆", "边界条件", "常见误区"]),
-            _node("练习方向", practice_children),
-            _node("复习路线", ["先总览", "再逐点突破", "最后自测巩固"]),
-        ],
-    }
-
-
-def _build_fallback_mindmap_artifact(state: LearningState, reason: str) -> MindmapArtifact:
-    subject = _fallback_subject_title(state)
-    if subject.lower() == "python":
-        tree = _python_fallback_tree()
-    else:
-        tree = _generic_fallback_tree(state)
-    tree.setdefault("note", "由简化模式生成：mindmap_agent 结构化输出解析失败。")
-    title = str(tree.get("title") or f"{subject}复习思维导图")
-    tree["note"] = (
-        "由简化模式生成，原因是 mindmap_agent 结构化输出失败；"
-        f"失败原因：{str(reason or 'unknown')[:200]}"
-    )
-    return MindmapArtifact(title=title, tree=MindmapNode(**tree))
-
-
-def _is_fallback_mindmap_tree(tree: dict[str, Any]) -> bool:
-    return "简化模式" in str(tree.get("note") or "")
 
 
 def _local_review_failure(tree: dict[str, Any], _query: str) -> str:
@@ -267,13 +179,19 @@ async def mindmap_planner(state: LearningState) -> dict:
     )
     prompt = _render_prompt(
         "mindmap_planner",
-        {"question": query, "keypoints": _format_keypoints(state), "context": _format_context(context)},
+        {
+            "question": query,
+            "keypoints": _format_keypoints(state),
+            "context": _format_context(context),
+        },
     )
     outline = await invoke_plain_llm_fail_fast(
         node_name="mindmap_planner",
         llm_node="mindmap",
         messages=[
-            SystemMessage(content="You are a university course knowledge-structure planner. Return a concrete mindmap outline only."),
+            SystemMessage(
+                content="You are a university course knowledge-structure planner. Return a concrete mindmap outline only."
+            ),
             HumanMessage(content=prompt),
         ],
         state=state,
@@ -310,57 +228,38 @@ async def mindmap_agent(state: LearningState) -> dict:
         },
     )
     model_name = get_setting("llm.mindmap.model", get_setting("mindmap.model", ""))
-    fallback_used = False
-    error_type = ""
-    error_reason = ""
-    try:
-        with traced_llm_call(model_name=model_name, node_name="mindmap_agent", temperature=get_setting("mindmap.temperature", 0.2)):
-            structured_result = await invoke_structured_llm(
-                node_name="mindmap_agent",
-                llm_node="mindmap",
-                schema=MindmapArtifact,
-                messages=[
-                    SystemMessage(content="You are a JSON tree generator. Return only JSON for MindmapArtifact."),
-                    HumanMessage(content=prompt),
-                ],
-                output_mode=get_llm_output_mode("mindmap_agent"),
-                business_validator=validate_mindmap_artifact,
-                state=state,
-                max_raw_chars=get_max_raw_chars("mindmap_agent"),
-            )
-        result = structured_result.parsed
-        if not isinstance(result, MindmapArtifact):
-            raise TypeError("mindmap_agent parsed result is not MindmapArtifact")
-    except StructuredOutputError as exc:
-        fallback_used = True
-        error_type = type(exc).__name__
-        error_reason = (
-            exc.result.parsing_error
-            or exc.result.validation_error
-            or exc.result.business_validation_error
-            or exc.result.error_message
-            or exc.result.failure_phase
-            or str(exc)
+    with traced_llm_call(
+        model_name=model_name,
+        node_name="mindmap_agent",
+        temperature=get_setting("mindmap.temperature", 0.2),
+    ):
+        structured_result = await invoke_structured_llm(
+            node_name="mindmap_agent",
+            llm_node="mindmap",
+            schema=MindmapArtifact,
+            messages=[
+                SystemMessage(
+                    content="You are a JSON tree generator. Return only JSON for MindmapArtifact."
+                ),
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("mindmap_agent"),
+            business_validator=validate_mindmap_artifact,
+            state=state,
+            max_raw_chars=get_max_raw_chars("mindmap_agent"),
         )
-        logger.warning("mindmap_agent structured output failed; using fallback mindmap: %s", error_reason)
-        result = _build_fallback_mindmap_artifact(state, error_reason)
-    except Exception as exc:
-        fallback_used = True
-        error_type = type(exc).__name__
-        error_reason = str(exc)
-        logger.warning("mindmap_agent failed; using fallback mindmap: %s", error_reason)
-        result = _build_fallback_mindmap_artifact(state, error_reason)
-    title = result.title.strip() or "Knowledge mindmap"
+    if not structured_result.success:
+        raise StructuredOutputError(structured_result)
+    result = structured_result.parsed
+    if not isinstance(result, MindmapArtifact):
+        raise TypeError("mindmap_agent parsed result is not MindmapArtifact")
     tree = normalize_mindmap_tree(_model_to_dict(result.tree))
     if not tree.get("title"):
-        tree["title"] = title
+        raise ValueError("normalized mindmap tree title is empty")
     emit_a3_trace(
         logger,
         "mindmap_agent",
         {
-            "fallback_used": fallback_used,
-            "error_type": error_type,
-            "error_reason": error_reason[:500],
             "has_mindmap_tree": bool(tree),
             "mindmap_round": round_no,
             "node_count": _tree_stats(tree)[0],
@@ -388,12 +287,6 @@ async def mindmap_reviewer(state: LearningState) -> dict:
             "mindmap_review_reason": local_failure,
             "mindmap_revision_notes": f"Please rewrite: {local_failure}",
         }
-    if _is_fallback_mindmap_tree(tree):
-        return {
-            "mindmap_review_verdict": "approve",
-            "mindmap_review_reason": "Fallback mindmap passed local structure checks.",
-            "mindmap_revision_notes": "",
-        }
     prompt = _render_prompt(
         "mindmap_reviewer",
         {
@@ -403,13 +296,17 @@ async def mindmap_reviewer(state: LearningState) -> dict:
         },
     )
     model_name = get_setting("llm.mindmap.model", get_setting("mindmap.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="mindmap_reviewer", temperature=0.0):
+    with traced_llm_call(
+        model_name=model_name, node_name="mindmap_reviewer", temperature=0.0
+    ):
         structured_result = await invoke_structured_llm(
             node_name="mindmap_reviewer",
             llm_node="mindmap",
             schema=MindmapReviewVerdict,
             messages=[
-                SystemMessage(content="You are a course resource quality reviewer. Return only JSON."),
+                SystemMessage(
+                    content="You are a course resource quality reviewer. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("mindmap_reviewer"),
@@ -417,13 +314,17 @@ async def mindmap_reviewer(state: LearningState) -> dict:
             state=state,
             max_raw_chars=get_max_raw_chars("mindmap_reviewer"),
         )
+    if not structured_result.success:
+        raise StructuredOutputError(structured_result)
     result = structured_result.parsed
     if not isinstance(result, MindmapReviewVerdict):
         raise TypeError("mindmap_reviewer parsed result is not MindmapReviewVerdict")
     return {
         "mindmap_review_verdict": result.verdict,
         "mindmap_review_reason": result.reason.strip(),
-        "mindmap_revision_notes": "" if result.verdict == "approve" else f"Please rewrite: {result.reason.strip()}",
+        "mindmap_revision_notes": ""
+        if result.verdict == "approve"
+        else f"Please rewrite: {result.reason.strip()}",
     }
 
 
@@ -443,7 +344,9 @@ async def mindmap_output(state: LearningState) -> dict:
     tree = state.get("mindmap_tree") or {}
     if not tree:
         raise ValueError("mindmap tree is empty")
-    title = str(tree.get("title") or "Knowledge mindmap")
+    title = str(tree.get("title") or "").strip()
+    if not title:
+        raise ValueError("mindmap tree title is empty")
     artifact = create_xmind_artifact(tree, title=title)
     payload = {
         "title": title,
@@ -467,4 +370,6 @@ def should_rewrite_mindmap(state: LearningState) -> str:
     current_round = int(state.get("mindmap_round", 0) or 0)
     if current_round < max_rounds:
         return "rewrite"
-    raise RuntimeError(f"mindmap rejected after max rounds: {state.get('mindmap_review_reason', '')}")
+    raise RuntimeError(
+        f"mindmap rejected after max rounds: {state.get('mindmap_review_reason', '')}"
+    )

@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.mindmap import (
     MindmapArtifact,
     MindmapNode,
+    MindmapReviewVerdict,
     mindmap_agent,
     mindmap_output,
     mindmap_reviewer,
@@ -25,31 +26,148 @@ def _mindmap_artifact() -> MindmapArtifact:
         tree=MindmapNode(
             title="Machine Learning",
             children=[
-                MindmapNode(title="Supervised learning", children=[MindmapNode(title="Regression")]),
-                MindmapNode(title="Unsupervised learning", children=[MindmapNode(title="Clustering")]),
-                MindmapNode(title="Model evaluation", children=[MindmapNode(title="Validation set")]),
-                MindmapNode(title="Practice", children=[MindmapNode(title="Mini project")]),
+                MindmapNode(
+                    title="Supervised learning",
+                    children=[MindmapNode(title="Regression")],
+                ),
+                MindmapNode(
+                    title="Unsupervised learning",
+                    children=[MindmapNode(title="Clustering")],
+                ),
+                MindmapNode(
+                    title="Model evaluation",
+                    children=[MindmapNode(title="Validation set")],
+                ),
+                MindmapNode(
+                    title="Practice", children=[MindmapNode(title="Mini project")]
+                ),
             ],
         ),
+    )
+
+
+def _agent_state() -> dict:
+    return {
+        "messages": [HumanMessage(content="Create a machine learning mindmap")],
+        "context": [{"content": "Machine learning course notes", "source": "ml.md"}],
+        "mindmap_outline": "Supervised, unsupervised, evaluation, practice",
+        "mindmap_round": 0,
+    }
+
+
+def _failed_structured_result(
+    *,
+    node_name: str = "mindmap_agent",
+    schema_name: str = "MindmapArtifact",
+    failure_phase: str,
+) -> StructuredLLMResult:
+    return StructuredLLMResult(
+        success=False,
+        parsed=None,
+        node_name=node_name,
+        llm_node="mindmap",
+        schema_name=schema_name,
+        provider="test",
+        model="test",
+        output_mode="native_json_schema_pydantic",
+        failure_phase=failure_phase,
+        error_type="TestStructuredFailure",
+        error_message="structured output failed",
     )
 
 
 @pytest.mark.anyio
 async def test_mindmap_agent_generates_json_tree_from_outline():
     artifact = _mindmap_artifact()
-    with patch("src.graph.mindmap.invoke_structured_llm", return_value=SimpleNamespace(parsed=artifact)):
-        result = await mindmap_agent(
-            {
-                "messages": [HumanMessage(content="Create a machine learning mindmap")],
-                "context": [{"content": "Machine learning course notes", "source": "ml.md"}],
-                "mindmap_outline": "Supervised, unsupervised, evaluation, practice",
-                "mindmap_round": 0,
-            }
-        )
+    with patch(
+        "src.graph.mindmap.invoke_structured_llm",
+        return_value=SimpleNamespace(success=True, parsed=artifact),
+    ):
+        result = await mindmap_agent(_agent_state())
 
     assert result["mindmap_tree"]["title"] == "Machine Learning"
     assert result["mindmap_round"] == 1
     assert "mindmap_artifact" not in result
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "failure_phase",
+    [
+        "provider_http_error",
+        "parsing_error",
+        "validation_error",
+        "business_validation_error",
+    ],
+)
+async def test_mindmap_agent_propagates_structured_output_error(
+    failure_phase: str,
+):
+    structured_error = StructuredOutputError(
+        _failed_structured_result(failure_phase=failure_phase)
+    )
+    with (
+        patch(
+            "src.graph.mindmap.invoke_structured_llm",
+            side_effect=structured_error,
+        ),
+        pytest.raises(StructuredOutputError) as exc_info,
+    ):
+        await mindmap_agent(_agent_state())
+
+    assert exc_info.value is structured_error
+
+
+@pytest.mark.anyio
+async def test_mindmap_agent_rejects_non_raising_failed_structured_result():
+    failed_result = _failed_structured_result(failure_phase="validation_error")
+    with (
+        patch(
+            "src.graph.mindmap.invoke_structured_llm",
+            return_value=failed_result,
+        ),
+        pytest.raises(StructuredOutputError) as exc_info,
+    ):
+        await mindmap_agent(_agent_state())
+
+    assert exc_info.value.result is failed_result
+
+
+@pytest.mark.anyio
+async def test_mindmap_agent_propagates_transport_exception():
+    transport_error = ConnectionError("mindmap provider transport failed")
+    with (
+        patch(
+            "src.graph.mindmap.invoke_structured_llm",
+            side_effect=transport_error,
+        ),
+        pytest.raises(ConnectionError) as exc_info,
+    ):
+        await mindmap_agent(_agent_state())
+
+    assert exc_info.value is transport_error
+
+
+@pytest.mark.anyio
+async def test_mindmap_reviewer_uses_strict_structured_verdict():
+    verdict = MindmapReviewVerdict(verdict="approve", reason="Structure is complete.")
+    with patch(
+        "src.graph.mindmap.invoke_structured_llm",
+        return_value=SimpleNamespace(success=True, parsed=verdict),
+    ):
+        result = await mindmap_reviewer(
+            {
+                "messages": [HumanMessage(content="Review the mindmap")],
+                "mindmap_outline": "Machine learning topics",
+                "mindmap_tree": _mindmap_artifact().tree.model_dump(),
+            }
+        )
+
+    assert result == {
+        "mindmap_review_verdict": "approve",
+        "mindmap_review_reason": "Structure is complete.",
+        "mindmap_revision_notes": "",
+    }
 
 
 @pytest.mark.anyio
@@ -59,70 +177,28 @@ async def test_mindmap_agent_empty_outline_raises():
 
 
 @pytest.mark.anyio
-async def test_mindmap_agent_uses_fallback_on_structured_output_error():
-    structured_error = StructuredOutputError(
-        StructuredLLMResult(
-            success=False,
-            parsed=None,
-            node_name="mindmap_agent",
-            llm_node="mindmap",
-            schema_name="MindmapArtifact",
-            provider="test",
-            model="test",
-            output_mode="native_json_schema_pydantic",
-            failure_phase="parsing_error",
-            error_type="OutputParserException",
-            parsing_error="invalid JSON",
-        )
+async def test_mindmap_reviewer_rejects_non_raising_failed_structured_result():
+    failed_result = _failed_structured_result(
+        node_name="mindmap_reviewer",
+        schema_name="MindmapReviewVerdict",
+        failure_phase="business_validation_error",
     )
-    with patch("src.graph.mindmap.invoke_structured_llm", side_effect=structured_error):
-        result = await mindmap_agent(
-            {
-                "messages": [HumanMessage(content="帮我生成一份 Python 的思维导图")],
-                "primary_subject": "python",
-                "keypoints": ["函数", "数据类型"],
-                "expanded_keypoints": ["控制流", "异常处理"],
-                "learning_goal": "Python 复习",
-                "context": [{"content": "Python course notes", "source": "python.md"}],
-                "mindmap_outline": "Python 复习结构",
-                "mindmap_round": 0,
-            }
-        )
-
-    tree = result["mindmap_tree"]
-    assert tree["title"] == "Python 复习思维导图"
-    assert "简化模式" in tree["note"]
-    assert len(tree["children"]) >= 8
-    assert result["mindmap_round"] == 1
-
-    review = await mindmap_reviewer(
-        {
-            "messages": [HumanMessage(content="帮我生成一份 Python 的思维导图")],
-            "mindmap_outline": "Python 复习结构",
-            "mindmap_tree": tree,
-        }
-    )
-
-    assert review["mindmap_review_verdict"] == "approve"
-    with patch(
-        "src.graph.mindmap.create_xmind_artifact",
-        return_value={
-            "artifact_id": "fallback-1",
-            "filename": "python.xmind",
-            "path": "/tmp/python.xmind",
-            "xmind_url": "/artifacts/mindmaps/fallback-1/python.xmind",
-        },
+    with (
+        patch(
+            "src.graph.mindmap.invoke_structured_llm",
+            return_value=failed_result,
+        ),
+        pytest.raises(StructuredOutputError) as exc_info,
     ):
-        output = await mindmap_output(
+        await mindmap_reviewer(
             {
-                "mindmap_tree": tree,
-                "mindmap_review_verdict": review["mindmap_review_verdict"],
-                "mindmap_review_reason": review["mindmap_review_reason"],
+                "messages": [HumanMessage(content="Review the mindmap")],
+                "mindmap_outline": "Machine learning topics",
+                "mindmap_tree": _mindmap_artifact().tree.model_dump(),
             }
         )
 
-    assert output["mindmap_artifact"]["tree"]["title"] == "Python 复习思维导图"
-    assert output["mindmap_artifact"]["xmind_url"].endswith(".xmind")
+    assert exc_info.value.result is failed_result
 
 
 @pytest.mark.anyio
@@ -162,7 +238,9 @@ async def test_mindmap_output_generates_artifact():
             {
                 "mindmap_tree": {
                     "title": "Machine Learning",
-                    "children": [{"title": "Regularization", "children": [{"title": "L2"}]}],
+                    "children": [
+                        {"title": "Regularization", "children": [{"title": "L2"}]}
+                    ],
                 },
                 "mindmap_review_verdict": "approve",
                 "mindmap_review_reason": "approved",
@@ -180,8 +258,28 @@ async def test_mindmap_output_empty_tree_raises():
         await mindmap_output({})
 
 
+@pytest.mark.anyio
+async def test_mindmap_output_missing_title_raises_without_default_artifact():
+    with pytest.raises(ValueError, match="title"):
+        await mindmap_output(
+            {
+                "mindmap_tree": {
+                    "children": [{"title": "Regularization", "children": []}]
+                }
+            }
+        )
+
+
 def test_should_rewrite_mindmap_caps_retry_rounds():
-    assert should_rewrite_mindmap({"mindmap_review_verdict": "approve", "mindmap_round": 1}) == "output"
-    assert should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 1}) == "rewrite"
+    assert (
+        should_rewrite_mindmap(
+            {"mindmap_review_verdict": "approve", "mindmap_round": 1}
+        )
+        == "output"
+    )
+    assert (
+        should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 1})
+        == "rewrite"
+    )
     with pytest.raises(RuntimeError, match="max rounds"):
         should_rewrite_mindmap({"mindmap_review_verdict": "reject", "mindmap_round": 3})
