@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, Mapping
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import get_setting
 from src.context_engineering.workspace import (
@@ -79,6 +79,8 @@ PROFILE_COMPLETION_REQUIRED_KEYS = tuple(
 class StudyPlanEmotionalProfile(BaseModel):
     """Learner emotional and workload context for study-plan generation."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     summary: str = Field(..., min_length=1)
     workload_risk: Literal["low", "medium", "high"]
     motivation_state: str = Field(..., min_length=1)
@@ -87,6 +89,8 @@ class StudyPlanEmotionalProfile(BaseModel):
 
 class StudyPlanPhase(BaseModel):
     """A phase in a personalized study plan."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     title: str = Field(..., min_length=1)
     duration: str = Field(..., min_length=1)
@@ -99,6 +103,8 @@ class StudyPlanPhase(BaseModel):
 
 class StudyPlanArtifact(BaseModel):
     """Structured personalized study-plan artifact."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     title: str = Field(..., min_length=1)
     learner_profile_summary: str = Field(..., min_length=1)
@@ -114,6 +120,8 @@ class StudyPlanArtifact(BaseModel):
 class StudyPlanPhasesArtifact(BaseModel):
     """First-stage study-plan phase structure."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     title: str = Field(..., min_length=1)
     learner_profile_summary: str = Field(..., min_length=1)
     overall_goal: str = Field(..., min_length=1)
@@ -124,6 +132,8 @@ class StudyPlanPhasesArtifact(BaseModel):
 class StudyPlanScheduleArtifact(BaseModel):
     """Second-stage study-plan execution schedule."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     weekly_schedule: list[str] = Field(..., min_length=1)
     milestones: list[str] = Field(..., min_length=1)
     practice_tasks: list[str] = Field(..., min_length=1)
@@ -133,8 +143,22 @@ class StudyPlanScheduleArtifact(BaseModel):
 class StudyPlanReviewVerdict(BaseModel):
     """Structured study-plan reviewer verdict."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     verdict: Literal["approve", "reject"]
     reason: str = Field(..., min_length=1)
+
+
+class StudyPlanContractError(ValueError):
+    """Raised when study-plan state violates the authoritative graph contract."""
+
+
+class StudyPlanApprovalError(RuntimeError):
+    """Raised when an unapproved study plan reaches authoritative output."""
+
+
+class StudyPlanArtifactWriteError(RuntimeError):
+    """Raised when an approved study plan cannot be persisted safely."""
 
 
 def _last_human_query(state: LearningState) -> str:
@@ -145,9 +169,7 @@ def _last_human_query(state: LearningState) -> str:
 
 
 def _model_to_dict(model: BaseModel) -> dict:
-    if hasattr(model, "model_dump"):
-        return model.model_dump()
-    return model.dict()
+    return model.model_dump(mode="python")
 
 
 def _format_keypoints(state: LearningState) -> str:
@@ -469,6 +491,16 @@ async def _invoke_study_plan_stage(
             status="failed",
         )
         raise
+    if structured_result.success is not True:
+        _emit_study_plan_repair_trace(
+            state,
+            stage=stage,
+            result=structured_result,
+            status="failed",
+        )
+        raise StructuredOutputError(structured_result)
+    if structured_result.parsed is None:
+        raise TypeError(f"{stage} returned no parsed result")
     _emit_study_plan_repair_trace(
         state,
         stage=stage,
@@ -487,8 +519,6 @@ async def _invoke_study_plan_stage(
         state=state,
         env_flag="LOG_A3_TRACE",
     )
-    if structured_result.parsed is None:
-        raise TypeError(f"{stage} returned no parsed result")
     return structured_result.parsed
 
 
@@ -497,6 +527,25 @@ def validate_emotional_profile(parsed: BaseModel) -> str:
         return "root expected StudyPlanEmotionalProfile"
     if not parsed.summary.strip():
         return "summary must be non-empty"
+    if not parsed.motivation_state.strip():
+        return "motivation_state must be non-empty"
+    for idx, suggestion in enumerate(parsed.support_suggestions):
+        if not suggestion.strip():
+            return f"support_suggestions.{idx} must be non-empty"
+    return ""
+
+
+def _validate_string_items(
+    field_name: str,
+    items: list[str],
+    *,
+    required: bool = True,
+) -> str:
+    if required and not items:
+        return f"{field_name} must be non-empty"
+    for idx, item in enumerate(items):
+        if not item.strip():
+            return f"{field_name}.{idx} must be non-empty"
     return ""
 
 
@@ -505,58 +554,100 @@ def validate_study_plan_phases(parsed: BaseModel) -> str:
         return "root expected StudyPlanPhasesArtifact"
     if len(parsed.phases or []) < 2:
         return "phases must contain at least 2 items"
+    for field_name, value in (
+        ("title", parsed.title),
+        ("learner_profile_summary", parsed.learner_profile_summary),
+        ("overall_goal", parsed.overall_goal),
+    ):
+        if not value.strip():
+            return f"{field_name} must be non-empty"
     for idx, phase in enumerate(parsed.phases or []):
         prefix = f"phases.{idx}"
+        if not phase.title.strip():
+            return f"{prefix}.title must be non-empty"
         if not phase.duration.strip():
             return f"{prefix}.duration must be non-empty"
-        if not phase.goals:
-            return f"{prefix}.goals must be non-empty"
-        if not phase.tasks:
-            return f"{prefix}.tasks must be non-empty"
-        if not phase.resources:
-            return f"{prefix}.resources must be non-empty"
-        if not phase.practice:
-            return f"{prefix}.practice must be non-empty"
-        if not phase.checkpoints:
-            return f"{prefix}.checkpoints must be non-empty"
+        for field_name, items in (
+            ("goals", phase.goals),
+            ("tasks", phase.tasks),
+            ("resources", phase.resources),
+            ("practice", phase.practice),
+            ("checkpoints", phase.checkpoints),
+        ):
+            item_error = _validate_string_items(f"{prefix}.{field_name}", items)
+            if item_error:
+                return item_error
     if not parsed.evidence_usage:
         return "evidence_usage must be non-empty"
+    evidence_error = _validate_string_items("evidence_usage", parsed.evidence_usage)
+    if evidence_error:
+        return evidence_error
     return ""
 
 
 def validate_study_plan_schedule(parsed: BaseModel) -> str:
     if not isinstance(parsed, StudyPlanScheduleArtifact):
         return "root expected StudyPlanScheduleArtifact"
-    if not parsed.weekly_schedule:
-        return "weekly_schedule must be non-empty"
-    if not parsed.milestones:
-        return "milestones must be non-empty"
-    if not parsed.practice_tasks:
-        return "practice_tasks must be non-empty"
+    for field_name, items in (
+        ("weekly_schedule", parsed.weekly_schedule),
+        ("milestones", parsed.milestones),
+        ("practice_tasks", parsed.practice_tasks),
+    ):
+        item_error = _validate_string_items(field_name, items)
+        if item_error:
+            return item_error
+    risk_error = _validate_string_items(
+        "risk_warnings",
+        parsed.risk_warnings,
+        required=False,
+    )
+    if risk_error:
+        return risk_error
     return ""
 
 
 def validate_study_plan_artifact(parsed: BaseModel) -> str:
     if not isinstance(parsed, StudyPlanArtifact):
         return "root expected StudyPlanArtifact"
-    if not parsed.title.strip():
-        return "title must be non-empty"
+    for field_name, value in (
+        ("title", parsed.title),
+        ("learner_profile_summary", parsed.learner_profile_summary),
+        ("overall_goal", parsed.overall_goal),
+    ):
+        if not value.strip():
+            return f"{field_name} must be non-empty"
     if len(parsed.phases or []) < 2:
         return "phases must contain at least 2 items"
     for idx, phase in enumerate(parsed.phases or []):
         prefix = f"phases.{idx}"
+        if not phase.title.strip():
+            return f"{prefix}.title must be non-empty"
         if not phase.duration.strip():
             return f"{prefix}.duration must be non-empty"
-        if not phase.goals:
-            return f"{prefix}.goals must be non-empty"
-        if not phase.tasks:
-            return f"{prefix}.tasks must be non-empty"
-        if not phase.checkpoints:
-            return f"{prefix}.checkpoints must be non-empty"
-    if not parsed.weekly_schedule:
-        return "weekly_schedule must be non-empty"
-    if not parsed.evidence_usage:
-        return "evidence_usage must be non-empty"
+        for field_name, items in (
+            ("goals", phase.goals),
+            ("tasks", phase.tasks),
+            ("resources", phase.resources),
+            ("practice", phase.practice),
+            ("checkpoints", phase.checkpoints),
+        ):
+            item_error = _validate_string_items(f"{prefix}.{field_name}", items)
+            if item_error:
+                return item_error
+    for field_name, items in (
+        ("weekly_schedule", parsed.weekly_schedule),
+        ("milestones", parsed.milestones),
+        ("practice_tasks", parsed.practice_tasks),
+        ("risk_warnings", parsed.risk_warnings),
+        ("evidence_usage", parsed.evidence_usage),
+    ):
+        item_error = _validate_string_items(
+            field_name,
+            items,
+            required=field_name != "risk_warnings",
+        )
+        if item_error:
+            return item_error
     return ""
 
 
@@ -570,65 +661,218 @@ def validate_study_plan_review(parsed: BaseModel) -> str:
     return ""
 
 
-def _render_artifact_markdown(artifact: dict) -> str:
+def _validated_study_plan_artifact(artifact: object) -> StudyPlanArtifact:
+    if not isinstance(artifact, Mapping):
+        raise StudyPlanContractError("study_plan artifact must be an object")
+    try:
+        validated = StudyPlanArtifact.model_validate(dict(artifact), strict=True)
+    except ValidationError as exc:
+        raise StudyPlanContractError(
+            "study_plan artifact violates StudyPlanArtifact"
+        ) from exc
+    business_error = validate_study_plan_artifact(validated)
+    if business_error:
+        raise StudyPlanContractError(
+            f"study_plan artifact failed business validation: {business_error}"
+        )
+    return validated
+
+
+def _study_plan_model_name() -> str:
+    configured_model = get_setting("llm.study_plan.model", None)
+    if not isinstance(configured_model, str) or not configured_model.strip():
+        raise ValueError("llm.study_plan.model must be explicitly configured")
+    return configured_model.strip()
+
+
+def _study_plan_temperature() -> float:
+    configured_temperature = get_setting("llm.study_plan.temperature", None)
+    if isinstance(configured_temperature, bool) or not isinstance(
+        configured_temperature,
+        (int, float),
+    ):
+        raise ValueError("llm.study_plan.temperature must be explicitly configured")
+    temperature = float(configured_temperature)
+    if not 0.0 <= temperature <= 2.0:
+        raise ValueError("llm.study_plan.temperature must be between 0 and 2")
+    return temperature
+
+
+def _study_plan_max_generation_rounds() -> int:
+    configured_rounds = get_setting(
+        "llm.study_plan.max_generation_rounds",
+        None,
+    )
+    if isinstance(configured_rounds, bool) or not isinstance(configured_rounds, int):
+        raise ValueError(
+            "llm.study_plan.max_generation_rounds must be explicitly configured"
+        )
+    if configured_rounds < 1:
+        raise ValueError("llm.study_plan.max_generation_rounds must be positive")
+    return configured_rounds
+
+
+def _study_plan_planner_max_raw_chars() -> int:
+    configured_chars = get_setting(
+        "llm_outputs.study_plan_planner.max_raw_chars",
+        None,
+    )
+    if isinstance(configured_chars, bool) or not isinstance(configured_chars, int):
+        raise ValueError(
+            "llm_outputs.study_plan_planner.max_raw_chars must be explicitly configured"
+        )
+    if configured_chars < 1:
+        raise ValueError(
+            "llm_outputs.study_plan_planner.max_raw_chars must be positive"
+        )
+    return configured_chars
+
+
+def _study_plan_round(state: Mapping[str, object]) -> int:
+    value = state.get("study_plan_round")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise StudyPlanContractError(
+            "study_plan_round must be an explicit non-negative integer"
+        )
+    return value
+
+
+def _study_plan_review_state(
+    state: Mapping[str, object],
+) -> tuple[Literal["approve", "reject"], str, Literal["approve", "reject"], str]:
+    raw_academic_verdict = state.get("study_plan_academic_verdict")
+    raw_emotional_verdict = state.get("study_plan_emotional_verdict")
+    if raw_academic_verdict == "approve":
+        academic_verdict: Literal["approve", "reject"] = "approve"
+    elif raw_academic_verdict == "reject":
+        academic_verdict = "reject"
+    else:
+        raise StudyPlanContractError(
+            "study_plan academic reviewer requires an explicit approve or reject verdict"
+        )
+    if raw_emotional_verdict == "approve":
+        emotional_verdict: Literal["approve", "reject"] = "approve"
+    elif raw_emotional_verdict == "reject":
+        emotional_verdict = "reject"
+    else:
+        raise StudyPlanContractError(
+            "study_plan emotional reviewer requires an explicit approve or reject verdict"
+        )
+    academic_reason = state.get("study_plan_academic_reason")
+    emotional_reason = state.get("study_plan_emotional_reason")
+    if not isinstance(academic_reason, str) or not academic_reason.strip():
+        raise StudyPlanContractError(
+            "study_plan academic reviewer reason must be non-empty"
+        )
+    if not isinstance(emotional_reason, str) or not emotional_reason.strip():
+        raise StudyPlanContractError(
+            "study_plan emotional reviewer reason must be non-empty"
+        )
+    return (
+        academic_verdict,
+        academic_reason.strip(),
+        emotional_verdict,
+        emotional_reason.strip(),
+    )
+
+
+def _require_study_plan_output_approval(state: Mapping[str, object]) -> None:
+    if _study_plan_round(state) < 1:
+        raise StudyPlanApprovalError(
+            "study_plan output requires at least one completed generation round"
+        )
+    consensus = state.get("study_plan_consensus")
+    if consensus is not True:
+        raise StudyPlanApprovalError(
+            "study_plan output requires authoritative consensus=true"
+        )
+    academic_verdict, _, emotional_verdict, _ = _study_plan_review_state(state)
+    if academic_verdict != "approve" or emotional_verdict != "approve":
+        raise StudyPlanApprovalError(
+            "study_plan output requires exact approval from both reviewers"
+        )
+
+
+def _validated_study_plan_document(document: object) -> dict[str, Any]:
+    if not isinstance(document, Mapping):
+        raise StudyPlanArtifactWriteError(
+            "study_plan document writer returned a non-object artifact"
+        )
+    normalized = dict(document)
+    for key in ("artifact_id", "filename", "markdown_url", "docx_url"):
+        value = normalized.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise StudyPlanArtifactWriteError(
+                f"study_plan document artifact missing required {key}"
+            )
+        normalized[key] = value.strip()
+    return normalized
+
+
+def _render_artifact_markdown(artifact: StudyPlanArtifact) -> str:
     lines = [
-        f"# {artifact.get('title') or 'Personalized Study Plan'}",
+        f"# {artifact.title}",
         "",
         "## Learner Profile",
-        str(artifact.get("learner_profile_summary") or ""),
+        artifact.learner_profile_summary,
         "",
         "## Overall Goal",
-        str(artifact.get("overall_goal") or ""),
+        artifact.overall_goal,
         "",
         "## Phases",
     ]
-    for idx, phase in enumerate(artifact.get("phases") or [], 1):
+    for idx, phase in enumerate(artifact.phases, 1):
         lines.extend(
             [
                 "",
-                f"### {idx}. {phase.get('title') or 'Phase'}",
-                f"- Duration: {phase.get('duration') or ''}",
+                f"### {idx}. {phase.title}",
+                f"- Duration: {phase.duration}",
                 "- Goals:",
-                *[f"  - {item}" for item in phase.get("goals") or []],
+                *[f"  - {item}" for item in phase.goals],
                 "- Tasks:",
-                *[f"  - {item}" for item in phase.get("tasks") or []],
+                *[f"  - {item}" for item in phase.tasks],
                 "- Resources:",
-                *[f"  - {item}" for item in phase.get("resources") or []],
+                *[f"  - {item}" for item in phase.resources],
                 "- Practice:",
-                *[f"  - {item}" for item in phase.get("practice") or []],
+                *[f"  - {item}" for item in phase.practice],
                 "- Checkpoints:",
-                *[f"  - {item}" for item in phase.get("checkpoints") or []],
+                *[f"  - {item}" for item in phase.checkpoints],
             ]
         )
     lines.extend(
         [
             "",
             "## Weekly Schedule",
-            *[f"- {item}" for item in artifact.get("weekly_schedule") or []],
+            *[f"- {item}" for item in artifact.weekly_schedule],
         ]
     )
     lines.extend(
         [
             "",
             "## Milestones",
-            *[f"- {item}" for item in artifact.get("milestones") or []],
+            *[f"- {item}" for item in artifact.milestones],
         ]
     )
     lines.extend(
         [
             "",
             "## Practice Tasks",
-            *[f"- {item}" for item in artifact.get("practice_tasks") or []],
+            *[f"- {item}" for item in artifact.practice_tasks],
         ]
     )
-    risks = artifact.get("risk_warnings") or []
-    if risks:
-        lines.extend(["", "## Risk Warnings", *[f"- {item}" for item in risks]])
+    if artifact.risk_warnings:
+        lines.extend(
+            [
+                "",
+                "## Risk Warnings",
+                *[f"- {item}" for item in artifact.risk_warnings],
+            ]
+        )
     lines.extend(
         [
             "",
             "## Evidence Usage",
-            *[f"- {item}" for item in artifact.get("evidence_usage") or []],
+            *[f"- {item}" for item in artifact.evidence_usage],
         ]
     )
     return "\n".join(lines).strip()
@@ -646,11 +890,12 @@ async def study_plan_emotional_intel(state: LearningState) -> dict:
         "Do not provide therapy or medical diagnosis. Focus on study burden, motivation, pacing, and support needs.\n\n"
         f"User query:\n{query}\n\nConversation excerpt:\n{history}"
     )
-    model_name = get_setting(
-        "llm.study_plan.model", get_setting("study_plan.model", "")
-    )
+    model_name = _study_plan_model_name()
+    temperature = _study_plan_temperature()
     with traced_llm_call(
-        model_name=model_name, node_name="study_plan_emotional_intel", temperature=0.0
+        model_name=model_name,
+        node_name="study_plan_emotional_intel",
+        temperature=temperature,
     ):
         structured_result = await invoke_structured_llm(
             node_name="study_plan_emotional_intel",
@@ -667,6 +912,8 @@ async def study_plan_emotional_intel(state: LearningState) -> dict:
             state=state,
             max_raw_chars=get_max_raw_chars("study_plan_emotional_intel"),
         )
+    if structured_result.success is not True:
+        raise StructuredOutputError(structured_result)
     result = structured_result.parsed
     if not isinstance(result, StudyPlanEmotionalProfile):
         raise TypeError(
@@ -693,6 +940,8 @@ async def study_plan_emotional_intel(state: LearningState) -> dict:
 @traced_node
 async def study_plan_planner(state: LearningState) -> dict:
     """Create a non-empty outline for the study-plan artifact."""
+    temperature = _study_plan_temperature()
+    planner_max_raw_chars = _study_plan_planner_max_raw_chars()
     query = _last_human_query(state)
     context = state.get("context", [])
     curriculum_context = state.get("curriculum_context", "")
@@ -723,10 +972,8 @@ async def study_plan_planner(state: LearningState) -> dict:
             HumanMessage(content=prompt),
         ],
         state=state,
-        temperature=get_setting("llm.study_plan.temperature", 0.2),
-        max_raw_chars=get_setting(
-            "llm_outputs.study_plan_planner.max_raw_chars", 12000
-        ),
+        temperature=temperature,
+        max_raw_chars=planner_max_raw_chars,
     )
     if not outline.strip():
         raise ValueError("study_plan_planner produced empty outline")
@@ -860,12 +1107,13 @@ async def study_plan_agent(state: LearningState) -> dict:
     outline = state.get("study_plan_outline", "")
     if not outline.strip():
         raise ValueError("study_plan outline is empty")
-    round_no = int(state.get("study_plan_round", 0) or 0) + 1
-    model_name = get_setting(
-        "llm.study_plan.model", get_setting("study_plan.model", "")
-    )
+    round_no = _study_plan_round(state) + 1
+    model_name = _study_plan_model_name()
+    temperature = _study_plan_temperature()
     with traced_llm_call(
-        model_name=model_name, node_name="study_plan_agent", temperature=0.2
+        model_name=model_name,
+        node_name="study_plan_agent",
+        temperature=temperature,
     ):
         phases_model = await _invoke_study_plan_stage(
             state,
@@ -937,9 +1185,7 @@ async def study_plan_agent(state: LearningState) -> dict:
 
 
 async def _review_study_plan(state: LearningState, *, reviewer_kind: str) -> dict:
-    artifact = state.get("study_plan_artifact") or {}
-    if not artifact:
-        raise ValueError("study_plan artifact is empty")
+    artifact = _validated_study_plan_artifact(state.get("study_plan_artifact"))
     focus = (
         "academic soundness, phase progression, evidence consistency, and avoiding fabricated resources"
         if reviewer_kind == "academic"
@@ -947,13 +1193,16 @@ async def _review_study_plan(state: LearningState, *, reviewer_kind: str) -> dic
     )
     prompt = (
         f"Review this study plan for {focus}. Return approve or reject with a concise reason.\n\n"
-        f"Plan:\n{artifact}\n\nEmotional intel:\n{state.get('study_plan_emotional_intel', '')}"
+        f"Plan:\n{artifact.model_dump(mode='json')}\n\n"
+        f"Emotional intel:\n{state.get('study_plan_emotional_intel', '')}"
     )
     node_name = f"study_plan_reviewer_{reviewer_kind}"
+    model_name = _study_plan_model_name()
+    temperature = _study_plan_temperature()
     with traced_llm_call(
-        model_name=get_setting("llm.study_plan.model", ""),
+        model_name=model_name,
         node_name=node_name,
-        temperature=0.0,
+        temperature=temperature,
     ):
         structured_result = await invoke_structured_llm(
             node_name=node_name,
@@ -970,10 +1219,12 @@ async def _review_study_plan(state: LearningState, *, reviewer_kind: str) -> dic
             state=state,
             max_raw_chars=get_max_raw_chars(node_name),
         )
+    if structured_result.success is not True:
+        raise StructuredOutputError(structured_result)
     result = structured_result.parsed
     if not isinstance(result, StudyPlanReviewVerdict):
         raise TypeError(f"{node_name} parsed result is not StudyPlanReviewVerdict")
-    return result.model_dump() if hasattr(result, "model_dump") else result.dict()
+    return result.model_dump(mode="python")
 
 
 @traced_node
@@ -996,27 +1247,53 @@ async def study_plan_reviewer_emotional(state: LearningState) -> dict:
 
 @traced_node
 async def study_plan_consensus(state: LearningState) -> dict:
-    academic_ok = state.get("study_plan_academic_verdict") == "approve"
-    emotional_ok = state.get("study_plan_emotional_verdict") == "approve"
-    if academic_ok and emotional_ok:
-        return {"study_plan_consensus": True, "study_plan_revision_notes": ""}
-    max_rounds = int(get_setting("study_plan.max_generation_rounds", 3) or 3)
-    current_round = int(state.get("study_plan_round", 0) or 0)
-    notes = "\n".join(
-        item
-        for item in [
-            state.get("study_plan_academic_reason", ""),
-            state.get("study_plan_emotional_reason", ""),
-        ]
-        if item
+    current_round = _study_plan_round(state)
+    if current_round < 1:
+        raise StudyPlanContractError(
+            "study_plan consensus requires at least one generation round"
+        )
+    academic_verdict, academic_reason, emotional_verdict, emotional_reason = (
+        _study_plan_review_state(state)
     )
+    if academic_verdict == "approve" and emotional_verdict == "approve":
+        return {"study_plan_consensus": True, "study_plan_revision_notes": ""}
+    max_rounds = _study_plan_max_generation_rounds()
+    notes = "\n".join(
+        reason
+        for verdict, reason in [
+            (academic_verdict, academic_reason),
+            (emotional_verdict, emotional_reason),
+        ]
+        if verdict == "reject"
+    )
+    if not notes:
+        raise StudyPlanContractError(
+            "study_plan rejection requires explicit reviewer revision reasons"
+        )
     if current_round >= max_rounds:
         raise RuntimeError(f"study_plan rejected after max rounds: {notes}")
     return {"study_plan_consensus": False, "study_plan_revision_notes": notes}
 
 
 def route_after_study_plan_consensus(state: LearningState) -> str:
-    return "output" if state.get("study_plan_consensus") else "rewrite"
+    consensus = state.get("study_plan_consensus")
+    academic_verdict, _, emotional_verdict, _ = _study_plan_review_state(state)
+    both_approved = academic_verdict == "approve" and emotional_verdict == "approve"
+    if consensus is True:
+        if not both_approved:
+            raise StudyPlanContractError(
+                "study_plan consensus=true conflicts with reviewer verdicts"
+            )
+        return "output"
+    if consensus is False:
+        if both_approved:
+            raise StudyPlanContractError(
+                "study_plan consensus=false conflicts with reviewer approvals"
+            )
+        return "rewrite"
+    raise StudyPlanContractError(
+        "study_plan routing requires an explicit boolean consensus"
+    )
 
 
 @traced_node
@@ -1031,15 +1308,18 @@ async def study_plan_rewrite(state: LearningState) -> dict:
 
 @traced_node
 async def study_plan_output(state: LearningState) -> dict:
-    artifact = state.get("study_plan_artifact") or {}
-    if not artifact:
-        raise ValueError("study_plan artifact is empty")
+    _require_study_plan_output_approval(state)
+    artifact = _validated_study_plan_artifact(state.get("study_plan_artifact"))
     markdown = _render_artifact_markdown(artifact)
     if not markdown.strip():
         raise ValueError("study_plan markdown is empty")
-    document = create_markdown_artifact(
-        markdown, str(artifact.get("title") or "Personalized Study Plan")
-    )
+    try:
+        written_document = create_markdown_artifact(markdown, artifact.title)
+    except Exception as exc:
+        raise StudyPlanArtifactWriteError(
+            "study_plan document artifact write failed"
+        ) from exc
+    document = _validated_study_plan_document(written_document)
     return {
         "study_plan_markdown": markdown,
         "study_plan_document_artifact": document,

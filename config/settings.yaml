@@ -1158,6 +1158,7 @@ llm:
     beta_base_url: "https://api.deepseek.com/beta"
     api_key_env: "DEEPSEEK_API_KEY"
     temperature: 0.2
+    max_generation_rounds: 3
     max_tokens: 4096
     thinking: disabled
     streaming: false
@@ -1306,6 +1307,8 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
+  study_plan_planner:
+    max_raw_chars: 12000
   study_plan_agent:
     output_mode: deepseek_tool_call_strict
     failure_policy: block
@@ -1372,11 +1375,6 @@ llm_outputs:
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
-
-study_plan:
-  temperature: 0.2
-  reviewer_temperature: 0.0
-  max_generation_rounds: 3
 
 emotional:
   temperature: 0.8                      # Slightly creative for empathy

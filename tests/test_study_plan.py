@@ -6,9 +6,14 @@ from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 
 from src.graph.study_plan import (
+    StudyPlanApprovalError,
     StudyPlanArtifact,
+    StudyPlanArtifactWriteError,
+    StudyPlanContractError,
+    StudyPlanEmotionalProfile,
     StudyPlanPhasesArtifact,
     StudyPlanPhase,
     StudyPlanReviewVerdict,
@@ -16,13 +21,15 @@ from src.graph.study_plan import (
     route_after_study_plan_consensus,
     study_plan_consensus,
     study_plan_agent,
+    study_plan_emotional_intel,
     study_plan_output,
     study_plan_planner,
     study_plan_profile_gate,
     study_plan_profile_gate_main,
+    study_plan_reviewer_academic,
     validate_study_plan_artifact,
 )
-from src.llm.structured_output import StructuredLLMResult
+from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
 
 
 def _valid_artifact() -> StudyPlanArtifact:
@@ -58,13 +65,30 @@ def _valid_artifact() -> StudyPlanArtifact:
     )
 
 
+def _approved_output_state(artifact: StudyPlanArtifact | None = None) -> dict:
+    artifact = artifact or _valid_artifact()
+    return {
+        "study_plan_artifact": artifact.model_dump(mode="python"),
+        "study_plan_round": 1,
+        "study_plan_consensus": True,
+        "study_plan_academic_verdict": "approve",
+        "study_plan_academic_reason": "Academic review passed.",
+        "study_plan_emotional_verdict": "approve",
+        "study_plan_emotional_reason": "Workload review passed.",
+    }
+
+
 @pytest.mark.anyio
 async def test_study_plan_planner_empty_outline_raises():
-    with patch("src.graph.study_plan.invoke_plain_llm_fail_fast", return_value="   "):
+    with patch(
+        "src.graph.study_plan.invoke_plain_llm_fail_fast", return_value="   "
+    ) as invoke:
         with pytest.raises(ValueError, match="empty outline"):
             await study_plan_planner(
                 {"messages": [HumanMessage(content="make a plan")]}
             )
+    assert invoke.call_args.kwargs["temperature"] == 0.2
+    assert invoke.call_args.kwargs["max_raw_chars"] == 12000
 
 
 def test_validate_study_plan_artifact_rejects_missing_evidence_usage():
@@ -87,10 +111,32 @@ async def test_study_plan_consensus_max_rounds_rejected_raises():
 
 
 def test_route_after_study_plan_consensus():
-    assert route_after_study_plan_consensus({"study_plan_consensus": True}) == "output"
-    assert (
-        route_after_study_plan_consensus({"study_plan_consensus": False}) == "rewrite"
-    )
+    approved = _approved_output_state()
+    assert route_after_study_plan_consensus(approved) == "output"
+    rejected = {
+        **approved,
+        "study_plan_consensus": False,
+        "study_plan_academic_verdict": "reject",
+        "study_plan_academic_reason": "Evidence is incomplete.",
+    }
+    assert route_after_study_plan_consensus(rejected) == "rewrite"
+
+
+@pytest.mark.parametrize("consensus", [None, "true", 1])
+def test_route_after_study_plan_consensus_rejects_non_boolean(consensus):
+    state = {**_approved_output_state(), "study_plan_consensus": consensus}
+    with pytest.raises(StudyPlanContractError, match="explicit boolean"):
+        route_after_study_plan_consensus(state)
+
+
+def test_route_after_study_plan_consensus_rejects_conflicting_verdicts():
+    state = {
+        **_approved_output_state(),
+        "study_plan_academic_verdict": "reject",
+        "study_plan_academic_reason": "Evidence is incomplete.",
+    }
+    with pytest.raises(StudyPlanContractError, match="conflicts"):
+        route_after_study_plan_consensus(state)
 
 
 @pytest.mark.anyio
@@ -313,6 +359,7 @@ async def test_study_plan_agent_runs_staged_structured_generation():
         result = await study_plan_agent(
             {
                 "study_plan_outline": "Two-phase ML plan",
+                "study_plan_round": 0,
                 "messages": [HumanMessage(content="make a study plan")],
                 "learner_profile": {
                     "learning_goal": "Master ML basics",
@@ -341,30 +388,198 @@ async def test_study_plan_agent_runs_staged_structured_generation():
 
 
 @pytest.mark.anyio
+async def test_study_plan_agent_rejects_unsuccessful_structured_result():
+    failed = StructuredLLMResult(
+        success=False,
+        parsed=None,
+        node_name="study_plan_agent",
+        llm_node="study_plan",
+        schema_name="StudyPlanPhasesArtifact",
+        provider="test",
+        model="test",
+        output_mode="native_json_schema_pydantic",
+        failure_phase="provider_call",
+        error_type="ProviderError",
+    )
+    with patch(
+        "src.graph.study_plan.invoke_structured_llm",
+        return_value=failed,
+    ):
+        with pytest.raises(StructuredOutputError):
+            await study_plan_agent(
+                {
+                    "study_plan_outline": "Two-phase ML plan",
+                    "study_plan_round": 0,
+                    "messages": [HumanMessage(content="make a study plan")],
+                }
+            )
+
+
+@pytest.mark.anyio
+async def test_study_plan_emotional_intel_rejects_unsuccessful_result():
+    failed = StructuredLLMResult(
+        success=False,
+        parsed=StudyPlanEmotionalProfile(
+            summary="Unsafe stale payload",
+            workload_risk="medium",
+            motivation_state="steady",
+        ),
+        node_name="study_plan_emotional_intel",
+        llm_node="study_plan",
+        schema_name="StudyPlanEmotionalProfile",
+        provider="test",
+        model="test",
+        output_mode="native_json_schema_pydantic",
+        failure_phase="business_validation",
+    )
+    with patch(
+        "src.graph.study_plan.invoke_structured_llm",
+        return_value=failed,
+    ):
+        with pytest.raises(StructuredOutputError):
+            await study_plan_emotional_intel(
+                {"messages": [HumanMessage(content="make a study plan")]}
+            )
+
+
+@pytest.mark.anyio
+async def test_study_plan_reviewer_rejects_unsuccessful_result():
+    failed = StructuredLLMResult(
+        success=False,
+        parsed=StudyPlanReviewVerdict(
+            verdict="approve",
+            reason="Unsafe stale approval",
+        ),
+        node_name="study_plan_reviewer_academic",
+        llm_node="study_plan",
+        schema_name="StudyPlanReviewVerdict",
+        provider="test",
+        model="test",
+        output_mode="native_json_schema_pydantic",
+        failure_phase="provider_call",
+    )
+    with patch(
+        "src.graph.study_plan.invoke_structured_llm",
+        return_value=failed,
+    ):
+        with pytest.raises(StructuredOutputError):
+            await study_plan_reviewer_academic(
+                {"study_plan_artifact": _valid_artifact().model_dump(mode="python")}
+            )
+
+
+@pytest.mark.anyio
+async def test_study_plan_consensus_rejects_unknown_reviewer_verdict():
+    state = {
+        "study_plan_round": 1,
+        "study_plan_academic_verdict": "unknown",
+        "study_plan_academic_reason": "No decision.",
+        "study_plan_emotional_verdict": "approve",
+        "study_plan_emotional_reason": "Workload is acceptable.",
+    }
+    with pytest.raises(StudyPlanContractError, match="explicit approve or reject"):
+        await study_plan_consensus(state)
+
+
+@pytest.mark.anyio
+async def test_study_plan_consensus_requires_explicit_round_config():
+    state = {
+        "study_plan_round": 1,
+        "study_plan_academic_verdict": "reject",
+        "study_plan_academic_reason": "Evidence is incomplete.",
+        "study_plan_emotional_verdict": "approve",
+        "study_plan_emotional_reason": "Workload is acceptable.",
+    }
+    with patch("src.graph.study_plan.get_setting", return_value=None):
+        with pytest.raises(ValueError, match="must be explicitly configured"):
+            await study_plan_consensus(state)
+
+
+@pytest.mark.anyio
 async def test_study_plan_output_empty_artifact_raises():
+    state = _approved_output_state()
+    state["study_plan_artifact"] = {}
     with pytest.raises(ValueError, match="artifact"):
-        await study_plan_output({})
+        await study_plan_output(state)
+
+
+@pytest.mark.anyio
+async def test_study_plan_output_requires_consensus_and_both_approvals():
+    missing_consensus = {
+        **_approved_output_state(),
+        "study_plan_consensus": False,
+    }
+    with pytest.raises(StudyPlanApprovalError, match="consensus=true"):
+        await study_plan_output(missing_consensus)
+
+    rejected = {
+        **_approved_output_state(),
+        "study_plan_academic_verdict": "reject",
+        "study_plan_academic_reason": "Evidence is incomplete.",
+    }
+    with pytest.raises(StudyPlanApprovalError, match="both reviewers"):
+        await study_plan_output(rejected)
 
 
 @pytest.mark.anyio
 async def test_study_plan_output_renders_markdown_and_artifact():
-    artifact = _valid_artifact()
     with patch(
         "src.graph.study_plan.create_markdown_artifact",
-        return_value={"title": "Personalized Study Plan", "filename": "study-plan.md"},
+        return_value={
+            "artifact_id": "study-plan-1",
+            "filename": "study-plan.md",
+            "markdown_url": "/artifacts/review-docs/study-plan-1/study-plan.md",
+            "docx_url": "/artifacts/review-docs/study-plan-1/study-plan.docx",
+        },
     ):
-        result = await study_plan_output({"study_plan_artifact": artifact.model_dump()})
+        result = await study_plan_output(_approved_output_state())
 
     assert "Personalized Study Plan" in result["study_plan_markdown"]
     assert result["study_plan_document_artifact"]["filename"] == "study-plan.md"
     assert result["messages"]
 
 
-def test_review_verdict_schema_accepts_review_output():
+@pytest.mark.anyio
+async def test_study_plan_output_wraps_writer_failure():
+    with patch(
+        "src.graph.study_plan.create_markdown_artifact",
+        side_effect=OSError("disk unavailable"),
+    ):
+        with pytest.raises(StudyPlanArtifactWriteError, match="write failed"):
+            await study_plan_output(_approved_output_state())
+
+
+@pytest.mark.anyio
+async def test_study_plan_output_rejects_incomplete_document_artifact():
+    with patch(
+        "src.graph.study_plan.create_markdown_artifact",
+        return_value={"artifact_id": "study-plan-1", "filename": "study-plan.md"},
+    ):
+        with pytest.raises(StudyPlanArtifactWriteError, match="markdown_url"):
+            await study_plan_output(_approved_output_state())
+
+
+@pytest.mark.anyio
+async def test_study_plan_output_revalidates_checkpoint_artifact():
+    state = _approved_output_state()
+    state["study_plan_artifact"]["phases"][0]["tasks"] = ["   "]
+    with pytest.raises(StudyPlanContractError, match="business validation"):
+        await study_plan_output(state)
+
+
+def test_review_verdict_schema_is_strict_and_forbids_legacy_fields():
     verdict = StudyPlanReviewVerdict(
         verdict="approve",
         reason="Plan is coherent.",
-        revision_notes=[],
-        risk_flags=[],
     )
     assert verdict.verdict == "approve"
+    with pytest.raises(ValidationError):
+        StudyPlanReviewVerdict.model_validate(
+            {
+                "verdict": "approve",
+                "reason": "Plan is coherent.",
+                "revision_notes": [],
+                "risk_flags": [],
+            },
+            strict=True,
+        )

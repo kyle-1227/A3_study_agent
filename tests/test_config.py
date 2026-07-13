@@ -19,7 +19,7 @@ import pytest
 # ===========================================================================
 
 @pytest.fixture
-def config_dir(tmp_path):
+def config_dir(tmp_path: Path) -> Path:
     """Create a temp config dir and point config_manager at it."""
     from src.config import config_manager
 
@@ -433,10 +433,13 @@ class TestSettingsValues:
 
         assert get_setting("academic.hallucination_eval_temperature") == 0.0
 
-    def test_study_plan_temperature(self):
+    def test_study_plan_uses_single_explicit_llm_config(self):
         from src.config import get_setting
 
-        assert get_setting("study_plan.temperature") == 0.2
+        assert get_setting("llm.study_plan.temperature") == 0.2
+        assert get_setting("llm.study_plan.max_generation_rounds") == 3
+        assert get_setting("llm_outputs.study_plan_planner.max_raw_chars") == 12000
+        assert get_setting("study_plan.temperature") is None
 
     def test_emotional_temperature(self):
         from src.config import get_setting
