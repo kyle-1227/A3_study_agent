@@ -1,9 +1,4 @@
-"""Central LLM factory and fallback invoke logic.
-
-Provides a resilient invoke_with_fallback() that catches transient API errors
-(timeouts, 502s, rate limits) and retries on a fallback model, recording the
-failover event on the active OpenTelemetry span.
-"""
+"""Central LLM factories and same-provider retry helpers."""
 
 from __future__ import annotations
 
@@ -57,27 +52,6 @@ _CONTEXT_POLICY_SUMMARY_EMITTED = False
 
 DEFAULT_DEEPSEEK_PROVIDER = "deepseek_official"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
-
-# ---------------------------------------------------------------------------
-# Recoverable errors that trigger automatic fallback
-# ---------------------------------------------------------------------------
-
-_FALLBACK_ERRORS: tuple[type[Exception], ...] = (TimeoutError, ConnectionError)
-
-try:
-    import openai
-
-    _FALLBACK_ERRORS = (
-        TimeoutError,
-        ConnectionError,
-        openai.APITimeoutError,
-        openai.APIConnectionError,
-        openai.InternalServerError,
-        openai.RateLimitError,
-    )
-except ImportError:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # LLM factories
@@ -157,33 +131,8 @@ def get_primary_llm(**overrides) -> ChatOpenAI:
     return ChatOpenAI(**defaults)
 
 
-def get_fallback_llm(**overrides) -> ChatOpenAI:
-    """Build the fallback chat model from FALLBACK_* env vars.
-
-    Defaults to the primary API config so that transient errors (502, timeout)
-    get a second chance on the same endpoint.  Override ``FALLBACK_MODEL``,
-    ``FALLBACK_API_KEY``, and ``FALLBACK_BASE_URL`` to point at a local Ollama
-    instance or a different cloud provider.
-    """
-    defaults = dict(
-        model=os.getenv(
-            "FALLBACK_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
-        ),
-        api_key=os.getenv("FALLBACK_API_KEY")
-        or os.getenv("DEEPSEEK_API_KEY")
-        or "not-configured",
-        base_url=os.getenv(
-            "FALLBACK_BASE_URL",
-            os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        ),
-        temperature=0.7,
-    )
-    defaults.update(overrides)
-    return ChatOpenAI(**defaults)
-
-
 # ---------------------------------------------------------------------------
-# Resilient invoke
+# Retry configuration
 # ---------------------------------------------------------------------------
 
 
@@ -202,177 +151,6 @@ def get_llm_call_max_retries(node_name: str | None = None, default: int = 2) -> 
     except Exception:
         value = default
     return max(0, min(3, value))
-
-
-def _is_recoverable_llm_error(exc: BaseException) -> bool:
-    return isinstance(exc, _FALLBACK_ERRORS) or _is_provider_transport_retryable(exc)
-
-
-def _invoke_with_retries_sync(
-    operation: Callable[[], T], *, max_retries: int, label: str
-) -> tuple[T, int]:
-    retry_count = 0
-    while True:
-        try:
-            return operation(), retry_count
-        except Exception as exc:
-            if not _is_recoverable_llm_error(exc) or retry_count >= max_retries:
-                raise
-            retry_count += 1
-            logger.warning(
-                "%s retry %s/%s after %s: %s",
-                label,
-                retry_count,
-                max_retries,
-                type(exc).__name__,
-                exc,
-            )
-
-
-async def _invoke_with_retries_async(
-    operation: Callable[[], Awaitable[T]],
-    *,
-    max_retries: int,
-    label: str,
-) -> tuple[T, int]:
-    retry_count = 0
-    while True:
-        try:
-            return await operation(), retry_count
-        except Exception as exc:
-            if not _is_recoverable_llm_error(exc) or retry_count >= max_retries:
-                raise
-            retry_count += 1
-            logger.warning(
-                "%s retry %s/%s after %s: %s",
-                label,
-                retry_count,
-                max_retries,
-                type(exc).__name__,
-                exc,
-            )
-
-
-def invoke_with_fallback(primary, messages, *, fallback=None, span=None):
-    """Invoke *primary*; on recoverable error, failover to *fallback*.
-
-    Args:
-        primary: Primary ChatModel instance.
-        messages: Message list passed to ``invoke()``.
-        fallback: Optional fallback ChatModel. ``None`` → error propagates.
-        span: Optional OTel span for recording fallback metadata.
-
-    Returns:
-        The LLM response from whichever model succeeded.
-
-    Raises:
-        The original error when no fallback is configured, or the fallback
-        error when both models fail.
-    """
-    max_retries = get_llm_call_max_retries()
-    try:
-        response, retry_count = _invoke_with_retries_sync(
-            lambda: primary.invoke(messages),
-            max_retries=max_retries,
-            label="Primary LLM",
-        )
-        if span is not None:
-            span.set_attribute("llm.retry_count", retry_count)
-            span.set_attribute("llm.fallback_used", False)
-        return response
-    except Exception as exc:
-        if not _is_recoverable_llm_error(exc) or fallback is None:
-            raise
-
-        logger.warning(
-            "Primary LLM failed (%s: %s), falling back",
-            type(exc).__name__,
-            exc,
-        )
-
-        if span is not None:
-            span.set_attribute("llm.fallback_used", True)
-            span.set_attribute(
-                "llm.fallback_model",
-                getattr(fallback, "model_name", "unknown"),
-            )
-            span.add_event(
-                "llm.fallback_triggered",
-                {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-
-        response, fallback_retry_count = _invoke_with_retries_sync(
-            lambda: fallback.invoke(messages),
-            max_retries=max_retries,
-            label="Fallback LLM",
-        )
-        if span is not None:
-            span.set_attribute("llm.fallback_retry_count", fallback_retry_count)
-        return response
-
-
-async def async_invoke_with_fallback(primary, messages, *, fallback=None, span=None):
-    """Async version of invoke_with_fallback; uses ainvoke() throughout.
-
-    Args:
-        primary: Primary ChatModel (or structured output chain) instance.
-        messages: Message list passed to ``ainvoke()``.
-        fallback: Optional fallback ChatModel. ``None`` → error propagates.
-        span: Optional OTel span for recording fallback metadata.
-
-    Returns:
-        The LLM response from whichever model succeeded.
-
-    Raises:
-        The original error when no fallback is configured, or the fallback
-        error when both models fail.
-    """
-    max_retries = get_llm_call_max_retries()
-    try:
-        response, retry_count = await _invoke_with_retries_async(
-            lambda: primary.ainvoke(messages),
-            max_retries=max_retries,
-            label="Primary LLM",
-        )
-        if span is not None:
-            span.set_attribute("llm.retry_count", retry_count)
-            span.set_attribute("llm.fallback_used", False)
-        return response
-    except Exception as exc:
-        if not _is_recoverable_llm_error(exc) or fallback is None:
-            raise
-
-        logger.warning(
-            "Primary LLM failed (%s: %s), falling back",
-            type(exc).__name__,
-            exc,
-        )
-
-        if span is not None:
-            span.set_attribute("llm.fallback_used", True)
-            span.set_attribute(
-                "llm.fallback_model",
-                getattr(fallback, "model_name", "unknown"),
-            )
-            span.add_event(
-                "llm.fallback_triggered",
-                {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-
-        response, fallback_retry_count = await _invoke_with_retries_async(
-            lambda: fallback.ainvoke(messages),
-            max_retries=max_retries,
-            label="Fallback LLM",
-        )
-        if span is not None:
-            span.set_attribute("llm.fallback_retry_count", fallback_retry_count)
-        return response
 
 
 def _message_content_chars(messages: list[Any]) -> int:
