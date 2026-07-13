@@ -157,7 +157,10 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
 
     assert "resource_evidence_planner" not in legacy.nodes
     assert {
-        "rag_generation_router",
+        "parent_child_retrieve",
+        "web_research",
+        "academic_parent_hydration",
+        "resource_parent_hydration",
         "resource_evidence_planner",
         "retrieval_round_router",
         "local_rag_search_batch",
@@ -167,6 +170,12 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         "evidence_repair_planner",
         "resource_evidence_assignment",
     }.issubset(candidate.nodes)
+    assert {
+        "rag_retrieve",
+        "web_search",
+        "rag_generation_router",
+        "parent_child_parent_hydration",
+    }.isdisjoint(candidate.nodes)
     assert (
         ("local_rag_search_batch", "web_research_search_batch"),
         "retrieval_round_merge",

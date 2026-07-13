@@ -322,7 +322,10 @@ def test_evidence_activity_adapter_does_not_silently_drop_unsafe_fields():
 
 def test_evidence_orchestration_nodes_are_registered():
     expected = {
-        "rag_generation_router",
+        "parent_child_retrieve",
+        "web_research",
+        "academic_parent_hydration",
+        "resource_parent_hydration",
         "resource_evidence_planner",
         "retrieval_round_router",
         "local_rag_search_batch",
@@ -330,7 +333,6 @@ def test_evidence_orchestration_nodes_are_registered():
         "retrieval_round_merge",
         "requirement_evidence_judge",
         "evidence_repair_planner",
-        "parent_child_parent_hydration",
         "resource_evidence_assignment",
     }
 

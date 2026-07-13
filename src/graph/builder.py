@@ -228,7 +228,6 @@ def build_resource_evidence_parent_child_graph(
         EvidenceOrchestrationRuntime as EvidenceOrchestrationRuntimeType,
         make_evidence_repair_planner_node,
         make_local_rag_search_batch_node,
-        make_rag_generation_router_node,
         make_requirement_evidence_judge_node,
         make_resource_evidence_assignment_node,
         make_resource_evidence_planner_node,
@@ -255,13 +254,8 @@ def build_resource_evidence_parent_child_graph(
             wrap_context_influence_node(node_name, interruptible),
         )
 
-    legacy_parent_hydration = make_parent_child_hydration_node(runtime.parent_child)
-    terminal_parent_hydration = make_terminal_parent_hydration_node(runtime)
-
-    async def joint_parent_hydration(state: LearningState) -> dict:
-        if state.get("rag_generation_route") == "resource_evidence_parent_child":
-            return await terminal_parent_hydration(state)
-        return await legacy_parent_hydration(state)
+    academic_parent_hydration = make_parent_child_hydration_node(runtime.parent_child)
+    resource_parent_hydration = make_terminal_parent_hydration_node(runtime)
 
     add_interruptible_node("supervisor", supervisor_node)
     add_interruptible_node("episodic_memory_retriever", episodic_memory_retriever)
@@ -270,15 +264,11 @@ def build_resource_evidence_parent_child_graph(
     add_interruptible_node("search_query_rewriter", search_query_rewriter)
     add_interruptible_node("academic_router", academic_router)
     add_interruptible_node(
-        "rag_retrieve",
+        "parent_child_retrieve",
         make_parent_child_rag_node(runtime.parent_child),
     )
-    add_interruptible_node("web_search", web_search)
+    add_interruptible_node("web_research", web_search)
     add_interruptible_node("evidence_judge", evidence_judge)
-    add_interruptible_node(
-        "rag_generation_router",
-        make_rag_generation_router_node(runtime),
-    )
     add_interruptible_node(
         "resource_evidence_planner",
         make_resource_evidence_planner_node(runtime),
@@ -308,8 +298,12 @@ def build_resource_evidence_parent_child_graph(
         make_evidence_repair_planner_node(runtime),
     )
     add_interruptible_node(
-        "parent_child_parent_hydration",
-        joint_parent_hydration,
+        "academic_parent_hydration",
+        academic_parent_hydration,
+    )
+    add_interruptible_node(
+        "resource_parent_hydration",
+        resource_parent_hydration,
     )
     add_interruptible_node(
         "resource_evidence_assignment",
@@ -349,16 +343,28 @@ def build_resource_evidence_parent_child_graph(
         route_after_candidate_query_rewrite,
         {
             "academic": "academic_router",
-            "resource_evidence": "rag_generation_router",
+            "resource_evidence": "resource_evidence_planner",
         },
     )
 
-    graph.add_edge("academic_router", "rag_retrieve")
-    graph.add_edge("academic_router", "web_search")
-    graph.add_edge(["rag_retrieve", "web_search"], "evidence_judge")
-    graph.add_edge("evidence_judge", "parent_child_parent_hydration")
+    graph.add_edge("academic_router", "parent_child_retrieve")
+    graph.add_edge("academic_router", "web_research")
+    graph.add_edge(
+        ["parent_child_retrieve", "web_research"],
+        "evidence_judge",
+    )
+    graph.add_edge("evidence_judge", "academic_parent_hydration")
+    graph.add_conditional_edges(
+        "academic_parent_hydration",
+        route_after_evidence_judge,
+        {
+            "answer": "generate_answer",
+            "qa": "qa_agent",
+            "resources": "resource_evidence_assignment",
+            "evidence_summary_output": "evidence_summary_output",
+        },
+    )
 
-    graph.add_edge("rag_generation_router", "resource_evidence_planner")
     graph.add_edge("resource_evidence_planner", "retrieval_round_router")
     graph.add_edge("retrieval_round_router", "local_rag_search_batch")
     graph.add_edge("retrieval_round_router", "web_research_search_batch")
@@ -372,21 +378,11 @@ def build_resource_evidence_parent_child_graph(
         route_after_requirement_evidence_judge,
         {
             "repair": "evidence_repair_planner",
-            "terminal": "parent_child_parent_hydration",
+            "terminal": "resource_parent_hydration",
         },
     )
     graph.add_edge("evidence_repair_planner", "retrieval_round_router")
-
-    graph.add_conditional_edges(
-        "parent_child_parent_hydration",
-        route_after_joint_parent_hydration,
-        {
-            "answer": "generate_answer",
-            "qa": "qa_agent",
-            "resources": "resource_evidence_assignment",
-            "evidence_summary_output": "evidence_summary_output",
-        },
-    )
+    graph.add_edge("resource_parent_hydration", "resource_evidence_assignment")
     graph.add_edge("resource_evidence_assignment", "resource_preflight_router")
     graph.add_conditional_edges(
         "resource_preflight_router",
@@ -469,16 +465,6 @@ def route_after_candidate_query_rewrite(state: LearningState) -> str:
     if response_mode in {"", "qa"}:
         return "academic"
     raise ValueError("candidate query rewrite received an invalid response_mode")
-
-
-def route_after_joint_parent_hydration(state: LearningState) -> str:
-    """Separate terminal resource assignment from the legacy response route."""
-
-    if state.get("rag_generation_route") == "resource_evidence_parent_child":
-        if state.get("evidence_orchestration_route") != "terminal":
-            raise ValueError("resource evidence hydration requires a terminal route")
-        return "resources"
-    return route_after_evidence_judge(state)
 
 
 def get_compiled_graph(checkpointer=None):
