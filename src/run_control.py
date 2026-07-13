@@ -11,6 +11,14 @@ from typing import Any, Callable
 from langgraph.types import interrupt
 
 from src.observability.activity import merge_activity_timeline
+from src.context_engineering.compaction import (
+    CompactBoundaryV1,
+    CompactionResultV1,
+    ConversationSummaryV2,
+    ProviderBoundUsageV1,
+)
+from src.context_engineering.session_memory import SessionContextMemoryLedgerV1
+from src.context_engineering.thread_window_v3 import ThreadContextWindowV3
 from src.observability.context_usage_report import merge_context_usage_report_history
 from src.observability.contracts import ContextUsageReport
 
@@ -136,6 +144,13 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
         "request_context_window",
         "thread_context_window",
         "thread_context_window_v2",
+        "thread_context_window_v3",
+        "session_context_memory_ledger",
+        "last_provider_dispatch",
+        "compact_boundary",
+        "conversation_summary_v2",
+        "compaction_result",
+        "profile_completion_request",
         "context_usage",
         "context_usage_history",
         "context_usage_report",
@@ -151,6 +166,7 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
         "resource_artifacts_by_type",
         "last_generated_artifacts",
         "last_resource_final_payload",
+        "last_qa_response",
         "missing_run_control_fields",
         "message",
     }
@@ -171,6 +187,36 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
                 )
             except Exception:
                 continue
+            continue
+        if key == "thread_context_window_v3" and isinstance(value, dict) and value:
+            result[key] = ThreadContextWindowV3.model_validate(value).model_dump(
+                mode="json"
+            )
+            continue
+        if key == "session_context_memory_ledger" and isinstance(value, dict) and value:
+            result[key] = SessionContextMemoryLedgerV1.model_validate(value).model_dump(
+                mode="json"
+            )
+            continue
+        if key == "last_provider_dispatch" and isinstance(value, dict) and value:
+            result[key] = ProviderBoundUsageV1.model_validate(value).model_dump(
+                mode="json"
+            )
+            continue
+        if key == "compact_boundary" and isinstance(value, dict) and value:
+            result[key] = CompactBoundaryV1.model_validate(value).model_dump(
+                mode="json"
+            )
+            continue
+        if key == "conversation_summary_v2" and isinstance(value, dict) and value:
+            result[key] = ConversationSummaryV2.model_validate(value).model_dump(
+                mode="json"
+            )
+            continue
+        if key == "compaction_result" and isinstance(value, dict) and value:
+            result[key] = CompactionResultV1.model_validate(value).model_dump(
+                mode="json"
+            )
             continue
         result[key] = _safe_active_value(value)
     return result
