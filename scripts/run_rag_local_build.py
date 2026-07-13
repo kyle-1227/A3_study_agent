@@ -1309,6 +1309,37 @@ def _validate_finite_vector(vector: object, *, expected_dimension: int) -> None:
             raise LocalBuildError("PersistedVectorCoordinateNotFinite")
 
 
+def _validated_embedding_rows(
+    value: object,
+    *,
+    expected_count: int,
+    failure_code: Literal[
+        "FlatChromaSampleShapeInvalid",
+        "GenerationChromaVectorSampleInvalid",
+    ],
+) -> tuple[object, ...]:
+    """Normalize only Chroma's declared list and two-dimensional array forms."""
+
+    import numpy as np
+
+    if isinstance(value, list):
+        rows: list[object] = value
+    elif isinstance(value, np.ndarray):
+        if value.ndim != 2:
+            raise LocalBuildError(failure_code)
+        rows = []
+        for row in value:
+            converted = row.tolist()
+            if not isinstance(converted, list):
+                raise LocalBuildError(failure_code)
+            rows.append(converted)
+    else:
+        raise LocalBuildError(failure_code)
+    if len(rows) != expected_count:
+        raise LocalBuildError(failure_code)
+    return tuple(rows)
+
+
 def _sample_ids(ids: Sequence[str], *, limit: int = 10) -> tuple[str, ...]:
     if not ids:
         raise LocalBuildError("ChromaCollectionEmpty")
@@ -1368,16 +1399,16 @@ def _validate_flat_baseline(
             isinstance(sampled_ids, list)
             and isinstance(documents, list)
             and isinstance(metadatas, list)
-            and isinstance(embeddings, list)
-            and len(sampled_ids)
-            == len(documents)
-            == len(metadatas)
-            == len(embeddings)
-            == len(sample_ids)
+            and len(sampled_ids) == len(documents) == len(metadatas) == len(sample_ids)
         ):
             raise LocalBuildError("FlatChromaSampleShapeInvalid")
+        embedding_rows = _validated_embedding_rows(
+            embeddings,
+            expected_count=len(sample_ids),
+            failure_code="FlatChromaSampleShapeInvalid",
+        )
         for identifier, document, metadata, vector in zip(
-            sampled_ids, documents, metadatas, embeddings, strict=True
+            sampled_ids, documents, metadatas, embedding_rows, strict=True
         ):
             if not isinstance(identifier, str) or not isinstance(document, str):
                 raise LocalBuildError("FlatChromaSampleTypeInvalid")
@@ -1569,11 +1600,11 @@ def _validate_generation(
             raise LocalBuildError("GenerationChromaIdDigestMismatch")
         sample_ids = _sample_ids(tuple(ids))
         sample = collection.get(ids=list(sample_ids), include=["embeddings"])
-        sample_vectors = sample.get("embeddings")
-        if not isinstance(sample_vectors, list) or len(sample_vectors) != len(
-            sample_ids
-        ):
-            raise LocalBuildError("GenerationChromaVectorSampleInvalid")
+        sample_vectors = _validated_embedding_rows(
+            sample.get("embeddings"),
+            expected_count=len(sample_ids),
+            failure_code="GenerationChromaVectorSampleInvalid",
+        )
         for vector in sample_vectors:
             _validate_finite_vector(
                 vector, expected_dimension=context.config.embedding.expected_dimension

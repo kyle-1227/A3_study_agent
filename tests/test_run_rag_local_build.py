@@ -4,9 +4,48 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from scripts import run_rag_local_build as local_build
+
+
+def test_embedding_rows_accept_exact_list_and_numpy_contracts() -> None:
+    list_rows = [[1.0, 2.0], [3.0, 4.0]]
+    array_rows = np.asarray(list_rows, dtype=np.float32)
+
+    assert local_build._validated_embedding_rows(
+        list_rows,
+        expected_count=2,
+        failure_code="FlatChromaSampleShapeInvalid",
+    ) == tuple(list_rows)
+    assert local_build._validated_embedding_rows(
+        array_rows,
+        expected_count=2,
+        failure_code="GenerationChromaVectorSampleInvalid",
+    ) == tuple(list_rows)
+
+
+@pytest.mark.parametrize(
+    "value,expected_count",
+    (
+        (np.asarray([1.0, 2.0], dtype=np.float32), 1),
+        (np.asarray([[1.0, 2.0]], dtype=np.float32), 2),
+        (([1.0, 2.0],), 1),
+    ),
+)
+def test_embedding_rows_reject_undeclared_shape_contracts(
+    value: object, expected_count: int
+) -> None:
+    with pytest.raises(
+        local_build.LocalBuildError,
+        match="FlatChromaSampleShapeInvalid",
+    ):
+        local_build._validated_embedding_rows(
+            value,
+            expected_count=expected_count,
+            failure_code="FlatChromaSampleShapeInvalid",
+        )
 
 
 def _arguments(tmp_path: Path, *mode: str) -> list[str]:
