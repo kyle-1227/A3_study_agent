@@ -51,6 +51,15 @@ class _AtomicSpan:
 
 
 @dataclass(frozen=True)
+class ProtectedAtomicSpan:
+    """One source-relative atomic block that chunk boundaries must not cross."""
+
+    start_char: int
+    end_char: int
+    kind: str
+
+
+@dataclass(frozen=True)
 class _StructureUnit:
     start: int
     end: int
@@ -93,8 +102,8 @@ def _fenced_code_spans(text: str) -> list[_AtomicSpan]:
         fence = match.group(1)
         fence_char = fence[0]
         fence_length = len(fence)
-        end = len(text)
-        closing_index = len(lines) - 1
+        end: int | None = None
+        closing_index: int | None = None
         for candidate_index in range(index + 1, len(lines)):
             _, candidate_end, candidate_line = lines[candidate_index]
             stripped = candidate_line.lstrip(" ")
@@ -107,6 +116,14 @@ def _fenced_code_spans(text: str) -> list[_AtomicSpan]:
                 end = candidate_end
                 closing_index = candidate_index
                 break
+        # An unterminated fence is malformed Markdown (and commonly appears in
+        # PDF extraction).  Treating it as a code block through EOF would turn
+        # arbitrary document text into one giant protected span.  It therefore
+        # cannot be protected as fenced code; continue scanning so a later,
+        # independently closed fence remains detectable.
+        if end is None or closing_index is None:
+            index += 1
+            continue
         spans.append(_AtomicSpan(start=start, end=end, kind="fenced_code"))
         index = closing_index + 1
     return spans
@@ -199,6 +216,24 @@ def _detect_atomic_spans(
     if policy.atomic_display_math:
         spans.extend(_display_math_spans(text))
     return _merge_atomic_spans(spans)
+
+
+def detect_protected_atomic_spans(
+    source: CleanedSourceDocument,
+    policy: ParentChildPolicy,
+) -> tuple[ProtectedAtomicSpan, ...]:
+    """Return validated source-relative protected spans for audit-only checks."""
+
+    spans = _detect_atomic_spans(source.content, policy)
+    _assert_atomic_limit(spans, hard_max=policy.parent_hard_max, absolute_offset=0)
+    return tuple(
+        ProtectedAtomicSpan(
+            start_char=span.start,
+            end_char=span.end,
+            kind=span.kind,
+        )
+        for span in spans
+    )
 
 
 def _assert_atomic_limit(

@@ -17,8 +17,13 @@ data/
 # artifacts
 artifacts/
 
+# generated local RAG runtime state; strict source templates stay tracked
+/config/rag/index.runtime.yaml
+/indexes/parent_child/
+
 # reports
 reports/*
+/reports/rag_build/
 
 # Jetbrains IDE
 .idea/

@@ -1,5 +1,87 @@
 # Parent–Child RAG 本地构建运行手册
 
+## Generated portable runtime configuration
+
+Do not manually edit the ignored runtime YAML. Generate it from the tracked,
+strict local template; provider, model, endpoint, policy, and retry values are
+copied only after source validation, while local locations remain explicit:
+
+```powershell
+python scripts/init_rag_runtime_config.py `
+  --project-root . `
+  --source-config config/rag/index.local.yaml `
+  --data-root data `
+  --index-root indexes/parent_child `
+  --registry-path generation_registry.sqlite `
+  --output config/rag/index.runtime.yaml
+```
+
+The generated YAML stores portable relative paths and is Git-ignored. The
+initializer validates that every location remains inside `--project-root`, that
+the source catalog agrees exactly with its strict `subject_policy_map`, and that
+`evaluation`, `_needs_ocr`, `unclassified`, hidden, and cache directories are
+excluded. It does not call a provider or create an index.
+
+## Local experimental build orchestration
+
+Use the one-key build entrypoint only with explicit paths and identifiers. It
+never reads `chroma_store`, never resolves an active generation as a candidate,
+and never invokes `activate`, `set-primary`, `set-shadow`, or `rollback`.
+
+Run the real loader/splitter and write only an experimental, provider-free
+report first. This mode creates no Chroma collection, BM25 artifact, Parent
+Store, registry, or generation:
+
+```powershell
+python scripts/run_rag_local_build.py `
+  --project-root . `
+  --index-config config/rag/index.runtime.yaml `
+  --benchmark-config config/rag/benchmark.yaml `
+  --gold-dataset data/evaluation/<reviewed-gold-dataset>.json `
+  --build-id <flat-build-id> `
+  --generation-id <parent-child-generation-id> `
+  --code-revision <current-git-sha> `
+  --run-id <unique-run-id> `
+  --offline-dry-run
+```
+
+`--execute` is the only mode that can contact configured providers or build
+isolated local artifacts. It requires explicit chat-provider coordinates in
+addition to the inputs above; the values must come from an approved provider
+configuration, never from a hidden default:
+
+```powershell
+python scripts/run_rag_local_build.py `
+  --project-root . `
+  --index-config config/rag/index.runtime.yaml `
+  --benchmark-config config/rag/benchmark.yaml `
+  --gold-dataset data/evaluation/<reviewed-gold-dataset>.json `
+  --build-id <flat-build-id> `
+  --generation-id <parent-child-generation-id> `
+  --code-revision <current-git-sha> `
+  --run-id <unique-run-id> `
+  --llm-provider <provider> `
+  --llm-model <model> `
+  --llm-base-url <https-base-url> `
+  --llm-endpoint-path <endpoint-path> `
+  --llm-api-key-env <environment-variable-name> `
+  --llm-timeout-seconds <positive-seconds> `
+  --execute
+```
+
+The command first validates local dependencies, strict paths, catalog and
+source groups; then probes Embedding, Reranker, and the explicit chat LLM. A
+failure writes a redacted report in `reports/rag_build/<run-id>/`, returns
+non-zero, and stops later stages. It never substitutes Flat Baseline output for
+a failed candidate. A completed local build is always marked
+`experimental_only=true` and `activation_prohibited=true`; a blocked Gold gate
+does not become a passing formal validation result.
+
+Passing a dataset's JSON schema alone does not make it formal Gold. In
+particular, select a dataset version only after its spans, source groups, and
+human or historical-query semantics have been reviewed; never infer that from a
+filename such as `v2`.
+
 本手册只覆盖可审计的本地构建、评估和部署前验证。它不会下载课程资料、不会修改现有 `chroma_store`，也不会因为某个依赖失败改用旧链路。所有命令从项目根目录执行，并且所有路径都必须位于项目根目录内且不得经过符号链接或 Windows reparse point。
 
 在正式 validation 通过、数据 gate 通过且有明确发布批准以前，**不得执行 activate**。

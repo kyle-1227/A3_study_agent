@@ -49,7 +49,10 @@ from src.rag.parent_child.registry import (
     GenerationRegistry,
     create_generation_registry,
 )
-from src.rag.parent_child.splitter import build_parent_child_bundle
+from src.rag.parent_child.splitter import (
+    build_parent_child_bundle,
+    detect_protected_atomic_spans,
+)
 
 
 def _loader_config() -> PageAwareLoaderConfig:
@@ -292,6 +295,44 @@ def test_schema_drift_and_oversized_atomic_block_fail_loudly(tmp_path: Path) -> 
     )
     with pytest.raises(AtomicSpanTooLargeError):
         build_parent_child_bundle(source, policy, "gen-atomic")
+
+
+def test_unclosed_fence_does_not_protect_the_rest_of_a_document(tmp_path: Path) -> None:
+    data_root = tmp_path / "unclosed-fence-data"
+    source_path = data_root / "python" / "notes.md"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        "```not-a-real-code-fence\n"
+        + ("Ordinary extracted prose must remain splittable.\n" * 40),
+        encoding="utf-8",
+    )
+    loader = _loader_config()
+    source = load_cleaned_source(
+        SourceEntry(
+            schema_version="source_entry_v1",
+            source_path=source_path,
+            data_root=data_root,
+            subject="python",
+            doc_type="notes",
+        ),
+        loader,
+    )
+    policy = _policy(
+        loader,
+        parent_size=90,
+        parent_overlap=15,
+        parent_hard_max=180,
+        child_size=45,
+        child_overlap=8,
+        child_hard_max=100,
+    )
+
+    protected = detect_protected_atomic_spans(source, policy)
+    bundle = build_parent_child_bundle(source, policy, "gen-unclosed-fence")
+
+    assert protected == ()
+    assert bundle.parents
+    assert bundle.children
 
 
 def test_parent_store_and_bm25_artifact_round_trip(tmp_path: Path) -> None:

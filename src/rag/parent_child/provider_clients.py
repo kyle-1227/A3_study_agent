@@ -27,6 +27,15 @@ class ProviderProtocolError(ProviderClientError):
     """The configured endpoint returned a response outside its strict schema."""
 
 
+class ProviderEmbeddingDimensionError(ProviderProtocolError):
+    """A schema-valid embedding response has the wrong configured dimension."""
+
+    def __init__(self, *, actual_dimension: int, expected_dimension: int) -> None:
+        self.actual_dimension = actual_dimension
+        self.expected_dimension = expected_dimension
+        super().__init__("embedding vector dimension contract mismatch")
+
+
 class _StrictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -83,6 +92,13 @@ class _StrictJsonHttpClient:
                 "Content-Type": "application/json",
             },
         )
+        self._last_http_status: int | None = None
+
+    @property
+    def last_http_status(self) -> int | None:
+        """Return the last received HTTP status without retaining response bodies."""
+
+        return self._last_http_status
 
     def close(self) -> None:
         self._client.close()
@@ -98,6 +114,7 @@ class _StrictJsonHttpClient:
                 last_reason = type(exc).__name__
                 retryable = True
             else:
+                self._last_http_status = response.status_code
                 if 200 <= response.status_code < 300:
                     try:
                         return response.json()
@@ -171,6 +188,12 @@ class StrictEmbeddingClient:
     def close(self) -> None:
         self._http.close()
 
+    @property
+    def last_http_status(self) -> int | None:
+        """Expose only the most recent status code for auditable probes."""
+
+        return self._http.last_http_status
+
     def _embed(self, texts: list[str], *, input_type: str) -> list[list[float]]:
         if not texts or any(not isinstance(text, str) or not text for text in texts):
             raise ProviderProtocolError("embedding inputs must be non-empty strings")
@@ -199,9 +222,12 @@ class StrictEmbeddingClient:
         vectors: list[list[float]] = []
         for index in range(len(texts)):
             vector = by_index[index].embedding
-            if len(vector) != self._config.expected_dimension or any(
-                not math.isfinite(coordinate) for coordinate in vector
-            ):
+            if len(vector) != self._config.expected_dimension:
+                raise ProviderEmbeddingDimensionError(
+                    actual_dimension=len(vector),
+                    expected_dimension=self._config.expected_dimension,
+                )
+            if any(not math.isfinite(coordinate) for coordinate in vector):
                 raise ProviderProtocolError("embedding vector contract mismatch")
             vectors.append(vector)
         return vectors
@@ -259,6 +285,12 @@ class StrictRerankerClient:
     def close(self) -> None:
         self._http.close()
 
+    @property
+    def last_http_status(self) -> int | None:
+        """Expose only the most recent status code for auditable probes."""
+
+        return self._http.last_http_status
+
     def rerank(
         self,
         *,
@@ -304,6 +336,7 @@ class StrictRerankerClient:
 
 __all__ = [
     "ProviderClientError",
+    "ProviderEmbeddingDimensionError",
     "ProviderProtocolError",
     "ProviderTransportError",
     "StrictEmbeddingClient",

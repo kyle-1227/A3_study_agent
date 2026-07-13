@@ -7,6 +7,7 @@ import pytest
 
 from src.config.rag_index_config import EmbeddingConfig, RerankerConfig, RetryConfig
 from src.rag.parent_child.provider_clients import (
+    ProviderEmbeddingDimensionError,
     ProviderProtocolError,
     StrictEmbeddingClient,
     StrictRerankerClient,
@@ -59,9 +60,15 @@ def _reranker_config() -> RerankerConfig:
     )
 
 
+def _auth_sentinel(marker: object) -> str:
+    """Return a non-credential, per-test authentication protocol sentinel."""
+
+    return f"provider-client-{id(marker)}"
+
+
 def test_embedding_client_validates_identity_dimension_and_input_type() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] == "Bearer secret"
+        assert request.headers["Authorization"] == f"Bearer {auth_sentinel}"
         payload = json.loads(request.content)
         assert payload == {
             "model": "configured-embedding",
@@ -78,14 +85,16 @@ def test_embedding_client_validates_identity_dimension_and_input_type() -> None:
             },
         )
 
+    auth_sentinel = _auth_sentinel(handler)
     client = StrictEmbeddingClient(
         config=_embedding_config(),
-        api_key="secret",
+        api_key=auth_sentinel,
         transport=httpx.MockTransport(handler),
         sleep=lambda _seconds: None,
     )
     try:
         assert client.embed_query("alpha") == [1.0, 0.0]
+        assert client.last_http_status == 200
     finally:
         client.close()
 
@@ -110,7 +119,7 @@ def test_provider_retries_only_configured_endpoint_and_same_request() -> None:
 
     client = StrictEmbeddingClient(
         config=_embedding_config(),
-        api_key="secret",
+        api_key=_auth_sentinel(handler),
         transport=httpx.MockTransport(handler),
         sleep=sleeps.append,
     )
@@ -125,6 +134,37 @@ def test_provider_retries_only_configured_endpoint_and_same_request() -> None:
     assert sleeps == [0.1]
 
 
+def test_embedding_dimension_mismatch_retains_actual_dimension_for_audit() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "model": "configured-embedding",
+                "data": [
+                    {"object": "embedding", "index": 0, "embedding": [1.0, 0.0, 0.0]}
+                ],
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            },
+        )
+
+    auth_sentinel = _auth_sentinel(handler)
+    client = StrictEmbeddingClient(
+        config=_embedding_config(),
+        api_key=auth_sentinel,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+    try:
+        with pytest.raises(ProviderEmbeddingDimensionError) as error:
+            client.embed_query("alpha")
+        assert error.value.actual_dimension == 3
+        assert error.value.expected_dimension == 2
+        assert client.last_http_status == 200
+    finally:
+        client.close()
+
+
 def test_reranker_requires_complete_unique_index_set() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -134,7 +174,7 @@ def test_reranker_requires_complete_unique_index_set() -> None:
 
     client = StrictRerankerClient(
         config=_reranker_config(),
-        api_key="secret",
+        api_key=_auth_sentinel(handler),
         transport=httpx.MockTransport(handler),
         sleep=lambda _seconds: None,
     )

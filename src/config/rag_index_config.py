@@ -111,17 +111,28 @@ class StorageConfig(StrictRagConfigModel):
 
     @model_validator(mode="after")
     def _validate_registry_containment(self) -> "StorageConfig":
-        index_root = self.index_root.resolve()
-        registry_path = self.registry_path
-        if not registry_path.is_absolute():
-            registry_path = index_root / registry_path
-        resolved_registry = registry_path.resolve()
-        if not resolved_registry.is_relative_to(index_root):
-            raise ValueError("registry_path must resolve within index_root")
+        if self.index_root.is_absolute():
+            index_root = self.index_root.resolve()
+            registry_path = self.registry_path
+            if not registry_path.is_absolute():
+                registry_path = index_root / registry_path
+            if not registry_path.resolve().is_relative_to(index_root):
+                raise ValueError("registry_path must resolve within index_root")
+            return self
+        if self.registry_path.is_absolute():
+            raise ValueError(
+                "registry_path must be relative when index_root is project-relative"
+            )
+        if ".." in self.registry_path.parts:
+            raise ValueError("relative registry_path must not contain parent traversal")
         return self
 
     def resolved_registry_path(self) -> Path:
         """Return the validated registry location under ``index_root``."""
+        if not self.index_root.is_absolute():
+            raise ValueError(
+                "storage paths must be resolved against an explicit project_root first"
+            )
         index_root = self.index_root.resolve()
         if self.registry_path.is_absolute():
             return self.registry_path.resolve()

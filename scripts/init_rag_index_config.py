@@ -45,6 +45,131 @@ class IndexConfigInitializationError(ValueError):
     """One explicit config-generator input cannot form a strict RAG config."""
 
 
+def _portable_relative_path(
+    *,
+    project_root: Path,
+    value: Path,
+    must_be_directory: bool,
+) -> Path:
+    """Validate one project-contained path and retain a portable representation."""
+
+    root = resolve_project_root(project_root)
+    if must_be_directory:
+        resolved = require_project_directory(root, value)
+    else:
+        resolved = resolve_project_path(root, value, must_exist=False)
+        if resolved.exists() and not resolved.is_dir():
+            raise IndexConfigInitializationError(
+                "index_root must be a directory when it exists"
+            )
+    return resolved.relative_to(root)
+
+
+def _portable_registry_path(
+    *,
+    project_root: Path,
+    index_root: Path,
+    registry_path: Path,
+) -> Path:
+    """Validate a registry path relative to its explicit index-root boundary."""
+
+    root = resolve_project_root(project_root)
+    index_root_resolved = resolve_project_path(root, index_root, must_exist=False)
+    registry_candidate = (
+        registry_path
+        if registry_path.is_absolute()
+        else index_root_resolved / registry_path
+    )
+    registry_resolved = resolve_project_path(root, registry_candidate, must_exist=False)
+    if registry_resolved.exists() and not registry_resolved.is_file():
+        raise IndexConfigInitializationError(
+            "registry_path must be a regular file when it exists"
+        )
+    if not registry_resolved.is_relative_to(index_root_resolved):
+        raise IndexConfigInitializationError(
+            "registry_path must remain within index_root"
+        )
+    return registry_resolved.relative_to(index_root_resolved)
+
+
+def _validate_experimental_runtime_catalog(config: RagIndexConfig) -> None:
+    """Require the configured local corpus scope before writing runtime config."""
+
+    exclusions: list[str] = []
+    if "evaluation" not in config.catalog.excluded_exact_names:
+        exclusions.append("evaluation")
+    if not config.catalog.exclude_hidden:
+        exclusions.append("hidden directories")
+    if not config.catalog.exclude_cache_directories:
+        exclusions.append("cache directories")
+    if not config.catalog.cache_directory_names:
+        exclusions.append("configured cache directory names")
+    if not config.catalog.exclude_unclassified:
+        exclusions.append("unclassified")
+    if not config.catalog.exclude_needs_ocr:
+        exclusions.append("_needs_ocr")
+    if exclusions:
+        raise IndexConfigInitializationError(
+            "catalog exclusion contract is incomplete: " + ", ".join(exclusions)
+        )
+    if config.catalog.symlink_policy != "reject":
+        raise IndexConfigInitializationError("catalog symlink_policy must be 'reject'")
+    snapshot = SubjectCatalog(
+        config=config.catalog,
+        subject_policy_map=config.subject_policy_map,
+    ).discover()
+    if not snapshot.subject_ids():
+        raise IndexConfigInitializationError(
+            "catalog must discover at least one subject"
+        )
+
+
+def portable_runtime_config_from_source(
+    *,
+    project_root: Path,
+    source_config_path: Path,
+    data_root: Path,
+    index_root: Path,
+    registry_path: Path,
+) -> RagIndexConfig:
+    """Copy a strict template while requiring explicit portable local locations.
+
+    Provider, model, endpoint, policy, and retrieval values come only from the
+    strictly validated source configuration. This function never invents them.
+    """
+
+    root = resolve_project_root(project_root)
+    template = load_rag_index_config(require_project_file(root, source_config_path))
+    portable_data_root = _portable_relative_path(
+        project_root=root,
+        value=data_root,
+        must_be_directory=True,
+    )
+    portable_index_root = _portable_relative_path(
+        project_root=root,
+        value=index_root,
+        must_be_directory=False,
+    )
+    portable_registry_path = _portable_registry_path(
+        project_root=root,
+        index_root=portable_index_root,
+        registry_path=registry_path,
+    )
+    payload = template.model_dump(mode="json")
+    catalog = dict(payload["catalog"])
+    storage = dict(payload["storage"])
+    catalog["data_root"] = portable_data_root.as_posix()
+    storage["index_root"] = portable_index_root.as_posix()
+    storage["registry_path"] = portable_registry_path.as_posix()
+    payload["catalog"] = catalog
+    payload["storage"] = storage
+    runtime = RagIndexConfig.model_validate(payload)
+    _validate_experimental_runtime_catalog(
+        resolve_rag_index_config_paths(runtime, project_root=root)
+    )
+    return runtime
+
+
 def _strict_bool(value: str) -> bool:
     if value == "true":
         return True
@@ -491,6 +616,44 @@ def write_initialized_config(
     if reloaded != config:
         raise IndexConfigInitializationError(
             "written index config failed strict round-trip validation"
+        )
+    return written
+
+
+def write_portable_runtime_config(
+    *,
+    project_root: Path,
+    output_path: Path,
+    config: RagIndexConfig,
+    overwrite: bool,
+) -> Path:
+    """Write a strict runtime config while preserving POSIX relative path text."""
+
+    root = resolve_project_root(project_root)
+    output = resolve_project_path(root, output_path, must_exist=False)
+    payload = config.model_dump(mode="json")
+    catalog = dict(payload["catalog"])
+    storage = dict(payload["storage"])
+    catalog["data_root"] = config.catalog.data_root.as_posix()
+    storage["index_root"] = config.storage.index_root.as_posix()
+    storage["registry_path"] = config.storage.registry_path.as_posix()
+    payload["catalog"] = catalog
+    payload["storage"] = storage
+    encoded = yaml.safe_dump(
+        payload,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    written = atomic_write_project_bytes(
+        root,
+        output,
+        encoded,
+        overwrite=overwrite,
+    )
+    if load_rag_index_config(written) != config:
+        raise IndexConfigInitializationError(
+            "written portable runtime config failed strict round-trip validation"
         )
     return written
 
