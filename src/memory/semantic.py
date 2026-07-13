@@ -89,7 +89,6 @@ async def consolidate_episodic_to_semantic(
                 HumanMessage(content=user_prompt),
             ],
             output_mode=get_llm_output_mode(_LLM_NODE),
-            fallback_modes=[],
             state={"thread_id": user_id},
             max_raw_chars=get_max_raw_chars(_LLM_NODE),
         )

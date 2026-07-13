@@ -15,7 +15,6 @@ from src.config import get_setting, load_prompt
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -603,7 +602,6 @@ async def review_doc_reviewer(state: LearningState) -> dict:
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("review_doc_reviewer"),
-            fallback_modes=get_fallback_modes("review_doc_reviewer"),
             business_validator=validate_review_doc_verdict,
             state=state,
             max_raw_chars=get_max_raw_chars("review_doc_reviewer"),

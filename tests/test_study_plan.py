@@ -335,7 +335,6 @@ async def test_study_plan_agent_runs_staged_structured_generation():
         "StudyPlanScheduleArtifact",
         "StudyPlanArtifact",
     ]
-    assert all(call["fallback_modes"] == [] for call in calls)
     assert all(call["business_validator"] is not None for call in calls)
     assert result["study_plan_artifact"]["title"] == artifact.title
     assert result["study_plan_round"] == 1

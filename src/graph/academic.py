@@ -56,7 +56,6 @@ from src.graph.web_research import (
 from src.llm.structured_output import (
     StructuredLLMResult,
     StructuredOutputError,
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -1880,19 +1879,6 @@ def _trace_parse_web_source_summary_raw(raw_output: str) -> dict:
         }
 
 
-def _attempted_modes(result: StructuredLLMResult | None) -> list[str]:
-    if result is None:
-        return []
-    modes: list[str] = []
-    for attempt in result.attempts:
-        mode = str(attempt.output_mode or "")
-        if mode and mode not in modes:
-            modes.append(mode)
-    if not modes and result.output_mode:
-        modes.append(str(result.output_mode))
-    return modes
-
-
 def _structured_contract_debug(result: StructuredLLMResult | None) -> dict:
     if result is None:
         return {}
@@ -1926,7 +1912,6 @@ def _make_execution_status(
     error_type: str | None = None,
     error_message: str | None = None,
     structured_output_mode: str | None = None,
-    fallback_modes_attempted: list[str] | None = None,
     retry_count: int = 0,
     validation_errors: list[str] | None = None,
     action_taken: str = "",
@@ -1949,7 +1934,6 @@ def _make_execution_status(
         if error_message
         else None,
         "structured_output_mode": structured_output_mode,
-        "fallback_modes_attempted": fallback_modes_attempted or [],
         "retry_count": int(retry_count or 0),
         "validation_errors": validation_errors or [],
         "action_taken": action_taken,
@@ -2509,7 +2493,6 @@ async def _grade_evidence_items_with_llm(
             error_type="DuplicateEvidenceIdBeforeGrading",
             error_message=f"Duplicate evidence_id values before grading: {duplicate_ids}",
             structured_output_mode=get_llm_output_mode("evidence_item_grader"),
-            fallback_modes_attempted=get_fallback_modes("evidence_item_grader"),
             retry_count=0,
             validation_errors=[f"duplicate evidence_id values: {duplicate_ids}"],
             action_taken="fail_before_calling_evidence_item_grader",
@@ -2531,7 +2514,6 @@ async def _grade_evidence_items_with_llm(
         for index in range(0, len(candidates), batch_size)
     ]
     output_mode = get_llm_output_mode("evidence_item_grader")
-    fallback_modes = get_fallback_modes("evidence_item_grader")
 
     for batch_index, batch in enumerate(batches):
         expected_ids = [candidate.evidence_id for candidate in batch]
@@ -2551,7 +2533,6 @@ async def _grade_evidence_items_with_llm(
                 schema=EvidenceGradeBatch,
                 messages=messages,
                 output_mode=output_mode,
-                fallback_modes=fallback_modes,
                 business_validator=lambda parsed,
                 ids=expected_ids: validate_evidence_grade_batch_output(
                     parsed,
@@ -2576,7 +2557,6 @@ async def _grade_evidence_items_with_llm(
                 error_type=result.error_type or type(exc).__name__,
                 error_message=result.error_message or str(exc),
                 structured_output_mode=result.output_mode or output_mode,
-                fallback_modes_attempted=_attempted_modes(result),
                 retry_count=result.retry_count,
                 validation_errors=validation_errors,
                 action_taken="return_failed_stage_for_v2_dispatcher",
@@ -2606,7 +2586,6 @@ async def _grade_evidence_items_with_llm(
                 error_type=type(exc).__name__,
                 error_message=str(exc),
                 structured_output_mode=output_mode,
-                fallback_modes_attempted=fallback_modes,
                 retry_count=0,
                 action_taken="return_failed_stage_for_v2_dispatcher",
                 batch_index=batch_index,
@@ -2641,7 +2620,6 @@ async def _grade_evidence_items_with_llm(
                 error_message=structured_result.error_message
                 or "Evidence item grader returned no parsed batch.",
                 structured_output_mode=structured_result.output_mode or output_mode,
-                fallback_modes_attempted=_attempted_modes(structured_result),
                 retry_count=structured_result.retry_count,
                 validation_errors=validation_errors,
                 action_taken="return_failed_stage_for_v2_dispatcher",
@@ -2677,7 +2655,6 @@ async def _grade_evidence_items_with_llm(
                 error_type="BusinessValidationError",
                 error_message="Evidence item grader business validation failed.",
                 structured_output_mode=structured_result.output_mode,
-                fallback_modes_attempted=_attempted_modes(structured_result),
                 retry_count=structured_result.retry_count,
                 validation_errors=validation_errors,
                 action_taken="return_failed_stage_for_v2_dispatcher",
@@ -2698,21 +2675,11 @@ async def _grade_evidence_items_with_llm(
             _emit_evidence_stage_trace(state, stage)
             return None, debug
 
-        stage_status = "fallback" if structured_result.fallback_used else "success"
         stage = _make_execution_status(
             node_name="evidence_item_grader",
             stage="evidence_item_grader.batch",
-            status=stage_status,
-            is_fallback=structured_result.fallback_used,
-            fallback_from=output_mode if structured_result.fallback_used else None,
-            fallback_to=structured_result.output_mode
-            if structured_result.fallback_used
-            else None,
-            fallback_reason="structured_output_mode_fallback"
-            if structured_result.fallback_used
-            else None,
+            status="success",
             structured_output_mode=structured_result.output_mode,
-            fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
             validation_errors=[],
             action_taken="accepted_batch_judgement",
@@ -2760,7 +2727,6 @@ async def _grade_evidence_items_with_llm(
         if aggregate_errors
         else None,
         structured_output_mode=output_mode,
-        fallback_modes_attempted=fallback_modes,
         retry_count=0,
         validation_errors=aggregate_errors,
         action_taken="aggregate_batch_judgements"
@@ -2791,7 +2757,6 @@ async def _judge_evidence_sufficiency_with_llm(
     requested_resource_types: list[str] | None = None,
 ) -> tuple[EvidenceSufficiencyOutput | None, dict]:
     output_mode = get_llm_output_mode("evidence_sufficiency_judge")
-    fallback_modes = get_fallback_modes("evidence_sufficiency_judge")
     messages = _build_evidence_sufficiency_messages(
         candidates=candidates,
         judged_items=judged_items,
@@ -2810,7 +2775,6 @@ async def _judge_evidence_sufficiency_with_llm(
             schema=EvidenceSufficiencyOutput,
             messages=messages,
             output_mode=output_mode,
-            fallback_modes=fallback_modes,
             business_validator=lambda parsed: validate_evidence_sufficiency_output(
                 parsed,
                 kept_count=kept_count,
@@ -2830,7 +2794,6 @@ async def _judge_evidence_sufficiency_with_llm(
             error_type=result.error_type or type(exc).__name__,
             error_message=result.error_message or str(exc),
             structured_output_mode=result.output_mode or output_mode,
-            fallback_modes_attempted=_attempted_modes(result),
             retry_count=result.retry_count,
             validation_errors=validation_errors,
             action_taken="return_failed_stage_to_v2_dispatcher",
@@ -2849,7 +2812,6 @@ async def _judge_evidence_sufficiency_with_llm(
             error_type=type(exc).__name__,
             error_message=str(exc),
             structured_output_mode=output_mode,
-            fallback_modes_attempted=fallback_modes,
             retry_count=0,
             action_taken="return_failed_stage_to_v2_dispatcher",
             kept_count=kept_count,
@@ -2875,7 +2837,6 @@ async def _judge_evidence_sufficiency_with_llm(
             error_message=structured_result.error_message
             or "Sufficiency judge returned no parsed output.",
             structured_output_mode=structured_result.output_mode or output_mode,
-            fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
             validation_errors=validation_errors,
             action_taken="return_failed_stage_to_v2_dispatcher",
@@ -2890,17 +2851,8 @@ async def _judge_evidence_sufficiency_with_llm(
     stage = _make_execution_status(
         node_name="evidence_sufficiency_judge",
         stage="evidence_sufficiency_judge",
-        status="fallback" if structured_result.fallback_used else "success",
-        is_fallback=structured_result.fallback_used,
-        fallback_from=output_mode if structured_result.fallback_used else None,
-        fallback_to=structured_result.output_mode
-        if structured_result.fallback_used
-        else None,
-        fallback_reason="structured_output_mode_fallback"
-        if structured_result.fallback_used
-        else None,
+        status="success",
         structured_output_mode=structured_result.output_mode,
-        fallback_modes_attempted=_attempted_modes(structured_result),
         retry_count=structured_result.retry_count,
         validation_errors=[],
         action_taken="accepted_sufficiency_judgement",
@@ -2935,7 +2887,6 @@ def _final_assembly_stage(
         stage="evidence_judge_v2.final_assembly",
         status="success",
         structured_output_mode=None,
-        fallback_modes_attempted=[],
         retry_count=0,
         validation_errors=[],
         action_taken="assembled_evidence_judge_v2_output",
@@ -3768,7 +3719,6 @@ async def _plan_web_research_tasks(
     original_user_query: str,
 ) -> tuple[WebResearchPlan | None, dict]:
     output_mode = get_llm_output_mode(WEB_RESEARCH_V2_PLANNER_NODE)
-    fallback_modes: list[str] = []
     allowed_subjects = _web_research_allowed_subjects(branches)
     messages = _build_web_research_planner_messages(
         state=state,
@@ -3782,7 +3732,6 @@ async def _plan_web_research_tasks(
             schema=WebResearchPlan,
             messages=messages,
             output_mode=output_mode,
-            fallback_modes=fallback_modes,
             business_validator=lambda parsed: validate_web_research_plan(
                 parsed,
                 allowed_subjects=allowed_subjects,
@@ -3801,7 +3750,6 @@ async def _plan_web_research_tasks(
             error_type=result.error_type or type(exc).__name__,
             error_message=result.error_message or str(exc),
             structured_output_mode=result.output_mode or output_mode,
-            fallback_modes_attempted=_attempted_modes(result),
             retry_count=result.retry_count,
             validation_errors=_validation_errors_from_text(
                 result.business_validation_error or result.validation_error
@@ -3822,7 +3770,6 @@ async def _plan_web_research_tasks(
             error_type=type(exc).__name__,
             error_message=str(exc),
             structured_output_mode=output_mode,
-            fallback_modes_attempted=fallback_modes,
             retry_count=0,
             validation_errors=[],
             action_taken=WEB_RESEARCH_V2_ACTION_PLANNER_FAILED,
@@ -3848,7 +3795,6 @@ async def _plan_web_research_tasks(
             error_message=structured_result.error_message
             or "Web research planner returned no parsed plan.",
             structured_output_mode=structured_result.output_mode or output_mode,
-            fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
             validation_errors=validation_errors,
             action_taken=WEB_RESEARCH_V2_ACTION_PLANNER_FAILED,
@@ -3874,7 +3820,6 @@ async def _plan_web_research_tasks(
             error_type="BusinessValidationError",
             error_message="Web research planner business validation failed.",
             structured_output_mode=structured_result.output_mode,
-            fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
             validation_errors=_validation_errors_from_text(validation_error_text),
             action_taken=WEB_RESEARCH_V2_ACTION_PLANNER_FAILED,
@@ -3891,7 +3836,6 @@ async def _plan_web_research_tasks(
         stage=WEB_RESEARCH_V2_STAGE_PLAN_SUCCESS,
         status="success",
         structured_output_mode=structured_result.output_mode,
-        fallback_modes_attempted=_attempted_modes(structured_result),
         retry_count=structured_result.retry_count,
         validation_errors=[],
         action_taken=WEB_RESEARCH_V2_ACTION_ACCEPTED_PLAN,
@@ -4358,7 +4302,6 @@ async def _summarize_web_sources(
 
     batch_size = _web_research_v2_source_summary_batch_size()
     output_mode = get_llm_output_mode(WEB_RESEARCH_V2_SUMMARIZER_NODE)
-    fallback_modes: list[str] = []
     all_summaries: list[dict] = []
     stages: list[dict] = []
     batches = [
@@ -4401,7 +4344,6 @@ async def _summarize_web_sources(
                 schema=WebSourceSummaryBatch,
                 messages=messages,
                 output_mode=output_mode,
-                fallback_modes=fallback_modes,
                 business_validator=lambda parsed,
                 ids=expected_ids: validate_web_source_summary_batch(
                     parsed,
@@ -4420,7 +4362,6 @@ async def _summarize_web_sources(
                 error_type=result.error_type or type(exc).__name__,
                 error_message=result.error_message or str(exc),
                 structured_output_mode=result.output_mode or output_mode,
-                fallback_modes_attempted=_attempted_modes(result),
                 retry_count=result.retry_count,
                 validation_errors=_validation_errors_from_text(
                     result.business_validation_error or result.validation_error
@@ -4453,7 +4394,6 @@ async def _summarize_web_sources(
                 error_type=type(exc).__name__,
                 error_message=str(exc),
                 structured_output_mode=output_mode,
-                fallback_modes_attempted=fallback_modes,
                 retry_count=0,
                 action_taken=WEB_RESEARCH_V2_ACTION_SUMMARIZER_FAILED,
                 developer_warning=WEB_RESEARCH_V2_WARNING_SUMMARIZER_FAILED,
@@ -4492,7 +4432,6 @@ async def _summarize_web_sources(
                 error_message=structured_result.error_message
                 or "Web source summarizer validation failed.",
                 structured_output_mode=structured_result.output_mode or output_mode,
-                fallback_modes_attempted=_attempted_modes(structured_result),
                 retry_count=structured_result.retry_count,
                 validation_errors=_validation_errors_from_text(
                     validation_error_text
@@ -4539,7 +4478,6 @@ async def _summarize_web_sources(
             stage=WEB_RESEARCH_V2_STAGE_SUMMARIZE_SUCCESS,
             status="success",
             structured_output_mode=structured_result.output_mode,
-            fallback_modes_attempted=_attempted_modes(structured_result),
             retry_count=structured_result.retry_count,
             validation_errors=[],
             action_taken=WEB_RESEARCH_V2_ACTION_ACCEPTED_SUMMARIES,
@@ -5773,7 +5711,6 @@ async def evidence_judge(state: LearningState) -> dict:
                 or str(exc)
             ),
             structured_output_mode=result.output_mode,
-            fallback_modes_attempted=_attempted_modes(result),
             retry_count=result.retry_count,
             validation_errors=_validation_errors_from_text(
                 result.business_validation_error
@@ -6368,7 +6305,6 @@ async def memory_use_decider(state: LearningState) -> dict:
                 schema=MemoryUseDecisionOutput,
                 messages=messages,
                 output_mode=get_llm_output_mode("memory_use_decider"),
-                fallback_modes=[],
                 business_validator=lambda p: validate_memory_use_decision_output(
                     p,
                     selected_memory_count=selected_memory_count,
@@ -6735,7 +6671,6 @@ async def _invoke_search_query_rewriter_structured(
         schema=SearchQueryRewriteOutput,
         messages=messages,
         output_mode=get_llm_output_mode("search_query_rewriter"),
-        fallback_modes=[],
         business_validator=lambda p: validate_search_query_rewrite_output(
             p,
             current_query=original_query,
@@ -7638,7 +7573,6 @@ async def evaluate_hallucination(state: LearningState) -> dict:
                 schema=HallucinationEvaluation,
                 messages=eval_messages,
                 output_mode=get_llm_output_mode("hallucination_eval"),
-                fallback_modes=get_fallback_modes("hallucination_eval"),
                 business_validator=validate_hallucination_eval,
                 state=state,
                 max_raw_chars=get_max_raw_chars("hallucination_eval"),

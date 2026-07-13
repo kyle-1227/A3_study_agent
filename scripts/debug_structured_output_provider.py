@@ -15,14 +15,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.llm.structured_output import ALLOWED_OUTPUT_MODES, StructuredOutputError, invoke_structured_llm  # noqa: E402
+from src.llm.structured_output import (  # noqa: E402
+    ALLOWED_OUTPUT_MODES,
+    StructuredOutputError,
+    invoke_structured_llm,
+)
 
 
 class ProbeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     verdict: Literal["ok", "failed"] = "ok"
-    answer: str = Field(..., description="A short answer proving structured output worked.")
+    answer: str = Field(
+        ..., description="A short answer proving structured output worked."
+    )
     confidence: float = Field(..., ge=0, le=1)
 
 
@@ -34,18 +40,19 @@ def _messages() -> list:
                 "Do not include Markdown or extra prose."
             )
         ),
-        HumanMessage(content="Return verdict ok, answer 'structured output works', confidence 0.9."),
+        HumanMessage(
+            content="Return verdict ok, answer 'structured output works', confidence 0.9."
+        ),
     ]
 
 
-async def _run(mode: str, fallback_modes: list[str]) -> None:
+async def _run(mode: str) -> None:
     try:
         result = await invoke_structured_llm(
             node_name="evidence_judge",
             schema=ProbeOutput,
             messages=_messages(),
             output_mode=mode,
-            fallback_modes=fallback_modes,
             max_raw_chars=12000,
         )
     except StructuredOutputError as exc:
@@ -55,7 +62,6 @@ async def _run(mode: str, fallback_modes: list[str]) -> None:
         "provider": result.provider,
         "model": result.model,
         "output_mode": result.output_mode,
-        "fallback_modes": result.fallback_modes,
         "success": result.success,
         "failure_phase": result.failure_phase,
         "error_type": result.error_type,
@@ -71,22 +77,17 @@ async def _run(mode: str, fallback_modes: list[str]) -> None:
 
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
-    parser = argparse.ArgumentParser(description="Probe provider-neutral structured output modes.")
+    parser = argparse.ArgumentParser(
+        description="Probe provider-neutral structured output modes."
+    )
     parser.add_argument(
         "--mode",
         default="native_json_schema_pydantic",
         choices=sorted(ALLOWED_OUTPUT_MODES),
         help="Provider-neutral structured output mode to test.",
     )
-    parser.add_argument(
-        "--fallback-mode",
-        action="append",
-        default=[],
-        choices=sorted(ALLOWED_OUTPUT_MODES),
-        help="Optional explicit fallback mode. May be passed multiple times.",
-    )
     args = parser.parse_args()
-    asyncio.run(_run(args.mode, args.fallback_mode))
+    asyncio.run(_run(args.mode))
 
 
 if __name__ == "__main__":

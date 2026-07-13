@@ -14,7 +14,6 @@ from src.config import get_setting, load_prompt
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -305,7 +304,6 @@ async def exercise_agent(state: LearningState) -> dict:
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("exercise_agent"),
-            fallback_modes=get_fallback_modes("exercise_agent"),
             business_validator=validate_exercise_artifact,
             state=state,
             max_raw_chars=get_max_raw_chars("exercise_agent"),
@@ -357,7 +355,6 @@ async def exercise_reviewer(state: LearningState) -> dict:
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("exercise_reviewer"),
-            fallback_modes=get_fallback_modes("exercise_reviewer"),
             business_validator=validate_review_verdict,
             state=state,
             max_raw_chars=get_max_raw_chars("exercise_reviewer"),

@@ -14,7 +14,6 @@ from src.config import get_setting
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -616,7 +615,6 @@ async def video_script_reviewer(state: LearningState) -> dict:
                     ),
                 ],
                 output_mode=get_llm_output_mode("video_script_reviewer"),
-                fallback_modes=get_fallback_modes("video_script_reviewer"),
                 business_validator=validate_video_script_verdict,
                 state=state,
                 max_raw_chars=get_max_raw_chars("video_script_reviewer"),

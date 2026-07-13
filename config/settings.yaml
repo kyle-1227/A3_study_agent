@@ -1166,7 +1166,6 @@ llm:
 llm_outputs:
   default:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     transport_max_retries: 2
@@ -1175,7 +1174,6 @@ llm_outputs:
     reask_business_validation: true
   conversation_compactor:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 0
     transport_max_retries: 2
@@ -1183,154 +1181,130 @@ llm_outputs:
     reask_enabled: false
   qa_agent:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 20000
     reask_enabled: true
   supervisor:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   search_query_rewriter:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_enabled: true
   resource_evidence_planner:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 24000
     reask_business_validation: true
   memory_use_decider:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   exercise_agent:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   exercise_reviewer:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   mindmap_agent:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   mindmap_reviewer:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   hallucination_eval:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   web_research_planner:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   web_source_summarizer:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   evidence_item_grader:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   evidence_sufficiency_judge:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
     reask_business_validation: true
   requirement_evidence_judge:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 24000
     reask_business_validation: true
   study_plan_emotional_intel:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   study_plan_agent:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 1
     max_raw_chars: 12000
     reask_business_validation: true
   study_plan_reviewer_academic:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   study_plan_reviewer_emotional:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   review_doc_reviewer:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   profile_extractor:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   memory_semantic_summarizer:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000
   error_classifier:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 8000
   practice_generator:
     output_mode: deepseek_tool_call_strict
-    fallback_modes: []
     failure_policy: block
     max_retries: 2
     max_raw_chars: 12000

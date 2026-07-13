@@ -96,7 +96,6 @@ async def classify_error(
                 HumanMessage(content=user_prompt),
             ],
             output_mode=get_llm_output_mode(_LLM_NODE),
-            fallback_modes=[],
             state={"thread_id": quiz_result.user_id},
             max_raw_chars=get_max_raw_chars(_LLM_NODE),
         )

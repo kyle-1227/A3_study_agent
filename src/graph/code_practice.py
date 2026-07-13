@@ -15,7 +15,6 @@ from src.config import get_setting
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -704,7 +703,6 @@ async def code_practice_reviewer(state: LearningState) -> dict:
                     ),
                 ],
                 output_mode=get_llm_output_mode("code_practice_reviewer"),
-                fallback_modes=get_fallback_modes("code_practice_reviewer"),
                 business_validator=validate_code_practice_verdict,
                 state=state,
                 max_raw_chars=get_max_raw_chars("code_practice_reviewer"),

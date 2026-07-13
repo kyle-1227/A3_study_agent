@@ -110,7 +110,7 @@ compaction、Context Window V3、完整 transcript/checkpoint、`LearningState.c
 | --- | --- | --- |
 | `get_fallback_llm`、`invoke_with_fallback`、`async_invoke_with_fallback` | 定义仅在 `src/graph/llm.py`；调用只在 `tests/test_llm_fallback.py`；manifest 测试还禁止其他生产文件调用 | 证明全部生产 provider transport 走 manifest-guarded 单 provider 路径；保留同 provider 有界 retry；删 helper、导出与只测旧 helper 的测试 |
 | `FALLBACK_MODEL/API_KEY/BASE_URL` | `.env.example` 与旧 LLM helper 引用 | helper 删除且配置/secret 扫描无引用后同步删除；不得转成隐藏默认 |
-| `fallback_modes` | 26 个 `config/settings.yaml` 条目均为空；`get_fallback_modes`、structured result/trace/API 与多个节点仍传递字段 | 每节点固定一个显式 output mode；strict Pydantic/business validation 和同 mode retry 测试替代；再从 config、API、result、trace、调用点和 tests 一次性移除 |
+| `fallback_modes` | 实施前 26 个 `config/settings.yaml` 条目均为空，但 structured result/trace/API 与多个节点仍透传字段 | 已改为每节点单一显式 output mode，并从 config、API、result、trace、调用点和 tests 删除旧契约；strict Pydantic/business validation、同模式 semantic retry 与同 provider transport retry 均保留 |
 | OpenRouter 专属旧 structured-output 路径 | 位于受保护 `src/llm/structured_output.py` 的历史 provider 分支 | 官方 provider 边界与真实协议 E2E 已覆盖；无生产配置/测试依赖后删除。不得影响独立 RAG embedding/rerank 的生产配置取舍 |
 | mindmap fallback | `_build_fallback_mindmap_artifact` 在 structured/provider failure 后生成并通过本地结构检查 | 失败返回 typed resource error；无假 artifact；成功路径与 bundle partial-success 测试通过后删除 |
 | review document fallback | fallback markdown、fallback 标志和 reviewer 放行逻辑仍参与 artifact/bundle | typed error；真实生成成功测试和失败不落产物测试替代 |

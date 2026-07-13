@@ -120,7 +120,6 @@ def _structured_result(parsed, *, node_name: str, schema_name: str) -> Structure
         provider="test",
         model="test",
         output_mode="deepseek_tool_call_strict",
-        fallback_modes=[],
         raw_output=parsed.model_dump_json() if parsed is not None else "{}",
     )
 
@@ -136,7 +135,6 @@ def _structured_error(*, node_name: str, schema_name: str, message: str = "struc
             provider="test",
             model="test",
             output_mode="deepseek_tool_call_strict",
-            fallback_modes=[],
             raw_output="{bad",
             failure_phase="validation_error",
             error_type="ValidationError",

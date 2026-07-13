@@ -26,7 +26,6 @@ from src.graph.capability_registry import get_registered_resource_types
 from src.graph.qa import build_general_qa_node_output
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -259,7 +258,6 @@ async def supervisor_node(state: LearningState) -> dict:
                 HumanMessage(content=user_message),
             ],
             output_mode=get_llm_output_mode("supervisor"),
-            fallback_modes=get_fallback_modes("supervisor"),
             business_validator=validate_supervisor_output,
             state=state,
             max_raw_chars=get_max_raw_chars("supervisor"),

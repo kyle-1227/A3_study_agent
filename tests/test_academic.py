@@ -562,7 +562,6 @@ class TestSearchQueryRewriter:
 
         assert result["local_retrieval_query"] == parsed.local_retrieval_query
         assert mock_invoke.await_count == 1
-        assert mock_invoke.await_args.kwargs["fallback_modes"] == []
         assert not any(
             event["stage"] == "query_rewrite_compliance_retry" for event in events
         )
@@ -1262,7 +1261,6 @@ def _web_research_structured_result(
         provider="test",
         model="test",
         output_mode="deepseek_tool_call_strict",
-        fallback_modes=[],
         raw_output=parsed.model_dump_json() if parsed is not None else "{}",
     )
 

@@ -1,3 +1,4 @@
+import inspect
 import json
 from typing import Annotated
 from unittest.mock import AsyncMock
@@ -13,7 +14,6 @@ from src.llm.structured_output import (
     StructuredLLMResult,
     _build_reask_instruction,
     compile_pydantic_schema_for_deepseek_tool,
-    get_fallback_modes,
     get_llm_output_mode,
     invoke_structured_llm,
 )
@@ -275,7 +275,6 @@ class TestDeepSeekStrictRuntime:
                 schema=QAResponse,
                 messages=[{"role": "user", "content": "解释这个概念"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={
                     "request_id": "00000000-0000-4000-8000-000000000001",
                     "thread_id": "thread-1",
@@ -323,7 +322,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "给我一份 Python 的练习题"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 business_validator=validate_supervisor_output,
                 state={"request_id": "r1", "thread_id": "t1"},
             )
@@ -344,7 +342,6 @@ class TestDeepSeekStrictRuntime:
         assert payload["provider_request_mode"] == "deepseek_tool_call_strict"
         assert payload["using_deepseek_official_http"] is True
         assert payload["using_direct_openrouter_http"] is False
-        assert payload["fallback_used"] is False
         assert payload["tool_call_present"] is True
 
     async def test_missing_tool_call_fails_with_deepseek_phase(self, monkeypatch):
@@ -368,7 +365,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -395,7 +391,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -420,7 +415,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -445,7 +439,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -474,7 +467,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 business_validator=validate_supervisor_output,
                 state={},
             )
@@ -484,6 +476,10 @@ class TestDeepSeekStrictRuntime:
         assert result.success is True
         assert result.retry_count == 1
         assert len(result.attempts) == 2
+        assert all(
+            attempt.output_mode == "deepseek_tool_call_strict"
+            for attempt in result.attempts
+        )
         assert _FakeAsyncClient.requests[1]["json"]["messages"][-1]["role"] == "user"
         correction = _FakeAsyncClient.requests[1]["json"]["messages"][-1]["content"]
         assert "Structured output correction required" in correction
@@ -533,7 +529,6 @@ class TestDeepSeekStrictRuntime:
             schema=SupervisorOutput,
             messages=[{"role": "user", "content": "route"}],
             output_mode="deepseek_tool_call_strict",
-            fallback_modes=[],
             business_validator=validate_supervisor_output,
             state={},
         )
@@ -571,7 +566,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 business_validator=validate_supervisor_output,
                 state={},
             )
@@ -600,7 +594,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -630,7 +623,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
 
@@ -671,7 +663,6 @@ class TestDeepSeekStrictRuntime:
                 schema=SupervisorOutput,
                 messages=[{"role": "user", "content": "route"}],
                 output_mode="deepseek_tool_call_strict",
-                fallback_modes=[],
                 state={},
             )
         finally:
@@ -702,7 +693,6 @@ class TestDeepSeekStrictRuntime:
             schema=SupervisorOutput,
             messages=[{"role": "user", "content": "return json route"}],
             output_mode="deepseek_json_object",
-            fallback_modes=[],
             state={},
         )
 
@@ -744,7 +734,6 @@ class TestDeepSeekStrictRuntime:
             schema=SupervisorOutput,
             messages=[{"role": "user", "content": "route"}],
             output_mode="deepseek_tool_call_strict",
-            fallback_modes=[],
             business_validator=require_high_confidence,
             state={},
         )
@@ -810,12 +799,35 @@ class TestDeepSeekConfigScope:
             )
             assert get_setting(f"llm.{llm_node}.api_key_env") == "DEEPSEEK_API_KEY"
 
-    def test_structured_nodes_resolve_strict_mode_and_no_fallback(self):
+    def test_structured_nodes_resolve_one_explicit_mode(self):
+        assert tuple(inspect.signature(invoke_structured_llm).parameters) == (
+            "node_name",
+            "llm_node",
+            "schema",
+            "messages",
+            "output_mode",
+            "business_validator",
+            "state",
+            "max_raw_chars",
+        )
+        allowed_output_config_keys = {
+            "output_mode",
+            "failure_policy",
+            "max_retries",
+            "transport_max_retries",
+            "max_raw_chars",
+            "reask_enabled",
+            "reask_business_validation",
+        }
+        default_output_config = get_setting("llm_outputs.default")
+        assert isinstance(default_output_config, dict)
+        assert set(default_output_config) <= allowed_output_config_keys
         for node_name, llm_node in self.STRUCTURED_NODE_TO_LLM_NODE.items():
             assert get_setting(f"llm.{llm_node}.provider") == "deepseek_official"
             assert get_llm_output_mode(node_name) == "deepseek_tool_call_strict"
-            assert get_fallback_modes(node_name) == []
-            assert get_setting(f"llm_outputs.{node_name}.fallback_modes", []) == []
+            output_config = get_setting(f"llm_outputs.{node_name}")
+            assert isinstance(output_config, dict)
+            assert set(output_config) <= allowed_output_config_keys
             max_retries = get_setting(f"llm_outputs.{node_name}.max_retries", 2)
             assert isinstance(max_retries, int)
             assert not isinstance(max_retries, bool)

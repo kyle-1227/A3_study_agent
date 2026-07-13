@@ -115,7 +115,6 @@ class ProfileExtractor:
                 schema=ExtractedProfileInfoStrict,
                 messages=messages,
                 output_mode=get_llm_output_mode("profile_extractor"),
-                fallback_modes=[],
                 state={},
                 max_raw_chars=get_max_raw_chars("profile_extractor"),
             )

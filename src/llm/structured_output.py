@@ -216,7 +216,6 @@ class StructuredLLMResult:
     provider: str
     model: str
     output_mode: str
-    fallback_modes: list[str] = field(default_factory=list)
     attempts: list[StructuredLLMAttempt] = field(default_factory=list)
     raw_output: str = ""
     provider_error_body: str = ""
@@ -228,8 +227,6 @@ class StructuredLLMResult:
     validation_error: str = ""
     business_validation_error: str = ""
     fail_fast: bool = False
-    fallback_used: bool = False
-    default_used: bool = False
     retry_count: int = 0
     failure_policy: str = ""
     # diagnostics
@@ -281,10 +278,7 @@ class StructuredLLMResult:
             "provider": self.provider,
             "model": self.model,
             "output_mode": self.output_mode,
-            "fallback_modes": self.fallback_modes,
             "fail_fast": self.fail_fast,
-            "fallback_used": self.fallback_used,
-            "default_used": self.default_used,
             "retry_count": self.retry_count,
             "failure_policy": self.failure_policy,
             # diagnostics
@@ -404,21 +398,6 @@ def get_llm_output_mode(node_name: str) -> str:
     )
     _validate_mode(mode)
     return mode
-
-
-def get_fallback_modes(node_name: str) -> list[str]:
-    """Return configured fallback modes; always empty in fail-fast development mode."""
-    if _fail_fast_enabled():
-        return []
-    raw = _output_setting(node_name, "fallback_modes", [])
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError(f"llm_outputs.{node_name}.fallback_modes must be a list[str]")
-    modes = [str(mode) for mode in raw]
-    for mode in modes:
-        _validate_mode(mode)
-    return modes
 
 
 def get_max_raw_chars(node_name: str) -> int:
@@ -2689,23 +2668,19 @@ async def invoke_structured_llm(
     schema: type[BaseModel],
     messages: list,
     output_mode: str,
-    fallback_modes: list[str] | None = None,
     business_validator: Callable[[BaseModel], None | str | list[str]] | None = None,
     state: dict | None = None,
     max_raw_chars: int | None = None,
 ) -> StructuredLLMResult:
     """Invoke a structured-output LLM.
 
-    Retryable parsing/schema failures are retried before fail-fast raises.
-    Fallback modes remain configuration-only in development fail-fast mode.
+    Retryable parsing/schema failures are retried in the requested mode before
+    fail-fast raises.
     """
     llm_node = llm_node or node_name
     fail_fast = _fail_fast_enabled()
-    requested_fallback_modes = list(fallback_modes or [])
-    effective_fallback_modes = [] if fail_fast else requested_fallback_modes
-    base_modes = [output_mode, *effective_fallback_modes]
     max_retries = get_llm_call_max_retries(node_name)
-    modes = [mode for mode in base_modes for _ in range(max_retries + 1)]
+    modes = [output_mode] * (max_retries + 1)
     provider = _provider(llm_node)
     model = _model(llm_node)
     schema_name = schema.__name__
@@ -2799,7 +2774,6 @@ async def invoke_structured_llm(
                         ),
                         "max_retries": max_retries,
                         "next_attempt": attempts_for_mode + 1,
-                        "fallback_used": result.fallback_used,
                         **reask_debug,
                     },
                     state=state,
@@ -2822,7 +2796,6 @@ async def invoke_structured_llm(
                     "retry_count": attempts_for_mode,
                     "max_retries": max_retries,
                     "next_attempt": attempts_for_mode + 1,
-                    "fallback_used": result.fallback_used,
                     **reask_debug,
                 },
                 state=state,
@@ -2875,7 +2848,6 @@ async def invoke_structured_llm(
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 failure_phase=attempt.failure_phase,
                 error_type=attempt.error_type,
@@ -2883,8 +2855,6 @@ async def invoke_structured_llm(
                 total_elapsed_ms=metrics.total_elapsed_ms,
                 schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
-                fallback_used=False,
-                default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
@@ -2960,7 +2930,6 @@ async def invoke_structured_llm(
                     provider=provider,
                     model=model,
                     output_mode=mode,
-                    fallback_modes=effective_fallback_modes,
                     attempts=attempts,
                     raw_output=raw_output,
                     failure_phase="business_validation_error",
@@ -2976,8 +2945,6 @@ async def invoke_structured_llm(
                     raw_output_chars=metrics.raw_output_chars,
                     schema_size_chars=schema_size_chars,
                     fail_fast=fail_fast,
-                    fallback_used=(mode != output_mode),
-                    default_used=False,
                     retry_count=0,
                     failure_policy=failure_policy,
                     using_direct_openrouter_http=metrics.using_direct_openrouter_http,
@@ -3017,7 +2984,6 @@ async def invoke_structured_llm(
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 raw_output=raw_output,
                 total_elapsed_ms=metrics.total_elapsed_ms,
@@ -3029,8 +2995,6 @@ async def invoke_structured_llm(
                 raw_output_chars=metrics.raw_output_chars,
                 schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
-                fallback_used=(mode != output_mode),
-                default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
@@ -3101,7 +3065,6 @@ async def invoke_structured_llm(
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 provider_error_body=provider_error_body,
                 failure_phase=phase,
@@ -3121,8 +3084,6 @@ async def invoke_structured_llm(
                 raw_output_chars=metrics.raw_output_chars,
                 schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
-                fallback_used=(mode != output_mode),
-                default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
@@ -3183,7 +3144,6 @@ async def invoke_structured_llm(
                 provider=provider,
                 model=model,
                 output_mode=mode,
-                fallback_modes=effective_fallback_modes,
                 attempts=attempts,
                 provider_error_body=provider_error_body,
                 failure_phase=phase,
@@ -3203,8 +3163,6 @@ async def invoke_structured_llm(
                 raw_output_chars=metrics.raw_output_chars,
                 schema_size_chars=schema_size_chars,
                 fail_fast=fail_fast,
-                fallback_used=(mode != output_mode),
-                default_used=False,
                 retry_count=0,
                 failure_policy=failure_policy,
                 using_direct_openrouter_http=metrics.using_direct_openrouter_http,
@@ -3229,7 +3187,6 @@ async def invoke_structured_llm(
         provider=provider,
         model=model,
         output_mode=last.output_mode or output_mode,
-        fallback_modes=effective_fallback_modes,
         attempts=attempts,
         failure_phase=last.failure_phase,
         error_type=last.error_type,
@@ -3245,8 +3202,6 @@ async def invoke_structured_llm(
         raw_output_chars=last.raw_output_chars,
         schema_size_chars=schema_size_chars,
         fail_fast=fail_fast,
-        fallback_used=(last.output_mode != output_mode),
-        default_used=False,
         retry_count=_semantic_retry_count(attempts),
         failure_policy=failure_policy,
         using_direct_openrouter_http=last.using_direct_openrouter_http,

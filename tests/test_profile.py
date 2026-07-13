@@ -910,7 +910,6 @@ class TestProfileExtractor:
             provider="deepseek_official",
             model="deepseek-v4-pro",
             output_mode="deepseek_tool_call_strict",
-            fallback_modes=[],
         )
 
     def _make_extractor(self, monkeypatch, ainvoke_return=None):
@@ -1132,7 +1131,6 @@ class TestProfileExtractor:
         assert kwargs["node_name"] == "profile_extractor"
         assert kwargs["llm_node"] == "profile_extractor"
         assert kwargs["output_mode"] == "deepseek_tool_call_strict"
-        assert kwargs["fallback_modes"] == []
 
 
 # ===========================================================================

@@ -24,7 +24,6 @@ from src.graph.qa_suggestion_registry import (
 )
 from src.graph.state import LearningState
 from src.llm.structured_output import (
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -195,7 +194,6 @@ async def qa_agent(state: LearningState) -> dict:
         schema=QAResponse,
         messages=messages,
         output_mode=get_llm_output_mode("qa_agent"),
-        fallback_modes=get_fallback_modes("qa_agent"),
         business_validator=lambda parsed: validate_qa_response(
             parsed,
             qa_scope=typed_scope,

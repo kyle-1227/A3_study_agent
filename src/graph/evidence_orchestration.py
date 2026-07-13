@@ -522,7 +522,6 @@ def make_resource_evidence_planner_node(
                     HumanMessage(content=prompt),
                 ],
                 output_mode=get_llm_output_mode("resource_evidence_planner"),
-                fallback_modes=[],
                 business_validator=lambda parsed: _planner_business_validation(
                     parsed,
                     resources=resources,
@@ -1469,7 +1468,6 @@ def make_requirement_evidence_judge_node(
                     HumanMessage(content=prompt),
                 ],
                 output_mode=get_llm_output_mode("requirement_evidence_judge"),
-                fallback_modes=[],
                 business_validator=lambda parsed: _coverage_business_validation(
                     parsed,
                     round_index=round_index,

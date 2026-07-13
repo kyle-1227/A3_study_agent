@@ -13,7 +13,6 @@ from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     StructuredOutputError,
-    get_fallback_modes,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -325,7 +324,6 @@ async def mindmap_agent(state: LearningState) -> dict:
                     HumanMessage(content=prompt),
                 ],
                 output_mode=get_llm_output_mode("mindmap_agent"),
-                fallback_modes=get_fallback_modes("mindmap_agent"),
                 business_validator=validate_mindmap_artifact,
                 state=state,
                 max_raw_chars=get_max_raw_chars("mindmap_agent"),
@@ -415,7 +413,6 @@ async def mindmap_reviewer(state: LearningState) -> dict:
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("mindmap_reviewer"),
-            fallback_modes=get_fallback_modes("mindmap_reviewer"),
             business_validator=validate_review_verdict,
             state=state,
             max_raw_chars=get_max_raw_chars("mindmap_reviewer"),

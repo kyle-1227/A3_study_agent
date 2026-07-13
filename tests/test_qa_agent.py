@@ -310,7 +310,6 @@ async def test_general_qa_agent_uses_one_structured_contract(monkeypatch):
     assert kwargs["node_name"] == "qa_agent"
     assert kwargs["llm_node"] == "qa_agent"
     assert kwargs["schema"] is QAResponse
-    assert kwargs["fallback_modes"] == []
     assert len(kwargs["messages"]) == 3
     assert "<QA_SUGGESTION_REGISTRY>" in kwargs["messages"][1].content
     assert not any(

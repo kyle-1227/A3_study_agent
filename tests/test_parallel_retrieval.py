@@ -35,7 +35,6 @@ def _web_research_structured_result(parsed, *, node_name: str, schema_name: str)
         provider="test",
         model="test",
         output_mode="deepseek_tool_call_strict",
-        fallback_modes=[],
         raw_output=parsed.model_dump_json() if parsed is not None else "{}",
     )
 

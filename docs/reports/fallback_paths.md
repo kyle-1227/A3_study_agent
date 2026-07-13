@@ -11,6 +11,17 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ## Observed Legacy Risk Areas
 
+### 2026-07-13 Structured-output single-mode cleanup
+
+- Removed the legacy `fallback_modes` configuration/API/result/trace contract
+  and `get_fallback_modes` helper from the structured-output runtime.
+- Each `invoke_structured_llm` call now supplies one explicit `output_mode`;
+  retryable parse, schema, and business-validation failures retry only that
+  mode, while provider transport retry remains unchanged.
+- Removed the now-constant structured-output result flags `fallback_used` and
+  `default_used`. Context Apply telemetry and resource-generator fallback
+  fields are separate contracts and were not changed in this cleanup.
+
 ### 2026-07-10 Parent-child RAG implementation baseline
 
 - `src/rag/retriever.py` catches BM25 construction failures and continues with
