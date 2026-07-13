@@ -31,6 +31,19 @@ EXPECTED_SUBJECTS = (
 )
 
 
+def test_tracked_local_config_uses_bounded_long_run_embedding_retry() -> None:
+    config = load_rag_index_config(PROJECT_ROOT / "config" / "rag" / "index.local.yaml")
+
+    assert config.embedding.retry.max_attempts == 10
+    assert config.embedding.retry.initial_backoff_seconds == 1.0
+    assert config.embedding.retry.max_backoff_seconds == 60.0
+    assert config.embedding.retry.multiplier == 2.0
+    assert config.embedding.batch_size == 8
+    assert config.embedding.max_in_flight_batches == 4
+    assert config.embedding.provider_routing is not None
+    assert config.embedding.provider_routing.allow_fallbacks is False
+
+
 def _write_source_config(project_root: Path) -> Path:
     """Clone the tracked strict template while pointing it at a test corpus."""
 

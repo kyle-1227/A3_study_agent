@@ -8,6 +8,7 @@ from src.rag.parent_child.embedding_batches import (
     EmbeddingBatchExecutionError,
     iter_bounded_document_embedding_batches,
 )
+from src.rag.parent_child.provider_clients import ProviderReportedError
 
 
 class _BlockingEmbeddingProvider:
@@ -116,7 +117,51 @@ def test_embedding_batch_failure_cancels_remaining_work_and_raises_typed_error()
     assert not consumer.is_alive()
     assert len(failures) == 1
     assert isinstance(failures[0], EmbeddingBatchExecutionError)
+    assert failures[0].batch_start == 1
+    assert failures[0].batch_size == 1
+    assert failures[0].cause_type == "RuntimeError"
+    assert failures[0].provider_code is None
+    assert failures[0].retryable is None
+    assert failures[0].attempts_exhausted is None
+    assert failures[0].__cause__ is None
+    assert failures[0].__context__ is None
     assert set(provider.calls) == {"hold", "bad"}
+
+
+def test_embedding_batch_failure_copies_only_safe_provider_diagnostics() -> None:
+    secret = "sensitive-token-value"
+    provider_error = ProviderReportedError(
+        code=429,
+        retryable=True,
+        attempts_exhausted=True,
+    )
+    provider_error.response_body = {"authorization": secret}
+    provider_error.request_url = f"https://provider.invalid/?key={secret}"
+
+    def fail(_texts: list[str]) -> list[list[float]]:
+        raise provider_error
+
+    with pytest.raises(EmbeddingBatchExecutionError) as captured:
+        list(
+            iter_bounded_document_embedding_batches(
+                texts=("one", "two"),
+                batch_size=2,
+                max_in_flight_batches=1,
+                embed_documents=fail,
+            )
+        )
+
+    failure = captured.value
+    assert failure.batch_start == 0
+    assert failure.batch_size == 2
+    assert failure.cause_type == "ProviderReportedError"
+    assert failure.provider_code == 429
+    assert failure.retryable is True
+    assert failure.attempts_exhausted is True
+    assert failure.__cause__ is None
+    assert failure.__context__ is None
+    assert secret not in str(failure)
+    assert secret not in repr(vars(failure))
 
 
 @pytest.mark.parametrize("max_in_flight_batches", (0, -1, True))

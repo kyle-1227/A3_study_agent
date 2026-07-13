@@ -8,6 +8,16 @@ import numpy as np
 import pytest
 
 from scripts import run_rag_local_build as local_build
+from src.rag.parent_child.embedding_batches import (
+    EmbeddingBatchExecutionError,
+    iter_bounded_document_embedding_batches,
+)
+from src.rag.parent_child.flat_baseline import FlatBaselineError
+from src.rag.parent_child.provider_clients import (
+    ProviderProtocolError,
+    ProviderReportedError,
+    ProviderTransportError,
+)
 
 
 def test_embedding_rows_accept_exact_list_and_numpy_contracts() -> None:
@@ -72,7 +82,7 @@ def _arguments(tmp_path: Path, *mode: str) -> list[str]:
 
 def _planned_report(inputs: local_build.BuildInputs) -> local_build.LocalBuildReport:
     return local_build.LocalBuildReport(
-        schema_version="rag_local_build_report_v1",
+        schema_version="rag_local_build_report_v2",
         run_id=inputs.run_id,
         mode=inputs.mode,
         status="planned",
@@ -273,7 +283,7 @@ def test_markdown_report_marks_unreached_build_artifacts_as_not_run(
         ),
     )
     report = local_build.LocalBuildReport(
-        schema_version="rag_local_build_report_v1",
+        schema_version="rag_local_build_report_v2",
         run_id="rag_test_run",
         mode="execute",
         status="failed",
@@ -304,7 +314,18 @@ def test_markdown_report_marks_unreached_build_artifacts_as_not_run(
             ),
         ),
         failure=local_build.FailureSummary(
-            stage="provider_probe", error_type="ProviderProbeFailed"
+            stage="provider_probe",
+            error_type="ProviderProbeFailed",
+            cause_chain=(
+                local_build.FailureDiagnostic(
+                    error_type="ProviderProbeFailed",
+                    batch_start=None,
+                    batch_size=None,
+                    provider_code=None,
+                    retryable=None,
+                    attempts_exhausted=None,
+                ),
+            ),
         ),
         experimental_only=True,
         activation_prohibited=True,
@@ -321,3 +342,97 @@ def test_markdown_report_marks_unreached_build_artifacts_as_not_run(
     assert "Retrieval outcome: status=`not_run`" in markdown
     assert "Grounded LLM outcome: status=`not_run`" in markdown
     assert "Activation allowed: `false`" in markdown
+
+
+def _raise_flat_embedding_failure(provider_error: BaseException) -> None:
+    def fail(_texts: list[str]) -> list[list[float]]:
+        raise provider_error
+
+    try:
+        list(
+            iter_bounded_document_embedding_batches(
+                texts=("one", "two"),
+                batch_size=2,
+                max_in_flight_batches=1,
+                embed_documents=fail,
+            )
+        )
+    except EmbeddingBatchExecutionError as exc:
+        raise FlatBaselineError("flat baseline embedding provider failed") from exc
+    raise AssertionError("the strict embedding provider failure was not propagated")
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    (
+        ProviderReportedError(
+            code=503,
+            retryable=True,
+            attempts_exhausted=True,
+        ),
+        ProviderTransportError("transport secret must not be serialized"),
+        ProviderProtocolError("protocol secret must not be serialized"),
+    ),
+    ids=("reported", "transport", "protocol"),
+)
+def test_failure_diagnostic_exposes_bounded_safe_cause_chain(
+    provider_error: BaseException,
+) -> None:
+    secret = "sensitive-token-value"
+    provider_error.response_body = {"Authorization": f"Bearer {secret}"}
+    provider_error.request_url = f"https://provider.invalid/v1?api_key={secret}"
+
+    with pytest.raises(FlatBaselineError) as captured:
+        _raise_flat_embedding_failure(provider_error)
+
+    chain = local_build._safe_failure_cause_chain(captured.value)
+    payload = local_build.FailureSummary(
+        stage="flat_baseline",
+        error_type="FlatBaselineError",
+        cause_chain=chain,
+    ).model_dump_json()
+
+    assert tuple(item.error_type for item in chain) == (
+        "FlatBaselineError",
+        "EmbeddingBatchExecutionError",
+        type(provider_error).__name__,
+    )
+    assert len(chain) <= local_build._MAX_FAILURE_CAUSE_DEPTH
+    assert chain[1].batch_start == 0
+    assert chain[1].batch_size == 2
+    if isinstance(provider_error, ProviderReportedError):
+        assert chain[2].provider_code == 503
+        assert chain[2].retryable is True
+        assert chain[2].attempts_exhausted is True
+    else:
+        assert chain[2].provider_code is None
+        assert chain[2].retryable is None
+        assert chain[2].attempts_exhausted is None
+    batch_failure = captured.value.__cause__
+    assert isinstance(batch_failure, EmbeddingBatchExecutionError)
+    assert batch_failure.__cause__ is None
+    assert batch_failure.__context__ is None
+    assert secret not in payload
+    assert "provider.invalid" not in payload
+    assert "Authorization" not in payload
+    assert "transport secret" not in payload
+    assert "protocol secret" not in payload
+
+
+def test_failure_diagnostic_truncates_deep_exception_chains() -> None:
+    failure: BaseException = RuntimeError("sensitive root text")
+    for _ in range(local_build._MAX_FAILURE_CAUSE_DEPTH + 4):
+        outer = RuntimeError("sensitive outer text")
+        outer.__cause__ = failure
+        failure = outer
+
+    chain = local_build._safe_failure_cause_chain(failure)
+    payload = local_build.FailureSummary(
+        stage="flat_baseline",
+        error_type="RuntimeError",
+        cause_chain=chain,
+    ).model_dump_json()
+
+    assert len(chain) == local_build._MAX_FAILURE_CAUSE_DEPTH
+    assert "sensitive root text" not in payload
+    assert "sensitive outer text" not in payload

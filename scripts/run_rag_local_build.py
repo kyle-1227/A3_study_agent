@@ -45,6 +45,7 @@ from src.config.rag_index_config import (
 )
 from src.config.rag_benchmark_config import load_rag_benchmark_config
 from src.rag.parent_child._storage_io import validate_generation_id
+from src.rag.parent_child.embedding_batches import EmbeddingBatchExecutionError
 from src.rag.parent_child.project_paths import (
     atomic_write_project_bytes,
     require_project_file,
@@ -52,6 +53,7 @@ from src.rag.parent_child.project_paths import (
     resolve_project_root,
 )
 from src.rag.gold_dataset import load_gold_dataset
+from src.rag.parent_child.provider_clients import ProviderReportedError
 from src.rag.subject_catalog import SubjectCatalog, SubjectCatalogSnapshot
 
 
@@ -62,6 +64,8 @@ if TYPE_CHECKING:
 
 _BUILD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{7,64}$")
+_SAFE_FAILURE_TYPE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_MAX_FAILURE_CAUSE_DEPTH = 8
 _REQUIRED_BUILD_MODULES: tuple[str, ...] = (
     "chromadb",
     "fitz",
@@ -172,9 +176,55 @@ class StageRecord(_StrictModel):
     failure_type: str | None
 
 
+class FailureDiagnostic(_StrictModel):
+    """One content-free exception coordinate in a bounded failure chain."""
+
+    error_type: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+    )
+    batch_start: int | None
+    batch_size: int | None
+    provider_code: int | None
+    retryable: bool | None
+    attempts_exhausted: bool | None
+
+    @model_validator(mode="after")
+    def _validate_safe_coordinates(self) -> "FailureDiagnostic":
+        if (self.batch_start is None) != (self.batch_size is None):
+            raise ValueError("failure batch coordinates must be paired")
+        if self.batch_start is not None and self.batch_start < 0:
+            raise ValueError("failure batch_start must be non-negative")
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError("failure batch_size must be positive")
+        provider_attributes = (
+            self.provider_code,
+            self.retryable,
+            self.attempts_exhausted,
+        )
+        if any(value is not None for value in provider_attributes) and not all(
+            value is not None for value in provider_attributes
+        ):
+            raise ValueError("failure provider diagnostics must be complete")
+        return self
+
+
 class FailureSummary(_StrictModel):
     stage: BuildStage
     error_type: str = Field(min_length=1)
+    cause_chain: tuple[FailureDiagnostic, ...] = Field(
+        min_length=1,
+        max_length=_MAX_FAILURE_CAUSE_DEPTH,
+    )
+
+    @model_validator(mode="after")
+    def _validate_outer_failure(self) -> "FailureSummary":
+        if self.error_type != self.cause_chain[0].error_type:
+            raise ValueError(
+                "failure error_type must match the outer cause-chain entry"
+            )
+        return self
 
 
 class FlatBaselineSummary(_StrictModel):
@@ -282,7 +332,7 @@ class _GroundedReviewPayload(_StrictModel):
 class LocalBuildReport(_StrictModel):
     """The safe final run envelope for success, failure, and offline runs."""
 
-    schema_version: Literal["rag_local_build_report_v1"]
+    schema_version: Literal["rag_local_build_report_v2"]
     run_id: str = Field(min_length=1)
     mode: BuildMode
     status: RunStatus
@@ -562,7 +612,85 @@ def _write_model(root: Path, output: Path, model: BaseModel) -> Path:
 def _safe_failure_type(exc: BaseException) -> str:
     """Return only an exception class name; exception text can contain secrets."""
 
-    return type(exc).__name__[:128] or "UnknownFailure"
+    name = type(exc).__name__
+    if _SAFE_FAILURE_TYPE_PATTERN.fullmatch(name) is not None:
+        return name
+    return "UnknownFailure"
+
+
+def _failure_diagnostic(exc: BaseException) -> FailureDiagnostic:
+    batch_start: int | None = None
+    batch_size: int | None = None
+    provider_code: int | None = None
+    retryable: bool | None = None
+    attempts_exhausted: bool | None = None
+    if isinstance(exc, EmbeddingBatchExecutionError):
+        batch_start = exc.batch_start
+        batch_size = exc.batch_size
+    if isinstance(exc, ProviderReportedError):
+        provider_code = exc.code
+        retryable = exc.retryable
+        attempts_exhausted = exc.attempts_exhausted
+    return FailureDiagnostic(
+        error_type=_safe_failure_type(exc),
+        batch_start=batch_start,
+        batch_size=batch_size,
+        provider_code=provider_code,
+        retryable=retryable,
+        attempts_exhausted=attempts_exhausted,
+    )
+
+
+def _embedded_safe_cause(
+    exc: EmbeddingBatchExecutionError,
+) -> FailureDiagnostic | None:
+    if exc.cause_type is None:
+        return None
+    return FailureDiagnostic(
+        error_type=exc.cause_type,
+        batch_start=None,
+        batch_size=None,
+        provider_code=exc.provider_code,
+        retryable=exc.retryable,
+        attempts_exhausted=exc.attempts_exhausted,
+    )
+
+
+def _next_failure(exc: BaseException) -> BaseException | None:
+    if isinstance(exc.__cause__, BaseException):
+        return exc.__cause__
+    if not exc.__suppress_context__ and isinstance(exc.__context__, BaseException):
+        return exc.__context__
+    return None
+
+
+def _safe_failure_cause_chain(
+    exc: BaseException,
+) -> tuple[FailureDiagnostic, ...]:
+    """Project exception topology to a bounded primitive-only diagnostic chain."""
+
+    diagnostics: list[FailureDiagnostic] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(diagnostics) < _MAX_FAILURE_CAUSE_DEPTH:
+        identity = id(current)
+        if identity in seen:
+            break
+        seen.add(identity)
+        diagnostics.append(_failure_diagnostic(current))
+        next_failure = _next_failure(current)
+        if (
+            isinstance(current, EmbeddingBatchExecutionError)
+            and len(diagnostics) < _MAX_FAILURE_CAUSE_DEPTH
+        ):
+            embedded = _embedded_safe_cause(current)
+            if embedded is not None and (
+                next_failure is None
+                or embedded.error_type != _safe_failure_type(next_failure)
+            ):
+                diagnostics.append(embedded)
+        current = next_failure
+    return tuple(diagnostics)
 
 
 def _new_stage(
@@ -1079,6 +1207,9 @@ def _render_build_markdown(
             f"reason={_format_probe_value(grounded.reason)}"
         )
     if report.failure is not None:
+        cause_types = " -> ".join(
+            diagnostic.error_type for diagnostic in report.failure.cause_chain
+        )
         lines.extend(
             [
                 "",
@@ -1086,8 +1217,23 @@ def _render_build_markdown(
                 "",
                 f"- Stage: `{report.failure.stage}`",
                 f"- Type: `{report.failure.error_type}`",
+                f"- Safe cause chain: `{cause_types}`",
             ]
         )
+        for diagnostic in report.failure.cause_chain:
+            if diagnostic.batch_start is not None:
+                lines.append(
+                    "- Embedding batch coordinates: "
+                    f"start=`{diagnostic.batch_start}`, size=`{diagnostic.batch_size}`"
+                )
+            if diagnostic.provider_code is not None:
+                lines.append(
+                    "- Provider diagnostic: "
+                    f"code=`{diagnostic.provider_code}`, "
+                    f"retryable=`{str(diagnostic.retryable).lower()}`, "
+                    "attempts_exhausted="
+                    f"`{str(diagnostic.attempts_exhausted).lower()}`"
+                )
     lines.extend(
         [
             "",
@@ -1119,7 +1265,7 @@ def _plan_report(inputs: BuildInputs) -> LocalBuildReport:
     root = inputs.project_root.resolve(strict=False)
     report_directory = root / "reports" / "rag_build" / inputs.run_id
     return LocalBuildReport(
-        schema_version="rag_local_build_report_v1",
+        schema_version="rag_local_build_report_v2",
         run_id=inputs.run_id,
         mode="plan",
         status="planned",
@@ -1158,7 +1304,7 @@ def _failure_report(
         context, reason=f"{failed_stage}_failed"
     )
     return LocalBuildReport(
-        schema_version="rag_local_build_report_v1",
+        schema_version="rag_local_build_report_v2",
         run_id=context.inputs.run_id,
         mode=context.inputs.mode,
         status="failed",
@@ -1177,7 +1323,11 @@ def _failure_report(
         smoke_retrieval_path=_relative(context.root, retrieval_path),
         grounded_smoke_path=_relative(context.root, grounded_path),
         stages=tuple(stages),
-        failure=FailureSummary(stage=failed_stage, error_type=_safe_failure_type(exc)),
+        failure=FailureSummary(
+            stage=failed_stage,
+            error_type=_safe_failure_type(exc),
+            cause_chain=_safe_failure_cause_chain(exc),
+        ),
         experimental_only=True,
         activation_prohibited=True,
     )
@@ -2101,7 +2251,7 @@ def _run_offline_dry_run(context: BuildContext) -> tuple[LocalBuildReport, int]:
             context, reason="offline_dry_run"
         )
         report = LocalBuildReport(
-            schema_version="rag_local_build_report_v1",
+            schema_version="rag_local_build_report_v2",
             run_id=context.inputs.run_id,
             mode="offline_dry_run",
             status="offline_complete",
@@ -2310,7 +2460,7 @@ def _run_execute(context: BuildContext) -> tuple[LocalBuildReport, int]:
             )
         )
         report = LocalBuildReport(
-            schema_version="rag_local_build_report_v1",
+            schema_version="rag_local_build_report_v2",
             run_id=context.inputs.run_id,
             mode="execute",
             status="success",
