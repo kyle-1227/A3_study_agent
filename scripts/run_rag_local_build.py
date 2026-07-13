@@ -1483,6 +1483,7 @@ def _validate_generation(
         read_subject_bm25_artifact,
     )
     from src.rag.parent_child.builder import compute_embedding_fingerprint
+    from src.rag.parent_child.chroma_children import iter_child_chroma_metadata_pages
     from src.rag.parent_child.generation import validate_sealed_generation
     from src.rag.parent_child.models import ChildMetadata
     from src.rag.parent_child.parent_store import ParentStore
@@ -1544,30 +1545,29 @@ def _validate_generation(
             raise LocalBuildError("GenerationChromaCountMismatch")
         if collection.metadata != expected_metadata:
             raise LocalBuildError("GenerationChromaMetadataMismatch")
-        payload = collection.get(include=["metadatas"])
-        identifiers = payload.get("ids")
-        metadatas = payload.get("metadatas")
-        if not (
-            isinstance(identifiers, list)
-            and isinstance(metadatas, list)
-            and len(identifiers) == len(metadatas) == manifest.counts.child_count
+        ids: list[str] = []
+        for page_ids, page_metadatas in iter_child_chroma_metadata_pages(
+            collection,
+            expected_count=manifest.counts.child_count,
+            page_size=context.config.embedding.batch_size,
         ):
-            raise LocalBuildError("GenerationChromaMetadataShapeInvalid")
-        ids = tuple(str(item) for item in identifiers)
+            ids.extend(page_ids)
+            for identifier, raw_metadata in zip(page_ids, page_metadatas, strict=True):
+                metadata = ChildMetadata.from_chroma_metadata(raw_metadata)
+                if metadata.child_id != identifier:
+                    raise LocalBuildError("GenerationChildIdMetadataMismatch")
+                if metadata.generation_id != context.inputs.generation_id:
+                    raise LocalBuildError("GenerationChildIdMismatch")
+                expected_policy = context.config.subject_policy_map.get(
+                    metadata.subject
+                )
+                if expected_policy is None or metadata.policy_id != expected_policy:
+                    raise LocalBuildError("GenerationChildPolicyMismatch")
+                children_by_subject.setdefault(metadata.subject, set()).add(identifier)
+                parent_ids.add(metadata.parent_id)
         if digest_identifier_set(ids) != manifest.child_id_set_sha256:
             raise LocalBuildError("GenerationChromaIdDigestMismatch")
-        for identifier, raw_metadata in zip(ids, metadatas, strict=True):
-            metadata = ChildMetadata.from_chroma_metadata(raw_metadata)
-            if metadata.child_id != identifier:
-                raise LocalBuildError("GenerationChildIdMetadataMismatch")
-            if metadata.generation_id != context.inputs.generation_id:
-                raise LocalBuildError("GenerationChildIdMismatch")
-            expected_policy = context.config.subject_policy_map.get(metadata.subject)
-            if expected_policy is None or metadata.policy_id != expected_policy:
-                raise LocalBuildError("GenerationChildPolicyMismatch")
-            children_by_subject.setdefault(metadata.subject, set()).add(identifier)
-            parent_ids.add(metadata.parent_id)
-        sample_ids = _sample_ids(ids)
+        sample_ids = _sample_ids(tuple(ids))
         sample = collection.get(ids=list(sample_ids), include=["embeddings"])
         sample_vectors = sample.get("embeddings")
         if not isinstance(sample_vectors, list) or len(sample_vectors) != len(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import re
-from typing import Literal, Protocol, Sequence
+from typing import Iterator, Literal, Protocol, Sequence
 
 import chromadb
 from chromadb.api.models.Collection import Collection
@@ -338,6 +338,69 @@ def _verify_collection(
     expected_ids = [child.child_id for child in expected_children]
     if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected_ids):
         raise ChromaVerificationError("persisted child ID set mismatch")
+
+
+def iter_child_chroma_metadata_pages(
+    collection: Collection,
+    *,
+    expected_count: int,
+    page_size: int,
+) -> Iterator[tuple[tuple[str, ...], tuple[dict[str, object], ...]]]:
+    """Yield every child ID/metadata row through an explicit bounded read.
+
+    The sealed child collection can be larger than SQLite's SQL-variable limit,
+    so callers must not use one unbounded ``Collection.get`` for full-artifact
+    validation.  A page must be complete, disjoint, and contain scalar metadata
+    mappings; callers remain responsible for their domain-level ID digest and
+    ``ChildMetadata`` validation.
+    """
+
+    if expected_count <= 0:
+        raise ChromaVerificationError("child Chroma expected count must be positive")
+    if page_size <= 0:
+        raise ChromaVerificationError(
+            "child Chroma metadata page size must be positive"
+        )
+
+    seen_ids: set[str] = set()
+    for offset in range(0, expected_count, page_size):
+        limit = min(page_size, expected_count - offset)
+        try:
+            result = collection.get(
+                limit=limit,
+                offset=offset,
+                include=["metadatas"],
+            )
+        except Exception as exc:
+            raise ChromaVerificationError("failed to read child metadata page") from exc
+        identifiers = result.get("ids")
+        raw_metadatas = result.get("metadatas")
+        if not (
+            isinstance(identifiers, list)
+            and isinstance(raw_metadatas, list)
+            and len(identifiers) == len(raw_metadatas) == limit
+        ):
+            raise ChromaVerificationError("child metadata page cardinality mismatch")
+        page_ids: list[str] = []
+        page_metadatas: list[dict[str, object]] = []
+        for identifier, raw_metadata in zip(identifiers, raw_metadatas, strict=True):
+            if not isinstance(identifier, str) or not identifier:
+                raise ChromaVerificationError(
+                    "child metadata page identifier is invalid"
+                )
+            if identifier in seen_ids:
+                raise ChromaVerificationError(
+                    "child metadata page contains duplicate ID"
+                )
+            if not isinstance(raw_metadata, dict):
+                raise ChromaVerificationError("child metadata page entry is invalid")
+            page_ids.append(identifier)
+            page_metadatas.append(raw_metadata)
+        seen_ids.update(page_ids)
+        yield tuple(page_ids), tuple(page_metadatas)
+
+    if len(seen_ids) != expected_count:
+        raise ChromaVerificationError("child metadata pages did not cover expected IDs")
 
 
 def write_child_chroma_artifact(

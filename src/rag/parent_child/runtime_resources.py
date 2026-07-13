@@ -88,6 +88,7 @@ class ChromaChildSearchChannel:
         expected_dimension: int,
         distance_metric: str,
         query_embedding_provider: QueryEmbeddingProvider,
+        child_lookup_batch_size: int,
     ) -> None:
         if not persist_directory.is_absolute():
             raise RuntimeResourceError("Chroma persist_directory must be absolute")
@@ -99,11 +100,14 @@ class ChromaChildSearchChannel:
             raise RuntimeResourceError("collection_name and generation_id are required")
         if expected_dimension <= 0:
             raise RuntimeResourceError("expected_dimension must be positive")
+        if child_lookup_batch_size <= 0:
+            raise RuntimeResourceError("child_lookup_batch_size must be positive")
         if distance_metric not in {"cosine", "l2", "ip"}:
             raise RuntimeResourceError("unsupported Chroma distance metric")
         self._generation_id = generation_id
         self._expected_dimension = expected_dimension
         self._embedding_provider = query_embedding_provider
+        self._child_lookup_batch_size = child_lookup_batch_size
         try:
             self._client = chromadb.PersistentClient(
                 path=str(persist_directory),
@@ -235,31 +239,43 @@ class ChromaChildSearchChannel:
             raise RetrievalProtocolError("child lookup requires non-empty IDs")
         if len(requested) != len(set(requested)):
             raise RetrievalProtocolError("child lookup IDs must be unique")
-        try:
-            raw = self._collection.get(
-                ids=list(requested),
-                include=["documents", "metadatas"],
-            )
-        except Exception as exc:
-            raise RetrievalChannelError("child Chroma lookup failed") from exc
-        ids = raw.get("ids")
-        documents = raw.get("documents")
-        metadatas = raw.get("metadatas")
-        if not (
-            isinstance(ids, list)
-            and isinstance(documents, list)
-            and isinstance(metadatas, list)
-            and len(ids) == len(documents) == len(metadatas)
-        ):
-            raise RetrievalProtocolError("child Chroma lookup shape is invalid")
         by_id: dict[str, ChildDocument] = {}
-        for child_id, document, metadata in zip(ids, documents, metadatas, strict=True):
-            if not isinstance(child_id, str) or child_id in by_id:
-                raise RetrievalProtocolError("child Chroma lookup IDs are invalid")
-            child = _decode_child(document, metadata)
-            if child.metadata.child_id != child_id:
-                raise RetrievalInvariantError("child lookup ID and metadata differ")
-            by_id[child_id] = child
+        for start in range(0, len(requested), self._child_lookup_batch_size):
+            batch = requested[start : start + self._child_lookup_batch_size]
+            try:
+                raw = self._collection.get(
+                    ids=list(batch),
+                    include=["documents", "metadatas"],
+                )
+            except Exception as exc:
+                raise RetrievalChannelError("child Chroma lookup failed") from exc
+            ids = raw.get("ids")
+            documents = raw.get("documents")
+            metadatas = raw.get("metadatas")
+            if not (
+                isinstance(ids, list)
+                and isinstance(documents, list)
+                and isinstance(metadatas, list)
+                and len(ids) == len(documents) == len(metadatas) == len(batch)
+            ):
+                raise RetrievalProtocolError("child Chroma lookup shape is invalid")
+            page_by_id: dict[str, ChildDocument] = {}
+            for child_id, document, metadata in zip(
+                ids, documents, metadatas, strict=True
+            ):
+                if not isinstance(child_id, str) or child_id in page_by_id:
+                    raise RetrievalProtocolError("child Chroma lookup IDs are invalid")
+                child = _decode_child(document, metadata)
+                if child.metadata.child_id != child_id:
+                    raise RetrievalInvariantError("child lookup ID and metadata differ")
+                page_by_id[child_id] = child
+            if set(page_by_id) != set(batch):
+                raise RetrievalInvariantError("child Chroma lookup ID set mismatch")
+            if set(by_id).intersection(page_by_id):
+                raise RetrievalInvariantError(
+                    "child Chroma lookup returned duplicate ID"
+                )
+            by_id.update(page_by_id)
         if set(by_id) != set(requested):
             raise RetrievalInvariantError("child Chroma lookup ID set mismatch")
         return tuple(by_id[child_id] for child_id in requested)

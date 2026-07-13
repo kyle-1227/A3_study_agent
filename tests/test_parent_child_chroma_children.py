@@ -13,6 +13,7 @@ from src.rag.parent_child.chroma_children import (
     ChromaInputContractError,
     ChromaStagingPathError,
     ChromaVerificationError,
+    iter_child_chroma_metadata_pages,
     write_child_chroma_artifact,
 )
 from src.rag.parent_child.models import ChildDocument, ChildMetadata
@@ -34,6 +35,29 @@ class DeterministicEmbedding:
 class WrongDimensionEmbedding:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [[1.0] for _ in texts]
+
+
+class _PagedMetadataCollection:
+    def __init__(self, *, page_size: int) -> None:
+        self._page_size = page_size
+        self.calls: list[tuple[int, int, tuple[object, ...]]] = []
+
+    def get(
+        self, *, limit: int | None = None, offset: int | None = None, include: object
+    ) -> dict[str, object]:
+        if limit is None or offset is None:
+            raise AssertionError("child metadata reads require limit and offset")
+        if limit > self._page_size:
+            raise AssertionError("child metadata read exceeded declared page size")
+        if include != ["metadatas"]:
+            raise AssertionError("child metadata read must request only metadata")
+        identifiers = ("child_a", "child_b", "child_c", "child_d", "child_e")
+        selected = identifiers[offset : offset + limit]
+        self.calls.append((limit, offset, tuple(include)))
+        return {
+            "ids": list(selected),
+            "metadatas": [{"child_id": identifier} for identifier in selected],
+        }
 
 
 def _child(
@@ -80,6 +104,31 @@ def _staging_root(tmp_path: Path, generation_id: str = "gen-a") -> Path:
     path = tmp_path / "indexes" / ".staging" / generation_id
     path.mkdir(parents=True)
     return path
+
+
+def test_child_metadata_reader_requires_explicit_bounded_pages() -> None:
+    collection = _PagedMetadataCollection(page_size=2)
+
+    pages = tuple(
+        iter_child_chroma_metadata_pages(
+            collection,  # type: ignore[arg-type]
+            expected_count=5,
+            page_size=2,
+        )
+    )
+
+    assert tuple(identifier for ids, _ in pages for identifier in ids) == (
+        "child_a",
+        "child_b",
+        "child_c",
+        "child_d",
+        "child_e",
+    )
+    assert collection.calls == [
+        (2, 0, ("metadatas",)),
+        (2, 2, ("metadatas",)),
+        (1, 4, ("metadatas",)),
+    ]
 
 
 def test_chroma_writer_persists_and_verifies_exact_children(tmp_path: Path) -> None:

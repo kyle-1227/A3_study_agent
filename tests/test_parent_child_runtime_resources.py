@@ -87,6 +87,7 @@ def test_sealed_chroma_vector_and_subject_bm25_resources_round_trip(
         expected_dimension=2,
         distance_metric="cosine",
         query_embedding_provider=_QueryEmbedding(),
+        child_lookup_batch_size=1,
     )
     try:
         vector_hits = vector.search(
@@ -96,6 +97,12 @@ def test_sealed_chroma_vector_and_subject_bm25_resources_round_trip(
             top_k=2,
         )
         assert vector_hits[0].document == alpha
+        assert vector.get_children(
+            (beta.metadata.child_id, alpha.metadata.child_id)
+        ) == (
+            beta,
+            alpha,
+        )
 
         rows = (
             Bm25CorpusRow(

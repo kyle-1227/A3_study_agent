@@ -218,6 +218,7 @@ def load_generation_runtime(
             expected_dimension=manifest.embedding.dimension,
             distance_metric=manifest.embedding.distance_metric,
             query_embedding_provider=query_embedding_provider,
+            child_lookup_batch_size=config.embedding.batch_size,
         )
         parents = ParentStore.open_readonly(
             generation_root,
