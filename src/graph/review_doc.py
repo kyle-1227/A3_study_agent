@@ -7,14 +7,14 @@ import logging
 import re
 from typing import Literal
 
-import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
+    StructuredOutputError,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -34,14 +34,6 @@ REQUIRED_REVIEW_DOC_SECTIONS = {
     "self_check": r"(?m)^##\s*(?:[一二三四五六七八九十0-9]+[、.．]\s*)?自测清单",
 }
 
-REVIEW_DOC_AGENT_RETRY_ERRORS = (
-    TimeoutError,
-    asyncio.TimeoutError,
-    httpx.RemoteProtocolError,
-    httpx.ReadError,
-    httpx.TimeoutException,
-)
-
 REVIEW_DOC_SUBJECT_TITLES = {
     "python": "Python",
     "computer": "计算机科学导论",
@@ -52,8 +44,18 @@ REVIEW_DOC_SUBJECT_TITLES = {
 class ReviewDocReviewVerdict(BaseModel):
     """Structured quality gate output for review_doc_reviewer."""
 
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
     verdict: Literal["approve", "reject"]
-    reason: str
+    reason: str = Field(min_length=1)
+
+
+class ReviewDocGenerationError(RuntimeError):
+    """Raised when no provider-produced review document can be accepted."""
+
+
+class ReviewDocApprovalError(RuntimeError):
+    """Raised when an unapproved review document reaches artifact output."""
 
 
 def validate_review_doc_verdict(parsed: BaseModel) -> str:
@@ -75,7 +77,10 @@ def _last_human_query(state: LearningState) -> str:
 
 def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
-    return ", ".join(str(item) for item in keypoints if str(item).strip()) or "No explicit keypoints."
+    return (
+        ", ".join(str(item) for item in keypoints if str(item).strip())
+        or "No explicit keypoints."
+    )
 
 
 def _format_context(context: list[dict]) -> str:
@@ -83,8 +88,15 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:900]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:900]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -101,8 +113,11 @@ def _extract_markdown_title(markdown: str) -> str:
     for line in markdown.splitlines():
         match = re.match(r"^#\s+(.+?)\s*$", line)
         if match:
-            return match.group(1).strip()
-    return "Markdown复习文档"
+            title = match.group(1).strip()
+            if title:
+                return title
+            break
+    raise ReviewDocGenerationError("review document Markdown title is missing")
 
 
 def _local_review_failure(markdown: str, _query: str) -> str:
@@ -128,28 +143,41 @@ def _local_review_failure(markdown: str, _query: str) -> str:
     return ""
 
 
-def _review_doc_error_type(exc: BaseException) -> str:
-    return type(exc).__name__
+def _review_doc_bundle_local_failure(state: LearningState, markdown: str) -> str:
+    documents = state.get("review_doc_markdowns") or []
+    if not documents:
+        return _local_review_failure(markdown, _last_human_query(state))
+    if not isinstance(documents, list):
+        return "review_doc_markdowns must be a list"
 
-
-def _is_retriable_review_doc_error(exc: BaseException) -> bool:
-    if isinstance(exc, REVIEW_DOC_AGENT_RETRY_ERRORS):
-        return True
-    message = f"{type(exc).__name__}: {exc}".lower()
-    retry_markers = (
-        "incomplete chunked read",
-        "peer closed connection",
-        "remoteprotocolerror",
-        "readerror",
-        "timeout",
-        "timed out",
-        "connection reset",
-        "connection aborted",
-    )
-    if any(marker in message for marker in retry_markers):
-        return True
-    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-    return bool(cause and cause is not exc and _is_retriable_review_doc_error(cause))
+    seen_subjects: set[str] = set()
+    for index, document in enumerate(documents):
+        if not isinstance(document, dict):
+            return f"review document {index} must be an object"
+        subject = str(document.get("subject") or "").strip()
+        title = str(document.get("title") or "").strip()
+        document_markdown = str(document.get("markdown") or "").strip()
+        if not subject:
+            return f"review document {index} subject is empty"
+        if subject in seen_subjects:
+            return f"duplicate review document subject: {subject}"
+        seen_subjects.add(subject)
+        expected_title = _review_doc_title_for_subject(subject)
+        if title != expected_title:
+            return (
+                f"review document {index} title mismatch: "
+                f"expected={expected_title!r}, actual={title!r}"
+            )
+        try:
+            _require_markdown_title(document_markdown, expected_title)
+        except ReviewDocGenerationError as exc:
+            return str(exc)
+        local_failure = _local_review_failure(
+            document_markdown, _last_human_query(state)
+        )
+        if local_failure:
+            return f"review document {index}: {local_failure}"
+    return ""
 
 
 def _review_doc_length_instruction() -> str:
@@ -194,80 +222,68 @@ def _doc_subject_values(item: dict) -> set[str]:
 
 
 def _context_for_subject(context: list[dict], subject: str) -> list[dict]:
-    filtered = [item for item in context if subject in _doc_subject_values(item)]
-    return filtered or context
+    return [item for item in context if subject in _doc_subject_values(item)]
 
 
-def _ensure_markdown_title(markdown: str, title: str) -> str:
+def _require_markdown_title(markdown: str, expected_title: str = "") -> str:
     text = markdown.strip()
     if not text:
-        return f"# {title}\n"
-    lines = text.splitlines()
-    for idx, line in enumerate(lines):
-        if not line.strip():
-            continue
-        if line.lstrip().startswith("# "):
-            lines[idx] = f"# {title}"
-            return "\n".join(lines).strip()
-        return f"# {title}\n\n{text}"
-    return f"# {title}\n"
+        raise ReviewDocGenerationError("review document Markdown is empty")
+    actual_title = _extract_markdown_title(text)
+    if expected_title and actual_title != expected_title:
+        raise ReviewDocGenerationError(
+            "review document title mismatch: "
+            f"expected={expected_title!r}, actual={actual_title!r}"
+        )
+    return text
 
 
-def _extract_outline_items(outline: str) -> list[str]:
-    items: list[str] = []
-    for line in outline.splitlines():
-        cleaned = re.sub(r"^[\s#\-*0-9一二三四五六七八九十、.．]+", "", line).strip()
-        cleaned = re.sub(r"[:：].*$", "", cleaned).strip()
-        if 2 <= len(cleaned) <= 30 and cleaned not in items:
-            items.append(cleaned)
-    return items
+def _review_doc_model_name() -> str:
+    configured_model = get_setting("llm.review_doc.model", None)
+    if not isinstance(configured_model, str) or not configured_model.strip():
+        raise ValueError("llm.review_doc.model must be explicitly configured")
+    return configured_model.strip()
 
 
-def _fallback_review_doc_markdown(
-    *,
-    title: str,
-    keypoints: list[str],
-    outline: str,
-    context: list[dict],
-    reason: str,
-) -> str:
-    keypoint_items = [str(item).strip() for item in keypoints if str(item).strip()]
-    if not keypoint_items:
-        keypoint_items = _extract_outline_items(outline)[:6]
-    if not keypoint_items:
-        keypoint_items = [title, "核心概念", "常见应用", "易错点"]
+def _review_doc_temperature() -> float:
+    configured_temperature = get_setting("llm.review_doc.temperature", None)
+    if isinstance(configured_temperature, bool) or not isinstance(
+        configured_temperature, (int, float)
+    ):
+        raise ValueError("llm.review_doc.temperature must be explicitly configured")
+    temperature = float(configured_temperature)
+    if not 0.0 <= temperature <= 2.0:
+        raise ValueError("llm.review_doc.temperature must be between 0 and 2")
+    return temperature
 
-    overview_lines = "\n".join(f"- {item}" for item in keypoint_items[:8])
-    concept_lines = "\n".join(f"- **{item}**：结合课程资料重点理解其定义、用途和适用边界。" for item in keypoint_items[:6])
-    self_check_lines = "\n".join(f"- [ ] 我能说明“{item}”的含义和典型用法。" for item in keypoint_items[:5])
-    evidence_note = _format_context(context)[:360]
 
-    return (
-        f"# {title}\n\n"
-        "## 一、复习目标\n"
-        "- 梳理课程核心知识点，形成可快速回顾的复习框架。\n"
-        "- 明确重点概念、常见用法、易错点和自测方向。\n\n"
-        "## 二、核心知识点总览\n"
-        f"{overview_lines}\n\n"
-        "## 三、重点概念解释\n"
-        f"{concept_lines}\n\n"
-        "## 四、易错点整理\n"
-        "- 只记结论、不理解适用条件，容易在变式题或实践场景中误用。\n"
-        "- 忽略概念之间的边界，容易把相似术语、函数、流程或方法混在一起。\n\n"
-        "## 五、自测清单\n"
-        f"{self_check_lines}\n"
-        "- [ ] 我能用自己的话总结本章节的复习路线。\n\n"
-        "## 六、参考依据与说明\n"
-        f"- 资料依据摘要：{evidence_note}\n"
-        f"- 本次由简化模式生成，原因是模型生成长文档时连接中断。错误类型：{reason}。\n"
-    )
+def _review_doc_timeout_seconds() -> float:
+    configured_timeout = get_setting("llm.review_doc.timeout_seconds", None)
+    if isinstance(configured_timeout, bool) or not isinstance(
+        configured_timeout, (int, float)
+    ):
+        raise ValueError("llm.review_doc.timeout_seconds must be explicitly configured")
+    timeout_seconds = float(configured_timeout)
+    if timeout_seconds <= 0:
+        raise ValueError("llm.review_doc.timeout_seconds must be greater than zero")
+    return timeout_seconds
+
+
+def _review_doc_max_generation_rounds() -> int:
+    configured_rounds = get_setting("llm.review_doc.max_generation_rounds", None)
+    if isinstance(configured_rounds, bool) or not isinstance(configured_rounds, int):
+        raise ValueError(
+            "llm.review_doc.max_generation_rounds must be explicitly configured"
+        )
+    if configured_rounds < 1:
+        raise ValueError("llm.review_doc.max_generation_rounds must be at least one")
+    return configured_rounds
 
 
 async def _generate_review_doc_markdown(
     *,
     state: LearningState,
     query: str,
-    keypoints: list[str],
     outline: str,
     revision_notes: str,
     context: list[dict],
@@ -275,12 +291,9 @@ async def _generate_review_doc_markdown(
     subject: str = "",
     title: str = "",
 ) -> dict:
-    temperature = get_setting("review_doc.temperature", 0.2)
-    timeout_seconds = float(get_setting("review_doc.timeout_seconds", 90) or 90)
-    model_name = get_setting(
-        "llm.review_doc.model",
-        get_setting("review_doc.model", ""),
-    )
+    temperature = _review_doc_temperature()
+    timeout_seconds = _review_doc_timeout_seconds()
+    model_name = _review_doc_model_name()
 
     subject_note = ""
     if subject and title:
@@ -301,15 +314,16 @@ async def _generate_review_doc_markdown(
     prompt += _review_doc_length_instruction()
 
     messages = [
-        SystemMessage(content="You are a university course Markdown review-document generator. Output Markdown only."),
+        SystemMessage(
+            content="You are a university course Markdown review-document generator. Output Markdown only."
+        ),
         HumanMessage(content=prompt),
     ]
 
-    markdown = ""
-    last_error_type = ""
-    last_error_message = ""
     try:
-        with traced_llm_call(model_name=model_name, node_name="review_doc_agent", temperature=temperature):
+        with traced_llm_call(
+            model_name=model_name, node_name="review_doc_agent", temperature=temperature
+        ):
             markdown = await asyncio.wait_for(
                 invoke_plain_llm_fail_fast(
                     node_name="review_doc_agent",
@@ -322,15 +336,12 @@ async def _generate_review_doc_markdown(
             )
         markdown = str(markdown or "").strip()
     except Exception as exc:
-        last_error_type = _review_doc_error_type(exc)
-        last_error_message = str(exc)
         emit_a3_trace(
             logger,
             "review_doc_agent_failed",
             {
-                "fallback_used": False,
-                "review_doc_agent_error_type": last_error_type,
-                "error_message": last_error_message[:300],
+                "review_doc_agent_error_type": type(exc).__name__,
+                "error_message": str(exc)[:300],
                 "timeout_seconds": timeout_seconds,
                 "subject": subject,
             },
@@ -340,32 +351,25 @@ async def _generate_review_doc_markdown(
         raise
 
     if not markdown:
-        last_error_type = "EmptyResponse"
-        last_error_message = "LLM returned empty Markdown content"
+        error_message = "LLM returned empty Markdown content"
         emit_a3_trace(
             logger,
             "review_doc_agent_failed",
             {
-                "fallback_used": False,
-                "review_doc_agent_error_type": last_error_type,
-                "error_message": last_error_message,
+                "review_doc_agent_error_type": "EmptyResponse",
+                "error_message": error_message,
                 "timeout_seconds": timeout_seconds,
                 "subject": subject,
             },
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
         )
-        raise ValueError(last_error_message)
+        raise ReviewDocGenerationError(error_message)
 
-    if title:
-        markdown = _ensure_markdown_title(markdown, title)
+    markdown = _require_markdown_title(markdown, title)
 
     return {
         "markdown": markdown,
-        "fallback_used": False,
-        "last_error_type": last_error_type,
-        "last_error_message": last_error_message,
-        "retries_used": 0,
         "round": round_no,
         "timeout_seconds": timeout_seconds,
     }
@@ -388,17 +392,23 @@ async def review_doc_planner(state: LearningState) -> dict:
     )
     prompt = _render_prompt(
         "review_doc_planner",
-        {"question": query, "keypoints": _format_keypoints(state), "context": _format_context(context)},
+        {
+            "question": query,
+            "keypoints": _format_keypoints(state),
+            "context": _format_context(context),
+        },
     )
     outline = await invoke_plain_llm_fail_fast(
         node_name="review_doc_planner",
         llm_node="review_doc",
         messages=[
-            SystemMessage(content="You are a university course Markdown review-document planner. Return a concrete outline only."),
+            SystemMessage(
+                content="You are a university course Markdown review-document planner. Return a concrete outline only."
+            ),
             HumanMessage(content=prompt),
         ],
         state=state,
-        temperature=get_setting("review_doc.temperature", 0.2),
+        temperature=_review_doc_temperature(),
     )
     if not outline.strip():
         raise ValueError("review_doc_planner produced empty outline")
@@ -418,7 +428,6 @@ async def review_doc_planner(state: LearningState) -> dict:
 @traced_node
 async def review_doc_agent(state: LearningState) -> dict:
     query = _last_human_query(state)
-    keypoints = state.get("keypoints", [])
     context = state.get("context", [])
     revision_notes = state.get("review_doc_revision_notes", "")
     outline = state.get("review_doc_outline", "")
@@ -430,10 +439,7 @@ async def review_doc_agent(state: LearningState) -> dict:
     multi_document = len(subjects) > 1
     if multi_document:
         documents: list[dict] = []
-        fallback_used_any = False
-        last_error_types: list[str] = []
-        retries_used_total = 0
-        timeout_seconds = float(get_setting("review_doc.timeout_seconds", 90) or 90)
+        timeout_seconds = _review_doc_timeout_seconds()
 
         for subject in subjects:
             title = _review_doc_title_for_subject(subject)
@@ -445,7 +451,6 @@ async def review_doc_agent(state: LearningState) -> dict:
             result = await _generate_review_doc_markdown(
                 state=state,
                 query=query,
-                keypoints=keypoints,
                 outline=subject_outline,
                 revision_notes=revision_notes,
                 context=subject_context,
@@ -453,14 +458,10 @@ async def review_doc_agent(state: LearningState) -> dict:
                 subject=subject,
                 title=title,
             )
-            markdown = str(result.get("markdown") or "").strip()
+            markdown = _require_markdown_title(str(result.get("markdown") or ""), title)
             documents.append({"subject": subject, "title": title, "markdown": markdown})
-            fallback_used_any = fallback_used_any or bool(result.get("fallback_used"))
-            if result.get("last_error_type"):
-                last_error_types.append(str(result.get("last_error_type")))
-            retries_used_total += int(result.get("retries_used") or 0)
 
-        combined_markdown = "\n\n---\n\n".join(doc["markdown"] for doc in documents if doc.get("markdown"))
+        combined_markdown = "\n\n---\n\n".join(doc["markdown"] for doc in documents)
         emit_a3_trace(
             logger,
             "review_doc_agent",
@@ -471,9 +472,6 @@ async def review_doc_agent(state: LearningState) -> dict:
                 "markdown_chars": len(combined_markdown),
                 "round": round_no,
                 "context_count": len(context),
-                "fallback_used": fallback_used_any,
-                "review_doc_agent_error_type": ",".join(last_error_types),
-                "retries_used": retries_used_total,
                 "timeout_seconds": timeout_seconds,
             },
             state=state,
@@ -484,8 +482,6 @@ async def review_doc_agent(state: LearningState) -> dict:
             "review_doc_markdowns": documents,
             "review_doc_round": round_no,
             "review_doc_artifact": {
-                "fallback_used": fallback_used_any,
-                "fallback_reason": ",".join(last_error_types),
                 "multi_document": True,
                 "document_count": len(documents),
                 "subjects": subjects,
@@ -498,13 +494,12 @@ async def review_doc_agent(state: LearningState) -> dict:
     result = await _generate_review_doc_markdown(
         state=state,
         query=query,
-        keypoints=keypoints,
         outline=outline,
         revision_notes=revision_notes,
         context=context,
         round_no=round_no,
     )
-    markdown = str(result.get("markdown") or "").strip()
+    markdown = _require_markdown_title(str(result.get("markdown") or ""))
     emit_a3_trace(
         logger,
         "review_doc_agent",
@@ -515,9 +510,6 @@ async def review_doc_agent(state: LearningState) -> dict:
             "markdown_chars": len(markdown),
             "round": round_no,
             "context_count": len(context),
-            "fallback_used": bool(result.get("fallback_used")),
-            "review_doc_agent_error_type": result.get("last_error_type", ""),
-            "retries_used": int(result.get("retries_used") or 0),
             "timeout_seconds": result.get("timeout_seconds", ""),
         },
         state=state,
@@ -527,10 +519,7 @@ async def review_doc_agent(state: LearningState) -> dict:
         "review_doc_markdown": markdown,
         "review_doc_markdowns": [],
         "review_doc_round": round_no,
-        "review_doc_artifact": {
-            "fallback_used": bool(result.get("fallback_used")),
-            "fallback_reason": result.get("last_error_type", ""),
-        },
+        "review_doc_artifact": {},
         "review_doc_artifacts": [],
         "review_doc_review_verdict": "",
         "review_doc_review_reason": "",
@@ -540,7 +529,7 @@ async def review_doc_agent(state: LearningState) -> dict:
 @traced_node
 async def review_doc_reviewer(state: LearningState) -> dict:
     markdown = state.get("review_doc_markdown", "")
-    local_failure = _local_review_failure(markdown, _last_human_query(state))
+    local_failure = _review_doc_bundle_local_failure(state, markdown)
     if local_failure:
         emit_a3_trace(
             logger,
@@ -550,7 +539,6 @@ async def review_doc_reviewer(state: LearningState) -> dict:
                 "reason": local_failure,
                 "markdown_chars": len(markdown),
                 "local_check_passed": False,
-                "fallback_used": False,
             },
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
@@ -561,28 +549,6 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             "review_doc_revision_notes": f"Please rewrite: {local_failure}",
         }
 
-    if (state.get("review_doc_artifact") or {}).get("fallback_used"):
-        reason = "Fallback Markdown passed local structure checks."
-        emit_a3_trace(
-            logger,
-            "review_doc_reviewer",
-            {
-                "verdict": "approve",
-                "reason": reason,
-                "markdown_chars": len(markdown),
-                "local_check_passed": True,
-                "fallback_used": True,
-                "skipped_llm_reviewer": True,
-            },
-            state=state,
-            env_flag="LOG_GENERATION_SUMMARY",
-        )
-        return {
-            "review_doc_review_verdict": "approve",
-            "review_doc_review_reason": reason,
-            "review_doc_revision_notes": "",
-        }
-
     prompt = _render_prompt(
         "review_doc_reviewer",
         {
@@ -591,14 +557,18 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             "review_doc_markdown": markdown,
         },
     )
-    model_name = get_setting("llm.review_doc.model", get_setting("review_doc.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="review_doc_reviewer", temperature=0.0):
+    model_name = _review_doc_model_name()
+    with traced_llm_call(
+        model_name=model_name, node_name="review_doc_reviewer", temperature=0.0
+    ):
         structured_result = await invoke_structured_llm(
             node_name="review_doc_reviewer",
             llm_node="review_doc",
             schema=ReviewDocReviewVerdict,
             messages=[
-                SystemMessage(content="You are a strict Markdown review-document quality reviewer. Return only JSON."),
+                SystemMessage(
+                    content="You are a strict Markdown review-document quality reviewer. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("review_doc_reviewer"),
@@ -606,9 +576,13 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             state=state,
             max_raw_chars=get_max_raw_chars("review_doc_reviewer"),
         )
+    if not structured_result.success:
+        raise StructuredOutputError(structured_result)
     result = structured_result.parsed
     if not isinstance(result, ReviewDocReviewVerdict):
-        raise TypeError("review_doc_reviewer parsed result is not ReviewDocReviewVerdict")
+        raise TypeError(
+            "review_doc_reviewer parsed result is not ReviewDocReviewVerdict"
+        )
     emit_a3_trace(
         logger,
         "review_doc_reviewer",
@@ -617,7 +591,6 @@ async def review_doc_reviewer(state: LearningState) -> dict:
             "reason": result.reason,
             "markdown_chars": len(markdown),
             "local_check_passed": True,
-            "fallback_used": False,
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
@@ -625,7 +598,9 @@ async def review_doc_reviewer(state: LearningState) -> dict:
     return {
         "review_doc_review_verdict": result.verdict,
         "review_doc_review_reason": result.reason.strip(),
-        "review_doc_revision_notes": "" if result.verdict == "approve" else f"Please rewrite: {result.reason.strip()}",
+        "review_doc_revision_notes": ""
+        if result.verdict == "approve"
+        else f"Please rewrite: {result.reason.strip()}",
     }
 
 
@@ -644,18 +619,25 @@ async def review_doc_rewrite(state: LearningState) -> dict:
 async def review_doc_output(state: LearningState) -> dict:
     markdown = state.get("review_doc_markdown", "")
     if not markdown.strip():
-        raise ValueError("review_doc markdown is empty")
-    review_verdict = state.get("review_doc_review_verdict", "")
-    review_reason = state.get("review_doc_review_reason", "")
-    prior_artifact = state.get("review_doc_artifact") or {}
+        raise ReviewDocApprovalError("review_doc markdown is empty")
+    review_verdict = str(state.get("review_doc_review_verdict") or "").strip()
+    review_reason = str(state.get("review_doc_review_reason") or "").strip()
+    if review_verdict != "approve":
+        detail = f": {review_reason}" if review_reason else ""
+        raise ReviewDocApprovalError(
+            f"review_doc output requires an approve verdict{detail}"
+        )
+    local_failure = _review_doc_bundle_local_failure(state, markdown)
+    if local_failure:
+        raise ReviewDocApprovalError(
+            f"review_doc output failed local quality check: {local_failure}"
+        )
     review_doc_markdowns = state.get("review_doc_markdowns") or []
     if review_doc_markdowns:
         review_doc_artifacts: list[dict] = []
         for doc in review_doc_markdowns:
             doc_markdown = str(doc.get("markdown") or "").strip()
-            if not doc_markdown:
-                continue
-            doc_title = str(doc.get("title") or _extract_markdown_title(doc_markdown))
+            doc_title = str(doc.get("title") or "").strip()
             artifact = create_markdown_artifact(doc_markdown, doc_title)
             review_doc_artifacts.append(
                 {
@@ -663,16 +645,23 @@ async def review_doc_output(state: LearningState) -> dict:
                     "subject": str(doc.get("subject") or ""),
                     "title": doc_title,
                     "markdown": doc_markdown,
-                    "quality_warning": review_verdict == "reject",
                     "review_reason": review_reason,
                 }
             )
 
-        first_artifact = review_doc_artifacts[0] if review_doc_artifacts else {}
+        if len(review_doc_artifacts) != len(review_doc_markdowns):
+            raise ReviewDocApprovalError(
+                "review_doc artifact count does not match document count"
+            )
+        first_artifact = review_doc_artifacts[0]
         combined_markdown = "\n\n---\n\n".join(
-            artifact["markdown"] for artifact in review_doc_artifacts if artifact.get("markdown")
+            artifact["markdown"] for artifact in review_doc_artifacts
         )
-        subjects = [artifact.get("subject", "") for artifact in review_doc_artifacts if artifact.get("subject")]
+        subjects = [
+            artifact.get("subject", "")
+            for artifact in review_doc_artifacts
+            if artifact.get("subject")
+        ]
         emit_a3_trace(
             logger,
             "review_doc_output",
@@ -682,10 +671,8 @@ async def review_doc_output(state: LearningState) -> dict:
                 "artifact_count": len(review_doc_artifacts),
                 "subjects": subjects,
                 "markdown_chars": len(combined_markdown),
-                "quality_warning": review_verdict == "reject",
                 "review_reason": review_reason,
                 "emits_ai_message": True,
-                "fallback_used": bool(prior_artifact.get("fallback_used")),
             },
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
@@ -693,7 +680,6 @@ async def review_doc_output(state: LearningState) -> dict:
         return {
             "review_doc_markdown": combined_markdown,
             "review_doc_artifact": {
-                **prior_artifact,
                 **first_artifact,
                 "multi_document": True,
                 "document_count": len(review_doc_artifacts),
@@ -713,10 +699,8 @@ async def review_doc_output(state: LearningState) -> dict:
             "document_count": 1,
             "artifact_count": 1,
             "markdown_chars": len(markdown),
-            "quality_warning": review_verdict == "reject",
             "review_reason": review_reason,
             "emits_ai_message": True,
-            "fallback_used": bool(prior_artifact.get("fallback_used")),
             "markdown_url": artifact.get("markdown_url", ""),
             "docx_url": artifact.get("docx_url", ""),
         },
@@ -724,10 +708,8 @@ async def review_doc_output(state: LearningState) -> dict:
         env_flag="LOG_GENERATION_SUMMARY",
     )
     final_artifact = {
-        **prior_artifact,
         **artifact,
         "markdown": markdown,
-        "quality_warning": review_verdict == "reject",
         "review_reason": review_reason,
     }
     return {
@@ -738,10 +720,18 @@ async def review_doc_output(state: LearningState) -> dict:
 
 
 def should_rewrite_review_doc(state: LearningState) -> str:
-    if state.get("review_doc_review_verdict") != "reject":
+    verdict = str(state.get("review_doc_review_verdict") or "").strip()
+    if verdict == "approve":
         return "output"
-    max_rounds = int(get_setting("review_doc.max_generation_rounds", 3) or 3)
+    if verdict != "reject":
+        raise ReviewDocApprovalError(
+            "review_doc routing requires an explicit approve or reject verdict"
+        )
+    max_rounds = _review_doc_max_generation_rounds()
     current_round = int(state.get("review_doc_round", 0) or 0)
     if current_round < max_rounds:
         return "rewrite"
-    raise RuntimeError(f"review_doc rejected after max rounds: {state.get('review_doc_review_reason', '')}")
+    raise ReviewDocApprovalError(
+        "review_doc rejected after max rounds: "
+        f"{state.get('review_doc_review_reason', '')}"
+    )
