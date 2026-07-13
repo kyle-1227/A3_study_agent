@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Literal
 
@@ -24,6 +26,7 @@ from src.tracing import traced_llm_call, traced_node
 logger = logging.getLogger(__name__)
 
 REQUIRED_LEVELS = {"basic", "intermediate", "application", "self_check"}
+EXERCISE_QUESTION_ID_PREFIX = "question:v1"
 
 
 class ExerciseItem(BaseModel):
@@ -87,7 +90,10 @@ def _model_to_dict(model: BaseModel) -> dict:
 
 def _format_keypoints(state: LearningState) -> str:
     keypoints = state.get("keypoints", [])
-    return ", ".join(str(item) for item in keypoints if str(item).strip()) or "No explicit keypoints."
+    return (
+        ", ".join(str(item) for item in keypoints if str(item).strip())
+        or "No explicit keypoints."
+    )
 
 
 def _format_context(context: list[dict]) -> str:
@@ -95,8 +101,15 @@ def _format_context(context: list[dict]) -> str:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
     for idx, item in enumerate(context[:8], 1):
-        source = item.get("source") or item.get("title") or item.get("url") or "learning material"
-        content = str(item.get("content") or item.get("snippet") or item.get("text") or "")[:800]
+        source = (
+            item.get("source")
+            or item.get("title")
+            or item.get("url")
+            or "learning material"
+        )
+        content = str(
+            item.get("content") or item.get("snippet") or item.get("text") or ""
+        )[:800]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -110,10 +123,7 @@ def _render_prompt(prompt_name: str, replacements: dict[str, str]) -> str:
 
 
 def _is_web_evidence(item: dict) -> bool:
-    return (
-        item.get("source_type") == "web"
-        or item.get("type") == "web_evidence"
-    )
+    return item.get("source_type") == "web" or item.get("type") == "web_evidence"
 
 
 def _web_evidence_items(context: list[dict]) -> list[dict]:
@@ -125,17 +135,54 @@ def _normalize_items(items: list[dict]) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
+        level = str(item.get("level") or "").strip()
+        question = str(item.get("question") or "").strip()
+        tags = [str(tag).strip() for tag in item.get("tags") or [] if str(tag).strip()]
         normalized.append(
             {
-                "level": str(item.get("level") or "").strip(),
-                "question": str(item.get("question") or "").strip(),
+                "question_id": stable_exercise_question_id(
+                    level=level,
+                    question=question,
+                    tags=tags,
+                ),
+                "level": level,
+                "question": question,
                 "answer": str(item.get("answer") or "").strip(),
                 "explanation": str(item.get("explanation") or "").strip(),
                 "pitfall": str(item.get("pitfall") or "").strip(),
-                "tags": list(item.get("tags") or []),
+                "tags": tags,
             }
         )
     return normalized
+
+
+def stable_exercise_question_id(
+    *,
+    level: str,
+    question: str,
+    tags: list[str],
+) -> str:
+    """Build a stable content identity for one validated exercise question."""
+
+    normalized_level = str(level or "").strip()
+    normalized_question = str(question or "").strip()
+    normalized_tags = sorted({str(tag).strip() for tag in tags if str(tag).strip()})
+    if not normalized_level or not normalized_question or not normalized_tags:
+        raise ValueError(
+            "exercise question identity requires level, question, and tags"
+        )
+    canonical = json.dumps(
+        {
+            "level": normalized_level,
+            "question": normalized_question,
+            "tags": normalized_tags,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{EXERCISE_QUESTION_ID_PREFIX}:{hashlib.sha256(canonical).hexdigest()}"
 
 
 def _local_review_failure(items: list[dict], _query: str) -> str:
@@ -148,7 +195,13 @@ def _local_review_failure(items: list[dict], _query: str) -> str:
     return ""
 
 
-def _render_exercise_markdown(title: str, items: list[dict], *, review_reason: str = "", quality_warning: bool = False) -> str:
+def _render_exercise_markdown(
+    title: str,
+    items: list[dict],
+    *,
+    review_reason: str = "",
+    quality_warning: bool = False,
+) -> str:
     lines = [f"## {title}", ""]
     if quality_warning:
         lines.extend([f"> Quality warning: {review_reason}", ""])
@@ -188,13 +241,19 @@ async def exercise_planner(state: LearningState) -> dict:
     )
     prompt = _render_prompt(
         "exercise_planner",
-        {"question": query, "keypoints": _format_keypoints(state), "context": _format_context(context)},
+        {
+            "question": query,
+            "keypoints": _format_keypoints(state),
+            "context": _format_context(context),
+        },
     )
     outline = await invoke_plain_llm_fail_fast(
         node_name="exercise_planner",
         llm_node="exercise",
         messages=[
-            SystemMessage(content="You are a university course exercise planner. Return a concrete exercise outline only."),
+            SystemMessage(
+                content="You are a university course exercise planner. Return a concrete exercise outline only."
+            ),
             HumanMessage(content=prompt),
         ],
         state=state,
@@ -230,13 +289,19 @@ async def exercise_agent(state: LearningState) -> dict:
         },
     )
     model_name = get_setting("llm.exercise.model", get_setting("exercise.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="exercise_agent", temperature=get_setting("exercise.temperature", 0.2)):
+    with traced_llm_call(
+        model_name=model_name,
+        node_name="exercise_agent",
+        temperature=get_setting("exercise.temperature", 0.2),
+    ):
         structured_result = await invoke_structured_llm(
             node_name="exercise_agent",
             llm_node="exercise",
             schema=ExerciseArtifact,
             messages=[
-                SystemMessage(content="You are a leveled exercise generator. Return only JSON for ExerciseArtifact."),
+                SystemMessage(
+                    content="You are a leveled exercise generator. Return only JSON for ExerciseArtifact."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("exercise_agent"),
@@ -249,7 +314,9 @@ async def exercise_agent(state: LearningState) -> dict:
     if not isinstance(result, ExerciseArtifact):
         raise TypeError("exercise_agent parsed result is not ExerciseArtifact")
     return {
-        "exercise_items": _normalize_items([_model_to_dict(item) for item in result.items]),
+        "exercise_items": _normalize_items(
+            [_model_to_dict(item) for item in result.items]
+        ),
         "exercise_artifact": {"title": result.title.strip()},
         "exercise_round": round_no,
         "exercise_review_verdict": "",
@@ -276,13 +343,17 @@ async def exercise_reviewer(state: LearningState) -> dict:
         },
     )
     model_name = get_setting("llm.exercise.model", get_setting("exercise.model", ""))
-    with traced_llm_call(model_name=model_name, node_name="exercise_reviewer", temperature=0.0):
+    with traced_llm_call(
+        model_name=model_name, node_name="exercise_reviewer", temperature=0.0
+    ):
         structured_result = await invoke_structured_llm(
             node_name="exercise_reviewer",
             llm_node="exercise",
             schema=ExerciseReviewVerdict,
             messages=[
-                SystemMessage(content="You are a course exercise quality reviewer. Return only JSON."),
+                SystemMessage(
+                    content="You are a course exercise quality reviewer. Return only JSON."
+                ),
                 HumanMessage(content=prompt),
             ],
             output_mode=get_llm_output_mode("exercise_reviewer"),
@@ -297,7 +368,9 @@ async def exercise_reviewer(state: LearningState) -> dict:
     return {
         "exercise_review_verdict": result.verdict,
         "exercise_review_reason": result.reason.strip(),
-        "exercise_revision_notes": "" if result.verdict == "approve" else f"Please rewrite: {result.reason.strip()}",
+        "exercise_revision_notes": ""
+        if result.verdict == "approve"
+        else f"Please rewrite: {result.reason.strip()}",
     }
 
 
@@ -317,7 +390,9 @@ async def exercise_output(state: LearningState) -> dict:
     items = state.get("exercise_items") or []
     if not items:
         raise ValueError("exercise items are empty")
-    title = str((state.get("exercise_artifact") or {}).get("title") or "Leveled exercises")
+    title = str(
+        (state.get("exercise_artifact") or {}).get("title") or "Leveled exercises"
+    )
     content = _render_exercise_markdown(
         title,
         items,
@@ -367,4 +442,6 @@ def should_rewrite_exercise(state: LearningState) -> str:
     current_round = int(state.get("exercise_round", 0) or 0)
     if current_round < max_rounds:
         return "rewrite"
-    raise RuntimeError(f"exercise rejected after max rounds: {state.get('exercise_review_reason', '')}")
+    raise RuntimeError(
+        f"exercise rejected after max rounds: {state.get('exercise_review_reason', '')}"
+    )

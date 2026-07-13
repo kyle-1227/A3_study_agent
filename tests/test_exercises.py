@@ -15,6 +15,7 @@ from src.graph.exercises import (
     exercise_output,
     exercise_reviewer,
     should_rewrite_exercise,
+    stable_exercise_question_id,
 )
 
 
@@ -44,7 +45,10 @@ def _artifact() -> ExerciseArtifact:
 @pytest.mark.anyio
 async def test_exercise_agent_generates_structured_items():
     artifact = _artifact()
-    with patch("src.graph.exercises.invoke_structured_llm", return_value=SimpleNamespace(parsed=artifact)):
+    with patch(
+        "src.graph.exercises.invoke_structured_llm",
+        return_value=SimpleNamespace(parsed=artifact),
+    ):
         result = await exercise_agent(
             {
                 "messages": [HumanMessage(content="Create machine learning exercises")],
@@ -62,6 +66,32 @@ async def test_exercise_agent_generates_structured_items():
         "application",
         "self_check",
     }
+    assert all(
+        item["question_id"].startswith("question:v1:")
+        for item in result["exercise_items"]
+    )
+    assert len({item["question_id"] for item in result["exercise_items"]}) == 4
+
+
+def test_stable_exercise_question_id_is_order_independent_for_tags():
+    first = stable_exercise_question_id(
+        level="basic",
+        question="What is overfitting?",
+        tags=["machine learning", "generalization"],
+    )
+    second = stable_exercise_question_id(
+        level="basic",
+        question="What is overfitting?",
+        tags=["generalization", "machine learning"],
+    )
+
+    assert first == second
+    assert first.startswith("question:v1:")
+
+
+def test_stable_exercise_question_id_rejects_incomplete_identity():
+    with pytest.raises(ValueError, match="requires level, question, and tags"):
+        stable_exercise_question_id(level="basic", question="", tags=["ml"])
 
 
 @pytest.mark.anyio
@@ -131,7 +161,14 @@ async def test_exercise_output_renders_markdown():
     content = result["messages"][0].content
     assert result["exercise_artifact"]["title"] == "Machine Learning Exercises"
     assert isinstance(result["messages"][0], AIMessage)
-    for text in ["foundation", "intermediate", "application", "self_check", "answer", "explanation"]:
+    for text in [
+        "foundation",
+        "intermediate",
+        "application",
+        "self_check",
+        "answer",
+        "explanation",
+    ]:
         assert text in content
 
 
@@ -142,7 +179,19 @@ async def test_exercise_output_empty_artifact_raises():
 
 
 def test_should_rewrite_exercise_caps_retry_rounds():
-    assert should_rewrite_exercise({"exercise_review_verdict": "approve", "exercise_round": 1}) == "output"
-    assert should_rewrite_exercise({"exercise_review_verdict": "reject", "exercise_round": 1}) == "rewrite"
+    assert (
+        should_rewrite_exercise(
+            {"exercise_review_verdict": "approve", "exercise_round": 1}
+        )
+        == "output"
+    )
+    assert (
+        should_rewrite_exercise(
+            {"exercise_review_verdict": "reject", "exercise_round": 1}
+        )
+        == "rewrite"
+    )
     with pytest.raises(RuntimeError, match="max rounds"):
-        should_rewrite_exercise({"exercise_review_verdict": "reject", "exercise_round": 3})
+        should_rewrite_exercise(
+            {"exercise_review_verdict": "reject", "exercise_round": 3}
+        )
