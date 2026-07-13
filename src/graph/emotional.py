@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 
 from src.config import get_setting, load_prompt
 from src.graph.llm import invoke_plain_llm_fail_fast
+from src.graph.qa import build_general_qa_node_output
 from src.graph.state import LearningState
 from src.tracing import traced_llm_call, traced_node
 
@@ -32,4 +33,4 @@ async def emotional_response(state: LearningState) -> dict:
             temperature=temperature,
         )
 
-    return {"messages": [AIMessage(content=response)]}
+    return build_general_qa_node_output(answer=response, state=state)

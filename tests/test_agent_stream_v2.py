@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.streaming import (
+    AgentStreamEventDraftV2,
     AgentStreamEventV2,
     StreamContractError,
     StreamEventSequencer,
@@ -43,6 +44,27 @@ def test_stream_events_are_ordered_and_done_requires_terminal() -> None:
 
     with pytest.raises(StreamContractError, match="after stream_done"):
         sequencer.emit("activity_update")
+
+
+def test_native_draft_rejects_session_owned_and_malformed_block_events() -> None:
+    with pytest.raises(ValidationError):
+        AgentStreamEventDraftV2.model_validate({"type": "stream_start", "data": {}})
+    with pytest.raises(ValidationError):
+        AgentStreamEventDraftV2.model_validate(
+            {"type": "content_block_delta", "data": {"delta": "missing identity"}}
+        )
+
+    draft = AgentStreamEventDraftV2(
+        type="content_block_delta",
+        data={
+            "block_id": "answer",
+            "block_index": 0,
+            "block_type": "markdown",
+            "provisional": True,
+            "delta": "ok",
+        },
+    )
+    assert draft.type == "content_block_delta"
 
 
 def test_stream_rejects_done_without_terminal_and_second_terminal() -> None:

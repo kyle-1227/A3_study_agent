@@ -4,7 +4,7 @@
       "Bash(npx next:*)",
       "Bash(npx tsc:*)",
       "Bash(xargs ls:*)",
-      "PowerShell(python -c \"import sys; sys.path.insert\\(0, '.'\\); from app import generate_sse; print\\('app OK'\\)\" 2>&1)",
+      "PowerShell(python -c \"import sys; sys.path.insert\\(0, '.'\\); from app import generate_stream_drafts; print\\('app OK'\\)\" 2>&1)",
       "PowerShell(python -m pytest tests/ -x -v --tb=short 2>&1)"
     ]
   }

@@ -52,7 +52,6 @@ from src.context_engineering.session_memory import (
     record_context_injection,
 )
 from src.context_engineering.model_view import build_model_view_projection
-from src.context_engineering.thread_window import build_thread_context_window_v2
 from src.context_engineering.thread_window_v3 import build_thread_context_window_v3
 from src.context_engineering.workspace import workspace_status_payload
 
@@ -160,7 +159,12 @@ from src.streaming.provisional import (
     reset_provisional_event_sink,
     set_provisional_event_sink,
 )
-from src.streaming.contracts import StreamContractError
+from src.streaming.contracts import (
+    AgentStreamDraftType,
+    AgentStreamEventDraftV2,
+    ContentBlockPayloadV1,
+    StreamContractError,
+)
 from src.streaming.journal import StreamJournalExpiredError
 from src.streaming.session import (
     StreamSessionConflictError,
@@ -201,6 +205,78 @@ WORKSPACE_TRACE_STAGES = {
     "resource_artifacts.indexed",
     "workspace_context.collected",
 }
+
+
+def _stream_draft(
+    event_type: AgentStreamDraftType,
+    data: dict | None = None,
+) -> AgentStreamEventDraftV2:
+    return AgentStreamEventDraftV2(type=event_type, data=dict(data or {}))
+
+
+def _activity_update_draft(
+    kind: str,
+    payload: dict | None = None,
+) -> AgentStreamEventDraftV2:
+    return _stream_draft(
+        "activity_update",
+        {"kind": kind, "payload": dict(payload or {})},
+    )
+
+
+def _tool_progress_draft(
+    kind: str,
+    payload: dict | None = None,
+) -> AgentStreamEventDraftV2:
+    return _stream_draft(
+        "tool_progress",
+        {"kind": kind, "payload": dict(payload or {})},
+    )
+
+
+def _artifact_progress_draft(
+    kind: str,
+    payload: dict | None = None,
+) -> AgentStreamEventDraftV2:
+    return _stream_draft(
+        "artifact_progress",
+        {"kind": kind, "payload": dict(payload or {})},
+    )
+
+
+def _trace_progress_draft(payload: dict) -> AgentStreamEventDraftV2:
+    """Convert one sanitized trace projection into its native public category."""
+
+    kind = str(payload.get("type") or "trace_update")
+    data = {key: value for key, value in payload.items() if key != "type"}
+    if kind in {"provider_retry", "resource_subnode"}:
+        return _tool_progress_draft(kind, data)
+    if kind in {"resource_generation", "artifact"}:
+        return _artifact_progress_draft(kind, data)
+    return _activity_update_draft(kind, data)
+
+
+def _content_block_draft(
+    event_type: AgentStreamDraftType,
+    *,
+    block_id: str,
+    block_index: int,
+    delta: str = "",
+    reset: bool = False,
+    reason: str = "",
+) -> AgentStreamEventDraftV2:
+    payload = ContentBlockPayloadV1(
+        block_id=block_id,
+        block_index=block_index,
+        block_type="markdown",
+        provisional=True,
+        delta=delta,
+        reset=reset,
+        reason=reason,
+    )
+    return _stream_draft(event_type, payload.model_dump(mode="json"))
+
+
 CONTEXT_TOP_ITEM_FIELDS = {
     "id",
     "source_type",
@@ -635,7 +711,7 @@ app.add_middleware(
 
 ALLOWED_NODES = {"generate_answer", "emotional_response"}
 
-# Non-streaming nodes whose final AIMessage content is emitted as a "text" SSE event.
+# Non-streaming nodes whose final AIMessage becomes one provisional content block.
 TEXT_EMIT_NODES = {
     "handle_unknown",
     "evidence_summary_output",
@@ -1012,7 +1088,6 @@ def _thread_status_from_snapshot(
     )
     missing_fields = _missing_run_control_fields(values)
     request_context_window, thread_context_window = _context_window_status(values)
-    thread_context_window_v2 = build_thread_context_window_v2(values)
     thread_context_window_v3 = _thread_context_window_v3(
         values,
         thread_id=thread_id,
@@ -1058,7 +1133,6 @@ def _thread_status_from_snapshot(
             else {},
             request_context_window=request_context_window,
             thread_context_window=thread_context_window,
-            thread_context_window_v2=thread_context_window_v2,
             thread_context_window_v3=thread_context_window_v3,
             profile_completion_request=profile_completion_request,
             missing_run_control_fields=missing_fields,
@@ -1118,7 +1192,6 @@ def _thread_status_from_snapshot(
         else {},
         request_context_window=request_context_window,
         thread_context_window=thread_context_window,
-        thread_context_window_v2=thread_context_window_v2,
         thread_context_window_v3=thread_context_window_v3,
         profile_completion_request=profile_completion_request,
         missing_run_control_fields=[],
@@ -1214,9 +1287,6 @@ def _thread_status_from_active_run(
             "workspace_artifact_count": 0,
             "workspace_updated_at": "",
         },
-        thread_context_window_v2=active_run.get("thread_context_window_v2")
-        if isinstance(active_run.get("thread_context_window_v2"), dict)
-        else build_thread_context_window_v2(active_run),
         thread_context_window_v3=thread_context_window_v3,
         profile_completion_request=profile_completion_request
         if isinstance(profile_completion_request, dict)
@@ -2143,7 +2213,7 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
     return {"ok": True, "thread_id": thread_id, "cleared_fields": cleared_fields}
 
 
-async def _stream_graph_events(
+async def _stream_graph_event_drafts(
     graph,
     input_data,
     config: dict,
@@ -2151,12 +2221,8 @@ async def _stream_graph_events(
     *,
     request_id: str,
     preserve_context_history: bool = False,
-) -> AsyncGenerator[str, None]:
-    """Shared SSE event streaming logic for /stream and /resume.
-
-    Processes astream_events and yields SSE payloads for node lifecycle,
-    token streaming, usage, and interrupt events.
-    """
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
+    """Project LangGraph execution directly into native agent_stream_v2 drafts."""
     node_start_times: dict[str, float] = {}
     active_nodes: list[str] = []
     trace_events: list[dict] = []
@@ -2180,6 +2246,9 @@ async def _stream_graph_events(
     activity_enabled = getattr(graph, "_a3_activity_events_enabled", False) is True
     activity_timeline: list[dict] = []
     activity_sequence = 0
+    provisional_block_open = False
+    node_content_blocks: dict[str, tuple[str, int]] = {}
+    next_content_block_index = 1
     if preserve_context_history:
         try:
             existing_snapshot = await graph.aget_state(config)
@@ -2224,7 +2293,7 @@ async def _stream_graph_events(
         activity: ActivityEvent,
         *,
         persist_checkpoint: bool = False,
-    ) -> str:
+    ) -> AgentStreamEventDraftV2:
         nonlocal activity_timeline, activity_sequence
         activity_sequence = max(activity_sequence, activity.sequence)
         activity_timeline = merge_activity_timeline(
@@ -2261,15 +2330,16 @@ async def _stream_graph_events(
                 },
                 persist_checkpoint=True,
             )
-        payload = {
-            "type": "activity_event",
-            **activity.model_dump(mode="json"),
-        }
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        return _activity_update_draft(
+            "activity_event",
+            activity.model_dump(mode="json"),
+        )
 
-    async def _activity_from_trace(event: dict) -> str:
+    async def _activity_from_trace(
+        event: dict,
+    ) -> AgentStreamEventDraftV2 | None:
         if not activity_enabled:
-            return ""
+            return None
         try:
             activity = activity_from_trace_event(
                 event,
@@ -2291,8 +2361,8 @@ async def _stream_graph_events(
                 state={"request_id": request_id, "thread_id": thread_id},
                 env_flag="LOG_A3_TRACE",
             )
-            return ""
-        return await _record_activity(activity) if activity is not None else ""
+            return None
+        return await _record_activity(activity) if activity is not None else None
 
     async def _finalize_stream_activity(
         *,
@@ -2301,9 +2371,9 @@ async def _stream_graph_events(
         summary: str,
         node: str = "",
         error_type: str = "",
-    ) -> str:
+    ) -> AgentStreamEventDraftV2 | None:
         if not activity_enabled:
-            return ""
+            return None
         activity = build_activity_event(
             thread_id=thread_id,
             request_id=request_id,
@@ -2322,7 +2392,7 @@ async def _stream_graph_events(
         interrupt_type: str,
         *,
         node: str = "",
-    ) -> list[str]:
+    ) -> list[AgentStreamEventDraftV2]:
         if not activity_enabled:
             return []
         stream_event = await _finalize_stream_activity(
@@ -2345,7 +2415,7 @@ async def _stream_graph_events(
                 safe_details={"interrupt_type": interrupt_type},
             )
         )
-        return [stream_event, waiting_event]
+        return [event for event in (stream_event, waiting_event) if event is not None]
 
     if activity_enabled:
         stream_started = build_activity_event(
@@ -2360,10 +2430,10 @@ async def _stream_graph_events(
         )
         yield await _record_activity(stream_started)
 
-    async def _drain_trace_events() -> list[str]:
+    async def _drain_trace_events() -> list[AgentStreamEventDraftV2]:
         nonlocal llm_input_manifests, manifest_state_context
         nonlocal worker_interrupted_seen, recovered_profile_completion_request
-        drained: list[str] = []
+        drained: list[AgentStreamEventDraftV2] = []
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
@@ -2402,15 +2472,10 @@ async def _stream_graph_events(
                     state_context=manifest_state_context,
                 )
                 drained.append(
-                    "data: "
-                    + json.dumps(
-                        {
-                            "type": "thread_context_window_v3",
-                            "thread_context_window_v3": window_v3,
-                        },
-                        ensure_ascii=False,
+                    _activity_update_draft(
+                        "thread_context_window_v3",
+                        {"thread_context_window_v3": window_v3},
                     )
-                    + "\n\n"
                 )
                 continue
             if stage in WORKSPACE_TRACE_STAGES:
@@ -2436,7 +2501,7 @@ async def _stream_graph_events(
                         max_chars=120,
                     ),
                 )
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage in PROVIDER_RETRY_TRACE_STAGES:
                 payload = {
@@ -2453,7 +2518,7 @@ async def _stream_graph_events(
                     "error_message": event.get("error_message", ""),
                     "status_code": event.get("status_code"),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage in {"resource_subnode.start", "resource_subnode.end"}:
                 elapsed_ms = event.get("elapsed_ms", 0)
@@ -2481,32 +2546,32 @@ async def _stream_graph_events(
                     ),
                 }
                 last_resource_subnodes.append(payload)
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_policy_resolved":
                 payload = _context_policy_resolved_payload(event)
                 node = str(payload.get("node") or "")
                 if node:
                     last_context_policy_by_node[node] = payload
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_provider_supply_plan":
                 payload = _context_provider_supply_plan_payload(event)
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_provider_supply":
                 payload = _context_provider_supply_payload(event)
                 node = str(payload.get("node") or "")
                 if node:
                     last_provider_supply_by_node[node] = payload
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_source_filter":
                 payload = _context_source_filter_payload(event)
                 node = str(payload.get("node") or "")
                 if node:
                     last_drop_reasons_by_node[node] = payload.get("drop_reasons", {})
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage in {
                 "context_window_state_updated",
@@ -2536,7 +2601,7 @@ async def _stream_graph_events(
                     "applied_node_count": event.get("applied_node_count", 0),
                     "resource_subnode_count": event.get("resource_subnode_count", 0),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "llm_input_manifest.built":
                 (
@@ -2570,25 +2635,12 @@ async def _stream_graph_events(
                         "background_context_window": background_window,
                     }
                 )
-                thread_window_v2 = build_thread_context_window_v2(
-                    manifest_state_context,
-                    target_node=str(
-                        payload.get("node_name") or payload.get("llm_node") or ""
-                    ),
-                )
-                update_active_run(
-                    thread_id,
-                    {"thread_context_window_v2": thread_window_v2},
-                )
                 sse_payload = {
                     "type": "llm_input_manifest",
                     **payload,
                     "background_context_window": background_window,
-                    "thread_context_window_v2": thread_window_v2,
                 }
-                drained.append(
-                    f"data: {json.dumps(sse_payload, ensure_ascii=False)}\n\n"
-                )
+                drained.append(_trace_progress_draft(sse_payload))
                 continue
             if stage == "llm_input_manifest.failed":
                 payload = {
@@ -2610,7 +2662,7 @@ async def _stream_graph_events(
                         max_chars=120,
                     ),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_usage_report":
                 try:
@@ -2652,9 +2704,7 @@ async def _stream_graph_events(
                             max_chars=160,
                         ),
                     }
-                    drained.append(
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
+                    drained.append(_trace_progress_draft(payload))
                     continue
                 report_payload = report.model_dump(mode="json")
                 context_usage_reports[:] = merge_context_usage_report_history(
@@ -2719,24 +2769,11 @@ async def _stream_graph_events(
                         "background_context_window": background_window,
                     }
                 )
-                thread_window_v2 = build_thread_context_window_v2(
-                    manifest_state_context,
-                    target_node=str(
-                        report_payload.get("node_name")
-                        or report_payload.get("llm_node")
-                        or ""
-                    ),
-                )
-                update_active_run(
-                    thread_id,
-                    {"thread_context_window_v2": thread_window_v2},
-                )
                 payload = {
                     "type": "context_usage_report",
                     **report_payload,
-                    "thread_context_window_v2": thread_window_v2,
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_usage_report_error":
                 payload = {
@@ -2771,7 +2808,7 @@ async def _stream_graph_events(
                         max_chars=120,
                     ),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_usage":
                 payload = {
@@ -2850,7 +2887,7 @@ async def _stream_graph_events(
                     state={"thread_id": thread_id, "session_id": thread_id},
                     persist_checkpoint=False,
                 )
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_usage_error":
                 payload = {
@@ -2864,7 +2901,7 @@ async def _stream_graph_events(
                         "warning", "context usage telemetry unavailable"
                     ),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_items_collected":
                 payload = {
@@ -2891,7 +2928,7 @@ async def _stream_graph_events(
                     ),
                     "top_items": _safe_context_top_items(event.get("top_items")),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_provider_error":
                 payload = {
@@ -2906,7 +2943,7 @@ async def _stream_graph_events(
                     "error_type": event.get("error_type", ""),
                     "error_reason": event.get("error_reason", ""),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_packing_plan":
                 payload = {
@@ -2924,7 +2961,7 @@ async def _stream_graph_events(
                     ),
                     "strategy": event.get("strategy", ""),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_packed":
                 payload = {
@@ -2952,7 +2989,7 @@ async def _stream_graph_events(
                     if isinstance(event.get("warnings"), list)
                     else [],
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_packing_error":
                 payload = {
@@ -2967,7 +3004,7 @@ async def _stream_graph_events(
                     "budget_tokens": event.get("budget_tokens"),
                     "error_type": event.get("error_type", ""),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_apply_plan":
                 payload = {
@@ -2993,7 +3030,7 @@ async def _stream_graph_events(
                     "injection_role": event.get("injection_role", ""),
                     "injection_position": event.get("injection_position", ""),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_apply_selection":
                 payload = {
@@ -3048,7 +3085,7 @@ async def _stream_graph_events(
                 if node:
                     last_context_selection_by_node[node] = payload
                     last_drop_reasons_by_node[node] = payload.get("drop_reasons", {})
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_applied":
                 payload = {
@@ -3097,7 +3134,7 @@ async def _stream_graph_events(
                 node = str(payload.get("node") or "")
                 if node:
                     last_context_applied_by_node[node] = payload
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_apply_policy_resolved_summary":
                 payload = {
@@ -3138,7 +3175,7 @@ async def _stream_graph_events(
                         event.get("importance_scoring_shadow_mode", False)
                     ),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_apply_error":
                 payload = {
@@ -3184,7 +3221,7 @@ async def _stream_graph_events(
                     ),
                     "error_type": event.get("error_type", ""),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 context_error_payload = {
                     "type": "context_error",
                     "stage": "context_apply_error",
@@ -3205,9 +3242,7 @@ async def _stream_graph_events(
                     "source_counts_after": payload["source_counts_after"],
                     "source_counts_dropped": payload["source_counts_dropped"],
                 }
-                drained.append(
-                    f"data: {json.dumps(context_error_payload, ensure_ascii=False)}\n\n"
-                )
+                drained.append(_trace_progress_draft(context_error_payload))
                 failed_update_ok = await _try_update_run_state(
                     graph,
                     config,
@@ -3240,9 +3275,7 @@ async def _stream_graph_events(
                     "llm_node": payload["llm_node"],
                     "request_event_count": len(request_context_events),
                 }
-                drained.append(
-                    f"data: {json.dumps(window_payload, ensure_ascii=False)}\n\n"
-                )
+                drained.append(_trace_progress_draft(window_payload))
                 continue
             if stage == "plain_llm_output" or stage == "structured_llm_output":
                 await _update_context_window_state_from_trace(
@@ -3265,7 +3298,7 @@ async def _stream_graph_events(
                     "llm_node": event.get("llm_node", ""),
                     "request_event_count": len(request_context_events),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
             if stage == "context_importance_scored":
                 payload = {
@@ -3299,15 +3332,92 @@ async def _stream_graph_events(
                     ),
                     "warnings": _safe_warning_list(event.get("warnings")),
                 }
-                drained.append(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+                drained.append(_trace_progress_draft(payload))
                 continue
         return drained
 
-    def _drain_provisional_events() -> list[str]:
-        drained: list[str] = []
+    def _drain_provisional_events() -> list[AgentStreamEventDraftV2]:
+        nonlocal provisional_block_open
+        drained: list[AgentStreamEventDraftV2] = []
+        block_id = f"{request_id}:qa-answer"
         while provisional_events:
             event = provisional_events.pop(0)
-            drained.append(f"data: {json.dumps(event, ensure_ascii=False)}\n\n")
+            event_type = str(event.get("type") or "")
+            if event_type == "qa_provisional_start":
+                if not provisional_block_open:
+                    provisional_block_open = True
+                    drained.append(
+                        _content_block_draft(
+                            "content_block_start",
+                            block_id=block_id,
+                            block_index=0,
+                        )
+                    )
+                continue
+            if event_type == "qa_provisional_delta":
+                if not provisional_block_open:
+                    provisional_block_open = True
+                    drained.append(
+                        _content_block_draft(
+                            "content_block_start",
+                            block_id=block_id,
+                            block_index=0,
+                        )
+                    )
+                drained.append(
+                    _content_block_draft(
+                        "content_block_delta",
+                        block_id=block_id,
+                        block_index=0,
+                        delta=str(event.get("delta") or ""),
+                    )
+                )
+                continue
+            if event_type in {"qa_provisional_stop", "qa_provisional_reset"}:
+                if provisional_block_open:
+                    provisional_block_open = False
+                    drained.append(
+                        _content_block_draft(
+                            "content_block_stop",
+                            block_id=block_id,
+                            block_index=0,
+                            reset=event_type == "qa_provisional_reset",
+                            reason=str(event.get("reason") or ""),
+                        )
+                    )
+                continue
+            raise StreamContractError("unknown provisional stream event")
+        return drained
+
+    def _close_open_content_blocks(
+        *,
+        reset: bool,
+        reason: str,
+    ) -> list[AgentStreamEventDraftV2]:
+        nonlocal provisional_block_open
+        drained: list[AgentStreamEventDraftV2] = []
+        if provisional_block_open:
+            provisional_block_open = False
+            drained.append(
+                _content_block_draft(
+                    "content_block_stop",
+                    block_id=f"{request_id}:qa-answer",
+                    block_index=0,
+                    reset=reset,
+                    reason=reason,
+                )
+            )
+        for node_name, (block_id, block_index) in list(node_content_blocks.items()):
+            node_content_blocks.pop(node_name, None)
+            drained.append(
+                _content_block_draft(
+                    "content_block_stop",
+                    block_id=block_id,
+                    block_index=block_index,
+                    reset=reset,
+                    reason=reason,
+                )
+            )
         return drained
 
     try:
@@ -3327,7 +3437,7 @@ async def _stream_graph_events(
                 # Only emit for top-level graph nodes (name matches metadata),
                 # not for internal sub-chains (RunnableSequence, etc.).
                 if node_name and node_name == meta_node and node_name in GRAPH_NODES:
-                    activity_sse = ""
+                    activity_draft = None
                     if event_type == "on_chain_start":
                         node_start_times[node_name] = time.monotonic()
                         if node_name not in active_nodes:
@@ -3344,16 +3454,12 @@ async def _stream_graph_events(
                             state={"thread_id": thread_id, "session_id": thread_id},
                             persist_checkpoint=False,
                         )
-                        payload = json.dumps(
-                            {
-                                "type": "node_event",
-                                "status": "start",
-                                "node": node_name,
-                            },
-                            ensure_ascii=False,
-                        )
+                        payload = {
+                            "status": "start",
+                            "node": node_name,
+                        }
                         if activity_enabled:
-                            activity_sse = await _record_activity(
+                            activity_draft = await _record_activity(
                                 build_node_activity_event(
                                     thread_id=thread_id,
                                     request_id=request_id,
@@ -3382,18 +3488,14 @@ async def _stream_graph_events(
                         ):
                             terminal_resource_output = output
 
-                        payload = json.dumps(
-                            {
-                                "type": "node_event",
-                                "status": "end",
-                                "node": node_name,
-                                "duration_ms": duration_ms,
-                                "error": error,
-                            },
-                            ensure_ascii=False,
-                        )
+                        payload = {
+                            "status": "end",
+                            "node": node_name,
+                            "duration_ms": duration_ms,
+                            "error": error,
+                        }
                         if activity_enabled:
-                            activity_sse = await _record_activity(
+                            activity_draft = await _record_activity(
                                 build_node_activity_event(
                                     thread_id=thread_id,
                                     request_id=request_id,
@@ -3415,40 +3517,78 @@ async def _stream_graph_events(
                             state={"thread_id": thread_id, "session_id": thread_id},
                             persist_checkpoint=False,
                         )
-                    if activity_sse:
-                        yield activity_sse
-                    yield f"data: {payload}\n\n"
+                    if activity_draft:
+                        yield activity_draft
+                    yield _activity_update_draft("node_event", payload)
 
-                    # Emit "text" for non-streaming nodes (AC-02)
+                    if (
+                        event_type == "on_chain_end"
+                        and node_name in node_content_blocks
+                    ):
+                        block_id, block_index = node_content_blocks.pop(node_name)
+                        yield _content_block_draft(
+                            "content_block_stop",
+                            block_id=block_id,
+                            block_index=block_index,
+                        )
+
+                    # Emit provisional content blocks for non-streaming answer nodes.
                     if event_type == "on_chain_end" and node_name in TEXT_EMIT_NODES:
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict):
                             for msg in output.get("messages", []):
                                 if hasattr(msg, "content") and msg.content:
-                                    text_payload = json.dumps(
-                                        {
-                                            "type": "text",
-                                            "content": msg.content,
-                                            "node": node_name,
-                                        },
-                                        ensure_ascii=False,
+                                    block_index = next_content_block_index
+                                    next_content_block_index += 1
+                                    block_id = (
+                                        f"{request_id}:assistant:{node_name}:"
+                                        f"{block_index}"
                                     )
-                                    yield f"data: {text_payload}\n\n"
+                                    yield _content_block_draft(
+                                        "content_block_start",
+                                        block_id=block_id,
+                                        block_index=block_index,
+                                    )
+                                    yield _content_block_draft(
+                                        "content_block_delta",
+                                        block_id=block_id,
+                                        block_index=block_index,
+                                        delta=str(msg.content),
+                                    )
+                                    yield _content_block_draft(
+                                        "content_block_stop",
+                                        block_id=block_id,
+                                        block_index=block_index,
+                                    )
 
                     for trace_payload in await _drain_trace_events():
                         yield trace_payload
 
-            # Token streaming
+            # Provider token streaming becomes provisional content blocks.
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
                 if node_name in ALLOWED_NODES:
                     chunk = event["data"]["chunk"]
                     if chunk.content:
-                        payload = json.dumps(
-                            {"type": "token", "content": chunk.content},
-                            ensure_ascii=False,
+                        if node_name not in node_content_blocks:
+                            block_index = next_content_block_index
+                            next_content_block_index += 1
+                            block_id = (
+                                f"{request_id}:assistant:{node_name}:{block_index}"
+                            )
+                            node_content_blocks[node_name] = (block_id, block_index)
+                            yield _content_block_draft(
+                                "content_block_start",
+                                block_id=block_id,
+                                block_index=block_index,
+                            )
+                        block_id, block_index = node_content_blocks[node_name]
+                        yield _content_block_draft(
+                            "content_block_delta",
+                            block_id=block_id,
+                            block_index=block_index,
+                            delta=str(chunk.content),
                         )
-                        yield f"data: {payload}\n\n"
 
             # Token usage events
             elif event_type == "on_chat_model_end":
@@ -3456,35 +3596,43 @@ async def _stream_graph_events(
                 output = event.get("data", {}).get("output")
                 usage = getattr(output, "usage_metadata", None)
                 if usage and node_name:
-                    payload = json.dumps(
+                    yield _activity_update_draft(
+                        "usage",
                         {
-                            "type": "usage",
                             "node": node_name,
                             "input_tokens": usage.get("input_tokens", 0),
                             "output_tokens": usage.get("output_tokens", 0),
                             "total_tokens": usage.get("total_tokens", 0),
                         },
-                        ensure_ascii=False,
                     )
-                    yield f"data: {payload}\n\n"
         for provisional_payload in _drain_provisional_events():
             yield provisional_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
+        for block_payload in _close_open_content_blocks(
+            reset=False,
+            reason="graph_completed",
+        ):
+            yield block_payload
     except Exception as e:
         for provisional_payload in _drain_provisional_events():
             yield provisional_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
+        for block_payload in _close_open_content_blocks(
+            reset=True,
+            reason="graph_failed",
+        ):
+            yield block_payload
         safe_error_message = sanitize_error_message(e, max_chars=300)
         logger.error(
             "Unhandled error in graph streaming: error_type=%s error_message=%s",
             type(e).__name__,
             safe_error_message,
         )
-        failed_activity_sse = ""
+        failed_activity_draft = None
         if activity_enabled:
-            failed_activity_sse = await _record_activity(
+            failed_activity_draft = await _record_activity(
                 build_activity_event(
                     thread_id=thread_id,
                     request_id=request_id,
@@ -3511,8 +3659,8 @@ async def _stream_graph_events(
         )
         run_control_registry.clear_stop_signal(thread_id)
         failed_node = active_nodes[-1] if active_nodes else None
-        if failed_activity_sse:
-            yield failed_activity_sse
+        if failed_activity_draft:
+            yield failed_activity_draft
         if failed_node:
             start_t = node_start_times.get(failed_node)
             duration_ms = (
@@ -3520,28 +3668,26 @@ async def _stream_graph_events(
                 if start_t is not None
                 else None
             )
-            node_payload = json.dumps(
+            yield _activity_update_draft(
+                "node_event",
                 {
-                    "type": "node_event",
                     "status": "end",
                     "node": failed_node,
                     "duration_ms": duration_ms,
-                    "error": safe_error_message,
+                    "error_type": type(e).__name__,
                     "synthetic": True,
                 },
-                ensure_ascii=False,
             )
-            yield f"data: {node_payload}\n\n"
-        error_payload = json.dumps(
+        yield _stream_draft(
+            "stream_error",
             {
-                "type": "error",
-                "message": safe_error_message,
+                "error_type": type(e).__name__,
+                "message": "Graph execution failed",
                 "failed_node": failed_node,
                 "active_nodes": active_nodes,
+                "recoverable": False,
             },
-            ensure_ascii=False,
         )
-        yield f"data: {error_payload}\n\n"
         if failed_update_ok:
             finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
         return
@@ -3656,9 +3802,11 @@ async def _stream_graph_events(
                 state=final_state,
                 env_flag="LOG_A3_TRACE",
             )
-            payload = json.dumps(
+            for activity_payload in interrupt_activity_payloads:
+                yield activity_payload
+            yield _stream_draft(
+                "stopped",
                 {
-                    "type": "run_status",
                     "run_status": RUN_STATUS_STOPPED,
                     "thread_id": thread_id,
                     "resume_available": True,
@@ -3666,11 +3814,7 @@ async def _stream_graph_events(
                     "node": stopped_node,
                     "stopped_at": stopped_at,
                 },
-                ensure_ascii=False,
             )
-            for activity_payload in interrupt_activity_payloads:
-                yield activity_payload
-            yield f"data: {payload}\n\n"
             if stopped_update_ok:
                 finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
             return
@@ -3753,10 +3897,12 @@ async def _stream_graph_events(
                 "draft": interrupt_value.get("value", interrupt_value),
                 "thread_id": thread_id,
             }
-        payload = json.dumps(payload_data, ensure_ascii=False)
         for activity_payload in interrupt_activity_payloads:
             yield activity_payload
-        yield f"data: {payload}\n\n"
+        yield _stream_draft(
+            "interrupt",
+            {key: value for key, value in payload_data.items() if key != "type"},
+        )
         if interrupt_update_ok:
             finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
         return
@@ -3807,7 +3953,10 @@ async def _stream_graph_events(
             )
             for activity_payload in interrupt_activity_payloads:
                 yield activity_payload
-            yield f"data: {json.dumps(payload_data, ensure_ascii=False)}\n\n"
+            yield _stream_draft(
+                "interrupt",
+                {key: value for key, value in payload_data.items() if key != "type"},
+            )
             if interrupt_update_ok:
                 finish_active_run(thread_id, {"run_status": RUN_STATUS_STOPPED})
             return
@@ -3854,7 +4003,14 @@ async def _stream_graph_events(
         )
         if lost_activity_payload:
             yield lost_activity_payload
-        yield f"data: {json.dumps(interrupt_lost_payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                key: value
+                for key, value in interrupt_lost_payload.items()
+                if key != "type"
+            },
+        )
         finish_active_run(
             thread_id,
             {
@@ -3910,7 +4066,14 @@ async def _stream_graph_events(
         )
         if pending_activity_payload:
             yield pending_activity_payload
-        yield f"data: {json.dumps(pending_checkpoint_payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                key: value
+                for key, value in pending_checkpoint_payload.items()
+                if key != "type"
+            },
+        )
         finish_active_run(
             thread_id,
             {
@@ -3950,7 +4113,7 @@ async def _stream_graph_events(
         if not resource_payload
         else None
     )
-    final_activity_payloads: list[str] = []
+    final_activity_payloads: list[AgentStreamEventDraftV2] = []
     if activity_enabled and resource_payload:
         resource_terminal_status = str(
             resource_payload.get("terminal_status") or "unknown"
@@ -4059,6 +4222,8 @@ async def _stream_graph_events(
         state=final_state,
     )
     run_control_registry.clear_stop_signal(thread_id)
+    for activity_payload in final_activity_payloads:
+        yield activity_payload
     if qa_payload:
         emit_a3_trace(
             logger,
@@ -4067,8 +4232,11 @@ async def _stream_graph_events(
             state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
-        yield f"data: {json.dumps(qa_payload, ensure_ascii=False)}\n\n"
-    if resource_payload:
+        yield _stream_draft(
+            "qa_final",
+            {key: value for key, value in qa_payload.items() if key != "type"},
+        )
+    elif resource_payload:
         emit_a3_trace(
             logger,
             "sse_resource_final",
@@ -4109,7 +4277,10 @@ async def _stream_graph_events(
             state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
-        yield f"data: {json.dumps(resource_payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "resource_final",
+            {key: value for key, value in resource_payload.items() if key != "type"},
+        )
     elif resource_diagnostic_payload:
         emit_a3_trace(
             logger,
@@ -4127,19 +4298,18 @@ async def _stream_graph_events(
             state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
         )
-        yield f"data: {json.dumps(resource_diagnostic_payload, ensure_ascii=False)}\n\n"
-
-    for activity_payload in final_activity_payloads:
-        yield activity_payload
-
-    completed_payload = {
-        "type": "run_status",
-        "run_status": RUN_STATUS_COMPLETED,
-        "thread_id": thread_id,
-    }
-    yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n"
-
-    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                **{
+                    key: value
+                    for key, value in resource_diagnostic_payload.items()
+                    if key != "type"
+                },
+                "error_type": "completed_without_resource",
+                "message": "Run completed without an authoritative resource payload",
+            },
+        )
     if completed_update_ok:
         finish_active_run(thread_id, {"run_status": RUN_STATUS_COMPLETED})
 
@@ -4166,7 +4336,7 @@ def _stream_context_payload(
     return payload
 
 
-async def _generate_sse_impl(
+async def _generate_stream_drafts_impl(
     query: str,
     graph,
     thread_id: str,
@@ -4174,26 +4344,8 @@ async def _generate_sse_impl(
     graph_version: str = "",
     *,
     request_id: str,
-) -> AsyncGenerator[str, None]:
-    """Stream LangGraph events as Server-Sent Events (SSE).
-
-    Yields SSE payload types:
-
-    * ``{"type": "thread_id", "thread_id": "..."}``
-      - emitted once at stream start so frontend can use it for /resume.
-    * ``{"type": "node_event", "status": "start"|"end", "node": "<name>"}``
-      - emitted when a graph node begins or finishes execution.
-    * ``{"type": "token", "content": "<text>"}``
-      - emitted for each streamed token from an allowed LLM node.
-    * ``{"type": "interrupt", "draft": "...", "thread_id": "..."}``
-      - emitted when the graph pauses for human review (HIL).
-
-    Args:
-        query: The user-provided string to be processed by the graph.
-        graph: The compiled LangGraph instance from app.state.
-        thread_id: Optional session ID for multi-turn memory. Auto-generated if None.
-        user_id: Optional user ID for profile context injection and recording.
-    """
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
+    """Produce native agent_stream_v2 drafts for one new graph request."""
     config = make_thread_config(thread_id)
     run_control_registry.clear_stop_signal(thread_id)
 
@@ -4272,12 +4424,14 @@ async def _generate_sse_impl(
         )
     except Exception:
         logger.exception("Failed to initialize thread checkpoint thread=%s", thread_id)
-        payload = {
-            "type": "error",
-            "message": "thread_checkpoint_initialization_failed",
-            "recoverable": False,
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "thread_checkpoint_initialization_failed",
+                "message": "Thread checkpoint initialization failed",
+                "recoverable": False,
+            },
+        )
         return
 
     run_state_snapshot = await graph.aget_state(config)
@@ -4320,14 +4474,15 @@ async def _generate_sse_impl(
             state=state_input,
             persist_checkpoint=True,
         )
-        payload = {
-            "type": "error",
-            "error_type": "full_compaction_failed",
-            "message": "full_compaction_failed",
-            "recoverable": False,
-            "thread_id": thread_id,
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "full_compaction_failed",
+                "message": "Full compaction failed",
+                "recoverable": False,
+                "thread_id": thread_id,
+            },
+        )
         return
     status_values = _new_request_status_values(
         compacted_values,
@@ -4348,7 +4503,6 @@ async def _generate_sse_impl(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
-            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": {},
             "context_usage_history": status_values.get("context_usage_history")
@@ -4397,41 +4551,47 @@ async def _generate_sse_impl(
         },
     )
 
-    thread_payload = {"type": "thread_id", "thread_id": thread_id}
-    yield f"data: {json.dumps(thread_payload, ensure_ascii=False)}\n\n"
+    yield _activity_update_draft("thread_id", {"thread_id": thread_id})
     stream_context_payload = _stream_context_payload(
         request_id=request_id,
         thread_id=thread_id,
         graph_version=graph_version,
     )
     if graph_version:
-        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
-        yield (
-            "data: "
-            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
-            "\n\n"
+        yield _activity_update_draft(
+            "stream_context",
+            {
+                key: value
+                for key, value in stream_context_payload.items()
+                if key != "type"
+            },
         )
-    running_payload = {
-        "type": "run_status",
-        "run_status": RUN_STATUS_RUNNING,
-        "thread_id": thread_id,
-    }
-    yield f"data: {json.dumps(running_payload, ensure_ascii=False)}\n\n"
+        graph_manifest_payload = graph_manifest_ref_payload(graph_version)
+        yield _activity_update_draft(
+            str(graph_manifest_payload.get("type") or "graph_manifest_ref"),
+            {
+                key: value
+                for key, value in graph_manifest_payload.items()
+                if key != "type"
+            },
+        )
+    yield _activity_update_draft(
+        "run_status",
+        {
+            "run_status": RUN_STATUS_RUNNING,
+            "thread_id": thread_id,
+        },
+    )
     if compaction_payload:
-        yield (
-            "data: "
-            + json.dumps(
-                {
-                    "type": "compaction_status",
-                    "compaction_result": compaction_payload,
-                    "thread_context_window_v3": status_values.get(
-                        "thread_context_window_v3",
-                        {},
-                    ),
-                },
-                ensure_ascii=False,
-            )
-            + "\n\n"
+        yield _activity_update_draft(
+            "compaction_status",
+            {
+                "compaction_result": compaction_payload,
+                "thread_context_window_v3": status_values.get(
+                    "thread_context_window_v3",
+                    {},
+                ),
+            },
         )
 
     # Record user input as episodic memory (non-fatal, fire-and-forget)
@@ -4456,7 +4616,7 @@ async def _generate_sse_impl(
         except Exception:
             logger.exception("Failed to record user input episodic memory")
 
-    async for chunk in _stream_graph_events(
+    async for chunk in _stream_graph_event_drafts(
         graph,
         state_input,
         config,
@@ -4479,14 +4639,14 @@ async def _generate_sse_impl(
             logger.exception("Profile recording failed (non-fatal) user=%s", user_id)
 
 
-async def generate_sse(
+async def generate_stream_drafts(
     query: str,
     graph,
     thread_id: str | None = None,
     user_id: str | None = None,
     graph_version: str = "",
-) -> AsyncGenerator[str, None]:
-    """Stream one new request inside a complete request performance root."""
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
+    """Produce one new request inside a complete performance root."""
 
     resolved_thread_id = thread_id or str(uuid.uuid4())
     request_id = str(uuid.uuid4())
@@ -4495,7 +4655,7 @@ async def generate_sse(
         thread_id=resolved_thread_id,
         user_id=user_id or "",
     ):
-        async for chunk in _generate_sse_impl(
+        async for chunk in _generate_stream_drafts_impl(
             query,
             graph,
             thread_id=resolved_thread_id,
@@ -4514,13 +4674,13 @@ async def _new_request_stream_source(
     user_id: str | None,
     graph_version: str,
     request_id: str,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     with observe_request_performance(
         request_id=request_id,
         thread_id=thread_id,
         user_id=user_id or "",
     ):
-        async for chunk in _generate_sse_impl(
+        async for chunk in _generate_stream_drafts_impl(
             query,
             graph,
             thread_id=thread_id,
@@ -4549,7 +4709,7 @@ def _new_thread_id_for_request(request_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"a3-study-agent:request:{request_id}"))
 
 
-async def _generate_resume_sse_impl(
+async def _generate_resume_stream_drafts_impl(
     edited_plan: str,
     feedback: str | None,
     graph,
@@ -4559,8 +4719,8 @@ async def _generate_resume_sse_impl(
     graph_version: str = "",
     *,
     resume_request_id: str,
-) -> AsyncGenerator[str, None]:
-    """Resume an interrupted graph and stream remaining events as SSE.
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
+    """Resume an interrupted graph and produce remaining native drafts.
 
     Args:
         edited_plan: The user-edited plan text to resume with.
@@ -4572,15 +4732,16 @@ async def _generate_resume_sse_impl(
     state_snapshot = await graph.aget_state(config)
     pending_type = _pending_interrupt_type(state_snapshot)
     if pending_type == "user_stop":
-        payload = {
-            "type": "run_status",
-            "run_status": RUN_STATUS_STOPPED,
-            "thread_id": thread_id,
-            "resume_available": True,
-            "pending_interrupt_type": "user_stop",
-            "message": "use /threads/{thread_id}/continue for user_stop interrupts",
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stopped",
+            {
+                "run_status": RUN_STATUS_STOPPED,
+                "thread_id": thread_id,
+                "resume_available": True,
+                "pending_interrupt_type": "user_stop",
+                "message": "use /threads/{thread_id}/continue for user_stop interrupts",
+            },
+        )
         return
     if profile_completion is not None and pending_type != "profile_completion_required":
         payload = {
@@ -4612,7 +4773,10 @@ async def _generate_resume_sse_impl(
                 "error_type": "profile_completion_checkpoint_missing",
             },
         )
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {key: value for key, value in payload.items() if key != "type"},
+        )
         return
 
     resume_value: object
@@ -4656,7 +4820,6 @@ async def _generate_resume_sse_impl(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
-            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
@@ -4701,20 +4864,32 @@ async def _generate_resume_sse_impl(
         graph_version=graph_version,
     )
     if graph_version:
-        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
-        yield (
-            "data: "
-            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
-            "\n\n"
+        yield _activity_update_draft(
+            "stream_context",
+            {
+                key: value
+                for key, value in stream_context_payload.items()
+                if key != "type"
+            },
         )
-    continuing_payload = {
-        "type": "run_status",
-        "run_status": RUN_STATUS_CONTINUING,
-        "thread_id": thread_id,
-    }
-    yield f"data: {json.dumps(continuing_payload, ensure_ascii=False)}\n\n"
+        graph_manifest_payload = graph_manifest_ref_payload(graph_version)
+        yield _activity_update_draft(
+            str(graph_manifest_payload.get("type") or "graph_manifest_ref"),
+            {
+                key: value
+                for key, value in graph_manifest_payload.items()
+                if key != "type"
+            },
+        )
+    yield _activity_update_draft(
+        "run_status",
+        {
+            "run_status": RUN_STATUS_CONTINUING,
+            "thread_id": thread_id,
+        },
+    )
 
-    async for chunk in _stream_graph_events(
+    async for chunk in _stream_graph_event_drafts(
         graph,
         resume_input,
         config,
@@ -4725,7 +4900,7 @@ async def _generate_resume_sse_impl(
         yield chunk
 
 
-async def generate_resume_sse(
+async def generate_resume_stream_drafts(
     edited_plan: str,
     feedback: str | None,
     graph,
@@ -4733,7 +4908,7 @@ async def generate_resume_sse(
     memory_use_choice: str | None = None,
     profile_completion: dict | None = None,
     graph_version: str = "",
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     """Resume one request inside a complete request performance root."""
 
     resume_request_id = str(uuid.uuid4())
@@ -4741,7 +4916,7 @@ async def generate_resume_sse(
         request_id=resume_request_id,
         thread_id=thread_id,
     ):
-        async for chunk in _generate_resume_sse_impl(
+        async for chunk in _generate_resume_stream_drafts_impl(
             edited_plan,
             feedback,
             graph,
@@ -4764,9 +4939,9 @@ async def _resume_stream_source(
     profile_completion: dict | None,
     graph_version: str,
     request_id: str,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     with observe_request_performance(request_id=request_id, thread_id=thread_id):
-        async for chunk in _generate_resume_sse_impl(
+        async for chunk in _generate_resume_stream_drafts_impl(
             edited_plan,
             feedback,
             graph,
@@ -4822,48 +4997,57 @@ async def request_thread_stop(graph, thread_id: str, reason: str) -> dict:
     }
 
 
-async def _generate_continue_sse_impl(
+async def _generate_continue_stream_drafts_impl(
     graph,
     thread_id: str,
     *,
     graph_version: str = "",
     continue_request_id: str,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     config = make_thread_config(thread_id)
     state_snapshot = await graph.aget_state(config)
     if not _has_checkpoint_state(state_snapshot):
-        payload = {
-            "type": "run_status",
-            "run_status": RUN_STATUS_NOT_RESUMABLE,
-            "thread_id": thread_id,
-            "resume_available": False,
-            "message": "checkpoint_not_found",
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "not_resumable",
+                "run_status": RUN_STATUS_NOT_RESUMABLE,
+                "thread_id": thread_id,
+                "resume_available": False,
+                "message": "checkpoint_not_found",
+                "recoverable": False,
+            },
+        )
         return
 
     pending_type = _pending_interrupt_type(state_snapshot)
     if pending_type in {"plan_review", "memory_confirmation"}:
-        payload = {
-            "type": "run_status",
-            "run_status": RUN_STATUS_NOT_RESUMABLE,
-            "thread_id": thread_id,
-            "resume_available": False,
-            "pending_interrupt_type": pending_type,
-            "message": "pending HIL interrupt must be resumed with /resume",
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "not_resumable",
+                "run_status": RUN_STATUS_NOT_RESUMABLE,
+                "thread_id": thread_id,
+                "resume_available": False,
+                "pending_interrupt_type": pending_type,
+                "message": "pending HIL interrupt must be resumed with /resume",
+                "recoverable": True,
+            },
+        )
         return
     if pending_type != "user_stop":
-        payload = {
-            "type": "run_status",
-            "run_status": RUN_STATUS_NOT_RESUMABLE,
-            "thread_id": thread_id,
-            "resume_available": False,
-            "pending_interrupt_type": pending_type,
-            "message": "no pending user_stop interrupt",
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "not_resumable",
+                "run_status": RUN_STATUS_NOT_RESUMABLE,
+                "thread_id": thread_id,
+                "resume_available": False,
+                "pending_interrupt_type": pending_type,
+                "message": "no pending user_stop interrupt",
+                "recoverable": False,
+            },
+        )
         return
 
     run_control_registry.clear_stop_signal(thread_id)
@@ -4882,7 +5066,6 @@ async def _generate_continue_sse_impl(
             "last_completed_node": "",
             "request_context_window": request_context_window,
             "thread_context_window": thread_context_window,
-            "thread_context_window_v2": build_thread_context_window_v2(status_values),
             **_active_session_context_fields(status_values, thread_id=thread_id),
             "context_usage": status_values.get("context_usage")
             if isinstance(status_values.get("context_usage"), dict)
@@ -4948,18 +5131,30 @@ async def _generate_continue_sse_impl(
         graph_version=graph_version,
     )
     if graph_version:
-        yield f"data: {json.dumps(stream_context_payload, ensure_ascii=False)}\n\n"
-        yield (
-            "data: "
-            f"{json.dumps(graph_manifest_ref_payload(graph_version), ensure_ascii=False)}"
-            "\n\n"
+        yield _activity_update_draft(
+            "stream_context",
+            {
+                key: value
+                for key, value in stream_context_payload.items()
+                if key != "type"
+            },
         )
-    continuing_payload = {
-        "type": "run_status",
-        "run_status": RUN_STATUS_CONTINUING,
-        "thread_id": thread_id,
-    }
-    yield f"data: {json.dumps(continuing_payload, ensure_ascii=False)}\n\n"
+        graph_manifest_payload = graph_manifest_ref_payload(graph_version)
+        yield _activity_update_draft(
+            str(graph_manifest_payload.get("type") or "graph_manifest_ref"),
+            {
+                key: value
+                for key, value in graph_manifest_payload.items()
+                if key != "type"
+            },
+        )
+    yield _activity_update_draft(
+        "run_status",
+        {
+            "run_status": RUN_STATUS_CONTINUING,
+            "thread_id": thread_id,
+        },
+    )
 
     resume_input = Command(resume={"type": "user_stop", "action": "continue"})
     _emit_graph_config_trace(
@@ -4971,7 +5166,7 @@ async def _generate_continue_sse_impl(
             "thread_id": thread_id,
         },
     )
-    async for chunk in _stream_graph_events(
+    async for chunk in _stream_graph_event_drafts(
         graph,
         resume_input,
         config,
@@ -4982,12 +5177,12 @@ async def _generate_continue_sse_impl(
         yield chunk
 
 
-async def generate_continue_sse(
+async def generate_continue_stream_drafts(
     graph,
     thread_id: str,
     *,
     graph_version: str = "",
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     """Continue one stopped request inside a complete request performance root."""
 
     continue_request_id = str(uuid.uuid4())
@@ -4995,7 +5190,7 @@ async def generate_continue_sse(
         request_id=continue_request_id,
         thread_id=thread_id,
     ):
-        async for chunk in _generate_continue_sse_impl(
+        async for chunk in _generate_continue_stream_drafts_impl(
             graph,
             thread_id,
             graph_version=graph_version,
@@ -5010,9 +5205,9 @@ async def _continue_stream_source(
     thread_id: str,
     graph_version: str,
     request_id: str,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     with observe_request_performance(request_id=request_id, thread_id=thread_id):
-        async for chunk in _generate_continue_sse_impl(
+        async for chunk in _generate_continue_stream_drafts_impl(
             graph,
             thread_id,
             graph_version=graph_version,

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.stream_draft_helpers import draft_payloads
 from src.context_engineering.packing.packer import pack_context_items
 from src.context_engineering.packing.policies import PackingPolicy
 from src.context_engineering.packing.schema import ContextPackingError
@@ -61,8 +61,8 @@ def _snapshot(values: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(next=(), tasks=[], values=values or {})
 
 
-def _payloads(collected: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
+def _payloads(collected) -> list[dict]:
+    return draft_payloads(collected)
 
 
 def test_context_packing_plan_event_is_safe():
@@ -132,7 +132,7 @@ def test_context_packing_error_event_is_redacted():
 
 @pytest.mark.anyio
 async def test_context_packing_events_are_forwarded_as_safe_sse():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -186,7 +186,7 @@ async def test_context_packing_events_are_forwarded_as_safe_sse():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for item in generate_sse("q", graph, thread_id="thread-1"):
+    async for item in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(item)
 
     payloads = _payloads(collected)

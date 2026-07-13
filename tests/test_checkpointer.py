@@ -236,13 +236,15 @@ class TestSSEWithConfig:
         return mock_graph
 
     @pytest.mark.anyio
-    async def test_generate_sse_passes_config(self):
-        """generate_sse should pass thread config to astream_events."""
-        from app import generate_sse
+    async def test_generate_stream_drafts_passes_config(self):
+        """generate_stream_drafts should pass thread config to astream_events."""
+        from app import generate_stream_drafts
 
         mock_graph = self._make_mock_graph()
 
-        async for _ in generate_sse("hello", mock_graph, thread_id="test-thread"):
+        async for _ in generate_stream_drafts(
+            "hello", mock_graph, thread_id="test-thread"
+        ):
             pass
 
         call_args = mock_graph.astream_events.call_args
@@ -251,13 +253,13 @@ class TestSSEWithConfig:
         assert config["configurable"]["thread_id"] == "test-thread"
 
     @pytest.mark.anyio
-    async def test_generate_sse_auto_generates_thread_id(self):
+    async def test_generate_stream_drafts_auto_generates_thread_id(self):
         """When no thread_id is provided, one should be auto-generated."""
-        from app import generate_sse
+        from app import generate_stream_drafts
 
         mock_graph = self._make_mock_graph()
 
-        async for _ in generate_sse("hello", mock_graph):
+        async for _ in generate_stream_drafts("hello", mock_graph):
             pass
 
         call_args = mock_graph.astream_events.call_args

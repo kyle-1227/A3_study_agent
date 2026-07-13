@@ -7,8 +7,13 @@ from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from src.streaming.adapter import adapt_legacy_sse_stream
-from src.streaming.contracts import AgentStreamEventV2, StreamContractError
+from src.streaming.contracts import (
+    AgentStreamEventDraftV2,
+    AgentStreamEventType,
+    AgentStreamEventV2,
+    StreamContractError,
+    StreamEventSequencer,
+)
 from src.streaming.journal import StreamJournal, StreamJournalCapacityError
 from src.streaming.settings import StreamingRuntimeConfig
 from src.streaming.sse import encode_sse_event
@@ -71,7 +76,7 @@ class StreamSession:
         self._producer: asyncio.Task[None] | None = None
         self._failure: Exception | None = None
 
-    def start(self, source: AsyncIterable[str]) -> None:
+    def start(self, source: AsyncIterable[AgentStreamEventDraftV2]) -> None:
         if self._producer is not None:
             raise StreamSessionConflictError("stream producer already started")
         self._producer = asyncio.create_task(self._run(source))
@@ -114,19 +119,37 @@ class StreamSession:
     def expired(self) -> bool:
         return self._complete and self.journal.expired
 
-    async def _run(self, source: AsyncIterable[str]) -> None:
+    async def _run(self, source: AsyncIterable[AgentStreamEventDraftV2]) -> None:
         cancellation: asyncio.CancelledError | None = None
+        sequencer = StreamEventSequencer(
+            stream_id=self.stream_id,
+            request_id=self.request_id,
+            thread_id=self.thread_id,
+        )
         try:
-            async for _frame in adapt_legacy_sse_stream(
-                source,
-                stream_id=self.stream_id,
-                request_id=self.request_id,
-                thread_id=self.thread_id,
-                retry_ms=self.config.retry_ms,
-                journal=self.journal,
-            ):
+            self.journal.append(
+                sequencer.emit("stream_start", {"retry_ms": self.config.retry_ms})
+            )
+            async with self._condition:
+                self._condition.notify_all()
+            async for draft in source:
+                validated = AgentStreamEventDraftV2.model_validate(draft)
+                self.journal.append(sequencer.emit(validated.type, validated.data))
                 async with self._condition:
                     self._condition.notify_all()
+            if sequencer.terminal is None:
+                self._record_failure_terminal(
+                    StreamContractError(
+                        "native stream source ended without an authoritative terminal"
+                    )
+                )
+            else:
+                self.journal.append(
+                    sequencer.emit(
+                        "stream_done",
+                        {"terminal_type": sequencer.terminal},
+                    )
+                )
         except asyncio.CancelledError as exc:
             cancellation = exc
             self._record_failure_terminal(exc)
@@ -180,7 +203,7 @@ class StreamSession:
 
     def _failure_event(
         self,
-        event_type: str,
+        event_type: AgentStreamEventType,
         data: dict[str, object],
     ) -> AgentStreamEventV2:
         sequence = self.journal.size + 1
@@ -213,7 +236,7 @@ class StreamSessionManager:
         thread_id: str,
         operation: str,
         request_fingerprint: str,
-        source: AsyncIterable[str],
+        source: AsyncIterable[AgentStreamEventDraftV2],
     ) -> StreamSession:
         async with self._lock:
             self._purge_expired()

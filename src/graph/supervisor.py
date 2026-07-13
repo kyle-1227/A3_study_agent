@@ -23,6 +23,7 @@ from src.graph.resource_generation import (
     normalize_requested_resource_types as _normalize_supported_requested_resource_types,
 )
 from src.graph.capability_registry import get_registered_resource_types
+from src.graph.qa import build_general_qa_node_output
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     get_fallback_modes,
@@ -394,7 +395,7 @@ def _filter_subject_candidates(
 @traced_node
 async def handle_unknown(state: LearningState) -> dict:
     """Handle off-topic queries with a friendly redirect message."""
-    return {
+    result = {
         "messages": [
             AIMessage(
                 content=(
@@ -405,6 +406,10 @@ async def handle_unknown(state: LearningState) -> dict:
             )
         ],
     }
+    return build_general_qa_node_output(
+        answer=str(result["messages"][0].content),
+        state=state,
+    )
 
 
 def route_by_intent(state: LearningState) -> str:

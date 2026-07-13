@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.stream_draft_helpers import draft_payloads
 from src.context_engineering.itemizer import make_context_item
 from src.context_engineering.schema import ContextProviderError
 from src.context_engineering.trace import (
@@ -39,8 +39,8 @@ def _item():
     )
 
 
-def _payloads(collected: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
+def _payloads(collected) -> list[dict]:
+    return draft_payloads(collected)
 
 
 def _snapshot(values: dict | None = None) -> SimpleNamespace:
@@ -120,7 +120,7 @@ def test_emit_context_items_collected_writes_safe_trace_sink():
 
 @pytest.mark.anyio
 async def test_context_item_events_are_forwarded_as_safe_sse():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -179,7 +179,7 @@ async def test_context_item_events_are_forwarded_as_safe_sse():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for item in generate_sse("q", graph, thread_id="thread-1"):
+    async for item in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(item)
 
     payloads = _payloads(collected)
@@ -199,4 +199,4 @@ async def test_context_item_events_are_forwarded_as_safe_sse():
     assert "must not forward" not in serialized
     assert "messages" not in serialized
     assert "content" not in serialized
-    assert payloads[-1] == {"type": "done"}
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]

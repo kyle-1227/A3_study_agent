@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.stream_draft_helpers import draft_payloads
 from src.observability.a3_trace import (
     emit_a3_trace,
     reset_trace_event_sink,
@@ -30,8 +30,8 @@ class AsyncIteratorMock:
             raise StopAsyncIteration
 
 
-def _payloads(collected: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
+def _payloads(collected) -> list[dict]:
+    return draft_payloads(collected)
 
 
 def _snapshot(
@@ -302,7 +302,7 @@ async def test_status_preserves_terminal_checkpoint_status(run_status):
 
 @pytest.mark.anyio
 async def test_stream_initializes_checkpoint_before_thread_id():
-    from app import generate_sse
+    from app import generate_stream_drafts
     from src.run_control import finish_active_run, get_active_run
 
     graph = MagicMock()
@@ -310,11 +310,11 @@ async def test_stream_initializes_checkpoint_before_thread_id():
     graph.aupdate_state = AsyncMock()
     graph.aget_state = AsyncMock(return_value=_snapshot(values={}))
 
-    stream = generate_sse("q", graph, thread_id="init-thread")
+    stream = generate_stream_drafts("q", graph, thread_id="init-thread")
     active_snapshot = None
     try:
         first = await stream.__anext__()
-        first_payload = json.loads(first.removeprefix("data: ").strip())
+        first_payload = draft_payloads([first])[0]
         active_snapshot = get_active_run("init-thread")
     finally:
         await stream.aclose()
@@ -332,7 +332,7 @@ async def test_stream_initializes_checkpoint_before_thread_id():
 
 @pytest.mark.anyio
 async def test_stream_active_status_preserves_checkpoint_workspace():
-    from app import generate_sse
+    from app import generate_stream_drafts
     from src.run_control import finish_active_run, get_active_run
 
     graph = MagicMock()
@@ -357,7 +357,7 @@ async def test_stream_active_status_preserves_checkpoint_workspace():
         )
     )
 
-    stream = generate_sse("another mindmap", graph, thread_id="thread-1")
+    stream = generate_stream_drafts("another mindmap", graph, thread_id="thread-1")
     try:
         await stream.__anext__()
         active_snapshot = get_active_run("thread-1")
@@ -438,7 +438,7 @@ async def test_live_context_window_update_is_active_run_only():
 
 @pytest.mark.anyio
 async def test_stream_checkpoint_init_failure_does_not_emit_thread_id():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
@@ -446,14 +446,15 @@ async def test_stream_checkpoint_init_failure_does_not_emit_thread_id():
     graph.aget_state = AsyncMock(return_value=_snapshot(values={}))
 
     collected = []
-    async for sse in generate_sse("q", graph, thread_id="broken-thread"):
+    async for sse in generate_stream_drafts("q", graph, thread_id="broken-thread"):
         collected.append(sse)
 
     payloads = _payloads(collected)
     assert payloads == [
         {
-            "type": "error",
-            "message": "thread_checkpoint_initialization_failed",
+            "type": "stream_error",
+            "error_type": "thread_checkpoint_initialization_failed",
+            "message": "Thread checkpoint initialization failed",
             "recoverable": False,
         }
     ]
@@ -512,7 +513,7 @@ async def test_dev_memory_clear_uses_registered_supervisor_writer(monkeypatch):
 
 @pytest.mark.anyio
 async def test_user_stop_interrupt_emits_stopped_without_done_or_completed():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
@@ -530,15 +531,15 @@ async def test_user_stop_interrupt_emits_stopped_without_done_or_completed():
     )
 
     collected = []
-    async for sse in generate_sse("q", graph, thread_id="thread-1"):
+    async for sse in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(sse)
 
     payloads = _payloads(collected)
-    run_statuses = [
-        payload for payload in payloads if payload.get("type") == "run_status"
+    stopped_events = [
+        payload for payload in payloads if payload.get("type") == "stopped"
     ]
-    assert run_statuses[-1]["run_status"] == "stopped"
-    assert not [payload for payload in payloads if payload.get("type") == "done"]
+    assert stopped_events[-1]["run_status"] == "stopped"
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
     assert not [
         payload
         for payload in payloads
@@ -549,7 +550,7 @@ async def test_user_stop_interrupt_emits_stopped_without_done_or_completed():
 
 @pytest.mark.anyio
 async def test_continue_requires_pending_user_stop_interrupt():
-    from app import generate_continue_sse
+    from app import generate_continue_stream_drafts
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
@@ -563,18 +564,20 @@ async def test_continue_requires_pending_user_stop_interrupt():
     )
 
     collected = []
-    async for sse in generate_continue_sse(graph, "thread-1"):
+    async for sse in generate_continue_stream_drafts(graph, "thread-1"):
         collected.append(sse)
 
     payloads = _payloads(collected)
     assert payloads == [
         {
-            "type": "run_status",
+            "type": "stream_error",
+            "error_type": "not_resumable",
             "run_status": "not_resumable",
             "thread_id": "thread-1",
             "resume_available": False,
             "pending_interrupt_type": "memory_confirmation",
             "message": "pending HIL interrupt must be resumed with /resume",
+            "recoverable": True,
         }
     ]
     graph.astream_events.assert_not_called()
@@ -582,7 +585,7 @@ async def test_continue_requires_pending_user_stop_interrupt():
 
 @pytest.mark.anyio
 async def test_resume_memory_confirmation_sends_choice_command():
-    from app import generate_resume_sse
+    from app import generate_resume_stream_drafts
 
     final_snapshot = _snapshot(values={"schema_version": "run_control_v1"})
     graph = MagicMock()
@@ -601,7 +604,7 @@ async def test_resume_memory_confirmation_sends_choice_command():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for sse in generate_resume_sse(
+    async for sse in generate_resume_stream_drafts(
         "",
         None,
         graph,
@@ -617,12 +620,12 @@ async def test_resume_memory_confirmation_sends_choice_command():
         "choice": "use",
     }
     assert payloads[0]["run_status"] == "continuing"
-    assert payloads[-1] == {"type": "done"}
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
 
 
 @pytest.mark.anyio
 async def test_resume_profile_completion_sends_profile_command():
-    from app import generate_resume_sse
+    from app import generate_resume_stream_drafts
 
     final_snapshot = _snapshot(values={"schema_version": "run_control_v1"})
     graph = MagicMock()
@@ -647,7 +650,7 @@ async def test_resume_profile_completion_sends_profile_command():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for sse in generate_resume_sse(
+    async for sse in generate_resume_stream_drafts(
         "",
         None,
         graph,
@@ -671,12 +674,12 @@ async def test_resume_profile_completion_sends_profile_command():
         },
     }
     assert payloads[0]["run_status"] == "continuing"
-    assert payloads[-1] == {"type": "done"}
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
 
 
 @pytest.mark.anyio
 async def test_resume_profile_completion_without_checkpoint_fails_fast():
-    from app import generate_resume_sse
+    from app import generate_resume_stream_drafts
 
     graph = MagicMock()
     graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
@@ -686,7 +689,7 @@ async def test_resume_profile_completion_without_checkpoint_fails_fast():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for sse in generate_resume_sse(
+    async for sse in generate_resume_stream_drafts(
         "",
         None,
         graph,
@@ -702,7 +705,7 @@ async def test_resume_profile_completion_without_checkpoint_fails_fast():
     payloads = _payloads(collected)
     assert payloads == [
         {
-            "type": "error",
+            "type": "stream_error",
             "error_type": "profile_completion_checkpoint_missing",
             "message": "profile_completion_checkpoint_missing",
             "thread_id": "thread-1",
@@ -716,7 +719,7 @@ async def test_resume_profile_completion_without_checkpoint_fails_fast():
 
 @pytest.mark.anyio
 async def test_continue_user_stop_clears_stop_before_command_resume():
-    from app import generate_continue_sse
+    from app import generate_continue_stream_drafts
 
     final_snapshot = _snapshot(
         values={
@@ -741,7 +744,7 @@ async def test_continue_user_stop_clears_stop_before_command_resume():
     )
 
     collected = []
-    async for sse in generate_continue_sse(graph, "thread-1"):
+    async for sse in generate_continue_stream_drafts(graph, "thread-1"):
         collected.append(sse)
 
     first_update = graph.aupdate_state.await_args_list[0].args[1]
@@ -754,7 +757,7 @@ async def test_continue_user_stop_clears_stop_before_command_resume():
 
 @pytest.mark.anyio
 async def test_context_usage_trace_becomes_sse_and_bounded_state():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -797,7 +800,7 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for sse in generate_sse("q", graph, thread_id="thread-1"):
+    async for sse in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(sse)
 
     payloads = _payloads(collected)
@@ -816,7 +819,7 @@ async def test_context_usage_trace_becomes_sse_and_bounded_state():
 
 @pytest.mark.anyio
 async def test_context_usage_error_trace_becomes_warning_sse():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -847,7 +850,7 @@ async def test_context_usage_error_trace_becomes_warning_sse():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for sse in generate_sse("q", graph, thread_id="thread-1"):
+    async for sse in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(sse)
 
     payloads = _payloads(collected)

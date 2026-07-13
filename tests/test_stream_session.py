@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from src.streaming.contracts import AgentStreamEventDraftV2
 from src.streaming.journal import StreamJournalSequenceError
 from src.streaming.session import (
     StreamSessionConflictError,
@@ -25,18 +26,37 @@ FINGERPRINT = "request-fingerprint-1"
 
 
 async def _source():
-    for payload in [
-        {"type": "qa_provisional_start"},
-        {"type": "qa_provisional_delta", "delta": "answer"},
-        {"type": "qa_final", "payload_hash": "abc"},
-        {"type": "done"},
+    for draft in [
+        AgentStreamEventDraftV2(
+            type="content_block_start",
+            data={
+                "block_id": "qa-answer",
+                "block_index": 0,
+                "block_type": "markdown",
+                "provisional": True,
+            },
+        ),
+        AgentStreamEventDraftV2(
+            type="content_block_delta",
+            data={
+                "block_id": "qa-answer",
+                "block_index": 0,
+                "block_type": "markdown",
+                "provisional": True,
+                "delta": "answer",
+            },
+        ),
+        AgentStreamEventDraftV2(type="qa_final", data={"payload_hash": "abc"}),
     ]:
         await asyncio.sleep(0)
-        yield f"data: {json.dumps(payload)}\n\n"
+        yield draft
 
 
 async def _broken_source():
-    yield f"data: {json.dumps({'type': 'node_event', 'node': 'qa'})}\n\n"
+    yield AgentStreamEventDraftV2(
+        type="activity_update",
+        data={"kind": "node_event", "payload": {"node": "qa"}},
+    )
     raise RuntimeError("private provider failure detail")
 
 
@@ -167,7 +187,7 @@ async def test_source_failure_is_a_replayable_safe_terminal() -> None:
 @pytest.mark.anyio
 async def test_failure_after_authoritative_terminal_only_appends_done() -> None:
     async def terminal_then_fail():
-        yield f"data: {json.dumps({'type': 'qa_final', 'payload_hash': 'abc'})}\n\n"
+        yield AgentStreamEventDraftV2(type="qa_final", data={"payload_hash": "abc"})
         raise RuntimeError("failure after final")
 
     manager = StreamSessionManager(_config())
@@ -190,10 +210,9 @@ async def test_failure_after_authoritative_terminal_only_appends_done() -> None:
 async def test_capacity_failure_reserves_error_and_done_events() -> None:
     async def many_events():
         for index in range(5):
-            yield (
-                "data: "
-                + json.dumps({"type": "node_event", "node": str(index)})
-                + "\n\n"
+            yield AgentStreamEventDraftV2(
+                type="activity_update",
+                data={"kind": "node_event", "payload": {"node": str(index)}},
             )
 
     manager = StreamSessionManager(_config(max_events=4))
@@ -216,10 +235,12 @@ async def test_capacity_failure_reserves_error_and_done_events() -> None:
 @pytest.mark.anyio
 async def test_byte_capacity_failure_reserves_error_and_done_events() -> None:
     async def oversized_event():
-        yield (
-            "data: "
-            + json.dumps({"type": "node_event", "details": "x" * 2000})
-            + "\n\n"
+        yield AgentStreamEventDraftV2(
+            type="activity_update",
+            data={
+                "kind": "node_event",
+                "payload": {"details": "x" * 2000},
+            },
         )
 
     manager = StreamSessionManager(_config(max_bytes=9000))

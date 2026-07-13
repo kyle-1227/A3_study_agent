@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -8,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 import app as app_module
+from tests.stream_draft_helpers import draft_payloads
 from src.context_engineering.compaction import (
     ConversationSummaryV2,
     ProviderBoundUsageV1,
@@ -176,9 +176,9 @@ async def test_compaction_failure_blocks_graph_before_execution(monkeypatch):
         fail_compaction,
     )
 
-    frames = [
-        frame
-        async for frame in app_module._generate_sse_impl(
+    drafts = [
+        draft
+        async for draft in app_module._generate_stream_drafts_impl(
             "query",
             graph,
             "thread-1",
@@ -186,21 +186,12 @@ async def test_compaction_failure_blocks_graph_before_execution(monkeypatch):
         )
     ]
 
-    payloads = [
-        json.loads(
-            "\n".join(
-                line[5:].lstrip()
-                for line in frame.strip().splitlines()
-                if line.startswith("data:")
-            )
-        )
-        for frame in frames
-    ]
+    payloads = draft_payloads(drafts)
     assert payloads == [
         {
-            "type": "error",
+            "type": "stream_error",
             "error_type": "full_compaction_failed",
-            "message": "full_compaction_failed",
+            "message": "Full compaction failed",
             "recoverable": False,
             "thread_id": "thread-1",
         }

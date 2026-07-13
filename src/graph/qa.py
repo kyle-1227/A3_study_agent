@@ -285,6 +285,47 @@ def build_qa_final_payload(
     ).model_dump(mode="json")
 
 
+def build_general_qa_node_output(
+    *,
+    answer: str,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a non-structured node answer into the shared QA final contract."""
+
+    response = QAResponse.model_validate(
+        {
+            "answer": answer,
+            "uncertainty_note": "",
+            "grounding_status": "general_knowledge",
+            "suggestions": [],
+        }
+    )
+    business_error = validate_qa_response(
+        response,
+        qa_scope="general",
+        kept_evidence_count=0,
+        requires_live_verification=False,
+    )
+    if business_error:
+        raise ValueError(f"QAResponse business validation failed: {business_error}")
+
+    thread_id = str(state.get("thread_id") or state.get("session_id") or "").strip()
+    request_id = str(state.get("request_id") or "").strip()
+    if not thread_id or not request_id:
+        raise ValueError("qa_final requires explicit thread_id and request_id")
+    final_payload = build_qa_final_payload(
+        response=response,
+        qa_scope="general",
+        thread_id=thread_id,
+        request_id=request_id,
+    )
+    return {
+        "messages": [AIMessage(content=_render_qa_message(response))],
+        "last_qa_response": final_payload,
+        "final_response_type": "qa",
+    }
+
+
 def qa_final_payload(state: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return the current request's validated QA final event, if present."""
     payload = state.get("last_qa_response")

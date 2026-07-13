@@ -569,13 +569,18 @@ class TestValidIntents:
 
 class TestHandleUnknown:
     async def test_returns_friendly_message(self):
-        state = {"messages": [HumanMessage(content="What is the weather today?")]}
+        state = {
+            "messages": [HumanMessage(content="What is the weather today?")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+        }
         result = await handle_unknown(state)
 
         assert "messages" in result
         assert len(result["messages"]) == 1
         assert isinstance(result["messages"][0], AIMessage)
         assert len(result["messages"][0].content) > 0
+        assert result["last_qa_response"]["type"] == "qa_final"
 
 
 class TestSupervisorOutput:

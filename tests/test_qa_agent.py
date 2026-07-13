@@ -18,6 +18,7 @@ from src.graph.qa import (
     QAFinalEvent,
     QAResponse,
     QASuggestion,
+    build_general_qa_node_output,
     build_qa_final_payload,
     qa_agent,
     qa_final_payload,
@@ -224,6 +225,20 @@ def test_empty_suggestions_are_valid_for_direct_qa_answer():
         )
         == ""
     )
+
+
+def test_general_qa_node_output_requires_identity_and_validates_contract():
+    result = build_general_qa_node_output(
+        answer="A validated emotional-support response.",
+        state={"thread_id": "thread-1", "request_id": "request-1"},
+    )
+
+    final = QAFinalEvent.model_validate(result["last_qa_response"])
+    assert final.qa_scope == "general"
+    assert final.response.grounding_status == "general_knowledge"
+    assert final.response.suggestions == []
+    with pytest.raises(ValueError, match="explicit thread_id and request_id"):
+        build_general_qa_node_output(answer="Missing identity", state={})
 
 
 def test_qa_suggestion_registry_is_safe_minimal_and_uses_canonical_resources():

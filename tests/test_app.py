@@ -51,12 +51,12 @@ class TestNoGlobalGraph:
         content = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
         assert "app.state.graph" in content
 
-    def test_generate_sse_accepts_graph_param(self):
-        """generate_sse should accept graph as a parameter."""
-        from app import generate_sse
+    def test_generate_stream_drafts_accepts_graph_param(self):
+        """generate_stream_drafts should accept graph as a parameter."""
+        from app import generate_stream_drafts
         import inspect
 
-        sig = inspect.signature(generate_sse)
+        sig = inspect.signature(generate_stream_drafts)
         assert "graph" in sig.parameters
 
 

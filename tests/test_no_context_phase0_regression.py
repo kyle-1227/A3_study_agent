@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from tests.stream_draft_helpers import draft_payloads
 
 
 class AsyncIteratorMock:
@@ -23,8 +24,8 @@ class AsyncIteratorMock:
             raise StopAsyncIteration
 
 
-def _payloads(collected: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
+def _payloads(collected) -> list[dict]:
+    return draft_payloads(collected)
 
 
 def _snapshot(values: dict | None = None) -> SimpleNamespace:
@@ -68,7 +69,7 @@ def _usage(node_name: str) -> dict:
 
 @pytest.mark.anyio
 async def test_stream_keeps_node_usage_resource_final_events():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     final_state = {
         "requested_resource_type": "quiz",
@@ -90,7 +91,7 @@ async def test_stream_keeps_node_usage_resource_final_events():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for event in generate_sse("q", graph, thread_id="thread-1"):
+    async for event in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(event)
 
     payloads = _payloads(collected)
@@ -100,12 +101,12 @@ async def test_stream_keeps_node_usage_resource_final_events():
         payload for payload in payloads if payload.get("type") == "resource_final"
     ]
     assert resource_events and resource_events[0]["resource_type"] == "quiz"
-    assert payloads[-1] == {"type": "done"}
+    assert payloads[-1]["type"] == "resource_final"
 
 
 @pytest.mark.anyio
 async def test_resume_keeps_basic_stream_path():
-    from app import generate_resume_sse
+    from app import generate_resume_stream_drafts
 
     final_snapshot = _snapshot({"schema_version": "run_control_v1"})
     graph = MagicMock()
@@ -122,13 +123,15 @@ async def test_resume_keeps_basic_stream_path():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for event in generate_resume_sse("approved", None, graph, "thread-1"):
+    async for event in generate_resume_stream_drafts(
+        "approved", None, graph, "thread-1"
+    ):
         collected.append(event)
 
     payloads = _payloads(collected)
     assert payloads[0]["run_status"] == "continuing"
     assert any(payload.get("type") == "node_event" for payload in payloads)
-    assert payloads[-1] == {"type": "done"}
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
 
 
 def test_unknown_model_window_emits_error_when_context_engineering_is_non_strict(

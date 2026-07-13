@@ -2,6 +2,7 @@
 
 from src.streaming.contracts import (
     AGENT_STREAM_SCHEMA_VERSION,
+    AgentStreamEventDraftV2,
     AgentStreamEventType,
     AgentStreamEventV2,
     AuthoritativeTerminal,
@@ -9,7 +10,6 @@ from src.streaming.contracts import (
     StreamContractError,
     StreamEventSequencer,
 )
-from src.streaming.adapter import adapt_legacy_sse_stream
 from src.streaming.journal import (
     StreamJournal,
     StreamJournalCapacityError,
@@ -25,6 +25,7 @@ from src.streaming.provisional import (
 
 __all__ = [
     "AGENT_STREAM_SCHEMA_VERSION",
+    "AgentStreamEventDraftV2",
     "AgentStreamEventType",
     "AgentStreamEventV2",
     "AuthoritativeTerminal",
@@ -35,7 +36,6 @@ __all__ = [
     "StreamJournalCapacityError",
     "StreamJournalExpiredError",
     "StreamJournalSequenceError",
-    "adapt_legacy_sse_stream",
     "encode_sse_event",
     "emit_provisional_event",
     "parse_last_event_id",

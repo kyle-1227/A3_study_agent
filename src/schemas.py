@@ -77,7 +77,6 @@ class ThreadStatusResponse(BaseModel):
     background_context_window: dict[str, Any] = Field(default_factory=dict)
     request_context_window: dict[str, Any] = Field(default_factory=dict)
     thread_context_window: dict[str, Any] = Field(default_factory=dict)
-    thread_context_window_v2: dict[str, Any] = Field(default_factory=dict)
     thread_context_window_v3: ThreadContextWindowV3
     context_influence_ledger: dict[str, Any] = Field(default_factory=dict)
     last_resource_final_payload: dict[str, Any] = Field(default_factory=dict)

@@ -52,13 +52,11 @@ import {
   parseGraphManifestUnavailable,
   parseFrontendPerformanceCapability,
   parseStreamContext,
-  parseThreadContextWindowV2,
   type ActivityEvent,
   type BackgroundContextWindow,
   type ContextUsageReportError,
   type GraphManifest,
   type GraphManifestUnavailable,
-  type ThreadContextWindowV2,
 } from "@/lib/observability-contracts"
 import { FrontendPerformanceTracker } from "@/lib/frontend-performance"
 import { requirePublicApiBaseUrl } from "@/lib/public-config"
@@ -353,7 +351,6 @@ export default function Home() {
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
   const [contextUsageState, setContextUsageState] = useState(EMPTY_CONTEXT_USAGE_STATE)
   const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
-  const [threadContextWindowV2, setThreadContextWindowV2] = useState<ThreadContextWindowV2 | null>(null)
   const [threadContextWindowV3, setThreadContextWindowV3] = useState<ThreadContextWindowV3 | null>(null)
   const [graphManifest, setGraphManifest] = useState<GraphManifest | null>(null)
   const [graphManifestError, setGraphManifestError] = useState<GraphManifestUnavailable | null>(null)
@@ -650,7 +647,6 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setThreadContextWindowV2(null)
     setThreadContextWindowV3(null)
     liveTurnRef.current = null
     setLiveTurn(null)
@@ -676,7 +672,6 @@ export default function Home() {
     setActivityTimeline([])
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setThreadContextWindowV2(null)
     setThreadContextWindowV3(null)
     liveTurnRef.current = null
     setLiveTurn(null)
@@ -713,7 +708,6 @@ export default function Home() {
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setThreadContextWindowV2(null)
     setThreadContextWindowV3(null)
     liveTurnRef.current = null
     setLiveTurn(null)
@@ -753,7 +747,6 @@ export default function Home() {
       setTokenUsage({ input: 0, output: 0, total: 0 })
       setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
       setBackgroundContextWindow(null)
-      setThreadContextWindowV2(null)
       setThreadContextWindowV3(null)
       liveTurnRef.current = null
       setLiveTurn(null)
@@ -1000,22 +993,6 @@ export default function Home() {
           applyContextUsageError(current, contextUsageContractFailure(error)),
         )
       }
-      if (data.thread_context_window_v2) {
-        try {
-          setThreadContextWindowV2(
-            parseThreadContextWindowV2(data.thread_context_window_v2),
-          )
-        } catch (error) {
-          setLogs((current) => [
-            ...current,
-            {
-              type: "warning",
-              message: `[CONTRACT] Thread context v2 rejected: ${contractFailureReason(error)}`,
-              ts: timestamp(),
-            },
-          ])
-        }
-      }
       return
     }
 
@@ -1161,22 +1138,6 @@ export default function Home() {
           },
         ])
       }
-      if (data.thread_context_window_v2) {
-        try {
-          setThreadContextWindowV2(
-            parseThreadContextWindowV2(data.thread_context_window_v2),
-          )
-        } catch (error) {
-          setLogs((current) => [
-            ...current,
-            {
-              type: "warning",
-              message: `[CONTRACT] Thread context v2 rejected: ${contractFailureReason(error)}`,
-              ts: timestamp(),
-            },
-          ])
-        }
-      }
       setLogs((prev) => [
         ...prev,
         {
@@ -1316,26 +1277,6 @@ export default function Home() {
           },
         ])
       }
-      return
-    }
-
-    if (data.type === "token") {
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === asstId
-            ? { ...msg, content: msg.content + data.content }
-            : msg
-        )
-      )
-      return
-    }
-
-    if (data.type === "text") {
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === asstId ? { ...msg, content: data.content } : msg
-        )
-      )
       return
     }
 
@@ -1687,24 +1628,6 @@ export default function Home() {
           {
             type: "warning",
             message: `[CONTRACT] Stored background context rejected: ${contractFailureReason(error)}`,
-            ts: timestamp(),
-          },
-        ])
-      }
-      try {
-        const threadWindow =
-          status.thread_context_window_v2 &&
-          Object.keys(status.thread_context_window_v2).length > 0
-            ? parseThreadContextWindowV2(status.thread_context_window_v2)
-            : null
-        setThreadContextWindowV2(threadWindow)
-      } catch (error) {
-        setThreadContextWindowV2(null)
-        setLogs((current) => [
-          ...current,
-          {
-            type: "warning",
-            message: `[CONTRACT] Stored thread context v2 rejected: ${contractFailureReason(error)}`,
             ts: timestamp(),
           },
         ])

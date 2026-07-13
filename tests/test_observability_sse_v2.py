@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from tests.stream_draft_helpers import draft_payloads
 from src.observability.a3_trace import emit_a3_trace
 from src.observability.llm_input import (
     build_llm_input_observation,
@@ -52,8 +53,8 @@ def _node_event(node: str, event_type: str) -> dict:
     }
 
 
-def _payloads(events: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in events]
+def _payloads(events) -> list[dict]:
+    return draft_payloads(events)
 
 
 def _graph(
@@ -78,7 +79,7 @@ def _graph(
 
 @pytest.mark.anyio
 async def test_activity_sse_updates_same_node_and_stream_ids_and_persists_timeline():
-    from app import _stream_graph_events
+    from app import _stream_graph_event_drafts
 
     graph = _graph(
         [
@@ -87,7 +88,7 @@ async def test_activity_sse_updates_same_node_and_stream_ids_and_persists_timeli
         ]
     )
     collected = []
-    async for item in _stream_graph_events(
+    async for item in _stream_graph_event_drafts(
         graph,
         {"request_id": "r1", "thread_id": "t1"},
         {"configurable": {"thread_id": "t1"}},
@@ -116,7 +117,7 @@ async def test_activity_sse_updates_same_node_and_stream_ids_and_persists_timeli
 
 @pytest.mark.anyio
 async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist():
-    from app import _stream_graph_events
+    from app import _stream_graph_event_drafts
 
     observation = build_llm_input_observation(
         node_name="qa_agent",
@@ -142,7 +143,7 @@ async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist
 
     graph = _graph(events(), activity=True)
     collected = []
-    async for item in _stream_graph_events(
+    async for item in _stream_graph_event_drafts(
         graph,
         {"request_id": "r1", "thread_id": "t1"},
         {"configurable": {"thread_id": "t1"}},
@@ -160,9 +161,7 @@ async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist
 
     assert report["input_estimated_tokens"] == legacy["input_estimated_tokens"]
     assert report["used_tokens"] == legacy["used_tokens"]
-    next_call = report["thread_context_window_v2"]["next_call_context_estimate"]
-    assert next_call["basis"] == "known_next_node"
-    assert next_call["target_node"] == "qa_agent"
+    assert "thread_context_window_v2" not in report
     serialized_report = json.dumps(report, ensure_ascii=False)
     assert "secret-system-body" not in serialized_report
     assert "secret-user-question" not in serialized_report
@@ -172,7 +171,7 @@ async def test_usage_report_and_legacy_usage_emit_from_same_snapshot_and_persist
 
 @pytest.mark.anyio
 async def test_usage_report_error_sse_preserves_versioned_contract(monkeypatch):
-    from app import _stream_graph_events
+    from app import _stream_graph_event_drafts
 
     monkeypatch.setenv("LOG_A3_TRACE", "true")
 
@@ -198,7 +197,7 @@ async def test_usage_report_error_sse_preserves_versioned_contract(monkeypatch):
 
     graph = _graph(events(), activity=True)
     collected = []
-    async for item in _stream_graph_events(
+    async for item in _stream_graph_event_drafts(
         graph,
         {"request_id": "r1", "thread_id": "t1"},
         {"configurable": {"thread_id": "t1"}},
@@ -220,11 +219,11 @@ async def test_usage_report_error_sse_preserves_versioned_contract(monkeypatch):
 
 @pytest.mark.anyio
 async def test_stream_context_and_manifest_ref_precede_graph_execution():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     graph = _graph([], activity=False)
     collected = []
-    async for item in generate_sse(
+    async for item in generate_stream_drafts(
         "hello",
         graph,
         thread_id="t1",
@@ -363,7 +362,7 @@ async def test_manifest_endpoint_returns_cached_contract_and_typed_cache_error()
 
 @pytest.mark.anyio
 async def test_interrupt_finalizes_stream_activity_as_waiting_and_persists():
-    from app import _stream_graph_events
+    from app import _stream_graph_event_drafts
 
     interrupt = SimpleNamespace(
         value={
@@ -384,7 +383,7 @@ async def test_interrupt_finalizes_stream_activity_as_waiting_and_persists():
         ),
     )
     collected = []
-    async for item in _stream_graph_events(
+    async for item in _stream_graph_event_drafts(
         graph,
         {"request_id": "r-interrupt", "thread_id": "t1"},
         {"configurable": {"thread_id": "t1"}},
@@ -409,7 +408,7 @@ async def test_interrupt_finalizes_stream_activity_as_waiting_and_persists():
 
 @pytest.mark.anyio
 async def test_stream_exception_finalizes_failed_activity_without_raw_error():
-    from app import _stream_graph_events
+    from app import _stream_graph_event_drafts
 
     async def failed_events():
         if False:
@@ -418,7 +417,7 @@ async def test_stream_exception_finalizes_failed_activity_without_raw_error():
 
     graph = _graph(failed_events(), activity=True)
     collected = []
-    async for item in _stream_graph_events(
+    async for item in _stream_graph_event_drafts(
         graph,
         {"request_id": "r-failed", "thread_id": "t1"},
         {"configurable": {"thread_id": "t1"}},

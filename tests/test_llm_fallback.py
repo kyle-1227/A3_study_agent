@@ -39,6 +39,7 @@ def _test_manifest(
 # TestInvokeWithFallback — sync core helper (kept for backward compat)
 # ===========================================================================
 
+
 class TestInvokeWithFallback:
     """Unit tests for invoke_with_fallback()."""
 
@@ -185,6 +186,7 @@ class TestInvokeWithFallback:
 # TestAsyncInvokeWithFallback — async core helper
 # ===========================================================================
 
+
 class TestAsyncInvokeWithFallback:
     """Unit tests for async_invoke_with_fallback()."""
 
@@ -254,7 +256,9 @@ class TestAsyncInvokeWithFallback:
         from src.graph import llm as llm_module
         from src.graph.llm import async_invoke_with_fallback
 
-        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        monkeypatch.setattr(
+            llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2
+        )
         primary = MagicMock()
         primary.ainvoke = AsyncMock(
             side_effect=[
@@ -276,7 +280,9 @@ class TestAsyncInvokeWithFallback:
         from src.graph import llm as llm_module
         from src.graph.llm import async_invoke_with_fallback
 
-        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        monkeypatch.setattr(
+            llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2
+        )
         primary = MagicMock()
         primary.ainvoke = AsyncMock(
             side_effect=[
@@ -299,6 +305,7 @@ class TestAsyncInvokeWithFallback:
 # TestProviderTransportRetry - same provider request, no business fallback
 # ===========================================================================
 
+
 class TestProviderTransportRetry:
     """Transport retry should not change model, prompt, schema, or fallback flags."""
 
@@ -307,14 +314,19 @@ class TestProviderTransportRetry:
         from src.graph import llm as llm_module
         from src.graph.llm import invoke_with_provider_transport_retry
 
-        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 2)
-        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_max_retries", lambda node_name=None: 2
+        )
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0
+        )
         monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
 
         calls = 0
         events: list[dict] = []
         token = set_trace_event_sink(events)
         try:
+
             async def operation():
                 nonlocal calls
                 calls += 1
@@ -342,7 +354,9 @@ class TestProviderTransportRetry:
         assert result == "ok"
         assert retry_count == 1
         assert calls == 2
-        retry_events = [event for event in events if event["stage"].startswith("provider_transport")]
+        retry_events = [
+            event for event in events if event["stage"].startswith("provider_transport")
+        ]
         assert [event["stage"] for event in retry_events] == [
             "provider_transport_error",
             "provider_transport_retry_attempt",
@@ -354,7 +368,9 @@ class TestProviderTransportRetry:
         from src.graph import llm as llm_module
         from src.graph.llm import invoke_with_provider_transport_retry
 
-        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 3)
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_max_retries", lambda node_name=None: 3
+        )
         monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
 
         calls = 0
@@ -387,8 +403,12 @@ class TestProviderTransportRetry:
         from src.graph import llm as llm_module
         from src.graph.llm import invoke_with_provider_transport_retry
 
-        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 2)
-        monkeypatch.setattr(llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0)
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_max_retries", lambda node_name=None: 2
+        )
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_delay_seconds", lambda _attempt: 0
+        )
         monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
 
         class Response:
@@ -398,6 +418,7 @@ class TestProviderTransportRetry:
         events: list[dict] = []
         token = set_trace_event_sink(events)
         try:
+
             async def operation():
                 exc = RuntimeError("rate limited")
                 exc.response = Response()
@@ -434,7 +455,9 @@ class TestProviderTransportRetry:
         from src.graph import llm as llm_module
         from src.graph.llm import invoke_with_provider_transport_retry
 
-        monkeypatch.setattr(llm_module, "_provider_transport_max_retries", lambda node_name=None: 2)
+        monkeypatch.setattr(
+            llm_module, "_provider_transport_max_retries", lambda node_name=None: 2
+        )
         monkeypatch.setattr(llm_module.asyncio, "sleep", AsyncMock())
 
         class Response:
@@ -496,7 +519,9 @@ class TestPlainLLMRetry:
         from src.graph import llm as llm_module
         from src.graph.llm import invoke_plain_llm_fail_fast
 
-        monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2)
+        monkeypatch.setattr(
+            llm_module, "get_llm_call_max_retries", lambda node_name=None, default=2: 2
+        )
         mock_llm = MagicMock()
         mock_llm.model_name = "deepseek-v4-pro"
         mock_llm.ainvoke = AsyncMock(
@@ -522,6 +547,7 @@ class TestPlainLLMRetry:
 # ===========================================================================
 # TestGenerateAnswerFallback — academic node
 # ===========================================================================
+
 
 class TestGenerateAnswerFallback:
     """generate_answer must use fail-fast plain invoke, not provider fallback."""
@@ -561,6 +587,7 @@ class TestGenerateAnswerFallback:
 # TestEmotionalResponseFallback — emotional node
 # ===========================================================================
 
+
 class TestEmotionalResponseFallback:
     """emotional_response must use fail-fast plain invoke, not provider fallback."""
 
@@ -568,7 +595,11 @@ class TestEmotionalResponseFallback:
     async def test_propagates_plain_invoke_timeout(self, mock_invoke_plain):
         mock_invoke_plain.side_effect = TimeoutError("primary timed out")
 
-        state = {"messages": [HumanMessage(content="test")]}
+        state = {
+            "messages": [HumanMessage(content="test")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+        }
 
         from src.graph.emotional import emotional_response
 
@@ -579,7 +610,11 @@ class TestEmotionalResponseFallback:
     async def test_returns_plain_response_when_healthy(self, mock_invoke_plain):
         mock_invoke_plain.return_value = "primary comfort"
 
-        state = {"messages": [HumanMessage(content="test")]}
+        state = {
+            "messages": [HumanMessage(content="test")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+        }
 
         from src.graph.emotional import emotional_response
 
@@ -593,12 +628,15 @@ class TestEmotionalResponseFallback:
 # TestFallbackTracing — OTel span attributes on failover
 # ===========================================================================
 
+
 class TestFallbackTracing:
     """Graph plain LLM nodes should not emit fallback span metadata."""
 
     @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_span_does_not_record_fallback_attributes_on_failure(
-        self, mock_invoke_plain, in_memory_exporter,
+        self,
+        mock_invoke_plain,
+        in_memory_exporter,
     ):
         """Plain LLM failure should fail fast without fallback metadata."""
         mock_invoke_plain.side_effect = TimeoutError("timed out")
@@ -627,7 +665,9 @@ class TestFallbackTracing:
 
     @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_span_records_plain_success_without_fallback_metadata(
-        self, mock_invoke_plain, in_memory_exporter,
+        self,
+        mock_invoke_plain,
+        in_memory_exporter,
     ):
         """Plain LLM success should not add fallback metadata."""
         mock_invoke_plain.return_value = "primary ok"

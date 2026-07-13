@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.stream_draft_helpers import draft_payloads
 from src.observability.a3_trace import emit_a3_trace
 
 
@@ -26,8 +26,8 @@ class AsyncIteratorMock:
             raise StopAsyncIteration
 
 
-def _payloads(collected: list[str]) -> list[dict]:
-    return [json.loads(item.removeprefix("data: ").strip()) for item in collected]
+def _payloads(collected) -> list[dict]:
+    return draft_payloads(collected)
 
 
 def _snapshot(values: dict | None = None) -> SimpleNamespace:
@@ -36,7 +36,7 @@ def _snapshot(values: dict | None = None) -> SimpleNamespace:
 
 @pytest.mark.anyio
 async def test_context_usage_sse_uses_canonical_fields_and_updates_state():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -82,7 +82,7 @@ async def test_context_usage_sse_uses_canonical_fields_and_updates_state():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for item in generate_sse("q", graph, thread_id="thread-1"):
+    async for item in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(item)
 
     usage_events = [
@@ -112,7 +112,7 @@ async def test_context_usage_sse_uses_canonical_fields_and_updates_state():
 
 @pytest.mark.anyio
 async def test_context_usage_error_sse_does_not_break_stream():
-    from app import generate_sse
+    from app import generate_stream_drafts
 
     async def events():
         emit_a3_trace(
@@ -143,7 +143,7 @@ async def test_context_usage_error_sse_does_not_break_stream():
     graph.aupdate_state = AsyncMock()
 
     collected = []
-    async for item in generate_sse("q", graph, thread_id="thread-1"):
+    async for item in generate_stream_drafts("q", graph, thread_id="thread-1"):
         collected.append(item)
 
     payloads = _payloads(collected)
@@ -162,4 +162,4 @@ async def test_context_usage_error_sse_does_not_break_stream():
         }
     ]
     assert any(payload.get("type") == "node_event" for payload in payloads)
-    assert payloads[-1] == {"type": "done"}
+    assert not [payload for payload in payloads if payload.get("type") == "stream_done"]

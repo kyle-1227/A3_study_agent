@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-AGENT_STREAM_SCHEMA_VERSION = "agent_stream_v2"
+AGENT_STREAM_SCHEMA_VERSION: Literal["agent_stream_v2"] = "agent_stream_v2"
 
 AgentStreamEventType: TypeAlias = Literal[
     "stream_start",
@@ -25,6 +25,19 @@ AgentStreamEventType: TypeAlias = Literal[
     "stopped",
     "stream_error",
     "stream_done",
+]
+AgentStreamDraftType: TypeAlias = Literal[
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "activity_update",
+    "tool_progress",
+    "artifact_progress",
+    "qa_final",
+    "resource_final",
+    "interrupt",
+    "stopped",
+    "stream_error",
 ]
 AuthoritativeTerminal: TypeAlias = Literal[
     "qa_final",
@@ -54,6 +67,23 @@ class ContentBlockPayloadV1(BaseModel):
     block_type: ContentBlockType
     provisional: bool
     delta: str = Field(default="", max_length=65536)
+    reset: bool = False
+    reason: str = Field(default="", max_length=240)
+
+
+class AgentStreamEventDraftV2(BaseModel):
+    """One native producer event before stream identity and sequencing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: AgentStreamDraftType
+    data: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validate_content_block(self) -> "AgentStreamEventDraftV2":
+        if self.type.startswith("content_block_"):
+            ContentBlockPayloadV1.model_validate(self.data)
+        return self
 
 
 class AgentStreamEventV2(BaseModel):
@@ -145,6 +175,8 @@ class StreamEventSequencer:
 
 __all__ = [
     "AGENT_STREAM_SCHEMA_VERSION",
+    "AgentStreamDraftType",
+    "AgentStreamEventDraftV2",
     "AgentStreamEventType",
     "AgentStreamEventV2",
     "AuthoritativeTerminal",
