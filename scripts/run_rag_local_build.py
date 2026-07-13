@@ -756,7 +756,69 @@ def _validate_new_targets(context: BuildContext) -> None:
         raise FileExistsError("GenerationTargetAlreadyExists")
 
 
-def _render_build_markdown(report: LocalBuildReport) -> str:
+def _read_optional_report_artifact(
+    context: BuildContext,
+    *,
+    filename: str,
+    model_type: type[BaseModel],
+) -> BaseModel | None:
+    """Load one local, strict, content-free report when the stage wrote it.
+
+    A missing artifact is meaningful for a stage that was never reached.  An
+    existing artifact must validate exactly; the human report must not conceal a
+    corrupt or schema-drifted machine report behind a prose approximation.
+    """
+
+    candidate = resolve_project_path(
+        context.root,
+        context.report_directory / filename,
+        must_exist=False,
+    )
+    if not candidate.exists():
+        return None
+    try:
+        path = require_project_file(context.root, candidate)
+        return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LocalBuildError("BuildReportArtifactContractInvalid") from exc
+
+
+def _report_artifact_exists(context: BuildContext, *, filename: str) -> bool:
+    """Check a report path with the same project-containment rules as reads."""
+
+    candidate = resolve_project_path(
+        context.root,
+        context.report_directory / filename,
+        must_exist=False,
+    )
+    return candidate.is_file()
+
+
+def _stage_status(
+    report: LocalBuildReport, stage_name: BuildStage
+) -> StageStatus | None:
+    for stage in report.stages:
+        if stage.stage == stage_name:
+            return stage.status
+    return None
+
+
+def _format_probe_value(value: object) -> str:
+    """Format only typed scalar probe facts for a safe Markdown report."""
+
+    if value is None:
+        return "`not observed`"
+    if isinstance(value, bool):
+        return f"`{str(value).lower()}`"
+    if isinstance(value, float):
+        return f"`{value:.6f}`"
+    return f"`{value}`"
+
+
+def _render_build_markdown(
+    context: BuildContext,
+    report: LocalBuildReport,
+) -> str:
     """Render a content-free, secret-free human report from the strict model."""
 
     lines = [
@@ -781,6 +843,33 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
         lines.append(
             f"- `{stage.stage}`: `{stage.status}` ({stage.duration_ms:.2f} ms){suffix}"
         )
+
+    preflight = _read_optional_report_artifact(
+        context,
+        filename="preflight.json",
+        model_type=PreflightReport,
+    )
+    if preflight is not None:
+        if not isinstance(preflight, PreflightReport):
+            raise LocalBuildError("PreflightReportTypeInvalid")
+        lines.extend(
+            [
+                "",
+                "## Preflight",
+                "",
+                f"- Data root: `{preflight.catalog_data_root}`",
+                f"- Parent-child index root: `{preflight.storage_index_root}`",
+                f"- Registry path: `{preflight.registry_path}`",
+                "- Missing required local modules: "
+                + (
+                    "`none`"
+                    if not preflight.dependencies.missing_modules
+                    else ", ".join(
+                        f"`{item}`" for item in preflight.dependencies.missing_modules
+                    )
+                ),
+            ]
+        )
     if report.catalog is not None:
         lines.extend(["", "## Catalog", ""])
         for item in report.catalog.subjects:
@@ -803,6 +892,90 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
         lines.extend(["", "## Secret presence", ""])
         for entry in report.secrets.entries:
             lines.append(f"- `{entry.name}`: present={str(entry.present).lower()}")
+
+    lines.extend(["", "## Provider probes", ""])
+    if not _report_artifact_exists(context, filename="provider_probe.json"):
+        lines.append(
+            "- Provider probe: `not run` "
+            f"(stage={_stage_status(report, 'provider_probe') or 'not recorded'})"
+        )
+    else:
+        from src.rag.parent_child.provider_probe import ProviderProbeReport
+
+        provider_probe = _read_optional_report_artifact(
+            context,
+            filename="provider_probe.json",
+            model_type=ProviderProbeReport,
+        )
+        if not isinstance(provider_probe, ProviderProbeReport):
+            raise LocalBuildError("ProviderProbeReportTypeInvalid")
+        embedding = provider_probe.embedding
+        reranker = provider_probe.reranker
+        llm = provider_probe.llm
+        lines.extend(
+            [
+                "- Embedding: "
+                f"status=`{embedding.status}`, provider=`{embedding.provider}`, "
+                f"model=`{embedding.model}`, http={_format_probe_value(embedding.http_status)}, "
+                f"dimension={_format_probe_value(embedding.actual_dimension)}, "
+                f"batch_supported={_format_probe_value(embedding.batch_supported)}, "
+                f"input_type_supported={_format_probe_value(embedding.input_type_supported)}, "
+                f"failure={_format_probe_value(embedding.failure_type)}",
+                "- Reranker: "
+                f"status=`{reranker.status}`, provider=`{reranker.provider}`, "
+                f"model=`{reranker.model}`, http={_format_probe_value(reranker.http_status)}, "
+                "complete_unique_indices="
+                f"{_format_probe_value(reranker.returned_indices_complete_unique)}, "
+                f"score_min={_format_probe_value(reranker.score_min)}, "
+                f"score_max={_format_probe_value(reranker.score_max)}, "
+                "relevant_above_irrelevant="
+                f"{_format_probe_value(reranker.relevant_documents_above_irrelevant)}, "
+                f"failure={_format_probe_value(reranker.failure_type)}",
+                "- Chat LLM: "
+                f"status=`{llm.status}`, provider={_format_probe_value(llm.provider)}, "
+                f"model={_format_probe_value(llm.model)}, http={_format_probe_value(llm.http_status)}, "
+                f"real_text_returned={_format_probe_value(llm.real_text_returned)}, "
+                f"failure={_format_probe_value(llm.failure_type)}",
+            ]
+        )
+
+    lines.extend(["", "## Real chunk dry run", ""])
+    if not _report_artifact_exists(context, filename="chunk_stats.json"):
+        lines.append(
+            "- Chunk dry run: `not run` "
+            f"(stage={_stage_status(report, 'chunk_dry_run') or 'not recorded'})"
+        )
+    else:
+        from src.rag.parent_child.build_audit import ChunkStatsReport
+
+        chunk_stats = _read_optional_report_artifact(
+            context,
+            filename="chunk_stats.json",
+            model_type=ChunkStatsReport,
+        )
+        if not isinstance(chunk_stats, ChunkStatsReport):
+            raise LocalBuildError("ChunkStatsReportTypeInvalid")
+        for subject in chunk_stats.subjects:
+            lines.append(
+                f"- `{subject.subject}`: {subject.source_count} sources, "
+                f"{subject.parent_count} parents, {subject.child_count} children"
+            )
+        lines.extend(
+            [
+                f"- Planned child embedding count: `{chunk_stats.total_children}`",
+                f"- Estimated embedding batches: `{chunk_stats.estimated_embedding_batch_count}` "
+                f"(configured batch size `{chunk_stats.embedding_batch_size}`)",
+                f"- Empty content: `{chunk_stats.empty_content_count}`",
+                f"- Orphan children: `{chunk_stats.orphan_child_count}`",
+                "- Over-hard-max parents/children: "
+                f"`{chunk_stats.parent_over_hard_max_count}`/"
+                f"`{chunk_stats.child_over_hard_max_count}`",
+                "- Protected atomic blocks/violations: "
+                f"`{chunk_stats.protected_atomic_block_count}`/"
+                f"`{chunk_stats.protected_atomic_block_violation_count}`",
+                f"- Loader failures: `{chunk_stats.loader_failure_count}`",
+            ]
+        )
     if report.flat_baseline is not None:
         flat = report.flat_baseline
         lines.extend(
@@ -814,6 +987,15 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
                 f"- Manifest: `{flat.manifest_path}`",
                 f"- Collection: `{flat.collection_name}`",
                 f"- Count: `{flat.chunk_count}`",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Flat baseline",
+                "",
+                "- Not built; no local Chroma count, manifest, or vector validation exists for this run.",
             ]
         )
     if report.generation is not None:
@@ -830,6 +1012,27 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
                 f"- Hydration failures: `{generation.hydration_failure_count}`",
             ]
         )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Parent-child generation",
+                "",
+                "- Not built; no registry row, READY state, Parent Store, BM25 artifact, or generation Chroma validation exists for this run.",
+                "- Candidate active: `false` (no candidate was created or routed).",
+            ]
+        )
+
+    smoke = _read_optional_report_artifact(
+        context,
+        filename="smoke_retrieval.json",
+        model_type=SmokeRetrievalArtifact,
+    )
+    grounded = _read_optional_report_artifact(
+        context,
+        filename="llm_grounded_smoke.json",
+        model_type=GroundedSmokeArtifact,
+    )
     lines.extend(
         [
             "",
@@ -839,6 +1042,39 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
             f"- Grounded LLM: `{report.grounded_smoke_path}`",
         ]
     )
+    if smoke is not None:
+        if not isinstance(smoke, SmokeRetrievalArtifact):
+            raise LocalBuildError("SmokeRetrievalArtifactTypeInvalid")
+        flat_hits = sum(len(item.flat_baseline.hits) for item in smoke.records)
+        candidate_hits = sum(
+            len(item.parent_child_candidate.hits) for item in smoke.records
+        )
+        hydrated = sum(
+            item.parent_child_candidate.parent_hydration_success_count
+            for item in smoke.records
+        )
+        lines.append(
+            "- Retrieval outcome: "
+            f"status=`{smoke.status}`, records=`{len(smoke.records)}`, "
+            f"flat_hits=`{flat_hits}`, candidate_hits=`{candidate_hits}`, "
+            f"candidate_hydrations=`{hydrated}`, reason={_format_probe_value(smoke.reason)}"
+        )
+    if grounded is not None:
+        if not isinstance(grounded, GroundedSmokeArtifact):
+            raise LocalBuildError("GroundedSmokeArtifactTypeInvalid")
+        answer_supported = sum(item.answer_supported for item in grounded.records)
+        citation_supported = sum(item.citation_supported for item in grounded.records)
+        hallucination_suspected = sum(
+            item.hallucination_suspected for item in grounded.records
+        )
+        lines.append(
+            "- Grounded LLM outcome: "
+            f"status=`{grounded.status}`, records=`{len(grounded.records)}`, "
+            f"answer_supported=`{answer_supported}`, "
+            f"citation_supported=`{citation_supported}`, "
+            f"hallucination_suspected=`{hallucination_suspected}`, "
+            f"reason={_format_probe_value(grounded.reason)}"
+        )
     if report.failure is not None:
         lines.extend(
             [
@@ -849,6 +1085,17 @@ def _render_build_markdown(report: LocalBuildReport) -> str:
                 f"- Type: `{report.failure.error_type}`",
             ]
         )
+    lines.extend(
+        [
+            "",
+            "## Activation decision",
+            "",
+            "- Evaluation eligible: "
+            f"`{str(report.readiness.evaluation_eligible).lower() if report.readiness is not None else 'not evaluated'}`",
+            "- Activation allowed: `false`",
+            "- This tool never activates, shadows, rolls back, or changes an active generation.",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -858,7 +1105,7 @@ def _write_final_report(context: BuildContext, report: LocalBuildReport) -> None
     atomic_write_project_bytes(
         context.root,
         Path(_relative(context.root, markdown_path)),
-        _render_build_markdown(report).encode("utf-8"),
+        _render_build_markdown(context, report).encode("utf-8"),
         overwrite=True,
     )
 

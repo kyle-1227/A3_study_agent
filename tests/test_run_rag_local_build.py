@@ -201,3 +201,84 @@ def test_dependency_preflight_fails_without_selecting_an_alternative(
     assert report.missing_modules == ("chromadb",)
     with pytest.raises(local_build.LocalBuildError, match="Dependency"):
         local_build._require_build_dependencies(report)
+
+
+def test_markdown_report_marks_unreached_build_artifacts_as_not_run(
+    tmp_path: Path,
+) -> None:
+    """A failed provider stage must not be described as a completed local build."""
+
+    report_directory = tmp_path / "reports" / "rag_build" / "rag_test_run"
+    report_directory.mkdir(parents=True)
+    context = SimpleNamespace(root=tmp_path, report_directory=report_directory)
+    local_build._write_model(
+        tmp_path,
+        report_directory / "smoke_retrieval.json",
+        local_build.SmokeRetrievalArtifact(
+            schema_version="rag_smoke_retrieval_v1",
+            status="not_run",
+            reason="provider_probe_failed",
+            generation_id=None,
+            records=(),
+        ),
+    )
+    local_build._write_model(
+        tmp_path,
+        report_directory / "llm_grounded_smoke.json",
+        local_build.GroundedSmokeArtifact(
+            schema_version="rag_llm_grounded_smoke_v1",
+            status="not_run",
+            reason="provider_probe_failed",
+            records=(),
+            private_output_written=False,
+        ),
+    )
+    report = local_build.LocalBuildReport(
+        schema_version="rag_local_build_report_v1",
+        run_id="rag_test_run",
+        mode="execute",
+        status="failed",
+        requested_code_revision="a" * 40,
+        head_code_revision="a" * 40,
+        revision_matches_head=True,
+        runtime_config_path="config/rag/index.runtime.yaml",
+        gold_dataset_path="data/evaluation/gold_dataset_v2.json",
+        catalog=None,
+        readiness=None,
+        secrets=None,
+        flat_baseline=None,
+        generation=None,
+        smoke_retrieval_path="reports/rag_build/rag_test_run/smoke_retrieval.json",
+        grounded_smoke_path="reports/rag_build/rag_test_run/llm_grounded_smoke.json",
+        stages=(
+            local_build.StageRecord(
+                stage="provider_probe",
+                status="failed",
+                duration_ms=1.0,
+                failure_type="ProviderProbeFailed",
+            ),
+            local_build.StageRecord(
+                stage="chunk_dry_run",
+                status="not_run",
+                duration_ms=0.0,
+                failure_type=None,
+            ),
+        ),
+        failure=local_build.FailureSummary(
+            stage="provider_probe", error_type="ProviderProbeFailed"
+        ),
+        experimental_only=True,
+        activation_prohibited=True,
+    )
+
+    markdown = local_build._render_build_markdown(context, report)
+
+    assert "Provider probe: `not run` (stage=failed)" in markdown
+    assert "Chunk dry run: `not run` (stage=not_run)" in markdown
+    assert "## Flat baseline" in markdown
+    assert "no local Chroma count" in markdown
+    assert "## Parent-child generation" in markdown
+    assert "no registry row, READY state" in markdown
+    assert "Retrieval outcome: status=`not_run`" in markdown
+    assert "Grounded LLM outcome: status=`not_run`" in markdown
+    assert "Activation allowed: `false`" in markdown
