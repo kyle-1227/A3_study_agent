@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -14,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from src.tools.document_tool import _safe_filename_stem
+from src.tools.video_animation_contracts import (
+    VideoAnimationSpecV1,
+    validate_video_animation_spec,
+)
 
 DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parents[2] / "artifacts"
 DEFAULT_VIDEO_ANIMATION_ARTIFACT_DIR = DEFAULT_ARTIFACT_ROOT / "video-animations"
@@ -43,61 +46,44 @@ def get_video_animation_artifact_dir() -> Path:
     return root.resolve()
 
 
-def create_video_animation_artifact(
-    animation_spec: dict,
-    title: str,
-    srt_text: str | None = None,
-    fps: int = 12,
-    width: int = 1280,
-    height: int = 720,
-    max_duration_seconds: int = 90,
-    render_mode: str = "production",
-) -> dict:
-    """Synchronous compatibility wrapper for non-async scripts."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(
-            create_video_animation_artifact_async(
-                animation_spec=animation_spec,
-                title=title,
-                srt_text=srt_text,
-                fps=fps,
-                width=width,
-                height=height,
-                max_duration_seconds=max_duration_seconds,
-                render_mode=render_mode,
-            )
-        )
-    raise RuntimeError(
-        "create_video_animation_artifact cannot run inside an active asyncio loop; "
-        "await create_video_animation_artifact_async instead."
-    )
-
-
 async def create_video_animation_artifact_async(
     animation_spec: dict,
     title: str,
-    srt_text: str | None = None,
-    fps: int = 12,
-    width: int = 1280,
-    height: int = 720,
-    max_duration_seconds: int = 90,
-    render_mode: str = "production",
+    srt_text: str | None,
+    fps: int,
+    width: int,
+    height: int,
+    max_duration_seconds: int,
+    render_mode: str,
 ) -> dict:
     """Create HTML/JSON/SRT artifacts and render an MP4 when local tools exist."""
-    normalized_render_mode = (
-        "test" if str(render_mode).strip().lower() == "test" else "production"
-    )
+    validated_spec = VideoAnimationSpecV1.model_validate(animation_spec)
+    business_error = validate_video_animation_spec(validated_spec)
+    if business_error:
+        raise ValueError(business_error)
+    canonical_spec = validated_spec.model_dump(mode="json")
+    safe_title = str(title or "").strip()
+    if safe_title != validated_spec.title:
+        raise ValueError("video animation title must equal the validated spec title")
+    normalized_render_mode = str(render_mode).strip().lower()
+    if normalized_render_mode not in {"production", "test"}:
+        raise ValueError("render_mode must be production or test")
     normalized_fps = (
         TEST_RENDER_FPS if normalized_render_mode == "test" else PRODUCTION_RENDER_FPS
     )
+    if fps != normalized_fps:
+        raise ValueError(
+            f"fps must equal {normalized_fps} for {normalized_render_mode}"
+        )
+    if width != 1280 or height != 720:
+        raise ValueError("video animation resolution must equal 1280x720")
+    if max_duration_seconds != 90:
+        raise ValueError(
+            "max_duration_seconds must equal 90 for video_animation_spec_v1"
+        )
     normalized_width = 1280
     normalized_height = 720
-    max_duration = _clamp_int(max_duration_seconds, default=90, minimum=1, maximum=600)
-    safe_title = str(title or "").strip() or str(
-        (animation_spec or {}).get("title") or "teaching-animation"
-    )
+    max_duration = max_duration_seconds
     filename_stem = _safe_filename_stem(safe_title, default="teaching-animation")
 
     artifact_id = uuid.uuid4().hex
@@ -117,7 +103,7 @@ async def create_video_animation_artifact_async(
     mp4_path = _safe_child_file(artifact_dir, mp4_filename)
 
     normalized_spec = _normalize_animation_spec(
-        animation_spec=animation_spec or {},
+        animation_spec=canonical_spec,
         title=safe_title,
         fps=normalized_fps,
         width=normalized_width,
@@ -148,7 +134,7 @@ async def create_video_animation_artifact_async(
     is_preview_video = normalized_render_mode == "test"
     video_valid_for_teaching = (
         normalized_render_mode == "production"
-        and render_duration_seconds >= PRODUCTION_RENDER_SECONDS
+        and render_duration_seconds == full_duration_seconds
     )
     render_result = await render_html_animation_to_mp4_async(
         html_path=html_path,
@@ -238,16 +224,12 @@ def _normalize_animation_spec(
     height: int,
     max_duration_seconds: int,
 ) -> dict:
-    raw_scenes = (
-        animation_spec.get("scenes") if isinstance(animation_spec, dict) else []
-    )
-    scenes = [
-        _normalize_scene(item, index)
-        for index, item in enumerate(raw_scenes or [])
-        if isinstance(item, dict)
-    ]
-    if not scenes:
-        scenes = _fallback_scenes(animation_spec, title)
+    raw_scenes = animation_spec.get("scenes")
+    if not isinstance(raw_scenes, list) or not 5 <= len(raw_scenes) <= 8:
+        raise ValueError("validated animation spec must contain 5-8 scenes")
+    if any(not isinstance(item, dict) for item in raw_scenes):
+        raise ValueError("every validated animation scene must be an object")
+    scenes = [_normalize_scene(item, index) for index, item in enumerate(raw_scenes)]
 
     requested_duration = _float_or_none(animation_spec.get("duration_seconds"))
     has_explicit_timing = any(
@@ -276,7 +258,7 @@ def _normalize_animation_spec(
             else cursor
         )
         if start >= max_duration_seconds:
-            break
+            raise ValueError("scene start exceeds max_duration_seconds")
         if requested_end is not None and requested_end > start:
             duration = requested_end - start
         else:
@@ -290,11 +272,8 @@ def _normalize_animation_spec(
         normalized_scenes.append(normalized)
         cursor = start + duration
 
-    if not normalized_scenes:
-        normalized_scenes = _fallback_scenes(animation_spec, title)[:1]
-        normalized_scenes[0]["start"] = 0.0
-        normalized_scenes[0]["end"] = float(min(max_duration_seconds, 8))
-        normalized_scenes[0]["duration_seconds"] = normalized_scenes[0]["end"]
+    if len(normalized_scenes) != len(scenes):
+        raise ValueError("renderer normalization dropped validated animation scenes")
 
     last_scene_end = max(float(scene.get("end") or 0.0) for scene in normalized_scenes)
     duration_seconds = (
@@ -463,42 +442,6 @@ def _safe_css_color(value: str) -> str:
 def _safe_css_font(value: str) -> str:
     cleaned = "".join(ch for ch in value if ch not in "{};<>")
     return cleaned.strip()[:160] or "Microsoft YaHei, Arial, sans-serif"
-
-
-def _fallback_scenes(animation_spec: dict, title: str) -> list[dict]:
-    topic = str(animation_spec.get("topic") or animation_spec.get("subject") or title)
-    concepts = animation_spec.get("concepts") or animation_spec.get("keypoints") or []
-    if not isinstance(concepts, list):
-        concepts = [str(concepts)]
-    concepts = [str(item).strip() for item in concepts if str(item).strip()]
-    if not concepts:
-        concepts = ["core idea", "visual example", "summary"]
-    return [
-        {
-            "title": f"{topic}: overview",
-            "narration": f"Introduce {topic} with a simple visual overview.",
-            "visual": "Title card with topic keywords and a moving focus marker.",
-            "bullets": concepts[:3],
-            "duration_seconds": 8.0,
-            "accent": "#2f6f4e",
-        },
-        {
-            "title": "Key concept animation",
-            "narration": "Break the concept into parts and show how they connect.",
-            "visual": "Cards move into a connected diagram.",
-            "bullets": concepts[:5],
-            "duration_seconds": 10.0,
-            "accent": "#2767a8",
-        },
-        {
-            "title": "Practice and recap",
-            "narration": "End with a quick recap and one self-check question.",
-            "visual": "Checklist appears with progress animation.",
-            "bullets": ["recap", "self-check", "next step"],
-            "duration_seconds": 8.0,
-            "accent": "#8a5a20",
-        },
-    ]
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -852,14 +795,13 @@ def _build_srt(scenes: list[dict], srt_text: str | None) -> str:
         end = _format_srt_time(
             float(scene.get("end") or scene.get("duration_seconds") or 1.0)
         )
-        text = str(
-            scene.get("narration") or scene.get("title") or "Please view the animation."
-        ).strip()
+        text = str(scene.get("narration") or "").strip()
+        if not text:
+            raise ValueError(f"scene {index} narration is required for SRT generation")
         blocks.append(f"{index}\n{start} --> {end}\n{text}")
-    return (
-        "\n\n".join(blocks)
-        or "1\n00:00:00,000 --> 00:00:05,000\nPlease view the animation HTML."
-    )
+    if not blocks:
+        raise ValueError("validated animation scenes are required for SRT generation")
+    return "\n\n".join(blocks)
 
 
 def _format_srt_time(seconds: float) -> str:

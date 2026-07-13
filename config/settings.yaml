@@ -904,6 +904,11 @@ context_engineering:
     - title: resource_quality
       content: "Generated learning resources must stay grounded in available evidence, explicit requirements, and reviewer rubrics."
 
+video_animation:
+  render_mode: production
+  max_duration_seconds: 90
+  max_generation_rounds: 2
+
 web_search:
   provider: tavily                       # Web Research executor provider
   timeout_seconds: 120                   # Timeout per web research task
@@ -1135,6 +1140,16 @@ llm:
     max_tokens: 4096
     thinking: disabled
     streaming: false
+  video_animation:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.2
+    max_tokens: 4096
+    thinking: disabled
+    streaming: false
   study_plan:
     provider: deepseek_official
     model: "deepseek-v4-pro"
@@ -1317,6 +1332,21 @@ llm_outputs:
     max_retries: 2
     max_raw_chars: 12000
   video_script_reviewer:
+    output_mode: deepseek_tool_call_strict
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 12000
+  video_animation_planner:
+    output_mode: deepseek_tool_call_strict
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 16000
+  video_animation_agent:
+    output_mode: deepseek_tool_call_strict
+    failure_policy: block
+    max_retries: 2
+    max_raw_chars: 16000
+  video_animation_reviewer:
     output_mode: deepseek_tool_call_strict
     failure_policy: block
     max_retries: 2

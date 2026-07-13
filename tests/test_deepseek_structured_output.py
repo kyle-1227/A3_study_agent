@@ -765,6 +765,7 @@ class TestDeepSeekConfigScope:
         "review_doc",
         "code_practice",
         "video_script",
+        "video_animation",
         "study_plan",
         "profile_extractor",
     )
@@ -788,6 +789,9 @@ class TestDeepSeekConfigScope:
         "review_doc_reviewer": "review_doc",
         "code_practice_reviewer": "code_practice",
         "video_script_reviewer": "video_script",
+        "video_animation_planner": "video_animation",
+        "video_animation_agent": "video_animation",
+        "video_animation_reviewer": "video_animation",
         "profile_extractor": "profile_extractor",
     }
     STRICT_LLM_NODES = tuple(sorted(set(STRUCTURED_NODE_TO_LLM_NODE.values())))

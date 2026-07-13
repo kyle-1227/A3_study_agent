@@ -269,7 +269,18 @@ def _video_animation_validator(
         filename_field="mp4_filename",
         allowed_suffixes=frozenset({".mp4"}),
     )
-    if artifact.get("render_success") is True and verified_mp4:
+    full_duration = int(artifact.get("full_duration_seconds") or 0)
+    render_duration = int(artifact.get("render_duration_seconds") or 0)
+    formal_full_video = bool(
+        artifact.get("render_success") is True
+        and verified_mp4
+        and artifact.get("render_mode") == "production"
+        and artifact.get("is_preview_video") is False
+        and artifact.get("video_valid_for_teaching") is True
+        and full_duration > 0
+        and render_duration == full_duration
+    )
+    if formal_full_video:
         return _validation_model(
             "video_animation",
             terminal_status="success",
@@ -277,7 +288,7 @@ def _video_animation_validator(
             references=references,
         )
     preview_inline = 1 if _nonempty_text(state.get("video_animation_html")) else 0
-    preview_references = max(references.downloadable_count - int(verified_mp4), 0)
+    preview_references = references.downloadable_count
     if preview_inline or preview_references:
         return _validation_model(
             "video_animation",

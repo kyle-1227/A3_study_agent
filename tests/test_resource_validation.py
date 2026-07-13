@@ -263,7 +263,19 @@ def test_video_animation_has_three_terminal_levels(
     )
 
     success = validate_renderable_resource_result(
-        "video_animation", {"title": "Lesson", "render_success": True, **mp4}, [], {}
+        "video_animation",
+        {
+            "title": "Lesson",
+            "render_success": True,
+            "render_mode": "production",
+            "is_preview_video": False,
+            "video_valid_for_teaching": True,
+            "full_duration_seconds": 30,
+            "render_duration_seconds": 30,
+            **mp4,
+        },
+        [],
+        {},
     )
     partial = validate_renderable_resource_result(
         "video_animation", {"title": "Lesson", "render_success": False, **html}, [], {}
@@ -275,3 +287,50 @@ def test_video_animation_has_three_terminal_levels(
     assert success.terminal_status == "success"
     assert partial.terminal_status == "partial_success"
     assert failed.terminal_status == "failed"
+
+
+def test_video_animation_preview_and_truncated_mp4_are_only_partial(
+    artifact_roots: dict[str, Path],
+):
+    root = artifact_roots["video_animation"]
+    mp4 = _local_artifact(
+        root,
+        artifact_id="video-preview",
+        filename="lesson.mp4",
+        url_field="mp4_url",
+        filename_field="mp4_filename",
+    )
+
+    preview = validate_renderable_resource_result(
+        "video_animation",
+        {
+            "title": "Lesson",
+            "render_success": True,
+            "render_mode": "test",
+            "is_preview_video": True,
+            "video_valid_for_teaching": False,
+            "full_duration_seconds": 30,
+            "render_duration_seconds": 5,
+            **mp4,
+        },
+        [],
+        {},
+    )
+    truncated = validate_renderable_resource_result(
+        "video_animation",
+        {
+            "title": "Lesson",
+            "render_success": True,
+            "render_mode": "production",
+            "is_preview_video": False,
+            "video_valid_for_teaching": False,
+            "full_duration_seconds": 60,
+            "render_duration_seconds": 30,
+            **mp4,
+        },
+        [],
+        {},
+    )
+
+    assert preview.terminal_status == "partial_success"
+    assert truncated.terminal_status == "partial_success"
