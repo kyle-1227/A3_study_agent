@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--probe-llm", action="store_true")
     parser.add_argument("--llm-provider")
+    parser.add_argument("--llm-protocol")
     parser.add_argument("--llm-model")
     parser.add_argument("--llm-base-url")
     parser.add_argument("--llm-endpoint-path")
@@ -41,6 +42,7 @@ def _llm_config_from_args(args: argparse.Namespace) -> LlmProbeConfig | None:
 
     values = (
         args.llm_provider,
+        args.llm_protocol,
         args.llm_model,
         args.llm_base_url,
         args.llm_endpoint_path,
@@ -56,6 +58,7 @@ def _llm_config_from_args(args: argparse.Namespace) -> LlmProbeConfig | None:
     try:
         return LlmProbeConfig(
             provider=args.llm_provider,
+            protocol=args.llm_protocol,
             model=args.llm_model,
             base_url=args.llm_base_url,
             endpoint_path=args.llm_endpoint_path,

@@ -61,6 +61,7 @@ python scripts/run_rag_local_build.py `
   --code-revision <current-git-sha> `
   --run-id <unique-run-id> `
   --llm-provider <provider> `
+  --llm-protocol <explicit-chat-protocol> `
   --llm-model <model> `
   --llm-base-url <https-base-url> `
   --llm-endpoint-path <endpoint-path> `

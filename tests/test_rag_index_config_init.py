@@ -154,6 +154,8 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "openai_embeddings_v1",
         "--embedding-model",
         "test_embedding_model",
+        "--embedding-response-model",
+        "test_embedding_model",
         "--embedding-base-url",
         "https://embedding.invalid/v1",
         "--embedding-endpoint-path",
@@ -187,6 +189,8 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "test_reranker_provider",
         "--reranker-model",
         "test_reranker_model",
+        "--reranker-response-model",
+        "test_reranker_model",
         "--reranker-base-url",
         "https://reranker.invalid/v1",
         "--reranker-endpoint-path",
@@ -206,7 +210,7 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "--reranker-batch-size",
         "20",
         "--reranker-protocol",
-        "rerank_v1",
+        "ranked_index_scores_v1",
         "--reranker-score-min",
         "0.0",
         "--reranker-score-max",
@@ -287,6 +291,22 @@ def test_init_generates_stable_strict_config_without_reading_api_keys(
     assert output.read_bytes() == first
     with pytest.raises(FileExistsError):
         main(arguments)
+
+
+def test_init_accepts_explicit_openrouter_embedding_protocol(
+    tmp_path: Path,
+) -> None:
+    project_root, policy_path = _project(tmp_path)
+    arguments = _arguments(project_root, policy_path)
+    arguments[arguments.index("--embedding-provider") + 1] = "openrouter"
+    arguments[arguments.index("--embedding-protocol") + 1] = "openrouter_embeddings_v1"
+
+    assert main(arguments) == 0
+
+    config = load_rag_index_config(project_root / "config" / "rag" / "index.local.yaml")
+    assert config.embedding.provider == "openrouter"
+    assert config.embedding.protocol == "openrouter_embeddings_v1"
+    assert config.embedding.input_type_field is None
 
 
 def test_init_assigns_distinct_explicit_policies_to_catalog_subjects(

@@ -101,13 +101,14 @@ embedding:
   distance_metric: cosine
   document_input_type: document
   endpoint_path: /embeddings
-  expected_dimension: 1024
-  input_type_field: input_type
+  expected_dimension: 2048
+  input_type_field: null
   model: nvidia/llama-nemotron-embed-vl-1b-v2:free
   normalization_contract: provider_output_as_is_v1
-  protocol: openai_embeddings_v1
+  protocol: openrouter_embeddings_v1
   provider: openrouter
   query_input_type: query
+  response_model: private/openrouter/nvidia/llama-nemotron-embed-vl-1b-v2
   retry:
     initial_backoff_seconds: 0.5
     max_attempts: 3
@@ -120,8 +121,9 @@ reranker:
   batch_size: 40
   endpoint_path: /rerank
   model: nvidia/llama-nemotron-rerank-vl-1b-v2:free
-  protocol: ranked_index_scores_v1
+  protocol: openrouter_ranked_index_scores_v1
   provider: openrouter
+  response_model: nvidia/llama-nemotron-rerank-vl-1b-v2
   retry:
     initial_backoff_seconds: 0.5
     max_attempts: 3

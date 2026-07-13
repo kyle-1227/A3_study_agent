@@ -329,6 +329,7 @@ class BuildInputs:
     run_id: str
     private_smoke_output: Path | None
     llm_provider: str | None
+    llm_protocol: str | None
     llm_model: str | None
     llm_base_url: str | None
     llm_endpoint_path: str | None
@@ -370,6 +371,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id")
     parser.add_argument("--private-smoke-output", type=Path)
     parser.add_argument("--llm-provider")
+    parser.add_argument("--llm-protocol")
     parser.add_argument("--llm-model")
     parser.add_argument("--llm-base-url")
     parser.add_argument("--llm-endpoint-path")
@@ -419,6 +421,7 @@ def _build_inputs(args: argparse.Namespace) -> BuildInputs:
         run_id=run_id,
         private_smoke_output=args.private_smoke_output,
         llm_provider=args.llm_provider,
+        llm_protocol=args.llm_protocol,
         llm_model=args.llm_model,
         llm_base_url=args.llm_base_url,
         llm_endpoint_path=args.llm_endpoint_path,
@@ -1249,6 +1252,7 @@ def _llm_probe_config(context: BuildContext) -> LlmProbeConfig | None:
     inputs = context.inputs
     values = (
         inputs.llm_provider,
+        inputs.llm_protocol,
         inputs.llm_model,
         inputs.llm_base_url,
         inputs.llm_endpoint_path,
@@ -1258,6 +1262,7 @@ def _llm_probe_config(context: BuildContext) -> LlmProbeConfig | None:
     if any(value is None for value in values):
         return None
     assert inputs.llm_provider is not None
+    assert inputs.llm_protocol is not None
     assert inputs.llm_model is not None
     assert inputs.llm_base_url is not None
     assert inputs.llm_endpoint_path is not None
@@ -1265,6 +1270,7 @@ def _llm_probe_config(context: BuildContext) -> LlmProbeConfig | None:
     assert inputs.llm_timeout_seconds is not None
     return LlmProbeConfig(
         provider=inputs.llm_provider,
+        protocol=inputs.llm_protocol,
         model=inputs.llm_model,
         base_url=inputs.llm_base_url,
         endpoint_path=inputs.llm_endpoint_path,

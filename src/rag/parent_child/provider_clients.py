@@ -58,6 +58,35 @@ class _EmbeddingResponse(_StrictResponse):
     usage: _EmbeddingUsage
 
 
+class _OpenRouterEmbeddingCostDetails(_StrictResponse):
+    """Observed OpenRouter embedding usage detail contract as of this protocol."""
+
+    upstream_inference_completions_cost: int | float
+    upstream_inference_cost: int | float
+    upstream_inference_prompt_cost: int | float
+
+
+class _OpenRouterEmbeddingUsage(_StrictResponse):
+    """Strict OpenRouter-specific embedding usage metadata."""
+
+    prompt_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    cost: int | float
+    cost_details: _OpenRouterEmbeddingCostDetails
+    is_byok: bool
+
+
+class _OpenRouterEmbeddingResponse(_StrictResponse):
+    """Observed OpenRouter embedding response with declared metadata fields."""
+
+    id: str = Field(min_length=1)
+    object: Literal["list"]
+    model: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    data: list[_EmbeddingData]
+    usage: _OpenRouterEmbeddingUsage
+
+
 class _RerankerResult(_StrictResponse):
     index: int = Field(ge=0)
     relevance_score: float = Field(ge=0.0, le=1.0)
@@ -65,6 +94,37 @@ class _RerankerResult(_StrictResponse):
 
 class _RerankerResponse(_StrictResponse):
     results: list[_RerankerResult]
+
+
+class _OpenRouterRerankerDocument(_StrictResponse):
+    """OpenRouter's returned reranked document echo."""
+
+    text: str = Field(min_length=1)
+
+
+class _OpenRouterRerankerResult(_StrictResponse):
+    """OpenRouter's strictly declared rerank result row."""
+
+    index: int = Field(ge=0)
+    relevance_score: float = Field(ge=0.0, le=1.0)
+    document: _OpenRouterRerankerDocument
+
+
+class _OpenRouterRerankerUsage(_StrictResponse):
+    """Strict OpenRouter reranker usage metadata."""
+
+    cost: int | float
+    total_tokens: int = Field(ge=0)
+
+
+class _OpenRouterRerankerResponse(_StrictResponse):
+    """OpenRouter rerank envelope observed through a real provider probe."""
+
+    id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    results: list[_OpenRouterRerankerResult]
+    usage: _OpenRouterRerankerUsage
 
 
 class _StrictJsonHttpClient:
@@ -153,7 +213,10 @@ class StrictEmbeddingClient:
         transport: httpx.BaseTransport | None,
         sleep: Callable[[float], None],
     ) -> None:
-        if config.protocol != "openai_embeddings_v1":
+        if config.protocol not in {
+            "openai_embeddings_v1",
+            "openrouter_embeddings_v1",
+        }:
             raise ValueError("unsupported embedding protocol")
         self._config = config
         self._http = _StrictJsonHttpClient(
@@ -205,12 +268,17 @@ class StrictEmbeddingClient:
             payload[self._config.input_type_field] = input_type
         raw = self._http.post_json(payload)
         try:
-            response = _EmbeddingResponse.model_validate(raw)
+            if self._config.protocol == "openai_embeddings_v1":
+                response = _EmbeddingResponse.model_validate(raw)
+            elif self._config.protocol == "openrouter_embeddings_v1":
+                response = _OpenRouterEmbeddingResponse.model_validate(raw)
+            else:
+                raise AssertionError("EmbeddingConfig must validate protocol")
         except ValidationError as exc:
             raise ProviderProtocolError(
                 "embedding response failed strict schema validation"
             ) from exc
-        if response.model != self._config.model:
+        if response.model != self._config.response_model:
             raise ProviderProtocolError("embedding response model identity mismatch")
         if len(response.data) != len(texts):
             raise ProviderProtocolError("embedding response cardinality mismatch")
@@ -250,7 +318,10 @@ class StrictRerankerClient:
         transport: httpx.BaseTransport | None,
         sleep: Callable[[float], None],
     ) -> None:
-        if config.protocol != "ranked_index_scores_v1":
+        if config.protocol not in {
+            "ranked_index_scores_v1",
+            "openrouter_ranked_index_scores_v1",
+        }:
             raise ValueError("unsupported reranker protocol")
         self._config = config
         self._http = _StrictJsonHttpClient(
@@ -313,7 +384,16 @@ class StrictRerankerClient:
             }
         )
         try:
-            response = _RerankerResponse.model_validate(raw)
+            if self._config.protocol == "ranked_index_scores_v1":
+                response = _RerankerResponse.model_validate(raw)
+            elif self._config.protocol == "openrouter_ranked_index_scores_v1":
+                response = _OpenRouterRerankerResponse.model_validate(raw)
+                if response.model != self._config.response_model:
+                    raise ProviderProtocolError(
+                        "reranker response model identity mismatch"
+                    )
+            else:
+                raise AssertionError("RerankerConfig must validate protocol")
         except ValidationError as exc:
             raise ProviderProtocolError(
                 "reranker response failed strict schema validation"

@@ -275,10 +275,11 @@ def _parser() -> argparse.ArgumentParser:
     embedding.add_argument("--embedding-provider", required=True)
     embedding.add_argument(
         "--embedding-protocol",
-        choices=("openai_embeddings_v1",),
+        choices=("openai_embeddings_v1", "openrouter_embeddings_v1"),
         required=True,
     )
     embedding.add_argument("--embedding-model", required=True)
+    embedding.add_argument("--embedding-response-model", required=True)
     embedding.add_argument("--embedding-base-url", required=True)
     embedding.add_argument("--embedding-endpoint-path", required=True)
     embedding.add_argument("--embedding-api-key-env", required=True)
@@ -317,6 +318,7 @@ def _parser() -> argparse.ArgumentParser:
     reranker = parser.add_argument_group("reranker")
     reranker.add_argument("--reranker-provider", required=True)
     reranker.add_argument("--reranker-model", required=True)
+    reranker.add_argument("--reranker-response-model", required=True)
     reranker.add_argument("--reranker-base-url", required=True)
     reranker.add_argument("--reranker-endpoint-path", required=True)
     reranker.add_argument("--reranker-api-key-env", required=True)
@@ -334,7 +336,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     reranker.add_argument("--reranker-retry-multiplier", type=float, required=True)
     reranker.add_argument("--reranker-batch-size", type=int, required=True)
-    reranker.add_argument("--reranker-protocol", required=True)
+    reranker.add_argument(
+        "--reranker-protocol",
+        choices=(
+            "ranked_index_scores_v1",
+            "openrouter_ranked_index_scores_v1",
+        ),
+        required=True,
+    )
     reranker.add_argument("--reranker-score-min", type=float, required=True)
     reranker.add_argument("--reranker-score-max", type=float, required=True)
 
@@ -439,6 +448,7 @@ def _embedding_from_args(args: argparse.Namespace) -> EmbeddingConfig:
         provider=args.embedding_provider,
         protocol=args.embedding_protocol,
         model=args.embedding_model,
+        response_model=args.embedding_response_model,
         base_url=args.embedding_base_url,
         endpoint_path=args.embedding_endpoint_path,
         api_key_env=args.embedding_api_key_env,
@@ -458,6 +468,7 @@ def _reranker_from_args(args: argparse.Namespace) -> RerankerConfig:
     return RerankerConfig(
         provider=args.reranker_provider,
         model=args.reranker_model,
+        response_model=args.reranker_response_model,
         base_url=args.reranker_base_url,
         endpoint_path=args.reranker_endpoint_path,
         api_key_env=args.reranker_api_key_env,

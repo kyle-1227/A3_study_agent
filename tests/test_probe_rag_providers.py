@@ -18,6 +18,7 @@ from src.config.rag_index_config import (
     load_rag_index_config,
 )
 from src.rag.parent_child.provider_probe import (
+    ChatRequestMessage,
     LlmProbeConfig,
     StrictChatCompletionClient,
     run_provider_probe,
@@ -40,6 +41,15 @@ def _write_probe_config(tmp_path: Path) -> Path:
     assert isinstance(storage, dict)
     assert isinstance(embedding, dict)
     assert isinstance(reranker, dict)
+    embedding["provider"] = "configured-embedding-provider"
+    embedding["protocol"] = "openai_embeddings_v1"
+    embedding["model"] = "configured-embedding-model"
+    embedding["response_model"] = "configured-embedding-model"
+    embedding["input_type_field"] = "input_type"
+    reranker["provider"] = "configured-reranker-provider"
+    reranker["protocol"] = "ranked_index_scores_v1"
+    reranker["model"] = "configured-reranker-model"
+    reranker["response_model"] = "configured-reranker-model"
     catalog["data_root"] = "data"
     storage["index_root"] = "indexes/parent_child"
     storage["registry_path"] = "generation_registry.sqlite"
@@ -121,6 +131,7 @@ class _DimensionMismatchEmbeddingClient:
 def _llm_config() -> LlmProbeConfig:
     return LlmProbeConfig(
         provider="configured-chat-provider",
+        protocol="openai_chat_completions_v1",
         model="configured-chat-model",
         base_url="https://chat.invalid/v1",
         endpoint_path="/chat/completions",
@@ -133,6 +144,7 @@ def test_llm_probe_config_requires_an_environment_identifier() -> None:
     with pytest.raises(ValidationError):
         LlmProbeConfig(
             provider="configured-chat-provider",
+            protocol="openai_chat_completions_v1",
             model="configured-chat-model",
             base_url="https://chat.invalid/v1",
             endpoint_path="/chat/completions",
@@ -243,6 +255,66 @@ def test_probe_writes_redacted_success_report_from_strict_mock_protocols(
     assert "Authorization" not in serialized
     assert "先检索证据" not in serialized
     assert "为什么 RAG" not in serialized
+
+
+def test_deepseek_chat_protocol_accepts_declared_usage_metadata() -> None:
+    config = LlmProbeConfig(
+        provider="deepseek",
+        protocol="deepseek_chat_completions_v1",
+        model="configured-deepseek-model",
+        base_url="https://chat.invalid/v1",
+        endpoint_path="/chat/completions",
+        api_key_env="PROBE_LLM_KEY",
+        timeout_seconds=5.0,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat-probe-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "configured-deepseek-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Evidence should be retrieved first.",
+                            "reasoning_content": "brief reasoning",
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": None,
+                    }
+                ],
+                "usage": {
+                    "completion_tokens": 2,
+                    "completion_tokens_details": {"reasoning_tokens": 1},
+                    "prompt_cache_hit_tokens": 0,
+                    "prompt_cache_miss_tokens": 3,
+                    "prompt_tokens": 3,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "total_tokens": 5,
+                },
+                "system_fingerprint": "configured-fingerprint",
+            },
+        )
+
+    client = StrictChatCompletionClient(
+        config=config,
+        api_key="deepseek-protocol-test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        completion = client.complete(
+            messages=(ChatRequestMessage(role="user", content="question"),)
+        )
+    finally:
+        client.close()
+
+    assert completion.content == "Evidence should be retrieved first."
+    assert completion.model == "configured-deepseek-model"
 
 
 def test_missing_embedding_secret_writes_failure_report_without_network(
@@ -379,7 +451,12 @@ def test_openrouter_mapping_is_ephemeral_and_only_for_exact_configured_names(
     reranker = payload["reranker"]
     assert isinstance(embedding, dict)
     assert isinstance(reranker, dict)
+    embedding["provider"] = "openrouter"
+    embedding["protocol"] = "openrouter_embeddings_v1"
+    embedding["input_type_field"] = None
     embedding["api_key_env"] = "RAG_EMBEDDING_API_KEY"
+    reranker["provider"] = "openrouter"
+    reranker["protocol"] = "openrouter_ranked_index_scores_v1"
     reranker["api_key_env"] = "RAG_RERANKER_API_KEY"
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=True),

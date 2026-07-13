@@ -161,11 +161,12 @@ class RetryConfig(StrictRagConfigModel):
 
 
 class EmbeddingConfig(StrictRagConfigModel):
-    """Provider-neutral embedding endpoint configuration."""
+    """Explicit embedding endpoint configuration and response protocol."""
 
     provider: NonBlankStr
-    protocol: Literal["openai_embeddings_v1"]
+    protocol: Literal["openai_embeddings_v1", "openrouter_embeddings_v1"]
     model: NonBlankStr
+    response_model: NonBlankStr
     base_url: BaseUrl
     endpoint_path: EndpointPath
     api_key_env: Annotated[
@@ -182,12 +183,29 @@ class EmbeddingConfig(StrictRagConfigModel):
     query_input_type: NonBlankStr
     input_type_field: NonBlankStr | None
 
+    @model_validator(mode="after")
+    def _validate_provider_specific_protocol(self) -> "EmbeddingConfig":
+        """Keep provider-specific wire contracts explicit and fail-fast."""
+
+        if self.protocol != "openrouter_embeddings_v1":
+            return self
+        if self.provider != "openrouter":
+            raise ValueError(
+                "openrouter_embeddings_v1 requires provider to be 'openrouter'"
+            )
+        if self.input_type_field is not None:
+            raise ValueError(
+                "openrouter_embeddings_v1 requires input_type_field to be null"
+            )
+        return self
+
 
 class RerankerConfig(StrictRagConfigModel):
     """Provider-neutral reranker endpoint and response contract."""
 
     provider: NonBlankStr
     model: NonBlankStr
+    response_model: NonBlankStr
     base_url: BaseUrl
     endpoint_path: EndpointPath
     api_key_env: Annotated[
@@ -205,6 +223,19 @@ class RerankerConfig(StrictRagConfigModel):
     def _validate_score_contract(self) -> "RerankerConfig":
         if self.score_min != 0.0 or self.score_max != 1.0:
             raise ValueError("reranker score contract must be exactly [0.0, 1.0]")
+        if self.protocol == "openrouter_ranked_index_scores_v1":
+            if self.provider != "openrouter":
+                raise ValueError(
+                    "openrouter_ranked_index_scores_v1 requires provider to be "
+                    "'openrouter'"
+                )
+        elif (
+            self.protocol == "ranked_index_scores_v1"
+            and self.response_model != self.model
+        ):
+            raise ValueError(
+                "ranked_index_scores_v1 requires response_model to equal model"
+            )
         return self
 
 

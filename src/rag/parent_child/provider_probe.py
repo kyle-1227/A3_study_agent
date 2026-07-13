@@ -17,7 +17,14 @@ import time
 from typing import Annotated, Literal, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from src.config._rag_config import (
     NonBlankStr,
@@ -140,6 +147,42 @@ class _ChatResponse(_StrictResponseModel):
     service_tier: str | None = None
 
 
+class _DeepSeekCompletionTokenDetails(_StrictResponseModel):
+    """Strict DeepSeek completion-token metadata observed from the endpoint."""
+
+    reasoning_tokens: int = Field(ge=0)
+
+
+class _DeepSeekPromptTokenDetails(_StrictResponseModel):
+    """Strict DeepSeek prompt-token metadata observed from the endpoint."""
+
+    cached_tokens: int = Field(ge=0)
+
+
+class _DeepSeekChatUsage(_StrictResponseModel):
+    """DeepSeek-specific chat usage metadata with no undeclared fields."""
+
+    completion_tokens: int = Field(ge=0)
+    completion_tokens_details: _DeepSeekCompletionTokenDetails
+    prompt_cache_hit_tokens: int = Field(ge=0)
+    prompt_cache_miss_tokens: int = Field(ge=0)
+    prompt_tokens: int = Field(ge=0)
+    prompt_tokens_details: _DeepSeekPromptTokenDetails
+    total_tokens: int = Field(ge=0)
+
+
+class _DeepSeekChatResponse(_StrictResponseModel):
+    """DeepSeek chat-completion contract observed by a real provider probe."""
+
+    id: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+    created: int = Field(ge=0)
+    model: str = Field(min_length=1)
+    choices: list[_ChatResponseChoice] = Field(min_length=1)
+    usage: _DeepSeekChatUsage
+    system_fingerprint: str | None = None
+
+
 class ChatRequestMessage(StrictRagConfigModel):
     """One explicit OpenAI-compatible chat message for a probe or smoke test."""
 
@@ -158,11 +201,23 @@ class LlmProbeConfig(StrictRagConfigModel):
     """Fully explicit OpenAI-compatible chat configuration for local probes."""
 
     provider: NonBlankStr
+    protocol: Literal["openai_chat_completions_v1", "deepseek_chat_completions_v1"]
     model: NonBlankStr
     base_url: BaseUrl
     endpoint_path: EndpointPath
     api_key_env: ApiKeyEnvironment
     timeout_seconds: PositiveFloat
+
+    @model_validator(mode="after")
+    def _validate_provider_specific_protocol(self) -> "LlmProbeConfig":
+        if (
+            self.protocol == "deepseek_chat_completions_v1"
+            and self.provider != "deepseek"
+        ):
+            raise ValueError(
+                "deepseek_chat_completions_v1 requires provider to be 'deepseek'"
+            )
+        return self
 
 
 class ChatCompletionResult(StrictRagConfigModel):
@@ -654,7 +709,12 @@ class StrictChatCompletionClient:
         except ValueError as exc:
             raise ChatProbeProtocolError("chat response is not valid JSON") from exc
         try:
-            parsed = _ChatResponse.model_validate(raw)
+            if self._config.protocol == "openai_chat_completions_v1":
+                parsed = _ChatResponse.model_validate(raw)
+            elif self._config.protocol == "deepseek_chat_completions_v1":
+                parsed = _DeepSeekChatResponse.model_validate(raw)
+            else:
+                raise AssertionError("LlmProbeConfig must validate protocol")
         except ValidationError as exc:
             raise ChatProbeProtocolError("chat response failed strict schema") from exc
         if parsed.model != self._config.model:
