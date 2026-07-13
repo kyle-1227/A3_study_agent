@@ -49,6 +49,14 @@ def compute_reranker_fingerprint(config: RagIndexConfig) -> str:
                 "model": reranker.model,
                 "protocol": reranker.protocol,
                 "provider": reranker.provider,
+                "provider_routing": (
+                    None
+                    if reranker.provider_routing is None
+                    else {
+                        "allow_fallbacks": reranker.provider_routing.allow_fallbacks,
+                        "order": reranker.provider_routing.order,
+                    }
+                ),
                 "score_max": reranker.score_max,
                 "score_min": reranker.score_min,
             }

@@ -42,6 +42,7 @@ def _embedding_config() -> EmbeddingConfig:
         document_input_type="document",
         query_input_type="query",
         input_type_field="input_type",
+        provider_routing=None,
     )
 
 
@@ -63,6 +64,10 @@ def _openrouter_embedding_config() -> EmbeddingConfig:
         document_input_type="document",
         query_input_type="query",
         input_type_field=None,
+        provider_routing={
+            "order": ["parasail"],
+            "allow_fallbacks": False,
+        },
     )
 
 
@@ -80,6 +85,7 @@ def _reranker_config() -> RerankerConfig:
         protocol="ranked_index_scores_v1",
         score_min=0.0,
         score_max=1.0,
+        provider_routing=None,
     )
 
 
@@ -97,6 +103,10 @@ def _openrouter_reranker_config() -> RerankerConfig:
         protocol="openrouter_ranked_index_scores_v1",
         score_min=0.0,
         score_max=1.0,
+        provider_routing={
+            "order": ["nvidia"],
+            "allow_fallbacks": False,
+        },
     )
 
 
@@ -213,6 +223,10 @@ def test_openrouter_embedding_protocol_requires_explicit_metadata_and_no_input_t
         assert payload == {
             "model": "configured-embedding",
             "input": ["alpha"],
+            "provider": {
+                "order": ["parasail"],
+                "allow_fallbacks": False,
+            },
         }
         return httpx.Response(
             200,
@@ -299,7 +313,8 @@ def test_openrouter_embedding_protocol_rejects_wrong_provider_or_input_type() ->
 
 
 def test_reranker_requires_complete_unique_index_set() -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "provider" not in json.loads(request.content)
         return httpx.Response(
             200,
             json={"results": [{"index": 0, "relevance_score": 0.9}]},
@@ -335,6 +350,10 @@ def test_openrouter_reranker_protocol_requires_declared_metadata_and_identity() 
         payload = json.loads(request.content)
         assert payload["model"] == "configured-reranker-request"
         assert "top_n" in payload
+        assert payload["provider"] == {
+            "order": ["nvidia"],
+            "allow_fallbacks": False,
+        }
         return httpx.Response(
             200,
             json={

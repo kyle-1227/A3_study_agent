@@ -185,6 +185,7 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "--embedding-query-input-type",
         "query",
         "--embedding-no-input-type-field",
+        "--embedding-no-provider-routing",
         "--reranker-provider",
         "test_reranker_provider",
         "--reranker-model",
@@ -215,6 +216,7 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "0.0",
         "--reranker-score-max",
         "1.0",
+        "--reranker-no-provider-routing",
         "--bm25-tokenizer",
         "jieba_builtin_precise_v1",
         "--bm25-artifact-format",
@@ -300,6 +302,11 @@ def test_init_accepts_explicit_openrouter_embedding_protocol(
     arguments = _arguments(project_root, policy_path)
     arguments[arguments.index("--embedding-provider") + 1] = "openrouter"
     arguments[arguments.index("--embedding-protocol") + 1] = "openrouter_embeddings_v1"
+    routing_index = arguments.index("--embedding-no-provider-routing")
+    arguments[routing_index : routing_index + 1] = [
+        "--embedding-provider-routing",
+        '{"order":["parasail"],"allow_fallbacks":false}',
+    ]
 
     assert main(arguments) == 0
 
@@ -307,6 +314,8 @@ def test_init_accepts_explicit_openrouter_embedding_protocol(
     assert config.embedding.provider == "openrouter"
     assert config.embedding.protocol == "openrouter_embeddings_v1"
     assert config.embedding.input_type_field is None
+    assert config.embedding.provider_routing is not None
+    assert config.embedding.provider_routing.order == ("parasail",)
 
 
 def test_init_assigns_distinct_explicit_policies_to_catalog_subjects(
@@ -376,3 +385,12 @@ def test_init_rejects_project_escape_and_symlink_policy_fragment(
 def test_init_cli_requires_explicit_provider_and_policy_inputs() -> None:
     with pytest.raises(SystemExit):
         _parser().parse_args([])
+
+
+def test_init_cli_requires_explicit_provider_routing(tmp_path: Path) -> None:
+    project_root, policy_path = _project(tmp_path)
+    arguments = _arguments(project_root, policy_path)
+    arguments.remove("--embedding-no-provider-routing")
+
+    with pytest.raises(SystemExit):
+        main(arguments)

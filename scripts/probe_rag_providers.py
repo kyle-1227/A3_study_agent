@@ -20,12 +20,31 @@ from src.rag.parent_child.provider_probe import (  # noqa: E402
 )
 
 
+def _embedding_probe_batch_size(raw_value: str) -> int:
+    """Parse an explicitly requested probe batch without applying a default."""
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "embedding probe batch size must be an integer"
+        ) from exc
+    if value < 2:
+        raise argparse.ArgumentTypeError(
+            "embedding probe batch size must be at least two"
+        )
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--index-config", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--embedding-probe-batch-size", type=_embedding_probe_batch_size
+    )
     parser.add_argument("--probe-llm", action="store_true")
     parser.add_argument("--llm-provider")
     parser.add_argument("--llm-protocol")
@@ -77,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             index_config_path=args.index_config,
             run_id=args.run_id,
             output_directory=args.output_dir,
+            embedding_probe_batch_size=args.embedding_probe_batch_size,
             probe_llm_enabled=args.probe_llm,
             llm_config=_llm_config_from_args(args),
         )

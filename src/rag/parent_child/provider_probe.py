@@ -70,6 +70,7 @@ _RERANK_DOCUMENTS: tuple[str, ...] = (
 )
 _LLM_PROMPT = "请用一句话说明：为什么 RAG 在回答前需要先检索证据？"
 _HIGH_CONSISTENCY_THRESHOLD = 0.999999
+_LEGACY_EMBEDDING_PROBE_DOCUMENT_COUNT = 2
 
 ApiKeyEnvironment = Annotated[
     NonBlankStr,
@@ -238,7 +239,7 @@ class ChatCompletionResult(StrictRagConfigModel):
 class EmbeddingProbeResult(StrictRagConfigModel):
     """Redacted evidence from strict embedding probe calls."""
 
-    schema_version: Literal["embedding_provider_probe_v1"]
+    schema_version: Literal["embedding_provider_probe_v2"]
     status: ProbeStatus
     provider: NonBlankStr
     model: NonBlankStr
@@ -246,6 +247,7 @@ class EmbeddingProbeResult(StrictRagConfigModel):
     http_status: int | None = Field(ge=100, le=599)
     response_schema_valid: bool
     actual_dimension: int | None = Field(gt=0)
+    document_batch_size: int = Field(ge=_LEGACY_EMBEDDING_PROBE_DOCUMENT_COUNT)
     batch_supported: bool
     input_type_supported: bool | None
     repeat_vector_similarity: float | None = Field(ge=-1.0, le=1.0)
@@ -311,7 +313,7 @@ class LlmProbeResult(StrictRagConfigModel):
 class ProviderProbeReport(StrictRagConfigModel):
     """Immutable, content-free report written for one provider probe run."""
 
-    schema_version: Literal["rag_provider_probe_v1"]
+    schema_version: Literal["rag_provider_probe_v2"]
     run_id: NonBlankStr
     success: bool
     failed_stage: Literal["embedding", "reranker", "llm"] | None
@@ -419,13 +421,50 @@ def _new_production_reranker_client(config: RerankerConfig) -> StrictRerankerCli
     return StrictRerankerClient.production(config=config)
 
 
+def _resolve_embedding_probe_batch_size(
+    *,
+    config: EmbeddingConfig,
+    embedding_probe_batch_size: int | None,
+) -> int:
+    """Validate an optional explicit probe batch without changing build config."""
+
+    if embedding_probe_batch_size is None:
+        return _LEGACY_EMBEDDING_PROBE_DOCUMENT_COUNT
+    if isinstance(embedding_probe_batch_size, bool) or not isinstance(
+        embedding_probe_batch_size, int
+    ):
+        raise ValueError("embedding probe batch size must be an integer")
+    if embedding_probe_batch_size < _LEGACY_EMBEDDING_PROBE_DOCUMENT_COUNT:
+        raise ValueError("embedding probe batch size must be at least two")
+    if embedding_probe_batch_size > config.batch_size:
+        raise ValueError(
+            "embedding probe batch size exceeds configured embedding batch_size"
+        )
+    return embedding_probe_batch_size
+
+
+def _embedding_probe_documents(*, document_batch_size: int) -> list[str]:
+    """Build ephemeral unique probe inputs; callers never persist their text."""
+
+    if document_batch_size == _LEGACY_EMBEDDING_PROBE_DOCUMENT_COUNT:
+        return [_PROBE_DOCUMENT, _PROBE_BATCH_DOCUMENT]
+    return [
+        _PROBE_DOCUMENT,
+        *(
+            f"{_PROBE_BATCH_DOCUMENT} [{index}]"
+            for index in range(1, document_batch_size)
+        ),
+    ]
+
+
 def _embedding_not_run(
     config: EmbeddingConfig,
     *,
+    document_batch_size: int,
     failure_type: ProbeFailureType | None,
 ) -> EmbeddingProbeResult:
     return EmbeddingProbeResult(
-        schema_version="embedding_provider_probe_v1",
+        schema_version="embedding_provider_probe_v2",
         status="not_run",
         provider=config.provider,
         model=config.model,
@@ -435,6 +474,7 @@ def _embedding_not_run(
         http_status=None,
         response_schema_valid=False,
         actual_dimension=None,
+        document_batch_size=document_batch_size,
         batch_supported=False,
         input_type_supported=None,
         repeat_vector_similarity=None,
@@ -495,22 +535,25 @@ def _llm_not_run(
 def probe_embedding(
     *,
     config: EmbeddingConfig,
+    embedding_probe_batch_size: int | None = None,
     client_factory: EmbeddingClientFactory = _new_production_embedding_client,
 ) -> EmbeddingProbeResult:
     """Make real strict embedding requests and return only redacted evidence."""
 
+    document_batch_size = _resolve_embedding_probe_batch_size(
+        config=config,
+        embedding_probe_batch_size=embedding_probe_batch_size,
+    )
     started_at = time.perf_counter()
     client: _EmbeddingClient | None = None
     try:
-        if config.batch_size < 2:
-            raise ValueError("embedding batch_size must support two probe documents")
         client = client_factory(config)
         document_vectors = client.embed_documents(
-            [_PROBE_DOCUMENT, _PROBE_BATCH_DOCUMENT]
+            _embedding_probe_documents(document_batch_size=document_batch_size)
         )
         first_query_vector = client.embed_query(_PROBE_QUERY)
         repeated_query_vector = client.embed_query(_PROBE_QUERY)
-        if len(document_vectors) != 2:
+        if len(document_vectors) != document_batch_size:
             raise ProviderProbeValidationError("embedding batch cardinality mismatch")
         for vector in (*document_vectors, first_query_vector, repeated_query_vector):
             _assert_vector_contract(
@@ -524,7 +567,7 @@ def probe_embedding(
                 "embedding repeat consistency is too low"
             )
         return EmbeddingProbeResult(
-            schema_version="embedding_provider_probe_v1",
+            schema_version="embedding_provider_probe_v2",
             status="success",
             provider=config.provider,
             model=config.model,
@@ -534,6 +577,7 @@ def probe_embedding(
             http_status=_safe_http_status(client),
             response_schema_valid=True,
             actual_dimension=len(first_query_vector),
+            document_batch_size=document_batch_size,
             batch_supported=True,
             input_type_supported=(
                 True if config.input_type_field is not None else None
@@ -547,7 +591,7 @@ def probe_embedding(
             exc if isinstance(exc, ProviderEmbeddingDimensionError) else None
         )
         return EmbeddingProbeResult(
-            schema_version="embedding_provider_probe_v1",
+            schema_version="embedding_provider_probe_v2",
             status="failed",
             provider=config.provider,
             model=config.model,
@@ -559,6 +603,7 @@ def probe_embedding(
             actual_dimension=(
                 None if dimension_error is None else dimension_error.actual_dimension
             ),
+            document_batch_size=document_batch_size,
             batch_supported=dimension_error is not None,
             input_type_supported=(
                 (True if dimension_error is not None else False)
@@ -842,6 +887,7 @@ def run_provider_probe(
     index_config_path: Path,
     run_id: str,
     output_directory: Path,
+    embedding_probe_batch_size: int | None = None,
     probe_llm_enabled: bool,
     llm_config: LlmProbeConfig | None,
     embedding_client_factory: EmbeddingClientFactory = _new_production_embedding_client,
@@ -861,15 +907,20 @@ def run_provider_probe(
     config = resolve_rag_index_config_paths(
         load_rag_index_config(config_path), project_root=root
     )
+    _resolve_embedding_probe_batch_size(
+        config=config.embedding,
+        embedding_probe_batch_size=embedding_probe_batch_size,
+    )
     _map_openrouter_key_for_current_process(config)
 
     embedding = probe_embedding(
         config=config.embedding,
+        embedding_probe_batch_size=embedding_probe_batch_size,
         client_factory=embedding_client_factory,
     )
     if embedding.status != "success":
         report = ProviderProbeReport(
-            schema_version="rag_provider_probe_v1",
+            schema_version="rag_provider_probe_v2",
             run_id=run_id,
             success=False,
             failed_stage="embedding",
@@ -899,7 +950,7 @@ def run_provider_probe(
     )
     if reranker.status != "success":
         report = ProviderProbeReport(
-            schema_version="rag_provider_probe_v1",
+            schema_version="rag_provider_probe_v2",
             run_id=run_id,
             success=False,
             failed_stage="reranker",
@@ -922,7 +973,7 @@ def run_provider_probe(
 
     if not probe_llm_enabled:
         report = ProviderProbeReport(
-            schema_version="rag_provider_probe_v1",
+            schema_version="rag_provider_probe_v2",
             run_id=run_id,
             success=True,
             failed_stage=None,
@@ -943,7 +994,7 @@ def run_provider_probe(
 
     if llm_config is None:
         report = ProviderProbeReport(
-            schema_version="rag_provider_probe_v1",
+            schema_version="rag_provider_probe_v2",
             run_id=run_id,
             success=False,
             failed_stage="llm",
@@ -964,7 +1015,7 @@ def run_provider_probe(
 
     llm = probe_llm(config=llm_config, client_factory=llm_client_factory)
     report = ProviderProbeReport(
-        schema_version="rag_provider_probe_v1",
+        schema_version="rag_provider_probe_v2",
         run_id=run_id,
         success=llm.status == "success",
         failed_stage=None if llm.status == "success" else "llm",

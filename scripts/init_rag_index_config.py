@@ -192,6 +192,16 @@ def _json_string_sequence(value: str) -> tuple[str, ...]:
     return tuple(parsed)
 
 
+def _json_object(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("value must be a JSON object") from exc
+    if not isinstance(parsed, dict) or any(not isinstance(key, str) for key in parsed):
+        raise argparse.ArgumentTypeError("value must be a JSON object")
+    return parsed
+
+
 def _assignment(value: str) -> tuple[str, str]:
     name, separator, assigned_value = value.partition("=")
     if not separator or not name or not assigned_value:
@@ -314,6 +324,17 @@ def _parser() -> argparse.ArgumentParser:
         const=None,
         dest="embedding_input_type_field",
     )
+    embedding_routing_group = embedding.add_mutually_exclusive_group(required=True)
+    embedding_routing_group.add_argument(
+        "--embedding-provider-routing",
+        type=_json_object,
+    )
+    embedding_routing_group.add_argument(
+        "--embedding-no-provider-routing",
+        action="store_const",
+        const=None,
+        dest="embedding_provider_routing",
+    )
 
     reranker = parser.add_argument_group("reranker")
     reranker.add_argument("--reranker-provider", required=True)
@@ -346,6 +367,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     reranker.add_argument("--reranker-score-min", type=float, required=True)
     reranker.add_argument("--reranker-score-max", type=float, required=True)
+    reranker_routing_group = reranker.add_mutually_exclusive_group(required=True)
+    reranker_routing_group.add_argument(
+        "--reranker-provider-routing",
+        type=_json_object,
+    )
+    reranker_routing_group.add_argument(
+        "--reranker-no-provider-routing",
+        action="store_const",
+        const=None,
+        dest="reranker_provider_routing",
+    )
 
     bm25 = parser.add_argument_group("bm25")
     bm25.add_argument(
@@ -461,6 +493,7 @@ def _embedding_from_args(args: argparse.Namespace) -> EmbeddingConfig:
         document_input_type=args.embedding_document_input_type,
         query_input_type=args.embedding_query_input_type,
         input_type_field=args.embedding_input_type_field,
+        provider_routing=args.embedding_provider_routing,
     )
 
 
@@ -478,6 +511,7 @@ def _reranker_from_args(args: argparse.Namespace) -> RerankerConfig:
         protocol=args.reranker_protocol,
         score_min=args.reranker_score_min,
         score_max=args.reranker_score_max,
+        provider_routing=args.reranker_provider_routing,
     )
 
 

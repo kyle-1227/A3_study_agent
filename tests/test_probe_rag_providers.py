@@ -46,10 +46,12 @@ def _write_probe_config(tmp_path: Path) -> Path:
     embedding["model"] = "configured-embedding-model"
     embedding["response_model"] = "configured-embedding-model"
     embedding["input_type_field"] = "input_type"
+    embedding["provider_routing"] = None
     reranker["provider"] = "configured-reranker-provider"
     reranker["protocol"] = "ranked_index_scores_v1"
     reranker["model"] = "configured-reranker-model"
     reranker["response_model"] = "configured-reranker-model"
+    reranker["provider_routing"] = None
     catalog["data_root"] = "data"
     storage["index_root"] = "indexes/parent_child"
     storage["registry_path"] = "generation_registry.sqlite"
@@ -81,6 +83,16 @@ class _FakeEmbeddingClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _BatchRecordingEmbeddingClient(_FakeEmbeddingClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.document_batch_size: int | None = None
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.document_batch_size = len(texts)
+        return [[1.0, 0.0] for _ in texts]
 
 
 class _FakeRerankerClient:
@@ -255,6 +267,99 @@ def test_probe_writes_redacted_success_report_from_strict_mock_protocols(
     assert "Authorization" not in serialized
     assert "先检索证据" not in serialized
     assert "为什么 RAG" not in serialized
+
+
+def test_explicit_embedding_probe_batch_size_exercises_exact_cardinality(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_probe_config(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    embedding = payload["embedding"]
+    assert isinstance(embedding, dict)
+    embedding["batch_size"] = 128
+    config_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=True),
+        encoding="utf-8",
+    )
+    embedding_client = _BatchRecordingEmbeddingClient()
+
+    report = run_provider_probe(
+        project_root=tmp_path,
+        index_config_path=config_path.relative_to(tmp_path),
+        run_id="probe_batch_128",
+        output_directory=Path("reports/rag_build/probe_batch_128"),
+        embedding_probe_batch_size=128,
+        probe_llm_enabled=False,
+        llm_config=None,
+        embedding_client_factory=lambda _config: embedding_client,
+        reranker_client_factory=lambda _config: _FakeRerankerClient(),
+    )
+
+    serialized = (
+        tmp_path / "reports" / "rag_build" / "probe_batch_128" / "provider_probe.json"
+    ).read_text(encoding="utf-8")
+    assert report.success is True
+    assert report.embedding.document_batch_size == 128
+    assert report.embedding.batch_supported is True
+    assert embedding_client.document_batch_size == 128
+    assert '"document_batch_size":128' in serialized
+    assert "[127]" not in serialized
+
+
+def test_cli_forwards_optional_embedding_probe_batch_size(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _SuccessfulReport:
+        success = True
+
+    def fake_run_provider_probe(**kwargs: object) -> _SuccessfulReport:
+        captured.update(kwargs)
+        return _SuccessfulReport()
+
+    monkeypatch.setattr(
+        "scripts.probe_rag_providers.run_provider_probe",
+        fake_run_provider_probe,
+    )
+
+    exit_code = main(
+        [
+            "--project-root",
+            str(tmp_path),
+            "--index-config",
+            "config/rag/index.yaml",
+            "--run-id",
+            "probe_cli_batch",
+            "--output-dir",
+            "reports/rag_build/probe_cli_batch",
+            "--embedding-probe-batch-size",
+            "128",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["embedding_probe_batch_size"] == 128
+
+
+def test_cli_rejects_embedding_probe_batch_size_below_two(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--project-root",
+                str(tmp_path),
+                "--index-config",
+                "config/rag/index.yaml",
+                "--run-id",
+                "probe_cli_bad_batch",
+                "--output-dir",
+                "reports/rag_build/probe_cli_bad_batch",
+                "--embedding-probe-batch-size",
+                "1",
+            ]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_deepseek_chat_protocol_accepts_declared_usage_metadata() -> None:
@@ -455,9 +560,17 @@ def test_openrouter_mapping_is_ephemeral_and_only_for_exact_configured_names(
     embedding["protocol"] = "openrouter_embeddings_v1"
     embedding["input_type_field"] = None
     embedding["api_key_env"] = "RAG_EMBEDDING_API_KEY"
+    embedding["provider_routing"] = {
+        "order": ["parasail"],
+        "allow_fallbacks": False,
+    }
     reranker["provider"] = "openrouter"
     reranker["protocol"] = "openrouter_ranked_index_scores_v1"
     reranker["api_key_env"] = "RAG_RERANKER_API_KEY"
+    reranker["provider_routing"] = {
+        "order": ["nvidia"],
+        "allow_fallbacks": False,
+    }
     config_path.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=True),
         encoding="utf-8",

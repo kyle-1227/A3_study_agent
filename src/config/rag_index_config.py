@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -55,10 +56,27 @@ def _unique(values: tuple[object, ...], *, field_name: str) -> None:
         raise ValueError(f"{field_name} must not contain duplicates")
 
 
+_PROVIDER_ROUTING_SLUG = re.compile(
+    r"^[a-z0-9]+(?:[a-z0-9_-]*[a-z0-9])?(?:/[a-z0-9]+(?:[a-z0-9_-]*[a-z0-9])?)*$"
+)
+
+
+def _provider_routing_slug(value: str) -> str:
+    """Validate one provider-routing slug without normalizing it."""
+
+    if not _PROVIDER_ROUTING_SLUG.fullmatch(value):
+        raise ValueError("provider routing slug must be lower-case and slash-safe")
+    return value
+
+
 SubjectId = Annotated[NonBlankStr, AfterValidator(_subject_id)]
 PolicyId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 BaseUrl = Annotated[NonBlankStr, AfterValidator(_base_url)]
 EndpointPath = Annotated[NonBlankStr, AfterValidator(_endpoint_path)]
+ProviderRoutingSlug = Annotated[
+    NonBlankStr,
+    AfterValidator(_provider_routing_slug),
+]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveFloat = Annotated[float, Field(gt=0)]
@@ -160,6 +178,20 @@ class RetryConfig(StrictRagConfigModel):
         return self
 
 
+class ProviderRoutingConfig(StrictRagConfigModel):
+    """One explicit no-fallback OpenRouter provider route."""
+
+    order: Annotated[tuple[ProviderRoutingSlug, ...], Field(min_length=1, max_length=1)]
+    allow_fallbacks: Literal[False]
+
+    @field_validator("order", mode="before")
+    @classmethod
+    def _freeze_order(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+
 class EmbeddingConfig(StrictRagConfigModel):
     """Explicit embedding endpoint configuration and response protocol."""
 
@@ -182,16 +214,29 @@ class EmbeddingConfig(StrictRagConfigModel):
     document_input_type: NonBlankStr
     query_input_type: NonBlankStr
     input_type_field: NonBlankStr | None
+    provider_routing: ProviderRoutingConfig | None
 
     @model_validator(mode="after")
     def _validate_provider_specific_protocol(self) -> "EmbeddingConfig":
         """Keep provider-specific wire contracts explicit and fail-fast."""
 
         if self.protocol != "openrouter_embeddings_v1":
+            if self.provider == "openrouter":
+                raise ValueError(
+                    "provider 'openrouter' requires openrouter_embeddings_v1"
+                )
+            if self.provider_routing is not None:
+                raise ValueError(
+                    "non-openrouter embedding providers require provider_routing to be null"
+                )
             return self
         if self.provider != "openrouter":
             raise ValueError(
                 "openrouter_embeddings_v1 requires provider to be 'openrouter'"
+            )
+        if self.provider_routing is None:
+            raise ValueError(
+                "openrouter_embeddings_v1 requires explicit provider_routing"
             )
         if self.input_type_field is not None:
             raise ValueError(
@@ -218,6 +263,7 @@ class RerankerConfig(StrictRagConfigModel):
     protocol: NonBlankStr
     score_min: float
     score_max: float
+    provider_routing: ProviderRoutingConfig | None
 
     @model_validator(mode="after")
     def _validate_score_contract(self) -> "RerankerConfig":
@@ -229,6 +275,19 @@ class RerankerConfig(StrictRagConfigModel):
                     "openrouter_ranked_index_scores_v1 requires provider to be "
                     "'openrouter'"
                 )
+            if self.provider_routing is None:
+                raise ValueError(
+                    "openrouter_ranked_index_scores_v1 requires explicit "
+                    "provider_routing"
+                )
+        elif self.provider == "openrouter":
+            raise ValueError(
+                "provider 'openrouter' requires openrouter_ranked_index_scores_v1"
+            )
+        elif self.provider_routing is not None:
+            raise ValueError(
+                "non-openrouter reranker providers require provider_routing to be null"
+            )
         elif (
             self.protocol == "ranked_index_scores_v1"
             and self.response_model != self.model
@@ -544,6 +603,7 @@ __all__ = [
     "EmbeddingConfig",
     "ExtractionPolicyConfig",
     "PageAssemblyPolicyConfig",
+    "ProviderRoutingConfig",
     "RagIndexConfig",
     "RecursiveChunkConfig",
     "RerankerConfig",

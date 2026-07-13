@@ -37,7 +37,9 @@ from src.rag.parent_child.config_adapter import (
     PolicyAdapterError,
     resolve_subject_chunk_policy,
 )
+from src.rag.parent_child.builder import compute_embedding_fingerprint
 from src.rag.parent_child.ids import make_loader_policy_fingerprint
+from src.rag.parent_child.runtime_loader import compute_reranker_fingerprint
 
 
 def _write_yaml(path: Path, payload: object) -> Path:
@@ -149,6 +151,7 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "provider": "vendor_from_config",
             "protocol": "openai_embeddings_v1",
             "model": "embedding_model_from_config",
+            "response_model": "embedding_model_from_config",
             "base_url": "https://embedding.invalid/v1",
             "endpoint_path": "/embeddings",
             "api_key_env": "EMBEDDING_KEY_ENV",
@@ -161,10 +164,12 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "document_input_type": "document",
             "query_input_type": "query",
             "input_type_field": "input_type",
+            "provider_routing": None,
         },
         "reranker": {
             "provider": "another_vendor_from_config",
             "model": "reranker_model_from_config",
+            "response_model": "reranker_model_from_config",
             "base_url": "https://reranker.invalid/v1",
             "endpoint_path": "/rerank",
             "api_key_env": "RERANKER_KEY_ENV",
@@ -174,6 +179,7 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "protocol": "ranked_index_scores_v1",
             "score_min": 0.0,
             "score_max": 1.0,
+            "provider_routing": None,
         },
         "bm25": {
             "tokenizer": "tokenizer_from_config",
@@ -341,6 +347,129 @@ def test_index_loader_accepts_provider_neutral_explicit_config(tmp_path: Path) -
         config.storage.resolved_registry_path()
         == (tmp_path / "indexes" / "generation_registry.sqlite").resolve()
     )
+
+
+def test_openrouter_provider_routing_is_strict_and_changes_fingerprints(
+    tmp_path: Path,
+) -> None:
+    first_payload = _index_payload(tmp_path)
+    first_embedding = first_payload["embedding"]
+    first_reranker = first_payload["reranker"]
+    assert isinstance(first_embedding, dict)
+    assert isinstance(first_reranker, dict)
+    first_embedding.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_embeddings_v1",
+            "input_type_field": None,
+            "provider_routing": {
+                "order": ["parasail"],
+                "allow_fallbacks": False,
+            },
+        }
+    )
+    first_reranker.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_ranked_index_scores_v1",
+            "provider_routing": {
+                "order": ["nvidia"],
+                "allow_fallbacks": False,
+            },
+        }
+    )
+    first = RagIndexConfig.model_validate(first_payload)
+
+    second_payload = _index_payload(tmp_path)
+    second_embedding = second_payload["embedding"]
+    second_reranker = second_payload["reranker"]
+    assert isinstance(second_embedding, dict)
+    assert isinstance(second_reranker, dict)
+    second_embedding.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_embeddings_v1",
+            "input_type_field": None,
+            "provider_routing": {
+                "order": ["nvidia"],
+                "allow_fallbacks": False,
+            },
+        }
+    )
+    second_reranker.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_ranked_index_scores_v1",
+            "provider_routing": {
+                "order": ["parasail"],
+                "allow_fallbacks": False,
+            },
+        }
+    )
+    second = RagIndexConfig.model_validate(second_payload)
+
+    assert first.embedding.provider_routing is not None
+    assert first.embedding.provider_routing.order == ("parasail",)
+    assert first.embedding.provider_routing.allow_fallbacks is False
+    assert compute_embedding_fingerprint(first) != compute_embedding_fingerprint(second)
+    assert compute_reranker_fingerprint(first) != compute_reranker_fingerprint(second)
+
+    missing_routing = _index_payload(tmp_path)
+    missing_embedding = missing_routing["embedding"]
+    assert isinstance(missing_embedding, dict)
+    missing_embedding.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_embeddings_v1",
+            "input_type_field": None,
+        }
+    )
+    del missing_embedding["provider_routing"]
+    with pytest.raises(ValidationError):
+        RagIndexConfig.model_validate(missing_routing)
+
+    invalid_order = _index_payload(tmp_path)
+    invalid_embedding = invalid_order["embedding"]
+    assert isinstance(invalid_embedding, dict)
+    invalid_embedding.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_embeddings_v1",
+            "input_type_field": None,
+            "provider_routing": {
+                "order": ["parasail", "nvidia"],
+                "allow_fallbacks": False,
+            },
+        }
+    )
+    with pytest.raises(ValidationError):
+        RagIndexConfig.model_validate(invalid_order)
+
+    invalid_fallback = _index_payload(tmp_path)
+    invalid_reranker = invalid_fallback["reranker"]
+    assert isinstance(invalid_reranker, dict)
+    invalid_reranker.update(
+        {
+            "provider": "openrouter",
+            "protocol": "openrouter_ranked_index_scores_v1",
+            "provider_routing": {
+                "order": ["nvidia"],
+                "allow_fallbacks": True,
+            },
+        }
+    )
+    with pytest.raises(ValidationError):
+        RagIndexConfig.model_validate(invalid_fallback)
+
+    non_openrouter_routing = _index_payload(tmp_path)
+    non_openrouter_embedding = non_openrouter_routing["embedding"]
+    assert isinstance(non_openrouter_embedding, dict)
+    non_openrouter_embedding["provider_routing"] = {
+        "order": ["parasail"],
+        "allow_fallbacks": False,
+    }
+    with pytest.raises(ValidationError):
+        RagIndexConfig.model_validate(non_openrouter_routing)
 
 
 def test_index_loader_rejects_extra_fields_and_bad_cross_constraints(

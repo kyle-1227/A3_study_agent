@@ -266,6 +266,16 @@ class StrictEmbeddingClient:
         }
         if self._config.input_type_field is not None:
             payload[self._config.input_type_field] = input_type
+        if self._config.protocol == "openrouter_embeddings_v1":
+            provider_routing = self._config.provider_routing
+            if provider_routing is None:
+                raise ProviderProtocolError(
+                    "openrouter embedding request lacks provider_routing"
+                )
+            payload["provider"] = {
+                "order": list(provider_routing.order),
+                "allow_fallbacks": provider_routing.allow_fallbacks,
+            }
         raw = self._http.post_json(payload)
         try:
             if self._config.protocol == "openai_embeddings_v1":
@@ -375,14 +385,23 @@ class StrictRerankerClient:
         child_ids = tuple(candidate.child_id for candidate in candidates)
         if len(child_ids) != len(set(child_ids)):
             raise ProviderProtocolError("reranker candidate child IDs must be unique")
-        raw = self._http.post_json(
-            {
-                "model": self._config.model,
-                "query": query,
-                "documents": [candidate.content for candidate in candidates],
-                "top_n": len(candidates),
+        payload: dict[str, object] = {
+            "model": self._config.model,
+            "query": query,
+            "documents": [candidate.content for candidate in candidates],
+            "top_n": len(candidates),
+        }
+        if self._config.protocol == "openrouter_ranked_index_scores_v1":
+            provider_routing = self._config.provider_routing
+            if provider_routing is None:
+                raise ProviderProtocolError(
+                    "openrouter reranker request lacks provider_routing"
+                )
+            payload["provider"] = {
+                "order": list(provider_routing.order),
+                "allow_fallbacks": provider_routing.allow_fallbacks,
             }
-        )
+        raw = self._http.post_json(payload)
         try:
             if self._config.protocol == "ranked_index_scores_v1":
                 response = _RerankerResponse.model_validate(raw)

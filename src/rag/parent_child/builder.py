@@ -203,6 +203,14 @@ def compute_embedding_fingerprint(config: RagIndexConfig) -> str:
                 "normalization_contract": embedding.normalization_contract,
                 "protocol": embedding.protocol,
                 "provider": embedding.provider,
+                "provider_routing": (
+                    None
+                    if embedding.provider_routing is None
+                    else {
+                        "allow_fallbacks": embedding.provider_routing.allow_fallbacks,
+                        "order": embedding.provider_routing.order,
+                    }
+                ),
                 "query_input_type": embedding.query_input_type,
             }
         )

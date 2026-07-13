@@ -97,18 +97,22 @@ chunk_policies:
 embedding:
   api_key_env: RAG_EMBEDDING_API_KEY
   base_url: https://openrouter.ai/api/v1
-  batch_size: 32
+  batch_size: 128
   distance_metric: cosine
   document_input_type: document
   endpoint_path: /embeddings
-  expected_dimension: 2048
+  expected_dimension: 1024
   input_type_field: null
-  model: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  model: baai/bge-m3
   normalization_contract: provider_output_as_is_v1
   protocol: openrouter_embeddings_v1
   provider: openrouter
+  provider_routing:
+    allow_fallbacks: false
+    order:
+    - parasail
   query_input_type: query
-  response_model: private/openrouter/nvidia/llama-nemotron-embed-vl-1b-v2
+  response_model: parasail-bge-m3
   retry:
     initial_backoff_seconds: 0.5
     max_attempts: 3
@@ -123,6 +127,10 @@ reranker:
   model: nvidia/llama-nemotron-rerank-vl-1b-v2:free
   protocol: openrouter_ranked_index_scores_v1
   provider: openrouter
+  provider_routing:
+    allow_fallbacks: false
+    order:
+    - nvidia
   response_model: nvidia/llama-nemotron-rerank-vl-1b-v2
   retry:
     initial_backoff_seconds: 0.5
