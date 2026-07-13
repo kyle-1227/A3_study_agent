@@ -603,7 +603,7 @@ async def test_apply_error_does_not_fallback_to_original_messages(monkeypatch):
         for payload in trace_payloads
         if payload["stage"] == "context_apply_error"
     )
-    assert error_payload["fallback_used"] is False
+    assert "fallback_used" not in error_payload
     assert error_payload["recoverable"] is False
 
 
@@ -851,10 +851,9 @@ async def test_apply_error_without_fallback_raises_before_llm_and_emits_safe_err
         {
             "reason": apply_errors[0].reason,
             "warning": apply_errors[0].warning,
-            "fallback_used": apply_errors[0].fallback_used,
         }
     ).lower()
-    assert apply_errors[0].fallback_used is False
+    assert not hasattr(apply_errors[0], "fallback_used")
     assert "api_key" not in serialized_error
     assert "cookie" not in serialized_error
     assert "sk-secret-value" not in serialized_error

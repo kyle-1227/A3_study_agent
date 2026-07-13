@@ -111,7 +111,6 @@ def test_trace_builders_do_not_output_forbidden_payload_keys():
         policy=_policy(),
         result=ContextApplyResult(
             applied=True,
-            fallback_used=False,
             original_message_count=1,
             final_message_count=2,
             injected_items_count=1,

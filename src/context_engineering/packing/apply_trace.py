@@ -56,7 +56,6 @@ def build_context_applied_event(
         "llm_node": llm_node,
         "applied": result.applied,
         "apply_status": result.apply_status,
-        "fallback_used": result.fallback_used,
         "original_message_count": result.original_message_count,
         "final_message_count": result.final_message_count,
         "injected_items_count": result.injected_items_count,
@@ -154,7 +153,6 @@ def build_context_apply_error_event(error: ContextApplyError) -> dict[str, Any]:
         "llm_node": error.llm_node,
         "reason": error.reason,
         "warning": error.warning,
-        "fallback_used": error.fallback_used,
         "error_scope": error.error_scope,
         "recoverable": error.recoverable,
         "required_sources_missing": [

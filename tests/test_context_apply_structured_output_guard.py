@@ -230,7 +230,6 @@ def test_structured_output_active_rollout_applies_for_reviewer_node(monkeypatch)
             trace_call_id="trace-1",
             next_trace_seq=1,
             context_apply_applied=True,
-            context_apply_fallback_used=False,
             apply_result=SimpleNamespace(
                 injected_items_count=1,
                 injected_context_tokens=4,

@@ -72,7 +72,6 @@ class ContextPreparedMessages:
     trace_call_id: str
     next_trace_seq: int
     context_apply_applied: bool
-    context_apply_fallback_used: bool
     resolved_policy: ResolvedContextPolicy | None = None
     selection: ContextApplySelection | None = None
     apply_result: ContextApplyResult | None = None
@@ -188,7 +187,6 @@ def prepare_messages_with_context_policy(
                 trace_call_id=sequencer.trace_call_id,
                 next_trace_seq=sequencer.trace_seq,
                 context_apply_applied=False,
-                context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
                 context_apply_status="skipped",
@@ -270,7 +268,6 @@ def prepare_messages_with_context_policy(
                 trace_call_id=sequencer.trace_call_id,
                 next_trace_seq=sequencer.trace_seq,
                 context_apply_applied=False,
-                context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
                 context_apply_status=(
@@ -359,7 +356,6 @@ def prepare_messages_with_context_policy(
                 trace_call_id=sequencer.trace_call_id,
                 next_trace_seq=sequencer.trace_seq,
                 context_apply_applied=False,
-                context_apply_fallback_used=False,
                 resolved_policy=resolved,
                 selection=selection,
                 context_apply_status="observed",
@@ -447,7 +443,6 @@ def prepare_messages_with_context_policy(
             trace_call_id=sequencer.trace_call_id,
             next_trace_seq=sequencer.trace_seq,
             context_apply_applied=apply_result.applied,
-            context_apply_fallback_used=False,
             resolved_policy=resolved,
             selection=selection,
             apply_result=apply_result,
@@ -1029,7 +1024,6 @@ def _emit_context_apply_error(
     state: dict[str, Any],
     trace_fields: dict[str, Any],
 ) -> None:
-    error.fallback_used = False
     emit_a3_trace(
         logger,
         "context_apply_error",

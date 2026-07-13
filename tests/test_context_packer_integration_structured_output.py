@@ -211,7 +211,6 @@ async def test_structured_output_active_resource_agent_receives_injected_context
             trace_call_id="trace-1",
             next_trace_seq=5,
             context_apply_applied=True,
-            context_apply_fallback_used=False,
             apply_result=SimpleNamespace(
                 injected_items_count=1,
                 injected_context_tokens=12,

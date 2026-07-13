@@ -60,7 +60,6 @@ async def test_plain_llm_runs_packing_shadow_without_modifying_messages(monkeypa
             trace_call_id="trace-1",
             next_trace_seq=0,
             context_apply_applied=False,
-            context_apply_fallback_used=False,
         )
 
     monkeypatch.setattr(

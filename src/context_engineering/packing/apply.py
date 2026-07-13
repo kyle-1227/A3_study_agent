@@ -254,7 +254,6 @@ class ContextApplyResult:
     """Internal context apply result; final_messages must never be traced."""
 
     applied: bool
-    fallback_used: bool
     original_message_count: int
     final_message_count: int
     injected_items_count: int
@@ -287,7 +286,6 @@ class ContextApplyError(RuntimeError):
         warning: object,
         node_name: str,
         llm_node: str,
-        fallback_used: bool = False,
         original_exception_type: str = "",
         error_scope: ContextApplyErrorScope = "policy",
         recoverable: bool = False,
@@ -305,7 +303,6 @@ class ContextApplyError(RuntimeError):
         self.warning = sanitize_error_message(warning)
         self.node_name = str(node_name or "").strip()
         self.llm_node = str(llm_node or "").strip()
-        self.fallback_used = bool(fallback_used)
         self.original_exception_type = str(original_exception_type or "").strip()
         self.error_scope = _normalize_error_scope(error_scope)
         self.recoverable = bool(recoverable)
@@ -884,7 +881,6 @@ def build_applied_messages_from_rendered_context(
     if not rendered_context:
         return ContextApplyResult(
             applied=False,
-            fallback_used=False,
             original_message_count=len(messages),
             final_message_count=len(messages),
             injected_items_count=0,
@@ -918,7 +914,6 @@ def build_applied_messages_from_rendered_context(
     final_estimated_tokens = estimate_messages_tokens_mixed(final_messages)
     return ContextApplyResult(
         applied=True,
-        fallback_used=False,
         original_message_count=len(messages),
         final_message_count=len(final_messages),
         injected_items_count=injected_items_count,

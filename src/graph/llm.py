@@ -678,7 +678,6 @@ async def invoke_plain_llm_fail_fast(
         "prompt_chars": _message_content_chars(messages_for_llm),
         "fallback_used": False,
         "context_apply_applied": prepared.context_apply_applied,
-        "context_apply_fallback_used": False,
         "trace_call_id": prepared.trace_call_id,
         "trace_seq": prepared.next_trace_seq + 2,
     }

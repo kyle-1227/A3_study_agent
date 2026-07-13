@@ -70,7 +70,6 @@ def test_context_apply_plan_event_is_safe():
 def test_context_applied_event_does_not_dump_result_messages():
     result = ContextApplyResult(
         applied=True,
-        fallback_used=False,
         original_message_count=1,
         final_message_count=2,
         injected_items_count=1,
@@ -107,13 +106,12 @@ def test_context_apply_error_event_is_redacted():
             warning="api_key=sk-secret-value cookie=session",
             node_name="node",
             llm_node="llm",
-            fallback_used=True,
             original_exception_type="RuntimeError",
         )
     )
 
     serialized = repr(event).lower()
-    assert event["fallback_used"] is True
+    assert "fallback_used" not in event
     assert "api_key" not in serialized
     assert "cookie" not in serialized
     assert "sk-secret-value" not in serialized
@@ -224,7 +222,6 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
                 "node_name": "generate_answer",
                 "llm_node": "academic",
                 "applied": True,
-                "fallback_used": False,
                 "original_message_count": 1,
                 "final_message_count": 2,
                 "injected_items_count": 1,
@@ -284,7 +281,6 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
                 "llm_node": "academic",
                 "reason": "apply_failed",
                 "warning": "api_key=sk-secret-value db_uri=postgresql://u:p@h/db",
-                "fallback_used": True,
                 "error_type": "RuntimeError",
                 "final_messages": [{"content": "must not forward"}],
             },

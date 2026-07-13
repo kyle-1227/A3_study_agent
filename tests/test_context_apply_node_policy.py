@@ -1476,7 +1476,7 @@ async def test_active_apply_error_does_not_fallback_to_original_messages(monkeyp
         for payload in trace_payloads
         if payload["stage"] == "context_apply_error"
     ]
-    assert errors[0]["fallback_used"] is False
+    assert "fallback_used" not in errors[0]
     mock_llm.ainvoke.assert_not_awaited()
 
 
@@ -1572,7 +1572,7 @@ async def test_inherit_missing_fail_fast_before_llm(monkeypatch):
         if payload["stage"] == "context_apply_error"
     ]
     assert errors[0]["reason"] == "context_apply_node_policy_inherit_missing"
-    assert errors[0]["fallback_used"] is False
+    assert "fallback_used" not in errors[0]
     mock_llm.ainvoke.assert_not_awaited()
 
 

@@ -3087,7 +3087,6 @@ async def _stream_graph_event_drafts(
                     "trace_call_id": event.get("trace_call_id", ""),
                     "trace_seq": event.get("trace_seq", 0),
                     "applied": bool(event.get("applied", False)),
-                    "fallback_used": bool(event.get("fallback_used", False)),
                     "mode": sanitize_error_message(
                         event.get("mode", ""),
                         max_chars=80,
@@ -3178,7 +3177,6 @@ async def _stream_graph_event_drafts(
                     "trace_seq": event.get("trace_seq", 0),
                     "reason": event.get("reason", ""),
                     "warning": sanitize_error_message(event.get("warning", "")),
-                    "fallback_used": bool(event.get("fallback_used", False)),
                     "error_scope": sanitize_error_message(
                         event.get("error_scope", ""),
                         max_chars=80,
