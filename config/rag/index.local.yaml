@@ -97,8 +97,8 @@ chunk_policies:
 embedding:
   api_key_env: RAG_EMBEDDING_API_KEY
   base_url: https://openrouter.ai/api/v1
-  batch_size: 32
-  max_in_flight_batches: 1
+  batch_size: 8
+  max_in_flight_batches: 4
   distance_metric: cosine
   document_input_type: document
   endpoint_path: /embeddings
