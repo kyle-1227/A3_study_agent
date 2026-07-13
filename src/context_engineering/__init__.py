@@ -14,6 +14,14 @@ from src.context_engineering.packing import (
     emit_context_packing_shadow,
     pack_context_items,
 )
+from src.context_engineering.model_view import (
+    ModelViewBuildResult,
+    ModelViewConfigV1,
+    ModelViewProjectionV1,
+    build_model_view_projection,
+    get_model_view_config,
+    model_view_projection_trace_payload,
+)
 from src.context_engineering.schema import (
     ContextBudget,
     ContextConfigError,
@@ -50,6 +58,9 @@ __all__ = [
     "ContextProviderError",
     "ContextUsageError",
     "ContextUsageReport",
+    "ModelViewBuildResult",
+    "ModelViewConfigV1",
+    "ModelViewProjectionV1",
     "PackedContext",
     "PackingDecision",
     "TokenCount",
@@ -59,6 +70,7 @@ __all__ = [
     "build_context_usage_error_event",
     "build_context_usage_event",
     "build_context_usage_payload",
+    "build_model_view_projection",
     "compute_context_usage",
     "count_messages_tokens",
     "count_schema_chars",
@@ -72,6 +84,8 @@ __all__ = [
     "estimate_text_tokens_mixed",
     "get_context_engineering_config",
     "get_model_context_limit",
+    "get_model_view_config",
+    "model_view_projection_trace_payload",
     "message_content_to_text",
     "pack_context_items",
 ]

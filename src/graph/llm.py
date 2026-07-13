@@ -33,6 +33,10 @@ from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
     validate_llm_input_manifest,
 )
+from src.context_engineering.model_view import (
+    build_model_view_projection,
+    model_view_projection_trace_payload,
+)
 from src.context_engineering.influence_runtime import (
     record_llm_input_influences,
     record_plain_output_influence,
@@ -862,7 +866,23 @@ async def invoke_plain_llm_fail_fast(
             prepared.resolved_policy.summary,
             state_payload,
         )
-    messages_for_llm = prepared.messages_for_llm
+    model_view = build_model_view_projection(prepared.messages_for_llm)
+    messages_for_llm = model_view.messages
+    emit_a3_trace(
+        logger,
+        "model_view.projected",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            **model_view_projection_trace_payload(model_view.projection),
+        },
+        state=state_payload,
+        env_flag="LOG_A3_TRACE",
+    )
+    model_view_mutated = (
+        model_view.projection.source_message_fingerprint
+        != model_view.projection.projected_message_fingerprint
+    )
     base_payload = {
         "node_name": node_name,
         "llm_node": llm_node,
@@ -901,7 +921,9 @@ async def invoke_plain_llm_fail_fast(
             provider_remaining_input_tokens=(prepared.provider_remaining_input_tokens),
             effective_context_budget_tokens=(prepared.effective_context_budget_tokens),
             schema_contract_first=False,
-            provider_bound_messages_mutated=prepared.context_apply_applied,
+            provider_bound_messages_mutated=(
+                prepared.context_apply_applied or model_view_mutated
+            ),
             trace_call_id=prepared.trace_call_id,
             trace_seq=prepared.next_trace_seq + 2,
             context_items=context_items,

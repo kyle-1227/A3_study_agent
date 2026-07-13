@@ -59,6 +59,10 @@ from src.context_engineering.packing import (
 from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
 )
+from src.context_engineering.model_view import (
+    build_model_view_projection,
+    model_view_projection_trace_payload,
+)
 from src.context_engineering.influence_runtime import (
     record_llm_input_influences,
     record_structured_output_influence,
@@ -2289,14 +2293,33 @@ async def _invoke_one_mode(
         )
     except ContextApplyError as exc:
         raise _InvokeOneModeError(exc, metrics, raw_output="") from exc
-    messages = structured_context_result.messages
+    model_view = build_model_view_projection(structured_context_result.messages)
+    messages = model_view.messages
+    emit_a3_trace(
+        logger,
+        "model_view.projected",
+        {
+            "node_name": node_name,
+            "llm_node": llm_node,
+            **model_view_projection_trace_payload(model_view.projection),
+        },
+        state=state or {},
+        env_flag="LOG_A3_TRACE",
+    )
     metrics.extra_debug.update(structured_context_result.debug)
+    metrics.extra_debug["model_view_projection"] = model_view_projection_trace_payload(
+        model_view.projection
+    )
     metrics.prompt_chars = _compute_prompt_chars(messages)
     context_apply_applied = bool(
         structured_context_result.debug.get("context_apply_applied")
     )
     provider_bound_messages_mutated = bool(
         structured_context_result.debug.get("provider_bound_messages_mutated")
+    )
+    provider_bound_messages_mutated = provider_bound_messages_mutated or (
+        model_view.projection.source_message_fingerprint
+        != model_view.projection.projected_message_fingerprint
     )
     try:
         schema_size_chars = _safe_schema_size_chars(schema)

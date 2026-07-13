@@ -215,6 +215,10 @@ context_engineering:
     deepseek-v4-pro: 1000000
   session_memory:
     window_model: deepseek-v4-pro
+  model_view:
+    schema_version: 1
+    micro_compaction_enabled: true
+    retain_recent_rounds: 3
   thresholds:
     warning_ratio: 0.70
     critical_ratio: 0.85
