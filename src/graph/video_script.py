@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_setting
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
+    StructuredOutputError,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -25,9 +25,7 @@ from src.tracing import traced_llm_call, traced_node
 logger = logging.getLogger(__name__)
 
 
-VIDEO_SCRIPT_DEFAULT_MODEL = "deepseek-v4-flash"
 GENERIC_TITLE_LABEL = "\u6807\u9898"
-FALLBACK_VIDEO_SCRIPT_TITLE = "Python-\u6559\u5b66\u89c6\u9891\u811a\u672c"
 
 REQUIRED_VIDEO_SCRIPT_SECTIONS = {
     "title": r"(?m)^#\s+\S+",
@@ -67,18 +65,37 @@ SRT_TIMECODE_RE = re.compile(
 class VideoScriptReviewVerdict(BaseModel):
     """Structured teaching-quality gate output for video_script_reviewer."""
 
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
     verdict: Literal["approve", "reject"]
-    reason: str
+    reason: str = Field(min_length=1)
+
+
+class VideoScriptGenerationError(RuntimeError):
+    """Raised when no real provider-produced video script can be accepted."""
+
+
+class VideoScriptApprovalError(RuntimeError):
+    """Raised when an unapproved video script reaches artifact output."""
 
 
 def _video_script_model_name() -> str:
-    configured_model = get_setting(
-        "llm.video_script.model",
-        get_setting("video_script.model", None),
-    )
-    return str(
-        configured_model or os.getenv("DEEPSEEK_MODEL") or VIDEO_SCRIPT_DEFAULT_MODEL
-    )
+    configured_model = get_setting("llm.video_script.model", None)
+    if not isinstance(configured_model, str) or not configured_model.strip():
+        raise ValueError("llm.video_script.model must be explicitly configured")
+    return configured_model.strip()
+
+
+def _video_script_temperature() -> float:
+    configured_temperature = get_setting("llm.video_script.temperature", None)
+    if isinstance(configured_temperature, bool) or not isinstance(
+        configured_temperature, (int, float)
+    ):
+        raise ValueError("llm.video_script.temperature must be explicitly configured")
+    temperature = float(configured_temperature)
+    if not 0.0 <= temperature <= 2.0:
+        raise ValueError("llm.video_script.temperature must be between 0 and 2")
+    return temperature
 
 
 def validate_video_script_verdict(parsed: BaseModel) -> str:
@@ -152,7 +169,7 @@ def _extract_markdown_title(markdown: str) -> str:
             if title and title != GENERIC_TITLE_LABEL:
                 return title
             break
-    return FALLBACK_VIDEO_SCRIPT_TITLE
+    raise ValueError("video script Markdown title is missing or generic")
 
 
 def _section_body(markdown: str, section_key: str) -> str:
@@ -217,7 +234,7 @@ def _is_topic_relevant(markdown: str, state: dict) -> bool:
         candidates = {subject, subject.replace("_", " "), subject.replace("_", "")}
         return any(item and item in combined for item in candidates)
     terms = _topic_terms(state)
-    return True if not terms else any(term.lower() in combined for term in terms)
+    return bool(terms) and any(term.lower() in combined for term in terms)
 
 
 def _local_check_video_script(markdown: str, state: dict) -> dict:
@@ -329,104 +346,6 @@ def _agent_prompt(state: LearningState, outline: str) -> str:
     )
 
 
-def _fallback_video_script_markdown(state: LearningState, reason: str = "") -> str:
-    return f"""# 《10分钟理解 Python 类与对象》
-
-## 一、视频基本信息
-- 视频主题：Python 面向对象中的类与对象
-- 适用学生：已经了解变量、函数和基本控制流的 Python 初学者
-- 预计时长：10 分钟
-- 学习目标：理解类是模板、对象是实例，并能说出属性和方法的作用
-
-## 二、知识点拆解
-- 类：描述一类事物的共同结构和行为
-- 对象：由类创建出来的具体实例
-- 属性：对象保存的数据
-- 方法：对象可以执行的操作
-- `__init__`：创建对象时初始化属性
-
-## 三、视频分镜脚本
-| 镜头 | 时间 | 画面内容 | 旁白 | 字幕 | 动画说明 |
-|---|---|---|---|---|---|
-| 1 | 00:00-00:20 | 标题页与 Python 图标 | 欢迎来到本节课，我们用 10 分钟理解 Python 类与对象。 | 10分钟理解 Python 类与对象 | 标题淡入，图标轻微缩放 |
-| 2 | 00:20-01:20 | 展示“图纸”和“汽车”类比 | 类像图纸，对象像根据图纸造出来的一辆具体汽车。 | 类是模板，对象是实例 | 图纸变成多辆汽车 |
-| 3 | 01:20-03:10 | 代码展示 `class Student` | 我们用学生作为例子，类中保存姓名和分数。 | class Student 定义学生模板 | 代码逐行高亮 |
-| 4 | 03:10-05:20 | 展示创建对象 `alice = Student(...)` | 当我们调用类名时，就创建了一个对象。 | 对象保存自己的属性 | 箭头连接变量和对象卡片 |
-| 5 | 05:20-07:20 | 展示方法 `average_score` | 方法是写在类里的函数，用来处理对象自己的数据。 | 方法 = 对象的行为 | 方法调用动画 |
-| 6 | 07:20-09:20 | 总结类、对象、属性、方法关系 | 类、对象、属性和方法组合起来，就能表达更复杂的程序模型。 | 类 + 对象 + 属性 + 方法 | 四个概念组成结构图 |
-| 7 | 09:20-10:00 | 结尾提问与练习 | 请尝试写一个 Book 类，保存书名和作者。 | 拓展练习：Book 类 | 练习卡片弹出 |
-
-## 四、完整旁白文案
-欢迎来到本节课，我们将用 10 分钟理解 Python 面向对象中最核心的两个概念：类与对象。你可以先把类想象成一张图纸，把对象想象成根据图纸制造出来的具体物品。图纸本身不是汽车，但它规定了汽车应该有哪些结构；同样，类本身不是某个具体学生，但它规定了学生对象应该有哪些属性和方法。
-
-接下来我们用 `Student` 类作为例子。`name` 和 `scores` 是学生对象保存的数据，也就是属性。`average_score` 是学生对象可以执行的操作，也就是方法。当我们写出 `alice = Student("Alice", [90, 88, 95])` 时，Python 会根据 `Student` 这个模板创建出一个具体对象。每个对象都有自己的属性，所以 Alice 和 Bob 可以有不同的成绩。
-
-最后请记住：类负责定义模板，对象负责保存具体数据，属性描述对象是什么，方法描述对象能做什么。理解这一点，你就能开始用面向对象的方式组织更复杂的 Python 程序。
-
-## 五、字幕 SRT
-1
-00:00:00,000 --> 00:00:05,000
-欢迎来到本节课，我们用 10 分钟理解 Python 类与对象。
-
-2
-00:00:05,000 --> 00:00:12,000
-类可以理解为模板，对象是根据模板创建出来的具体实例。
-
-3
-00:00:12,000 --> 00:00:20,000
-在 Student 类中，name 和 scores 是属性，average_score 是方法。
-
-4
-00:00:20,000 --> 00:00:30,000
-当我们调用 Student 时，就会创建一个保存具体数据的学生对象。
-
-5
-00:00:30,000 --> 00:00:40,000
-请记住：类定义模板，对象保存数据，方法描述对象能做什么。
-
-## 六、动画设计说明
-- 用“图纸生成汽车”的动画解释类和对象的关系。
-- 用对象卡片展示不同学生拥有不同属性。
-- 用代码逐行高亮强调 `class`、`__init__`、属性和方法。
-
-## 七、板书内容
-- 类：对象的模板
-- 对象：类的实例
-- 属性：对象保存的数据
-- 方法：对象可以执行的操作
-
-## 八、互动提问
-1. 如果 `Student` 是类，那么 `alice` 是什么？
-2. `name` 和 `scores` 为什么适合作为属性？
-3. `average_score()` 为什么适合作为方法？
-
-## 九、结尾总结
-本节课的重点是建立面向对象的基本心智模型。类不是具体数据，而是模板；对象才是具体实例。属性记录对象状态，方法描述对象行为。
-
-## 十、拓展练习
-- 写一个 `Book` 类，包含书名、作者和价格。
-- 给 `Book` 类增加一个 `discount()` 方法。
-- 尝试创建三个 Book 对象并打印它们的信息。
-
-> 本脚本由简化模式生成。原因：{reason or "模型或证据不足，系统使用 fallback 视频脚本结构生成资源。"}
-"""
-
-
-def _fallback_video_script_outline(state: LearningState, reason: str = "") -> str:
-    return (
-        "视频主题：10分钟理解 Python 类与对象\n"
-        "适用学生：Python 初学者\n"
-        "预计时长：10 分钟\n"
-        "学习目标：理解类、对象、属性、方法和 __init__\n"
-        "知识点拆解：类是模板；对象是实例；属性保存数据；方法描述行为\n"
-        "分镜数量：7 个镜头\n"
-        "动画表现方式：图纸类比、对象卡片、代码高亮、结构图总结\n"
-        "互动问题：区分类和对象；判断属性与方法\n"
-        "字幕设计：短句字幕，配合关键概念高亮\n"
-        f"生成说明：{reason or 'fallback outline'}"
-    )
-
-
 def _create_video_script_artifact(markdown: str, title: str, srt: str) -> dict:
     return create_video_script_artifact(
         markdown_text=markdown, title=title, srt_text=srt
@@ -437,26 +356,20 @@ def _create_video_script_artifact(markdown: str, title: str, srt: str) -> dict:
 async def video_script_planner(state: LearningState) -> dict:
     query = _last_human_query(state)
     context = state.get("context", [])
-    try:
-        outline = await invoke_plain_llm_fail_fast(
-            node_name="video_script_planner",
-            llm_node="video_script",
-            messages=[
-                SystemMessage(
-                    content="You are a university teaching-video planner. Return a concrete blueprint only."
-                ),
-                HumanMessage(content=_planner_prompt(state, query, context)),
-            ],
-            state=state,
-            temperature=get_setting("video_script.temperature", 0.2),
-        )
-    except Exception as exc:
-        logger.warning("video_script_planner fallback used: %s", exc)
-        outline = _fallback_video_script_outline(state, f"{type(exc).__name__}: {exc}")
+    outline = await invoke_plain_llm_fail_fast(
+        node_name="video_script_planner",
+        llm_node="video_script",
+        messages=[
+            SystemMessage(
+                content="You are a university teaching-video planner. Return a concrete blueprint only."
+            ),
+            HumanMessage(content=_planner_prompt(state, query, context)),
+        ],
+        state=state,
+        temperature=_video_script_temperature(),
+    )
     if not outline.strip():
-        outline = _fallback_video_script_outline(
-            state, "planner produced empty outline"
-        )
+        raise ValueError("video_script_planner produced empty outline")
 
     emit_a3_trace(
         logger,
@@ -486,46 +399,30 @@ async def video_script_planner(state: LearningState) -> dict:
 async def video_script_agent(state: LearningState) -> dict:
     outline = state.get("video_script_outline", "")
     if not outline.strip():
-        outline = _fallback_video_script_outline(state, "outline is empty")
+        raise VideoScriptGenerationError("video script outline is empty")
 
     round_no = int(state.get("video_script_round", 0) or 0) + 1
-    fallback_used = False
-    fallback_reason = ""
     if (
         state.get("degraded_generation") is True
         and state.get("evidence_judge_state") == "insufficient"
     ):
-        fallback_used = True
-        fallback_reason = str(
-            state.get("degraded_reason")
-            or "Evidence is insufficient; generating video script with fallback structure."
+        raise VideoScriptGenerationError(
+            "video script generation blocked because evidence is insufficient"
         )
-        markdown = _fallback_video_script_markdown(state, fallback_reason)
-    else:
-        try:
-            markdown = await invoke_plain_llm_fail_fast(
-                node_name="video_script_agent",
-                llm_node="video_script",
-                messages=[
-                    SystemMessage(
-                        content="You are a teaching-video and animation script writer. Return Markdown only."
-                    ),
-                    HumanMessage(content=_agent_prompt(state, outline)),
-                ],
-                state=state,
-                temperature=get_setting("video_script.temperature", 0.2),
-            )
-        except Exception as exc:
-            fallback_used = True
-            fallback_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning("video_script_agent fallback used: %s", fallback_reason)
-            markdown = _fallback_video_script_markdown(
-                state, "模型生成视频脚本失败，系统使用 fallback 结构生成资源。"
-            )
+    markdown = await invoke_plain_llm_fail_fast(
+        node_name="video_script_agent",
+        llm_node="video_script",
+        messages=[
+            SystemMessage(
+                content="You are a teaching-video and animation script writer. Return Markdown only."
+            ),
+            HumanMessage(content=_agent_prompt(state, outline)),
+        ],
+        state=state,
+        temperature=_video_script_temperature(),
+    )
     if not markdown.strip():
-        fallback_used = True
-        fallback_reason = "video_script_agent produced empty markdown"
-        markdown = _fallback_video_script_markdown(state, fallback_reason)
+        raise VideoScriptGenerationError("video_script_agent produced empty markdown")
 
     srt = _extract_srt_from_markdown(markdown)
     emit_a3_trace(
@@ -535,8 +432,6 @@ async def video_script_agent(state: LearningState) -> dict:
             "markdown_chars": len(markdown),
             "srt_chars": len(srt),
             "round": round_no,
-            "fallback_used": fallback_used,
-            "fallback_reason": fallback_reason,
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
@@ -556,9 +451,7 @@ async def video_script_reviewer(state: LearningState) -> dict:
     markdown = state.get("video_script_markdown", "")
     local_check = _local_check_video_script(markdown, state)
 
-    def trace_payload(
-        verdict: str, reason: str, *, llm_fallback_used: bool = False
-    ) -> dict:
+    def trace_payload(verdict: str, reason: str) -> dict:
         return {
             "local_check_passed": bool(local_check.get("passed")),
             "missing_sections": local_check.get("missing_sections", []),
@@ -571,7 +464,6 @@ async def video_script_reviewer(state: LearningState) -> dict:
             "topic_relevant": bool(local_check.get("topic_relevant")),
             "verdict": verdict,
             "reason": reason,
-            "llm_fallback_used": llm_fallback_used,
         }
 
     if not local_check["passed"]:
@@ -591,72 +483,53 @@ async def video_script_reviewer(state: LearningState) -> dict:
         }
 
     model_name = _video_script_model_name()
-    try:
-        with traced_llm_call(
-            model_name=model_name, node_name="video_script_reviewer", temperature=0.0
-        ):
-            structured_result = await invoke_structured_llm(
-                node_name="video_script_reviewer",
-                llm_node="video_script",
-                schema=VideoScriptReviewVerdict,
-                messages=[
-                    SystemMessage(
-                        content="You are a strict teaching-video script reviewer. Return only JSON."
-                    ),
-                    HumanMessage(
-                        content=(
-                            "Review this Markdown teaching-video / animation script for teaching quality.\n"
-                            "The deterministic local check has already verified required structure, storyboard table, narration, SRT, animation design, interaction, summary, and topic relevance.\n"
-                            'Return JSON only: {"verdict": "approve" or "reject", "reason": "..."}\n\n'
-                            f"## User question\n{_last_human_query(state)}\n\n"
-                            f"## Outline\n{state.get('video_script_outline', '')}\n\n"
-                            f"## Markdown\n{markdown}"
-                        )
-                    ),
-                ],
-                output_mode=get_llm_output_mode("video_script_reviewer"),
-                business_validator=validate_video_script_verdict,
-                state=state,
-                max_raw_chars=get_max_raw_chars("video_script_reviewer"),
-            )
-        result = structured_result.parsed
-        if not isinstance(result, VideoScriptReviewVerdict):
-            raise TypeError(
-                "video_script_reviewer parsed result is not VideoScriptReviewVerdict"
-            )
-        verdict = result.verdict
-        reason = result.reason.strip()
-        emit_a3_trace(
-            logger,
-            "video_script_reviewer",
-            trace_payload(verdict, reason),
+    with traced_llm_call(
+        model_name=model_name, node_name="video_script_reviewer", temperature=0.0
+    ):
+        structured_result = await invoke_structured_llm(
+            node_name="video_script_reviewer",
+            llm_node="video_script",
+            schema=VideoScriptReviewVerdict,
+            messages=[
+                SystemMessage(
+                    content="You are a strict teaching-video script reviewer. Return only JSON."
+                ),
+                HumanMessage(
+                    content=(
+                        "Review this Markdown teaching-video / animation script for teaching quality.\n"
+                        "The deterministic local check has already verified required structure, storyboard table, narration, SRT, animation design, interaction, summary, and topic relevance.\n"
+                        'Return JSON only: {"verdict": "approve" or "reject", "reason": "..."}\n\n'
+                        f"## User question\n{_last_human_query(state)}\n\n"
+                        f"## Outline\n{state.get('video_script_outline', '')}\n\n"
+                        f"## Markdown\n{markdown}"
+                    )
+                ),
+            ],
+            output_mode=get_llm_output_mode("video_script_reviewer"),
+            business_validator=validate_video_script_verdict,
             state=state,
-            env_flag="LOG_GENERATION_SUMMARY",
+            max_raw_chars=get_max_raw_chars("video_script_reviewer"),
         )
-        return {
-            "video_script_review_verdict": verdict,
-            "video_script_review_reason": reason,
-            "video_script_revision_notes": "" if verdict == "approve" else reason,
-            "video_script_local_check": local_check,
-        }
-    except Exception as exc:
-        reason = (
-            "LLM reviewer failed; local check passed, so video script is approved by deterministic fallback. "
-            f"error={type(exc).__name__}: {exc}"
+    if not structured_result.success:
+        raise StructuredOutputError(structured_result)
+    result = structured_result.parsed
+    if not isinstance(result, VideoScriptReviewVerdict):
+        raise TypeError(
+            "video_script_reviewer parsed result is not VideoScriptReviewVerdict"
         )
-        logger.warning("video_script_reviewer LLM fallback used: %s", exc)
-
+    verdict = result.verdict
+    reason = result.reason.strip()
     emit_a3_trace(
         logger,
         "video_script_reviewer",
-        trace_payload("approve", reason, llm_fallback_used=True),
+        trace_payload(verdict, reason),
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
     )
     return {
-        "video_script_review_verdict": "approve",
+        "video_script_review_verdict": verdict,
         "video_script_review_reason": reason,
-        "video_script_revision_notes": "",
+        "video_script_revision_notes": "" if verdict == "approve" else reason,
         "video_script_local_check": local_check,
     }
 
@@ -674,41 +547,27 @@ async def video_script_rewrite(state: LearningState) -> dict:
 async def video_script_output(state: LearningState) -> dict:
     markdown = state.get("video_script_markdown", "")
     if not markdown.strip():
-        markdown = _fallback_video_script_markdown(
-            state, "output received empty markdown"
+        raise VideoScriptApprovalError("video script output received empty markdown")
+    review_verdict = str(state.get("video_script_review_verdict") or "").strip()
+    review_reason = str(state.get("video_script_review_reason") or "").strip()
+    if review_verdict != "approve":
+        detail = f": {review_reason}" if review_reason else ""
+        raise VideoScriptApprovalError(
+            f"video script output requires an approve verdict{detail}"
         )
     local_check = _local_check_video_script(markdown, state)
     if not local_check["passed"]:
-        markdown = _fallback_video_script_markdown(
-            state,
-            "generated video script failed local quality check; fallback was used.",
+        raise VideoScriptApprovalError(
+            "video script output failed local quality check: "
+            + "; ".join(str(item) for item in local_check["failed_reasons"])
         )
 
     title = _extract_markdown_title(markdown)
     srt = _extract_srt_from_markdown(markdown)
-    review_verdict = state.get("video_script_review_verdict", "")
-    review_reason = state.get("video_script_review_reason", "")
-    try:
-        artifact = _create_video_script_artifact(markdown, title, srt)
-    except Exception as exc:
-        logger.exception("video_script_output failed to create artifact")
-        artifact = {
-            "title": title,
-            "artifact_id": "",
-            "markdown_url": "",
-            "docx_url": "",
-            "srt_url": "",
-            "filename": "",
-            "docx_filename": "",
-            "srt_filename": "",
-            "markdown": markdown,
-            "srt": srt,
-            "artifact_error": f"{type(exc).__name__}: {exc}",
-        }
+    artifact = _create_video_script_artifact(markdown, title, srt)
     artifact = {
         **(state.get("video_script_artifact") or {}),
         **artifact,
-        "quality_warning": review_verdict not in {"", "approve"},
         "review_reason": review_reason,
     }
     emit_a3_trace(
@@ -721,7 +580,6 @@ async def video_script_output(state: LearningState) -> dict:
             "markdown_url": artifact.get("markdown_url", ""),
             "docx_url": artifact.get("docx_url", ""),
             "srt_url": artifact.get("srt_url", ""),
-            "quality_warning": review_verdict not in {"", "approve"},
             "emits_ai_message": True,
         },
         state=state,
@@ -736,9 +594,16 @@ async def video_script_output(state: LearningState) -> dict:
 
 
 def should_rewrite_video_script(state: LearningState) -> str:
-    if state.get("video_script_review_verdict") == "approve":
+    verdict = str(state.get("video_script_review_verdict") or "").strip()
+    if verdict == "approve":
         return "output"
+    if verdict != "reject":
+        raise VideoScriptApprovalError(
+            "video script routing requires an explicit approve or reject verdict"
+        )
     current_round = int(state.get("video_script_round", 0) or 0)
     if current_round < 2:
         return "rewrite"
-    return "output"
+    raise VideoScriptApprovalError(
+        "video script remained rejected after the maximum rewrite rounds"
+    )
