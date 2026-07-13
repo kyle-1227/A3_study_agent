@@ -90,14 +90,6 @@ def _safe_filename_stem(value: str, default: str = "review-doc") -> str:
     return cleaned or default
 
 
-def _extract_first_python_code_block(markdown_text: str) -> str:
-    match = re.search(
-        r"(?s)```(?:python|py)\s*\n(?P<code>.+?)```",
-        markdown_text or "",
-    )
-    return match.group("code").strip() + "\n" if match else ""
-
-
 def _extract_srt_section(markdown_text: str) -> str:
     text = str(markdown_text or "")
     match = re.search(
@@ -232,37 +224,6 @@ def create_document_artifact(
 def create_markdown_artifact(markdown_text: str, title: str) -> dict:
     """Save review-doc Markdown text as .md and .docx artifacts."""
     return create_document_artifact(markdown_text, title, artifact_kind="review_docs")
-
-
-def create_code_practice_artifact(
-    markdown_text: str,
-    title: str,
-    python_code: str | None = None,
-) -> dict:
-    """Save code-practice Markdown as .md/.docx plus an extracted .py file."""
-    artifact = create_document_artifact(
-        markdown_text=markdown_text,
-        title=title,
-        artifact_kind="code_practice",
-    )
-    code = str(python_code or "").strip()
-    if not code:
-        code = _extract_first_python_code_block(markdown_text).strip()
-    if not code:
-        code = 'print("请在 Markdown 文档中查看代码实操内容")'
-
-    artifact_id = str(artifact["artifact_id"])
-    python_filename = Path(str(artifact["filename"])).with_suffix(".py").name
-    artifact_dir = get_code_practice_artifact_dir() / artifact_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    (artifact_dir / python_filename).write_text(code.rstrip() + "\n", encoding="utf-8")
-
-    return {
-        **artifact,
-        "python_filename": python_filename,
-        "python_url": f"/artifacts/code-practice/{artifact_id}/{python_filename}",
-        "markdown": markdown_text,
-    }
 
 
 def create_video_script_artifact(

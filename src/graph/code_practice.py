@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_setting
 from src.graph.llm import invoke_plain_llm_fail_fast
 from src.graph.state import LearningState
 from src.llm.structured_output import (
+    StructuredOutputError,
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
@@ -104,11 +105,25 @@ EXTENSION_TASK_MARKERS = (
 )
 
 
+class CodePracticeGenerationError(RuntimeError):
+    """Raised when code-practice generation cannot produce a real provider result."""
+
+
+class CodePracticeReviewError(RuntimeError):
+    """Raised when code-practice review cannot establish an approval decision."""
+
+
+class CodePracticeApprovalError(RuntimeError):
+    """Raised when an unapproved code-practice result reaches artifact output."""
+
+
 class CodePracticeReviewVerdict(BaseModel):
     """Structured teaching-quality gate output for code_practice_reviewer."""
 
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
     verdict: Literal["approve", "revise", "reject"]
-    reason: str
+    reason: str = Field(min_length=1)
 
 
 def validate_code_practice_verdict(parsed: BaseModel) -> str:
@@ -164,8 +179,11 @@ def _extract_markdown_title(markdown: str) -> str:
     for line in markdown.splitlines():
         match = re.match(r"^#\s+(.+?)\s*$", line)
         if match:
-            return match.group(1).strip()
-    return "代码实操案例"
+            title = match.group(1).strip()
+            if title:
+                return title
+            break
+    raise CodePracticeGenerationError("code practice Markdown title is missing")
 
 
 def _extract_first_python_code_block(markdown: str) -> str:
@@ -266,7 +284,7 @@ def _is_topic_relevant(markdown: str, code: str, state: dict) -> bool:
     if subject in {"", "other"}:
         terms = _topic_terms(state)
         if not terms:
-            return True
+            return False
         return any(term.lower() in combined for term in terms)
     if subject == "python":
         return bool(code.strip())
@@ -352,14 +370,39 @@ def _local_check_code_practice(markdown: str, state: dict) -> dict:
     }
 
 
-def _local_review_failure(markdown: str) -> str:
-    local_check = _local_check_code_practice(markdown, {})
-    return "; ".join(local_check["failed_reasons"])
-
-
 def _extract_first_python_code(markdown: str) -> str:
     code = _extract_first_python_code_block(markdown)
     return code + "\n" if code else ""
+
+
+def _code_practice_model_name() -> str:
+    configured_model = get_setting("llm.code_practice.model", None)
+    if not isinstance(configured_model, str) or not configured_model.strip():
+        raise ValueError("llm.code_practice.model must be explicitly configured")
+    return configured_model.strip()
+
+
+def _code_practice_temperature() -> float:
+    configured_temperature = get_setting("llm.code_practice.temperature", None)
+    if isinstance(configured_temperature, bool) or not isinstance(
+        configured_temperature, (int, float)
+    ):
+        raise ValueError("llm.code_practice.temperature must be explicitly configured")
+    temperature = float(configured_temperature)
+    if not 0.0 <= temperature <= 2.0:
+        raise ValueError("llm.code_practice.temperature must be between 0 and 2")
+    return temperature
+
+
+def _code_practice_max_generation_rounds() -> int:
+    configured_rounds = get_setting("llm.code_practice.max_generation_rounds", None)
+    if isinstance(configured_rounds, bool) or not isinstance(configured_rounds, int):
+        raise ValueError(
+            "llm.code_practice.max_generation_rounds must be explicitly configured"
+        )
+    if configured_rounds < 1:
+        raise ValueError("llm.code_practice.max_generation_rounds must be at least one")
+    return configured_rounds
 
 
 def _planner_prompt(state: LearningState, query: str, context: list[dict]) -> str:
@@ -412,120 +455,6 @@ def _agent_prompt(state: LearningState, outline: str) -> str:
     )
 
 
-def _fallback_code_practice_markdown(
-    state: LearningState, outline: str, reason: str
-) -> str:
-    query = _last_human_query(state)
-    title = "Python 面向对象代码实操案例"
-    if "银行" in query or "账户" in query:
-        scenario = "银行账户系统"
-    elif "图书" in query:
-        scenario = "图书管理系统"
-    else:
-        scenario = "学生成绩管理系统"
-    return f"""# {title}
-
-## 一、实操目标
-通过一个“{scenario}”案例练习 Python 面向对象编程，重点掌握类、对象、实例属性、方法封装和简单数据汇总。
-
-## 二、前置知识
-- 会定义 `class` 和 `__init__` 方法。
-- 理解对象属性和实例方法。
-- 会使用列表保存多个对象。
-- 能在终端运行单个 `.py` 文件。
-
-## 三、案例场景
-你需要编写一个小型成绩管理程序。程序可以创建学生对象，将学生加入成绩册，并输出每个学生的平均分和班级平均分。
-
-## 四、完整代码
-```python
-class Student:
-    def __init__(self, name, scores):
-        self.name = name
-        self.scores = scores
-
-    def average_score(self):
-        if not self.scores:
-            return 0
-        return sum(self.scores) / len(self.scores)
-
-    def summary(self):
-        return f"{{self.name}}: 平均分 {{self.average_score():.1f}}"
-
-
-class GradeBook:
-    def __init__(self):
-        self.students = []
-
-    def add_student(self, student):
-        self.students.append(student)
-
-    def class_average(self):
-        if not self.students:
-            return 0
-        total = sum(student.average_score() for student in self.students)
-        return total / len(self.students)
-
-    def print_report(self):
-        print("学生成绩报告")
-        for student in self.students:
-            print(student.summary())
-        print(f"班级平均分: {{self.class_average():.1f}}")
-
-
-def main():
-    grade_book = GradeBook()
-    grade_book.add_student(Student("Alice", [90, 86, 95]))
-    grade_book.add_student(Student("Bob", [78, 82, 88]))
-    grade_book.add_student(Student("Cindy", [96, 91, 93]))
-    grade_book.print_report()
-
-
-if __name__ == "__main__":
-    main()
-```
-
-## 五、代码逐段讲解
-- `Student` 类负责保存单个学生的姓名和成绩，并提供平均分计算方法。
-- `GradeBook` 类负责管理多个学生对象，体现“对象之间协作”的思想。
-- `main()` 函数负责创建对象、组织数据并启动程序，便于后续扩展。
-
-## 六、运行方式
-1. 将代码保存为 `oop_gradebook.py`。
-2. 在终端进入文件所在目录。
-3. 执行命令：`python oop_gradebook.py`。
-
-## 七、预期输出
-运行后会打印类似结果：
-
-```text
-学生成绩报告
-Alice: 平均分 90.3
-Bob: 平均分 82.7
-Cindy: 平均分 93.3
-班级平均分: 88.8
-```
-
-## 八、常见错误与排查
-- 如果出现 `NameError`，检查类名或变量名是否拼写一致。
-- 如果出现 `TypeError`，检查传入 `Student(name, scores)` 的参数数量是否正确。
-- 如果平均分不符合预期，检查 `scores` 是否是数字列表。
-
-## 九、拓展任务
-- 增加最高分、最低分统计。
-- 增加按照平均分排序的功能。
-- 将学生数据改为从键盘输入。
-- 将报告保存到文本文件中。
-
-## 十、自测问题
-1. `Student` 类和 `GradeBook` 类分别承担什么职责？
-2. 为什么 `class_average()` 中要判断 `self.students` 是否为空？
-3. 如果要增加“课程名称”，你会把它放在哪个类里？
-
-> 本案例由简化模式生成。原因：{reason or "证据不足，系统使用 fallback 结构生成代码实操资源。"}
-"""
-
-
 @traced_node
 async def code_practice_planner(state: LearningState) -> dict:
     query = _last_human_query(state)
@@ -551,7 +480,7 @@ async def code_practice_planner(state: LearningState) -> dict:
             HumanMessage(content=_planner_prompt(state, query, context)),
         ],
         state=state,
-        temperature=get_setting("code_practice.temperature", 0.2),
+        temperature=_code_practice_temperature(),
     )
     if not outline.strip():
         raise ValueError("code_practice_planner produced empty outline")
@@ -570,46 +499,30 @@ async def code_practice_planner(state: LearningState) -> dict:
 async def code_practice_agent(state: LearningState) -> dict:
     outline = state.get("code_practice_outline", "")
     if not outline.strip():
-        raise ValueError("code_practice outline is empty")
+        raise CodePracticeGenerationError("code_practice outline is empty")
 
     round_no = int(state.get("code_practice_round", 0) or 0) + 1
-    fallback_used = False
-    fallback_reason = ""
     if (
         state.get("degraded_generation") is True
         and state.get("evidence_judge_state") == "insufficient"
     ):
-        fallback_used = True
-        fallback_reason = str(
-            state.get("degraded_reason")
-            or "Evidence is insufficient; generating resource with fallback structure."
+        raise CodePracticeGenerationError(
+            "code_practice generation blocked because evidence is insufficient"
         )
-        markdown = _fallback_code_practice_markdown(state, outline, fallback_reason)
-    else:
-        try:
-            markdown = await invoke_plain_llm_fail_fast(
-                node_name="code_practice_agent",
-                llm_node="code_practice",
-                messages=[
-                    SystemMessage(
-                        content="You are a code-practice case writer. Return Markdown only."
-                    ),
-                    HumanMessage(content=_agent_prompt(state, outline)),
-                ],
-                state=state,
-                temperature=get_setting("code_practice.temperature", 0.2),
-            )
-        except Exception as exc:
-            fallback_used = True
-            fallback_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning("code_practice_agent fallback used: %s", fallback_reason)
-            markdown = _fallback_code_practice_markdown(
-                state,
-                outline,
-                "模型生成代码实操案例失败，系统使用 fallback 结构生成资源。",
-            )
+    markdown = await invoke_plain_llm_fail_fast(
+        node_name="code_practice_agent",
+        llm_node="code_practice",
+        messages=[
+            SystemMessage(
+                content="You are a code-practice case writer. Return Markdown only."
+            ),
+            HumanMessage(content=_agent_prompt(state, outline)),
+        ],
+        state=state,
+        temperature=_code_practice_temperature(),
+    )
     if not markdown.strip():
-        raise ValueError("code_practice_agent produced empty markdown")
+        raise CodePracticeGenerationError("code_practice_agent produced empty markdown")
 
     emit_a3_trace(
         logger,
@@ -618,8 +531,6 @@ async def code_practice_agent(state: LearningState) -> dict:
             "markdown_chars": len(markdown),
             "round": round_no,
             "context_count": len(state.get("context", [])),
-            "fallback_used": fallback_used,
-            "fallback_reason": fallback_reason,
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
@@ -638,9 +549,7 @@ async def code_practice_reviewer(state: LearningState) -> dict:
     markdown = state.get("code_practice_markdown", "")
     local_check = _local_check_code_practice(markdown, state)
 
-    def trace_payload(
-        verdict: str, reason: str, *, llm_fallback_used: bool = False
-    ) -> dict:
+    def trace_payload(verdict: str, reason: str) -> dict:
         return {
             "local_check_passed": bool(local_check.get("passed")),
             "missing_sections": local_check.get("missing_sections", []),
@@ -655,7 +564,6 @@ async def code_practice_reviewer(state: LearningState) -> dict:
             "verdict": verdict,
             "reason": reason,
             "markdown_chars": len(markdown),
-            "llm_fallback_used": llm_fallback_used,
         }
 
     if not local_check["passed"]:
@@ -674,77 +582,56 @@ async def code_practice_reviewer(state: LearningState) -> dict:
             "code_practice_local_check": local_check,
         }
 
-    model_name = get_setting(
-        "llm.code_practice.model", get_setting("code_practice.model", "")
-    )
-    try:
-        with traced_llm_call(
-            model_name=model_name, node_name="code_practice_reviewer", temperature=0.0
-        ):
-            structured_result = await invoke_structured_llm(
-                node_name="code_practice_reviewer",
-                llm_node="code_practice",
-                schema=CodePracticeReviewVerdict,
-                messages=[
-                    SystemMessage(
-                        content="You are a strict code-practice teaching-quality reviewer. Return only JSON."
-                    ),
-                    HumanMessage(
-                        content=(
-                            "Review the teaching quality of this Markdown code-practice case.\n"
-                            "The deterministic local check has already verified structure, Python syntax, run steps, expected output, troubleshooting, extension tasks, and topic relevance.\n"
-                            "Return approve only if the explanation is clear, the task is teachable, and the example is useful for the learner. "
-                            "Otherwise return revise.\n\n"
-                            'JSON shape: {"verdict": "approve" or "revise", "reason": "..."}\n\n'
-                            f"## User question\n{_last_human_query(state)}\n\n"
-                            f"## Outline\n{state.get('code_practice_outline', '')}\n\n"
-                            f"## Markdown\n{markdown}"
-                        )
-                    ),
-                ],
-                output_mode=get_llm_output_mode("code_practice_reviewer"),
-                business_validator=validate_code_practice_verdict,
-                state=state,
-                max_raw_chars=get_max_raw_chars("code_practice_reviewer"),
-            )
-        result = structured_result.parsed
-        if not isinstance(result, CodePracticeReviewVerdict):
-            raise TypeError(
-                "code_practice_reviewer parsed result is not CodePracticeReviewVerdict"
-            )
-        verdict = "approve" if result.verdict == "approve" else "revise"
-        reason = result.reason.strip()
-        emit_a3_trace(
-            logger,
-            "code_practice_reviewer",
-            trace_payload(verdict, reason),
+    model_name = _code_practice_model_name()
+    with traced_llm_call(
+        model_name=model_name, node_name="code_practice_reviewer", temperature=0.0
+    ):
+        structured_result = await invoke_structured_llm(
+            node_name="code_practice_reviewer",
+            llm_node="code_practice",
+            schema=CodePracticeReviewVerdict,
+            messages=[
+                SystemMessage(
+                    content="You are a strict code-practice teaching-quality reviewer. Return only JSON."
+                ),
+                HumanMessage(
+                    content=(
+                        "Review the teaching quality of this Markdown code-practice case.\n"
+                        "The deterministic local check has already verified structure, Python syntax, run steps, expected output, troubleshooting, extension tasks, and topic relevance.\n"
+                        "Return approve only if the explanation is clear, the task is teachable, and the example is useful for the learner. "
+                        "Return revise when it can be corrected, or reject when it is fundamentally unusable.\n\n"
+                        'JSON shape: {"verdict": "approve", "revise", or "reject", "reason": "..."}\n\n'
+                        f"## User question\n{_last_human_query(state)}\n\n"
+                        f"## Outline\n{state.get('code_practice_outline', '')}\n\n"
+                        f"## Markdown\n{markdown}"
+                    )
+                ),
+            ],
+            output_mode=get_llm_output_mode("code_practice_reviewer"),
+            business_validator=validate_code_practice_verdict,
             state=state,
-            env_flag="LOG_GENERATION_SUMMARY",
+            max_raw_chars=get_max_raw_chars("code_practice_reviewer"),
         )
-        return {
-            "code_practice_review_verdict": verdict,
-            "code_practice_review_reason": reason,
-            "code_practice_revision_notes": "" if verdict == "approve" else reason,
-            "code_practice_local_check": local_check,
-        }
-    except Exception as exc:
-        reason = (
-            "LLM reviewer failed; local check passed, so code practice is approved by deterministic fallback. "
-            f"error={type(exc).__name__}: {exc}"
+    if not structured_result.success:
+        raise StructuredOutputError(structured_result)
+    result = structured_result.parsed
+    if not isinstance(result, CodePracticeReviewVerdict):
+        raise CodePracticeReviewError(
+            "code_practice_reviewer parsed result is not CodePracticeReviewVerdict"
         )
-        logger.warning("code_practice_reviewer LLM fallback used: %s", exc)
-
+    verdict = result.verdict
+    reason = result.reason.strip()
     emit_a3_trace(
         logger,
         "code_practice_reviewer",
-        trace_payload("approve", reason, llm_fallback_used=True),
+        trace_payload(verdict, reason),
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
     )
     return {
-        "code_practice_review_verdict": "approve",
+        "code_practice_review_verdict": verdict,
         "code_practice_review_reason": reason,
-        "code_practice_revision_notes": "",
+        "code_practice_revision_notes": "" if verdict == "approve" else reason,
         "code_practice_local_check": local_check,
     }
 
@@ -764,36 +651,49 @@ async def code_practice_rewrite(state: LearningState) -> dict:
 async def code_practice_output(state: LearningState) -> dict:
     markdown = state.get("code_practice_markdown", "")
     if not markdown.strip():
-        raise ValueError("code_practice markdown is empty")
+        raise CodePracticeApprovalError("code_practice markdown is empty")
 
+    review_verdict = str(state.get("code_practice_review_verdict") or "").strip()
+    review_reason = str(state.get("code_practice_review_reason") or "").strip()
+    if review_verdict != "approve":
+        detail = f": {review_reason}" if review_reason else ""
+        raise CodePracticeApprovalError(
+            f"code_practice output requires an approve verdict{detail}"
+        )
+    local_check = _local_check_code_practice(markdown, state)
+    if not local_check["passed"]:
+        raise CodePracticeApprovalError(
+            "code_practice output failed local quality check: "
+            + "; ".join(str(item) for item in local_check["failed_reasons"])
+        )
     title = _extract_markdown_title(markdown)
-    review_verdict = state.get("code_practice_review_verdict", "")
-    review_reason = state.get("code_practice_review_reason", "")
+    python_code = _extract_first_python_code(markdown)
+    if not python_code.strip():
+        raise CodePracticeApprovalError(
+            "code_practice output requires a real Python code block"
+        )
     document_artifact = create_document_artifact(
         markdown_text=markdown,
         title=title,
         artifact_kind="code_practice",
     )
-    python_code = _extract_first_python_code(markdown)
     python_filename = Path(document_artifact["filename"]).with_suffix(".py").name
-    python_url = ""
-    if python_code:
-        artifact_dir = get_code_practice_artifact_dir() / str(
-            document_artifact["artifact_id"]
-        )
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        python_path = artifact_dir / python_filename
-        python_path.write_text(python_code, encoding="utf-8")
-        python_url = f"/artifacts/code-practice/{document_artifact['artifact_id']}/{python_filename}"
+    artifact_dir = get_code_practice_artifact_dir() / str(
+        document_artifact["artifact_id"]
+    )
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    python_path = artifact_dir / python_filename
+    python_path.write_text(python_code, encoding="utf-8")
+    python_url = (
+        f"/artifacts/code-practice/{document_artifact['artifact_id']}/{python_filename}"
+    )
 
     artifact = {
-        **(state.get("code_practice_artifact") or {}),
         **document_artifact,
         "title": title,
-        "python_filename": python_filename if python_code else "",
+        "python_filename": python_filename,
         "python_url": python_url,
         "markdown": markdown,
-        "quality_warning": review_verdict not in {"", "approve"},
         "review_reason": review_reason,
     }
     emit_a3_trace(
@@ -802,7 +702,6 @@ async def code_practice_output(state: LearningState) -> dict:
         {
             "title": title,
             "markdown_chars": len(markdown),
-            "quality_warning": review_verdict not in {"", "approve"},
             "review_reason": review_reason,
             "markdown_url": artifact.get("markdown_url", ""),
             "docx_url": artifact.get("docx_url", ""),
@@ -821,9 +720,16 @@ async def code_practice_output(state: LearningState) -> dict:
 
 
 def should_rewrite_code_practice(state: LearningState) -> str:
-    if state.get("code_practice_review_verdict") == "approve":
+    verdict = str(state.get("code_practice_review_verdict") or "").strip()
+    if verdict == "approve":
         return "output"
+    if verdict not in {"revise", "reject"}:
+        raise CodePracticeApprovalError(
+            "code_practice routing requires approve, revise, or reject"
+        )
     current_round = int(state.get("code_practice_round", 0) or 0)
-    if current_round < 2:
+    if current_round < _code_practice_max_generation_rounds():
         return "rewrite"
-    return "output"
+    raise CodePracticeApprovalError(
+        "code_practice remained unapproved after the maximum rewrite rounds"
+    )
