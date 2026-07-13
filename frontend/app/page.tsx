@@ -2268,6 +2268,15 @@ export default function Home() {
         <ChatArea
           messages={messages}
           liveTurnContent={liveTurn?.provisionalAnswer ?? ""}
+          liveTurnProgress={
+            liveTurn
+              ? {
+                  lifecycle: liveTurn.lifecycle,
+                  activityCount: liveTurn.activities.length,
+                  toolCount: liveTurn.tools.length,
+                }
+              : null
+          }
           onSendMessage={handleSendMessage}
           onStopGeneration={handleStopGeneration}
           onContinueThread={handleContinueThread}

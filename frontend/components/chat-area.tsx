@@ -184,6 +184,11 @@ export interface StudyPlanResult {
 interface ChatAreaProps {
   messages: Message[]
   liveTurnContent?: string
+  liveTurnProgress?: {
+    lifecycle: "running" | "waiting" | "completed" | "failed"
+    activityCount: number
+    toolCount: number
+  } | null
   onSendMessage: (content: string) => void
   onStopGeneration?: () => void
   onContinueThread?: () => void
@@ -197,6 +202,7 @@ interface ChatAreaProps {
 export function ChatArea({
   messages,
   liveTurnContent = "",
+  liveTurnProgress = null,
   onSendMessage,
   onStopGeneration,
   onContinueThread,
@@ -298,6 +304,11 @@ export function ChatArea({
                       : message
                   }
                   streaming={isLiveProjection}
+                  streamingProgress={
+                    index === messages.length - 1 && message.role === "assistant"
+                      ? liveTurnProgress
+                      : null
+                  }
                 />
               )
             })
@@ -500,9 +511,11 @@ function useAnimationFrameValue(value: string): string {
 function MessageBubble({
   message,
   streaming = false,
+  streamingProgress = null,
 }: {
   message: Message
   streaming?: boolean
+  streamingProgress?: ChatAreaProps["liveTurnProgress"]
 }) {
   const isUser = message.role === "user"
   const hasAssistantPayload = Boolean(
@@ -541,6 +554,9 @@ function MessageBubble({
           <div className="whitespace-pre-wrap">{message.content}</div>
         ) : (
           <div className="min-w-0 space-y-3">
+            {streamingProgress ? (
+              <LiveTurnProgress progress={streamingProgress} />
+            ) : null}
             {message.resourceStatus && <ResourceGenerationStatusPanel status={message.resourceStatus} />}
             {message.activities?.length ? <ActivityStream activities={message.activities} /> : null}
             {message.reviewDocs?.length
@@ -1036,6 +1052,36 @@ function ResourceGenerationStatusPanel({ status }: { status: ResourceGenerationS
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function LiveTurnProgress({
+  progress,
+}: {
+  progress: NonNullable<ChatAreaProps["liveTurnProgress"]>
+}) {
+  const lifecycleLabel = {
+    running: "正在处理",
+    waiting: "等待继续",
+    completed: "处理完成",
+    failed: "处理失败",
+  }[progress.lifecycle]
+  const details = [
+    progress.activityCount > 0 ? `${progress.activityCount} 个阶段` : "",
+    progress.toolCount > 0 ? `${progress.toolCount} 个工具事件` : "",
+  ].filter(Boolean)
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="inline-flex items-center gap-1.5 font-medium text-primary">
+        <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+        {lifecycleLabel}
+      </span>
+      {details.length > 0 ? <span>{details.join(" · ")}</span> : null}
     </div>
   )
 }
