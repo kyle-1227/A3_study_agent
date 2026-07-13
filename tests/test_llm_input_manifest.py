@@ -16,6 +16,7 @@ from src.context_engineering.input_manifest import (
     llm_input_manifest_trace_payload,
     merge_llm_input_manifest_history,
 )
+from src.context_engineering.schema import ContextItem
 from src.context_engineering.influence import (
     build_influence_entry,
     build_influence_update,
@@ -71,6 +72,83 @@ def test_manifest_history_dedupes_by_stable_id():
 
     assert len(history) == 1
     assert history[0]["manifest_id"] == payload["manifest_id"]
+
+
+def test_manifest_keeps_safe_descriptors_only_for_applied_final_items():
+    item = ContextItem(
+        id="memory:course-goal",
+        source_type="memory",
+        content="private retained memory body",
+        token_estimate=7,
+        estimated=True,
+        tokenizer_mode="estimated_mixed_v1",
+        priority=80,
+        scope="session",
+        lifetime="session",
+        compressible=True,
+        can_drop=True,
+        disclosure_level="summary",
+    )
+    manifest = build_llm_input_manifest(
+        node_name="qa_agent",
+        llm_node="qa",
+        provider="deepseek_official",
+        model="deepseek-v4-pro",
+        messages=[HumanMessage(content="question")],
+        state={"request_id": "request-1", "thread_id": "thread-1"},
+        call_purpose="structured_output",
+        context_apply_applied=True,
+        context_apply_status="applied",
+        provider_bound_messages_mutated=True,
+        context_items=[item],
+    )
+
+    assert manifest["context_injection_items"] == [
+        {
+            "logical_item_id": "memory:course-goal",
+            "source_type": "memory",
+            "content_fingerprint": manifest["context_injection_items"][0][
+                "content_fingerprint"
+            ],
+            "token_count": 7,
+            "tokenizer_mode": "estimated_mixed_v1",
+            "estimated": True,
+        }
+    ]
+    assert "private retained memory body" not in repr(manifest)
+    assert "context_injection_items" not in llm_input_manifest_trace_payload(manifest)
+
+
+def test_manifest_does_not_describe_observe_only_context_items():
+    item = ContextItem(
+        id="memory:observe-only",
+        source_type="memory",
+        content="not provider bound",
+        token_estimate=4,
+        estimated=True,
+        tokenizer_mode="estimated_mixed_v1",
+        priority=50,
+        scope="session",
+        lifetime="session",
+        compressible=True,
+        can_drop=True,
+        disclosure_level="summary",
+    )
+    manifest = build_llm_input_manifest(
+        node_name="qa_agent",
+        llm_node="qa",
+        provider="deepseek_official",
+        model="deepseek-v4-pro",
+        messages=[HumanMessage(content="question")],
+        state={"request_id": "request-1", "thread_id": "thread-1"},
+        call_purpose="structured_output",
+        context_apply_applied=False,
+        context_apply_status="observe_only",
+        provider_bound_messages_mutated=False,
+        context_items=[item],
+    )
+
+    assert manifest["context_injection_items"] == []
 
 
 def test_manifest_history_enforces_total_character_budget(monkeypatch):

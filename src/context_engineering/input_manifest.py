@@ -19,6 +19,10 @@ from src.context_engineering.input_accounting import (
 from src.context_engineering.itemizer import sanitize_metadata
 from src.context_engineering.influence import influence_status_payload
 from src.context_engineering.schema import ContextItem
+from src.context_engineering.session_memory import (
+    ContextInjectionItemDescriptorV1,
+    build_injection_descriptor,
+)
 from src.context_engineering.workspace import (
     sanitize_workspace_text,
     utc_now_iso,
@@ -66,6 +70,8 @@ class LLMInputManifest(TypedDict, total=False):
     output_mode: str
     message_count: int
     input_estimated_tokens: int
+    input_tokenizer_mode: str
+    input_tokens_estimated: bool
     prompt_chars: int
     context_apply_applied: bool
     context_apply_status: str
@@ -83,6 +89,7 @@ class LLMInputManifest(TypedDict, total=False):
     trace_seq: int
     diagnostics: list[str]
     message_fingerprint: str
+    context_injection_items: list[dict[str, Any]]
 
 
 class ThreadContextLedger(TypedDict, total=False):
@@ -218,6 +225,12 @@ def build_llm_input_manifest(
         for source in optional_sources_missing
         if _safe_text(source, 80)
     ][:_SOURCE_ID_LIMIT]
+    injection_items = _context_injection_descriptors(
+        safe_context_items,
+        context_apply_applied=context_apply_applied,
+        context_apply_status=safe_apply_status,
+        provider_bound_messages_mutated=provider_bound_messages_mutated,
+    )
     identity: dict[str, Any] = {
         "request_id": request_id,
         "thread_id": thread_id,
@@ -246,6 +259,8 @@ def build_llm_input_manifest(
         "output_mode": safe_output_mode,
         "message_count": len(safe_messages),
         "input_estimated_tokens": input_tokens,
+        "input_tokenizer_mode": input_accounting.tokenizer_mode,
+        "input_tokens_estimated": True,
         "prompt_chars": prompt_chars,
         "context_apply_applied": bool(context_apply_applied),
         "context_apply_status": safe_apply_status,
@@ -265,6 +280,7 @@ def build_llm_input_manifest(
         "trace_seq": int(trace_seq or 0),
         "diagnostics": [],
         "message_fingerprint": input_accounting.message_fingerprint,
+        "context_injection_items": injection_items,
     }
     validate_llm_input_manifest(manifest)
     return manifest
@@ -281,6 +297,16 @@ def validate_llm_input_manifest(manifest: Mapping[str, Any] | None) -> None:
             raise LLMInputManifestError(f"llm_input_manifest_{key}_missing")
     if not isinstance(manifest.get("sections"), list):
         raise LLMInputManifestError("llm_input_manifest_sections_invalid")
+    descriptors = manifest.get("context_injection_items", [])
+    if not isinstance(descriptors, list):
+        raise LLMInputManifestError("llm_input_manifest_injection_items_invalid")
+    try:
+        for descriptor in descriptors:
+            ContextInjectionItemDescriptorV1.model_validate(descriptor)
+    except Exception as exc:
+        raise LLMInputManifestError(
+            "llm_input_manifest_injection_items_invalid"
+        ) from exc
 
 
 def llm_input_manifest_trace_payload(
@@ -931,6 +957,27 @@ def _source_ids_from_items(
         if len(seen) >= _SOURCE_ID_LIMIT:
             break
     return seen
+
+
+def _context_injection_descriptors(
+    items: Iterable[ContextItem],
+    *,
+    context_apply_applied: bool,
+    context_apply_status: str,
+    provider_bound_messages_mutated: bool,
+) -> list[dict[str, Any]]:
+    if (
+        not context_apply_applied
+        or not provider_bound_messages_mutated
+        or context_apply_status not in {"applied", "degraded_applied"}
+    ):
+        return []
+    descriptors: list[dict[str, Any]] = []
+    for item in items:
+        descriptor = build_injection_descriptor(item)
+        if descriptor is not None:
+            descriptors.append(descriptor.model_dump(mode="json"))
+    return descriptors
 
 
 def _safe_text(value: Any, max_chars: int = _TEXT_MAX) -> str:

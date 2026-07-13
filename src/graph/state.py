@@ -21,6 +21,14 @@ from src.context_engineering.influence import (
     CONTEXT_INFLUENCE_LEDGER_CLEAR as _CONTEXT_INFLUENCE_LEDGER_CLEAR,
     merge_context_influence_ledger,
 )
+from src.context_engineering.session_memory import (
+    ContextInjectionRecordV1,
+    ContextMemoryCompactionMutationV1,
+    SessionContextMemoryLedgerV1,
+    apply_context_memory_compaction,
+    new_session_context_memory_ledger,
+    record_context_injection,
+)
 from src.observability.activity import merge_activity_timeline
 from src.observability.context_usage_report import (
     merge_context_usage_report_history,
@@ -45,6 +53,9 @@ LLM_INPUT_MANIFESTS_CLEAR: list[dict] = [{"__llm_input_manifests_clear__": True}
 CONTEXT_INFLUENCE_LEDGER_CLEAR: dict = _CONTEXT_INFLUENCE_LEDGER_CLEAR
 ACTIVITY_TIMELINE_CLEAR: list[dict] = [{"__activity_timeline_clear__": True}]
 CONTEXT_USAGE_REPORTS_CLEAR: list[dict] = [{"__context_usage_reports_clear__": True}]
+SESSION_CONTEXT_MEMORY_LEDGER_CLEAR: dict = {
+    "__session_context_memory_ledger_clear__": True
+}
 
 # Evidence memory reducer
 EVIDENCE_MEMORY_MAX_ENTRIES = 20
@@ -235,6 +246,42 @@ def thread_context_ledger_reducer(existing: dict, update: dict) -> dict:
     if isinstance(update, dict) and update.get("__dict_clear__") is True:
         return {}
     return merge_thread_context_ledger(existing, update)
+
+
+def session_context_memory_ledger_reducer(existing: dict, update: dict) -> dict:
+    """Apply strict, idempotent mutations to durable session memory accounting."""
+
+    if not isinstance(update, dict):
+        raise ValueError("session context memory ledger update must be a dict")
+    if update.get("__session_context_memory_ledger_clear__") is True:
+        return {}
+    operation = update.get("operation")
+    if operation == "record_dispatch":
+        record = ContextInjectionRecordV1.model_validate(update.get("record"))
+        ledger = (
+            SessionContextMemoryLedgerV1.model_validate(existing)
+            if existing
+            else new_session_context_memory_ledger(record.thread_id)
+        )
+        return record_context_injection(ledger, record).model_dump(mode="json")
+    if operation == "apply_compaction":
+        if not existing:
+            raise ValueError("compaction requires an existing session memory ledger")
+        ledger = SessionContextMemoryLedgerV1.model_validate(existing)
+        mutation = ContextMemoryCompactionMutationV1.model_validate(update)
+        return apply_context_memory_compaction(
+            ledger,
+            boundary_id=mutation.boundary_id,
+            retained_logical_item_ids=mutation.retained_logical_item_ids,
+            compacted_at=mutation.compacted_at,
+            before_tokens=mutation.before_tokens,
+            after_tokens=mutation.after_tokens,
+        ).model_dump(mode="json")
+    if update.get("schema_version") == 1:
+        return SessionContextMemoryLedgerV1.model_validate(update).model_dump(
+            mode="json"
+        )
+    raise ValueError("session context memory ledger operation is invalid")
 
 
 def latest_dict_reducer(_existing: dict, update: dict) -> dict:
@@ -610,6 +657,12 @@ class LearningState(TypedDict):
     thread_context_ledger: Annotated[
         dict, thread_context_ledger_reducer
     ]  # Thread-level context source ledger
+    session_context_memory_ledger: Annotated[
+        dict, session_context_memory_ledger_reducer
+    ]  # Durable CE items actually dispatched during this thread
+    thread_context_window_v3: Annotated[
+        dict, latest_dict_reducer
+    ]  # Public projection of durable session context memory
     background_context_window: Annotated[
         dict, latest_dict_reducer
     ]  # Codex-like thread-level background context window

@@ -12,7 +12,9 @@ import os
 import asyncio
 import time
 import ssl
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, TypeVar
+from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
@@ -35,6 +37,7 @@ from src.context_engineering.influence_runtime import (
     record_llm_input_influences,
     record_plain_output_influence,
 )
+from src.context_engineering.session_memory import ContextInjectionRecordV1
 from src.observability.a3_trace import emit_a3_trace
 from src.observability.llm_input import (
     build_llm_input_observation,
@@ -534,13 +537,69 @@ async def invoke_with_provider_transport_retry(
     )
     max_retries = _provider_transport_max_retries(node_name)
     retry_count = 0
+    provider_call_id = f"provider-call:v1:{uuid4()}"
     while True:
         try:
+            attempt = retry_count + 1
+            dispatch_id = f"provider-dispatch:v1:{provider_call_id}:{attempt}"
+            dispatched_at = datetime.now(timezone.utc)
+            call_purpose = str(llm_input_manifest.get("call_purpose") or "")
+            emit_a3_trace(
+                logger,
+                "provider_dispatch.started",
+                {
+                    "call_id": provider_call_id,
+                    "dispatch_id": dispatch_id,
+                    "attempt": attempt,
+                    "manifest_id": manifest_payload.get("manifest_id", ""),
+                    "node_name": node_name,
+                    "llm_node": llm_node,
+                    "provider": provider,
+                    "model": model,
+                    "input_tokens": manifest_payload.get("input_estimated_tokens", 0),
+                    "tokenizer_mode": llm_input_manifest.get(
+                        "input_tokenizer_mode", ""
+                    ),
+                    "estimated": bool(
+                        llm_input_manifest.get("input_tokens_estimated", True)
+                    ),
+                    "trigger_eligible": call_purpose in {"plain_llm", "structured_llm"},
+                    "dispatched_at": dispatched_at.isoformat(),
+                },
+                state=state or {},
+                env_flag="LOG_A3_TRACE",
+            )
+            for item_index, item in enumerate(
+                llm_input_manifest.get("context_injection_items") or []
+            ):
+                record = ContextInjectionRecordV1.model_validate(
+                    {
+                        "record_id": (
+                            f"context-injection:v1:{provider_call_id}:"
+                            f"{attempt}:{item_index}"
+                        ),
+                        "dispatch_id": dispatch_id,
+                        "request_id": llm_input_manifest.get("request_id"),
+                        "call_id": provider_call_id,
+                        "attempt": attempt,
+                        "manifest_id": manifest_payload.get("manifest_id"),
+                        "thread_id": llm_input_manifest.get("thread_id"),
+                        "item": item,
+                        "dispatched_at": dispatched_at,
+                    }
+                )
+                emit_a3_trace(
+                    logger,
+                    "context_injection.dispatched",
+                    record.model_dump(mode="json"),
+                    state=state or {},
+                    env_flag="LOG_A3_TRACE",
+                )
             with performance_span(
                 "llm",
                 f"llm.{llm_node}",
                 attributes={
-                    "attempt_count": retry_count + 1,
+                    "attempt_count": attempt,
                     "node_name": node_name,
                 },
                 coalesce_same_type=True,
