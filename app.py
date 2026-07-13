@@ -139,10 +139,12 @@ from src.observability.contracts import (
 )
 from src.observability.graph_manifest import (
     build_graph_manifest,
+    get_physical_graph_node_ids,
     graph_manifest_error_payload,
     graph_manifest_ref_payload,
     graph_manifest_status_payload,
 )
+from src.observability.node_registry import get_node_runtime_metadata
 from src.observability.checkpointer_proxy import observe_checkpointer
 from src.observability.performance_config import (
     load_performance_observability_config,
@@ -643,6 +645,8 @@ async def lifespan(app: FastAPI):
         app.state.checkpointer_enabled = bool(checkpointer)
         app.state.checkpointer_type = ckp_type
         graph = get_compiled_graph(checkpointer=graph_checkpointer)
+        runtime_node_ids = frozenset(get_physical_graph_node_ids(graph))
+        setattr(graph, "_a3_node_ids", runtime_node_ids)
         setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
         setattr(graph, "_a3_checkpointer_type", ckp_type)
         try:
@@ -709,44 +713,19 @@ app.add_middleware(
 )
 
 
-ALLOWED_NODES = {"generate_answer", "emotional_response"}
+def _runtime_graph_node_ids(graph) -> frozenset[str]:
+    configured = getattr(graph, "_a3_node_ids", None)
+    if isinstance(configured, (set, frozenset, tuple, list)):
+        return frozenset(str(item) for item in configured if str(item).strip())
+    try:
+        return frozenset(get_physical_graph_node_ids(graph))
+    except Exception:
+        return frozenset()
 
-# Non-streaming nodes whose final AIMessage becomes one provisional content block.
-TEXT_EMIT_NODES = {
-    "handle_unknown",
-    "evidence_summary_output",
-    "resource_bundle_output",
-    "adaptive_practice_responder",
-    "recommendation_provider",
-}
 
-# All graph nodes whose lifecycle (start/end) we broadcast to the frontend.
-GRAPH_NODES = {
-    "supervisor",
-    "episodic_memory_retriever",
-    "episodic_memory_writer",
-    "memory_use_decider",
-    "academic_router",
-    "search_query_rewriter",
-    "rag_retrieve",
-    "web_search",
-    "evidence_judge",
-    "evidence_summary_output",
-    "generate_answer",
-    "evaluate_hallucination",
-    "rewrite_query",
-    "resource_preflight_router",
-    "study_plan_profile_gate_main",
-    "resource_orchestrator",
-    "resource_worker",
-    "resource_bundle_output",
-    "curriculum_planner",
-    "assessment_result_handler",
-    "adaptive_practice_responder",
-    "recommendation_provider",
-    "emotional_response",
-    "handle_unknown",
-}
+def _node_stream_mode(node_id: object) -> str:
+    metadata = get_node_runtime_metadata(str(node_id or "").strip())
+    return metadata.stream_mode if metadata is not None else "none"
 
 
 def _state_values(state_snapshot) -> dict:
@@ -1295,7 +1274,12 @@ def _thread_status_from_active_run(
     )
 
 
-def _valid_state_update_node(values: dict, state: dict | None = None) -> str:
+def _valid_state_update_node(
+    values: dict,
+    state: dict | None = None,
+    *,
+    runtime_node_ids: frozenset[str] = frozenset(),
+) -> str:
     candidates = (
         values.get("current_node"),
         (state or {}).get("current_node"),
@@ -1304,9 +1288,11 @@ def _valid_state_update_node(values: dict, state: dict | None = None) -> str:
     )
     for candidate in candidates:
         text = str(candidate or "").strip()
-        if text in GRAPH_NODES:
+        if text in runtime_node_ids:
             return text
-    return "supervisor"
+    if "supervisor" in runtime_node_ids or not runtime_node_ids:
+        return "supervisor"
+    raise RuntimeError("compiled graph does not expose a valid state update node")
 
 
 async def safe_update_thread_state(
@@ -1318,9 +1304,14 @@ async def safe_update_thread_state(
     as_node: str | None = None,
 ) -> None:
     """Update checkpoint state using a real graph node as LangGraph writer."""
+    runtime_node_ids = _runtime_graph_node_ids(graph)
     node = str(as_node or "").strip()
-    if node not in GRAPH_NODES:
-        node = _valid_state_update_node(values, state)
+    if node not in runtime_node_ids:
+        node = _valid_state_update_node(
+            values,
+            state,
+            runtime_node_ids=runtime_node_ids,
+        )
     await graph.aupdate_state(config, values, as_node=node)
 
 
@@ -2244,6 +2235,7 @@ async def _stream_graph_event_drafts(
     worker_interrupted_seen = False
     recovered_profile_completion_request: dict = {}
     activity_enabled = getattr(graph, "_a3_activity_events_enabled", False) is True
+    runtime_graph_nodes = _runtime_graph_node_ids(graph)
     activity_timeline: list[dict] = []
     activity_sequence = 0
     provisional_block_open = False
@@ -3436,7 +3428,11 @@ async def _stream_graph_event_drafts(
                 meta_node = event.get("metadata", {}).get("langgraph_node")
                 # Only emit for top-level graph nodes (name matches metadata),
                 # not for internal sub-chains (RunnableSequence, etc.).
-                if node_name and node_name == meta_node and node_name in GRAPH_NODES:
+                if (
+                    node_name
+                    and node_name == meta_node
+                    and node_name in runtime_graph_nodes
+                ):
                     activity_draft = None
                     if event_type == "on_chain_start":
                         node_start_times[node_name] = time.monotonic()
@@ -3533,7 +3529,10 @@ async def _stream_graph_event_drafts(
                         )
 
                     # Emit provisional content blocks for non-streaming answer nodes.
-                    if event_type == "on_chain_end" and node_name in TEXT_EMIT_NODES:
+                    if (
+                        event_type == "on_chain_end"
+                        and _node_stream_mode(node_name) == "final_message"
+                    ):
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict):
                             for msg in output.get("messages", []):
@@ -3567,7 +3566,10 @@ async def _stream_graph_event_drafts(
             # Provider token streaming becomes provisional content blocks.
             elif event_type == "on_chat_model_stream":
                 node_name = event.get("metadata", {}).get("langgraph_node")
-                if node_name in ALLOWED_NODES:
+                if (
+                    node_name in runtime_graph_nodes
+                    and _node_stream_mode(node_name) == "provider_delta"
+                ):
                     chunk = event["data"]["chunk"]
                     if chunk.content:
                         if node_name not in node_content_blocks:

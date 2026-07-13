@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 InfluenceKind = str
+StreamMode = Literal["none", "provider_delta", "final_message"]
 NodeRole = Literal[
     "router",
     "retrieval",
@@ -51,6 +52,7 @@ class NodeRuntimeMetadata:
     capture_rules: tuple[InfluenceCaptureRule, ...] = ()
     activity_running: str = ""
     activity_completed: str = ""
+    stream_mode: StreamMode = "none"
 
 
 def _rule(
@@ -94,6 +96,7 @@ def _metadata(
     visible: bool = True,
     capture_current_user_query: bool = False,
     capture_rules: tuple[InfluenceCaptureRule, ...] = (),
+    stream_mode: StreamMode = "none",
 ) -> NodeRuntimeMetadata:
     return NodeRuntimeMetadata(
         node_id=node_id,
@@ -112,6 +115,7 @@ def _metadata(
         capture_rules=capture_rules,
         activity_running=f"Running {label}",
         activity_completed=f"Completed {label}",
+        stream_mode=stream_mode,
     )
 
 
@@ -331,6 +335,7 @@ for item in (
         stage_rank=70,
         order=70,
         capture_rules=(_rule("agent_output", "messages", priority=65),),
+        stream_mode="provider_delta",
     ),
     _metadata(
         "evaluate_hallucination",
@@ -379,6 +384,7 @@ for item in (
         group="evidence",
         stage_rank=90,
         order=90,
+        stream_mode="final_message",
     ),
     _metadata(
         "resource_preflight_router",
@@ -443,6 +449,7 @@ for item in (
             _rule("artifact", "resource_bundle_artifact", priority=75),
             _rule("workspace", "task_workspace", priority=70),
         ),
+        stream_mode="final_message",
     ),
     _metadata(
         "qa_agent",
@@ -463,6 +470,7 @@ for item in (
         stage_rank=70,
         order=70,
         capture_rules=(_rule("agent_output", "messages", priority=60),),
+        stream_mode="provider_delta",
     ),
     _metadata(
         "handle_unknown",
@@ -473,6 +481,7 @@ for item in (
         stage_rank=90,
         order=90,
         capture_rules=(_rule("agent_output", "messages", priority=40),),
+        stream_mode="final_message",
     ),
 ):
     _register(item)

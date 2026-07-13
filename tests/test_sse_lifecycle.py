@@ -53,6 +53,16 @@ def _make_mock_graph(events=None):
         return_value=SimpleNamespace(next=(), tasks=[]),
     )
     mock_graph.aupdate_state = AsyncMock()
+    node_ids = {"supervisor"} | {
+        str(event.get("metadata", {}).get("langgraph_node") or "").strip()
+        for event in (events or [])
+        if isinstance(event, dict)
+    }
+    mock_graph._a3_node_ids = frozenset(
+        node_id
+        for node_id in node_ids
+        if node_id and not (node_id.startswith("__") and node_id.endswith("__"))
+    )
     return mock_graph
 
 
@@ -538,6 +548,7 @@ class TestSSEErrorCapture:
             return_value=SimpleNamespace(next=(), tasks=[])
         )
         mock_graph.aupdate_state = AsyncMock()
+        mock_graph._a3_node_ids = frozenset({"supervisor", "evidence_judge"})
 
         collected = []
         async for sse in generate_stream_drafts("q", mock_graph):

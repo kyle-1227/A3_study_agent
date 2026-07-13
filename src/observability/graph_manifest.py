@@ -43,24 +43,13 @@ def build_graph_manifest(
     checkpointer_type: str,
 ) -> GraphManifest:
     """Build and validate the backend graph source of truth."""
-    try:
-        drawable = compiled_graph.get_graph()
-    except Exception as exc:
-        raise GraphManifestBuildError(
-            "compiled graph introspection failed",
-            error_type=type(exc).__name__,
-        ) from exc
-
+    drawable = _compiled_drawable(compiled_graph)
     raw_nodes = getattr(drawable, "nodes", None)
     raw_edges = getattr(drawable, "edges", None)
     if not isinstance(raw_nodes, Mapping) or not isinstance(raw_edges, list):
         raise GraphManifestBuildError("compiled graph topology shape is invalid")
 
-    physical_ids = sorted(
-        node_id
-        for node_id in (str(item or "").strip() for item in raw_nodes)
-        if node_id and not _is_internal_node(node_id)
-    )
+    physical_ids = list(get_physical_graph_node_ids(compiled_graph))
     physical_nodes = [
         _manifest_node(node_id, logical=False) for node_id in physical_ids
     ]
@@ -164,6 +153,32 @@ def graph_manifest_status_payload(manifest: GraphManifest) -> dict[str, int | st
         "visible_node_count": sum(1 for node in manifest.nodes if node.visible),
         "edge_count": len(manifest.edges),
     }
+
+
+def get_physical_graph_node_ids(compiled_graph: Any) -> tuple[str, ...]:
+    """Return executable node ids from the compiled graph without registry guessing."""
+
+    drawable = _compiled_drawable(compiled_graph)
+    raw_nodes = getattr(drawable, "nodes", None)
+    if not isinstance(raw_nodes, Mapping):
+        raise GraphManifestBuildError("compiled graph nodes shape is invalid")
+    return tuple(
+        sorted(
+            node_id
+            for node_id in (str(item or "").strip() for item in raw_nodes)
+            if node_id and not _is_internal_node(node_id)
+        )
+    )
+
+
+def _compiled_drawable(compiled_graph: Any) -> Any:
+    try:
+        return compiled_graph.get_graph()
+    except Exception as exc:
+        raise GraphManifestBuildError(
+            "compiled graph introspection failed",
+            error_type=type(exc).__name__,
+        ) from exc
 
 
 def _manifest_node(node_id: str, *, logical: bool) -> GraphManifestNode:
