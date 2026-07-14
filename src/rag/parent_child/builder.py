@@ -27,7 +27,11 @@ from src.rag.parent_child.chroma_children import (
     DocumentEmbeddingProvider,
     write_child_chroma_artifact,
 )
-from src.rag.parent_child.config_adapter import resolve_subject_chunk_policy
+from src.rag.parent_child.config_adapter import (
+    resolve_subject_chunk_policy,
+    validate_configured_ocr_source_inventory,
+    validate_configured_ocr_runtimes,
+)
 from src.rag.parent_child.generation import GenerationWorkspace, SealedGeneration
 from src.rag.parent_child.loader import load_cleaned_source
 from src.rag.parent_child.manifests import (
@@ -250,6 +254,7 @@ class GenerationBuilder:
             raise ValueError(
                 "storage.index_root must be resolved absolute before build"
             )
+        validate_configured_ocr_runtimes(config)
 
     def _catalog_and_chunk(
         self,
@@ -264,6 +269,14 @@ class GenerationBuilder:
             config=self._config.catalog,
             subject_policy_map=self._config.subject_policy_map,
         ).discover()
+        validate_configured_ocr_source_inventory(
+            self._config,
+            tuple(
+                source.source_relpath
+                for subject in snapshot.subjects
+                for source in subject.sources
+            ),
+        )
         policies: dict[str, PolicyManifest] = {}
         parents: list[ParentRecord] = []
         children: list[ChildDocument] = []

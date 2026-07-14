@@ -79,6 +79,7 @@ def _loader_config() -> PageAwareLoaderConfig:
         supported_extensions=(".pdf", ".md", ".txt"),
         pdf_extraction_method="pymupdf_text_v1",
         text_extraction_method="utf8_text_v1",
+        pdf_ocr=None,
     )
 
 

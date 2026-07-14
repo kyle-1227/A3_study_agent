@@ -6,13 +6,21 @@ from pydantic import BaseModel, ConfigDict
 
 from src.config.rag_index_config import (
     ChunkPolicyConfig,
+    OcrExtractionPolicyConfig,
     RagIndexConfig,
     chunk_policy_manifest_payload,
     compute_chunk_policy_id,
 )
 from src.rag.parent_child._storage_io import canonical_json_bytes, sha256_bytes
+from src.rag.parent_child.ids import make_loader_policy_fingerprint
 from src.rag.parent_child.manifests import PolicyManifest
-from src.rag.parent_child.models import PageAwareLoaderConfig, ParentChildPolicy
+from src.rag.parent_child.models import (
+    PageAwareLoaderConfig,
+    ParentChildPolicy,
+    TesseractLanguageAsset,
+    TesseractOcrRuntimeConfig,
+)
+from src.rag.parent_child.tesseract_ocr import validate_tesseract_runtime
 
 
 class PolicyAdapterError(RuntimeError):
@@ -30,10 +38,15 @@ class ResolvedChunkPolicy(BaseModel):
 
 
 def _require_supported_algorithms(policy: ChunkPolicyConfig) -> None:
+    expected_extraction = (
+        "page_extract_tesseract_v2"
+        if isinstance(policy.extraction, OcrExtractionPolicyConfig)
+        else "page_extract_v1"
+    )
     supported = {
         "extraction.algorithm_version": (
             policy.extraction.algorithm_version,
-            "page_extract_v1",
+            expected_extraction,
         ),
         "page_assembly.algorithm_version": (
             policy.page_assembly.algorithm_version,
@@ -112,6 +125,40 @@ def resolve_chunk_policy(
     cleaning_policy_id = sha256_bytes(
         canonical_json_bytes(configured.cleaning.model_dump(mode="json"))
     )
+    pdf_ocr: TesseractOcrRuntimeConfig | None = None
+    if isinstance(configured.extraction, OcrExtractionPolicyConfig):
+        runtime = configured.extraction.pdf_ocr
+        pdf_ocr = TesseractOcrRuntimeConfig(
+            schema_version="tesseract_ocr_runtime_v1",
+            engine_protocol=runtime.engine_protocol,
+            extraction_method=runtime.extraction_method,
+            source_relpaths=runtime.source_relpaths,
+            binary_path=runtime.binary_path,
+            binary_sha256=runtime.binary_sha256,
+            runtime_manifest_sha256=runtime.runtime_manifest_sha256,
+            expected_version=runtime.expected_version,
+            renderer_protocol=runtime.renderer_protocol,
+            pymupdf_version=runtime.pymupdf_version,
+            mupdf_version=runtime.mupdf_version,
+            tessdata_dir=runtime.tessdata_dir,
+            language_assets=tuple(
+                TesseractLanguageAsset(
+                    language=asset.language,
+                    traineddata_sha256=asset.traineddata_sha256,
+                )
+                for asset in runtime.language_assets
+            ),
+            dpi=runtime.dpi,
+            render_colorspace=runtime.render_colorspace,
+            render_alpha=runtime.render_alpha,
+            render_annotations=runtime.render_annotations,
+            oem=runtime.oem,
+            psm=runtime.psm,
+            thread_limit=runtime.thread_limit,
+            timeout_seconds=runtime.timeout_seconds,
+            output_format=runtime.output_format,
+            empty_page_policy=runtime.empty_page_policy,
+        )
     loader = PageAwareLoaderConfig(
         schema_version="page_aware_loader_policy_v1",
         extraction_algorithm_version=configured.extraction.algorithm_version,
@@ -132,6 +179,7 @@ def resolve_chunk_policy(
         supported_extensions=index_config.catalog.supported_extensions,
         pdf_extraction_method=configured.extraction.pdf_extraction_method,
         text_extraction_method=configured.extraction.text_extraction_method,
+        pdf_ocr=pdf_ocr,
     )
     protected = set(configured.atomic_blocks.protected_types)
     runtime_policy = ParentChildPolicy(
@@ -146,9 +194,7 @@ def resolve_chunk_policy(
         short_unit_chars=configured.structure.short_unit_chars,
         parent_split_algorithm="span_recursive_v1",
         child_split_algorithm="span_recursive_v1",
-        loader_policy_id=sha256_bytes(
-            canonical_json_bytes(loader.model_dump(mode="json"))
-        ),
+        loader_policy_id=make_loader_policy_fingerprint(loader),
         cleaning_policy_id=cleaning_policy_id,
         parent_size=configured.parent.size,
         parent_overlap=configured.parent.overlap,
@@ -184,9 +230,73 @@ def resolve_subject_chunk_policy(
     return resolve_chunk_policy(index_config, policy_id)
 
 
+def validate_configured_ocr_runtimes(index_config: RagIndexConfig) -> None:
+    """Validate every unique OCR runtime before any corpus processing."""
+
+    validated: set[
+        tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            tuple[tuple[str, str], ...],
+        ]
+    ] = set()
+    for policy_id in sorted(index_config.chunk_policies):
+        runtime = resolve_chunk_policy(index_config, policy_id).loader_config.pdf_ocr
+        if runtime is None:
+            continue
+        identity = (
+            str(runtime.binary_path),
+            str(runtime.tessdata_dir),
+            runtime.binary_sha256,
+            runtime.runtime_manifest_sha256,
+            runtime.expected_version,
+            runtime.renderer_protocol,
+            runtime.pymupdf_version,
+            runtime.mupdf_version,
+            tuple(
+                (asset.language, asset.traineddata_sha256)
+                for asset in runtime.language_assets
+            ),
+        )
+        if identity in validated:
+            continue
+        validate_tesseract_runtime(runtime)
+        validated.add(identity)
+
+
+def validate_configured_ocr_source_inventory(
+    index_config: RagIndexConfig, active_source_relpaths: tuple[str, ...]
+) -> None:
+    """Require every configured OCR source to be active in SubjectCatalog."""
+
+    expected = {
+        source_relpath
+        for policy_id in sorted(index_config.chunk_policies)
+        for runtime in (
+            resolve_chunk_policy(index_config, policy_id).loader_config.pdf_ocr,
+        )
+        if runtime is not None
+        for source_relpath in runtime.source_relpaths
+    }
+    missing = expected - set(active_source_relpaths)
+    if missing:
+        raise PolicyAdapterError(
+            "configured OCR source inventory is not active in SubjectCatalog: "
+            + ", ".join(sorted(missing))
+        )
+
+
 __all__ = [
     "PolicyAdapterError",
     "ResolvedChunkPolicy",
     "resolve_chunk_policy",
     "resolve_subject_chunk_policy",
+    "validate_configured_ocr_runtimes",
+    "validate_configured_ocr_source_inventory",
 ]

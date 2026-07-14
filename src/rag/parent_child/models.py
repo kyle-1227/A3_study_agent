@@ -82,6 +82,87 @@ class SourceEntry(_StrictFrozenModel):
         return _validate_nonempty_identifier(value, field_name=field_name)
 
 
+class TesseractLanguageAsset(_StrictFrozenModel):
+    """One immutable language model identity in configured OCR order."""
+
+    language: str
+    traineddata_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        if re.fullmatch(r"[a-z0-9_]+", value) is None:
+            raise ValueError("OCR language must be a lower-case identifier")
+        return value
+
+
+class TesseractOcrRuntimeConfig(_StrictFrozenModel):
+    """Resolved runtime identity for exact-source Tesseract extraction."""
+
+    schema_version: Literal["tesseract_ocr_runtime_v1"]
+    engine_protocol: Literal["tesseract_cli_tsv_v1"]
+    extraction_method: Literal["tesseract_cli_tsv_v1"]
+    source_relpaths: tuple[str, ...] = Field(min_length=1)
+    binary_path: Path
+    binary_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
+    expected_version: str
+    renderer_protocol: Literal["pymupdf_pixmap_png_v1"]
+    pymupdf_version: str
+    mupdf_version: str
+    tessdata_dir: Path
+    language_assets: tuple[TesseractLanguageAsset, ...] = Field(min_length=1)
+    dpi: int = Field(ge=72, le=600)
+    render_colorspace: Literal["rgb"]
+    render_alpha: Literal[False]
+    render_annotations: Literal[True]
+    oem: Literal[1]
+    psm: Literal[3]
+    thread_limit: Literal[1]
+    timeout_seconds: float = Field(gt=0.0, le=300.0)
+    output_format: Literal["tsv_lines_v1"]
+    empty_page_policy: Literal["allow_empty_physical_page_v1"]
+
+    @field_validator(
+        "extraction_method",
+        "expected_version",
+        "pymupdf_version",
+        "mupdf_version",
+    )
+    @classmethod
+    def validate_labels(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", "OCR label")
+        return _validate_nonempty_identifier(value, field_name=field_name)
+
+    @field_validator("source_relpaths")
+    @classmethod
+    def validate_source_relpaths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        validated = tuple(_validate_source_relpath(item) for item in value)
+        if any(PurePosixPath(item).suffix.casefold() != ".pdf" for item in validated):
+            raise ValueError("OCR source_relpaths must identify PDF sources")
+        if len(set(validated)) != len(validated):
+            raise ValueError("OCR source_relpaths must not contain duplicates")
+        if validated != tuple(sorted(validated)):
+            raise ValueError("OCR source_relpaths must be sorted")
+        return validated
+
+    @field_validator("language_assets")
+    @classmethod
+    def validate_language_assets(
+        cls, value: tuple[TesseractLanguageAsset, ...]
+    ) -> tuple[TesseractLanguageAsset, ...]:
+        languages = tuple(asset.language for asset in value)
+        if len(set(languages)) != len(languages):
+            raise ValueError("OCR languages must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def validate_runtime_inventory(self) -> "TesseractOcrRuntimeConfig":
+        if not self.binary_path.is_absolute() or not self.tessdata_dir.is_absolute():
+            raise ValueError("OCR runtime paths must be resolved absolute paths")
+        return self
+
+
 class PageAwareLoaderConfig(_StrictFrozenModel):
     """Complete, explicit policy for extraction, cleaning, and page assembly."""
 
@@ -104,6 +185,7 @@ class PageAwareLoaderConfig(_StrictFrozenModel):
     supported_extensions: tuple[str, ...] = Field(min_length=1)
     pdf_extraction_method: str
     text_extraction_method: str
+    pdf_ocr: TesseractOcrRuntimeConfig | None
 
     @field_validator(
         "extraction_algorithm_version",
@@ -147,6 +229,14 @@ class PageAwareLoaderConfig(_StrictFrozenModel):
     def validate_repeated_line_policy(self) -> PageAwareLoaderConfig:
         if self.repeated_line_min_pages < 2:
             raise ValueError("repeated_line_min_pages must be at least 2")
+        if self.extraction_algorithm_version == "page_extract_v1":
+            if self.pdf_ocr is not None:
+                raise ValueError("page_extract_v1 requires pdf_ocr to be null")
+        elif self.extraction_algorithm_version == "page_extract_tesseract_v2":
+            if self.pdf_ocr is None:
+                raise ValueError("page_extract_tesseract_v2 requires an OCR runtime")
+        else:
+            raise ValueError("unsupported page extraction algorithm version")
         return self
 
 

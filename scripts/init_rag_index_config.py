@@ -92,6 +92,52 @@ def _portable_registry_path(
     return registry_resolved.relative_to(index_root_resolved)
 
 
+def _portableize_ocr_runtime_paths(
+    *,
+    project_root: Path,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Return a copied config payload with verified project-relative OCR paths."""
+
+    root = resolve_project_root(project_root)
+    copied = dict(payload)
+    chunk_policies_value = copied["chunk_policies"]
+    if not isinstance(chunk_policies_value, dict):
+        raise IndexConfigInitializationError("chunk_policies payload must be a map")
+    chunk_policies = dict(chunk_policies_value)
+    for policy_id, policy_payload_value in chunk_policies.items():
+        if not isinstance(policy_payload_value, dict):
+            raise IndexConfigInitializationError("chunk policy payload must be a map")
+        policy_payload = dict(policy_payload_value)
+        extraction_value = policy_payload.get("extraction")
+        if not isinstance(extraction_value, dict):
+            raise IndexConfigInitializationError("extraction payload must be a map")
+        extraction = dict(extraction_value)
+        pdf_ocr_value = extraction.get("pdf_ocr")
+        if pdf_ocr_value is None:
+            continue
+        if not isinstance(pdf_ocr_value, dict):
+            raise IndexConfigInitializationError("pdf_ocr payload must be a map")
+        pdf_ocr = dict(pdf_ocr_value)
+        binary_value = pdf_ocr.get("binary_path")
+        tessdata_value = pdf_ocr.get("tessdata_dir")
+        if not isinstance(binary_value, (str, Path)) or not isinstance(
+            tessdata_value, (str, Path)
+        ):
+            raise IndexConfigInitializationError(
+                "OCR runtime paths must be explicit strings or paths"
+            )
+        binary_path = require_project_file(root, Path(binary_value))
+        tessdata_dir = require_project_directory(root, Path(tessdata_value))
+        pdf_ocr["binary_path"] = binary_path.relative_to(root).as_posix()
+        pdf_ocr["tessdata_dir"] = tessdata_dir.relative_to(root).as_posix()
+        extraction["pdf_ocr"] = pdf_ocr
+        policy_payload["extraction"] = extraction
+        chunk_policies[policy_id] = policy_payload
+    copied["chunk_policies"] = chunk_policies
+    return copied
+
+
 def _validate_experimental_runtime_catalog(config: RagIndexConfig) -> None:
     """Require the configured local corpus scope before writing runtime config."""
 
@@ -163,6 +209,10 @@ def portable_runtime_config_from_source(
     storage["registry_path"] = portable_registry_path.as_posix()
     payload["catalog"] = catalog
     payload["storage"] = storage
+    payload = _portableize_ocr_runtime_paths(
+        project_root=root,
+        payload=payload,
+    )
     runtime = RagIndexConfig.model_validate(payload)
     _validate_experimental_runtime_catalog(
         resolve_rag_index_config_paths(runtime, project_root=root)
@@ -685,11 +735,30 @@ def write_portable_runtime_config(
     payload = config.model_dump(mode="json")
     catalog = dict(payload["catalog"])
     storage = dict(payload["storage"])
-    catalog["data_root"] = config.catalog.data_root.as_posix()
-    storage["index_root"] = config.storage.index_root.as_posix()
-    storage["registry_path"] = config.storage.registry_path.as_posix()
+    portable_data_root = _portable_relative_path(
+        project_root=root,
+        value=config.catalog.data_root,
+        must_be_directory=True,
+    )
+    portable_index_root = _portable_relative_path(
+        project_root=root,
+        value=config.storage.index_root,
+        must_be_directory=False,
+    )
+    portable_registry_path = _portable_registry_path(
+        project_root=root,
+        index_root=portable_index_root,
+        registry_path=config.storage.registry_path,
+    )
+    catalog["data_root"] = portable_data_root.as_posix()
+    storage["index_root"] = portable_index_root.as_posix()
+    storage["registry_path"] = portable_registry_path.as_posix()
     payload["catalog"] = catalog
     payload["storage"] = storage
+    payload = _portableize_ocr_runtime_paths(
+        project_root=root,
+        payload=payload,
+    )
     encoded = yaml.safe_dump(
         payload,
         allow_unicode=True,
@@ -702,7 +771,12 @@ def write_portable_runtime_config(
         encoded,
         overwrite=overwrite,
     )
-    if load_rag_index_config(written) != config:
+    written_config = resolve_rag_index_config_paths(
+        load_rag_index_config(written),
+        project_root=root,
+    )
+    expected_config = resolve_rag_index_config_paths(config, project_root=root)
+    if written_config != expected_config:
         raise IndexConfigInitializationError(
             "written portable runtime config failed strict round-trip validation"
         )

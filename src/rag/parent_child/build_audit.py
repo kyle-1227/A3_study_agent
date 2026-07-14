@@ -23,7 +23,11 @@ from src.config.rag_index_config import (
     resolve_rag_index_config_paths,
 )
 from src.rag.ids import make_doc_id
-from src.rag.parent_child.config_adapter import resolve_subject_chunk_policy
+from src.rag.parent_child.config_adapter import (
+    resolve_subject_chunk_policy,
+    validate_configured_ocr_runtimes,
+    validate_configured_ocr_source_inventory,
+)
 from src.rag.parent_child.loader import load_cleaned_source
 from src.rag.parent_child.models import ChildDocument, ParentRecord, SourceEntry
 from src.rag.parent_child.project_paths import (
@@ -460,7 +464,12 @@ def collect_chunk_stats(
     root = resolve_project_root(project_root)
     loaded_config = load_rag_index_config(require_project_file(root, config_path))
     config = resolve_rag_index_config_paths(loaded_config, project_root=root)
+    validate_configured_ocr_runtimes(config)
     snapshot = validate_experimental_catalog(config)
+    validate_configured_ocr_source_inventory(
+        config,
+        tuple(source.source_relpath for source in snapshot.source_entries()),
+    )
     source_group_completeness = validate_source_group_completeness(
         project_root=root,
         source_groups_path=source_groups_path,

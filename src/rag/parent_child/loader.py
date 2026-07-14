@@ -24,6 +24,7 @@ from src.rag.parent_child.models import (
     SourceEntry,
     SourcePage,
 )
+from src.rag.parent_child.tesseract_ocr import extract_pdf_pages_with_tesseract
 
 
 def _resolve_source(
@@ -285,9 +286,14 @@ def load_cleaned_source(
     source_path, source_relpath = _resolve_source(entry, loader_config)
     extension = source_path.suffix.lower()
     if extension == ".pdf":
-        extraction_method = loader_config.pdf_extraction_method
         pagination_kind = "physical"
-        raw_pages = _extract_pdf_pages(source_path)
+        pdf_ocr = loader_config.pdf_ocr
+        if pdf_ocr is not None and source_relpath in pdf_ocr.source_relpaths:
+            extraction_method = pdf_ocr.extraction_method
+            raw_pages = extract_pdf_pages_with_tesseract(source_path, pdf_ocr)
+        else:
+            extraction_method = loader_config.pdf_extraction_method
+            raw_pages = _extract_pdf_pages(source_path)
     elif extension in {".md", ".txt"}:
         extraction_method = loader_config.text_extraction_method
         pagination_kind = "logical"

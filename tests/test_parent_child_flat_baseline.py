@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
+from scripts import build_flat_baseline as flat_builder_script
 from src.rag.parent_child.flat_baseline import (
     FlatBaselineChunkMetadata,
     FlatBaselineDocument,
@@ -15,6 +18,23 @@ from src.rag.parent_child.flat_baseline import (
 )
 from src.rag.parent_child.manifests import EmbeddingManifestIdentity
 from src.rag.parent_child.retrieval import RerankCandidate, RerankScore
+
+
+def test_flat_builder_closes_upstream_when_cache_close_fails() -> None:
+    events: list[str] = []
+
+    class FailingCache:
+        def close(self) -> None:
+            events.append("cache")
+            raise RuntimeError("cache close failed")
+
+    class Upstream:
+        def close(self) -> None:
+            events.append("upstream")
+
+    with pytest.raises(RuntimeError, match="cache close failed"):
+        flat_builder_script._close_embedding_resources(FailingCache(), Upstream())
+    assert events == ["cache", "upstream"]
 
 
 class _EmbeddingProvider:

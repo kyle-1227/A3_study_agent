@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import stat
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -81,6 +82,7 @@ PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveFloat = Annotated[float, Field(gt=0)]
 UnitFloat = Annotated[float, Field(ge=0.0, le=1.0)]
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class CatalogConfig(StrictRagConfigModel):
@@ -314,6 +316,95 @@ class ExtractionPolicyConfig(StrictRagConfigModel):
     text_extraction_method: NonBlankStr
 
 
+def _validate_source_relpath(value: str) -> str:
+    if "\\" in value or "\x00" in value:
+        raise ValueError(
+            "OCR source_relpaths must use POSIX separators and contain no NUL"
+        )
+    raw_parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError(
+            "OCR source_relpaths must not contain empty, dot, or parent parts"
+        )
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts:
+        raise ValueError("OCR source_relpaths must be contained relative POSIX paths")
+    if path.as_posix() != value:
+        raise ValueError("OCR source_relpaths must be canonical")
+    if path.suffix.casefold() != ".pdf":
+        raise ValueError("OCR source_relpaths must identify PDF sources")
+    return value
+
+
+class TesseractLanguageAssetConfig(StrictRagConfigModel):
+    """One ordered Tesseract language asset identity."""
+
+    language: Annotated[str, Field(pattern=r"^[a-z0-9_]+$")]
+    traineddata_sha256: Sha256Hex
+
+
+class TesseractOcrPolicyConfig(StrictRagConfigModel):
+    """Explicit, fingerprinted Tesseract runtime and source selection."""
+
+    schema_version: Literal["tesseract_ocr_policy_v1"]
+    engine_protocol: Literal["tesseract_cli_tsv_v1"]
+    extraction_method: Literal["tesseract_cli_tsv_v1"]
+    source_relpaths: tuple[NonBlankStr, ...] = Field(min_length=1)
+    binary_path: ConfigPath
+    binary_sha256: Sha256Hex
+    runtime_manifest_sha256: Sha256Hex
+    expected_version: NonBlankStr
+    renderer_protocol: Literal["pymupdf_pixmap_png_v1"]
+    pymupdf_version: NonBlankStr
+    mupdf_version: NonBlankStr
+    tessdata_dir: ConfigPath
+    language_assets: tuple[TesseractLanguageAssetConfig, ...] = Field(min_length=1)
+    dpi: Annotated[int, Field(ge=72, le=600)]
+    render_colorspace: Literal["rgb"]
+    render_alpha: Literal[False]
+    render_annotations: Literal[True]
+    oem: Literal[1]
+    psm: Literal[3]
+    thread_limit: Literal[1]
+    timeout_seconds: Annotated[float, Field(gt=0.0, le=300.0)]
+    output_format: Literal["tsv_lines_v1"]
+    empty_page_policy: Literal["allow_empty_physical_page_v1"]
+
+    @field_validator("source_relpaths", "language_assets", mode="before")
+    @classmethod
+    def _freeze_sequences(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("source_relpaths")
+    @classmethod
+    def _validate_source_relpaths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        validated = tuple(_validate_source_relpath(item) for item in value)
+        _unique(validated, field_name="source_relpaths")
+        if validated != tuple(sorted(validated)):
+            raise ValueError("OCR source_relpaths must be sorted")
+        return validated
+
+    @field_validator("language_assets")
+    @classmethod
+    def _validate_language_assets(
+        cls, value: tuple[TesseractLanguageAssetConfig, ...]
+    ) -> tuple[TesseractLanguageAssetConfig, ...]:
+        languages = tuple(asset.language for asset in value)
+        _unique(languages, field_name="language_assets")
+        return value
+
+
+class OcrExtractionPolicyConfig(StrictRagConfigModel):
+    """Page extraction V2 with an exact, no-fallback OCR source inventory."""
+
+    algorithm_version: Literal["page_extract_tesseract_v2"]
+    pdf_extraction_method: Literal["configured_pdf_text"]
+    text_extraction_method: Literal["configured_utf8_text"]
+    pdf_ocr: TesseractOcrPolicyConfig
+
+
 class PageAssemblyPolicyConfig(StrictRagConfigModel):
     algorithm_version: NonBlankStr
     page_separator: NonEmptyStr
@@ -395,7 +486,7 @@ class RecursiveChunkConfig(StrictRagConfigModel):
 class ChunkPolicyConfig(StrictRagConfigModel):
     """All output-affecting parent/child chunk policy inputs."""
 
-    extraction: ExtractionPolicyConfig
+    extraction: ExtractionPolicyConfig | OcrExtractionPolicyConfig
     page_assembly: PageAssemblyPolicyConfig
     cleaning: CleaningPolicyConfig
     structure: StructurePolicyConfig
@@ -418,11 +509,20 @@ def chunk_policy_manifest_payload(
 ) -> dict[str, object]:
     """Return the canonical output-affecting V1 policy-manifest payload."""
 
+    extraction = policy.extraction.model_dump(mode="json")
+    if isinstance(policy.extraction, OcrExtractionPolicyConfig):
+        pdf_ocr = dict(extraction["pdf_ocr"])
+        # Installation paths are operational details. Their exact runtime
+        # identities are still sealed through the configured SHA-256 values.
+        pdf_ocr.pop("binary_path")
+        pdf_ocr.pop("tessdata_dir")
+        extraction["pdf_ocr"] = pdf_ocr
+
     return {
         "schema_version": "policy_manifest_v1",
         "canonicalization_version": "canonical_json_v1",
         "id_algorithm_version": "parent_child_id_v1",
-        "extraction": policy.extraction.model_dump(mode="json"),
+        "extraction": extraction,
         "page_assembly": policy.page_assembly.model_dump(mode="json"),
         "cleaning": policy.cleaning.model_dump(mode="json"),
         "structure": policy.structure.model_dump(mode="json"),
@@ -582,9 +682,43 @@ def resolve_rag_index_config_paths(
             raise ValueError(f"{field_name} must resolve within project_root")
         return resolved
 
+    def reject_symlink_components(value: Path, *, field_name: str) -> None:
+        candidate = value if value.is_absolute() else root / value
+        if ".." in candidate.parts:
+            raise ValueError(f"{field_name} must not contain parent traversal")
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be lexically contained in project_root"
+            ) from exc
+        cursor = root
+        for part in relative.parts:
+            cursor /= part
+            try:
+                path_status = cursor.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError(f"{field_name} could not be inspected") from exc
+            attributes = getattr(path_status, "st_file_attributes", 0)
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+            if cursor.is_symlink() or attributes & reparse_flag:
+                raise ValueError(
+                    f"{field_name} must not traverse a symlink or reparse point"
+                )
+
     payload = config.model_dump(mode="python")
     catalog = dict(payload["catalog"])
     storage = dict(payload["storage"])
+    reject_symlink_components(
+        config.catalog.data_root,
+        field_name="catalog.data_root",
+    )
+    reject_symlink_components(
+        config.storage.index_root,
+        field_name="storage.index_root",
+    )
     catalog["data_root"] = resolve_contained(
         config.catalog.data_root,
         field_name="catalog.data_root",
@@ -594,13 +728,104 @@ def resolve_rag_index_config_paths(
         field_name="storage.index_root",
     )
     registry_path = config.storage.registry_path
+    logical_registry_path = (
+        registry_path
+        if registry_path.is_absolute()
+        else config.storage.index_root / registry_path
+    )
+    reject_symlink_components(
+        logical_registry_path,
+        field_name="storage.registry_path",
+    )
     if registry_path.is_absolute():
         resolved_registry = registry_path.resolve(strict=False)
         if not resolved_registry.is_relative_to(storage["index_root"]):
             raise ValueError("storage.registry_path must remain inside index_root")
         storage["registry_path"] = resolved_registry
+    chunk_policies = dict(payload["chunk_policies"])
+    configured_ocr_sources: set[str] = set()
+    for policy_id, policy in config.chunk_policies.items():
+        if not isinstance(policy.extraction, OcrExtractionPolicyConfig):
+            continue
+        runtime = policy.extraction.pdf_ocr
+        binary_path = resolve_contained(
+            runtime.binary_path,
+            field_name="chunk_policies.extraction.pdf_ocr.binary_path",
+        )
+        tessdata_dir = resolve_contained(
+            runtime.tessdata_dir,
+            field_name="chunk_policies.extraction.pdf_ocr.tessdata_dir",
+        )
+        reject_symlink_components(
+            runtime.binary_path,
+            field_name="chunk_policies.extraction.pdf_ocr.binary_path",
+        )
+        reject_symlink_components(
+            runtime.tessdata_dir,
+            field_name="chunk_policies.extraction.pdf_ocr.tessdata_dir",
+        )
+        if not binary_path.is_file():
+            raise ValueError("configured OCR binary_path must be an existing file")
+        if not tessdata_dir.is_dir():
+            raise ValueError(
+                "configured OCR tessdata_dir must be an existing directory"
+            )
+        for asset in runtime.language_assets:
+            traineddata = tessdata_dir / f"{asset.language}.traineddata"
+            reject_symlink_components(
+                traineddata,
+                field_name="configured OCR traineddata file",
+            )
+            if not traineddata.is_file():
+                raise ValueError(
+                    "configured OCR language is missing its traineddata file"
+                )
+        for source_relpath in runtime.source_relpaths:
+            if source_relpath in configured_ocr_sources:
+                raise ValueError("OCR source_relpaths must be globally unique")
+            configured_ocr_sources.add(source_relpath)
+            relative = PurePosixPath(source_relpath)
+            subject = relative.parts[0]
+            if config.subject_policy_map.get(subject) != policy_id:
+                raise ValueError(
+                    "OCR source subject must reference the containing chunk policy"
+                )
+            source_path = Path(catalog["data_root"]) / Path(*relative.parts)
+            reject_symlink_components(
+                source_path,
+                field_name="configured OCR source path",
+            )
+            resolved_source = source_path.resolve(strict=False)
+            if (
+                not resolved_source.is_relative_to(Path(catalog["data_root"]))
+                or not resolved_source.is_file()
+            ):
+                raise ValueError(
+                    "configured OCR source must be an existing file inside data_root"
+                )
+        source_subjects = {
+            PurePosixPath(item).parts[0] for item in runtime.source_relpaths
+        }
+        mapped_subjects = {
+            subject
+            for subject, mapped_policy_id in config.subject_policy_map.items()
+            if mapped_policy_id == policy_id
+        }
+        if mapped_subjects != source_subjects:
+            raise ValueError(
+                "OCR policy subjects must exactly match its source_relpaths subjects"
+            )
+        policy_payload = dict(chunk_policies[policy_id])
+        extraction = dict(policy_payload["extraction"])
+        pdf_ocr = dict(extraction["pdf_ocr"])
+        pdf_ocr["binary_path"] = binary_path
+        pdf_ocr["tessdata_dir"] = tessdata_dir
+        extraction["pdf_ocr"] = pdf_ocr
+        policy_payload["extraction"] = extraction
+        chunk_policies[policy_id] = policy_payload
     payload["catalog"] = catalog
     payload["storage"] = storage
+    payload["chunk_policies"] = chunk_policies
     return RagIndexConfig.model_validate(payload)
 
 
@@ -612,6 +837,7 @@ __all__ = [
     "CleaningPolicyConfig",
     "EmbeddingConfig",
     "ExtractionPolicyConfig",
+    "OcrExtractionPolicyConfig",
     "PageAssemblyPolicyConfig",
     "ProviderRoutingConfig",
     "RagIndexConfig",
@@ -621,6 +847,8 @@ __all__ = [
     "RetrievalConfig",
     "StorageConfig",
     "StructurePolicyConfig",
+    "TesseractLanguageAssetConfig",
+    "TesseractOcrPolicyConfig",
     "chunk_policy_manifest_payload",
     "compute_chunk_policy_id",
     "load_rag_index_config",

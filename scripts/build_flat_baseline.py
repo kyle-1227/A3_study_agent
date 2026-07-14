@@ -27,7 +27,16 @@ from src.rag.parent_child._storage_io import (  # noqa: E402
 )
 from src.rag.parent_child.bm25_artifact import compute_tokenizer_fingerprint  # noqa: E402
 from src.rag.parent_child.builder import compute_embedding_fingerprint  # noqa: E402
-from src.rag.parent_child.config_adapter import resolve_subject_chunk_policy  # noqa: E402
+from src.rag.parent_child.config_adapter import (  # noqa: E402
+    resolve_subject_chunk_policy,
+    validate_configured_ocr_source_inventory,
+    validate_configured_ocr_runtimes,
+)
+from src.rag.parent_child.embedding_cache import (  # noqa: E402
+    EMBEDDING_CACHE_SCHEMA_VERSION,
+    CachingDocumentEmbeddingProvider,
+    SqliteEmbeddingCache,
+)
 from src.rag.parent_child.flat_baseline import (  # noqa: E402
     FlatBaselineChunkMetadata,
     FlatBaselineDocument,
@@ -56,6 +65,19 @@ class FlatBaselineBuildError(RuntimeError):
     """The flat artifact cannot be built without violating its strict contract."""
 
 
+def _close_embedding_resources(
+    embedding_cache: SqliteEmbeddingCache | None,
+    upstream_embedding: StrictEmbeddingClient,
+) -> None:
+    """Close both resources even if the cache close itself reports failure."""
+
+    try:
+        if embedding_cache is not None:
+            embedding_cache.close()
+    finally:
+        upstream_embedding.close()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, required=True)
@@ -65,6 +87,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-output", type=Path, required=True)
     parser.add_argument("--collection-name", required=True)
     parser.add_argument("--flat-build-id", required=True)
+    cache_group = parser.add_mutually_exclusive_group(required=True)
+    cache_group.add_argument("--embedding-cache", type=Path)
+    cache_group.add_argument(
+        "--no-embedding-cache",
+        action="store_const",
+        const=None,
+        dest="embedding_cache",
+    )
+    parser.add_argument(
+        "--embedding-cache-busy-timeout-seconds",
+        type=float,
+        required=True,
+    )
     return parser
 
 
@@ -103,6 +138,14 @@ def _build_documents(
         ).discover()
     except Exception as exc:
         raise FlatBaselineBuildError("SubjectCatalog discovery failed") from exc
+    validate_configured_ocr_source_inventory(
+        config,
+        tuple(
+            source.source_relpath
+            for subject in snapshot.subjects
+            for source in subject.sources
+        ),
+    )
     documents: list[FlatBaselineDocument] = []
     for subject in snapshot.subjects:
         resolved_policy = resolve_subject_chunk_policy(config, subject.subject_id)
@@ -202,6 +245,8 @@ def build_flat_baseline(
     manifest_output: Path,
     collection_name: str,
     flat_build_id: str,
+    embedding_cache_path: Path | None,
+    embedding_cache_busy_timeout_seconds: float,
 ) -> FlatBaselineManifest:
     """Build one isolated flat artifact and its strict manifest without activation."""
 
@@ -217,9 +262,12 @@ def build_flat_baseline(
         raise ValueError("collection-name must be non-empty and stripped")
     if not flat_build_id or flat_build_id != flat_build_id.strip():
         raise ValueError("flat-build-id must be non-empty and stripped")
+    if embedding_cache_busy_timeout_seconds <= 0:
+        raise ValueError("embedding cache busy timeout must be positive")
     config = resolve_rag_index_config_paths(
         load_rag_index_config(config_path), project_root=root
     )
+    validate_configured_ocr_runtimes(config)
     if config.catalog.symlink_policy != "reject":
         raise FlatBaselineBuildError(
             "flat baseline tooling requires catalog symlink_policy=reject"
@@ -244,8 +292,25 @@ def build_flat_baseline(
         source_fingerprint=_source_fingerprint(documents),
         documents=documents,
     )
-    embedding = StrictEmbeddingClient.production(config=config.embedding)
+    upstream_embedding = StrictEmbeddingClient.production(config=config.embedding)
+    embedding_cache: SqliteEmbeddingCache | None = None
+    embedding = upstream_embedding
     try:
+        if embedding_cache_path is not None:
+            contained_cache = require_project_file(root, embedding_cache_path)
+            embedding_cache = SqliteEmbeddingCache.open(
+                project_root=root,
+                cache_path=contained_cache,
+                expected_schema_version=EMBEDDING_CACHE_SCHEMA_VERSION,
+                expected_embedding_fingerprint=compute_embedding_fingerprint(config),
+                expected_dimension=config.embedding.expected_dimension,
+                busy_timeout_seconds=embedding_cache_busy_timeout_seconds,
+            )
+            embedding_cache.verify_integrity()
+            embedding = CachingDocumentEmbeddingProvider(
+                cache=embedding_cache,
+                upstream=upstream_embedding,
+            )
         write_flat_baseline_collection(
             documents=documents,
             persist_directory=persist,
@@ -255,7 +320,7 @@ def build_flat_baseline(
             max_in_flight_batches=config.embedding.max_in_flight_batches,
         )
     finally:
-        embedding.close()
+        _close_embedding_resources(embedding_cache, upstream_embedding)
         # Instantiate the checked tokenizer before writing the manifest.  This
         # makes its runtime dictionary identity a build precondition even though
         # the flat BM25 index itself is rebuilt in memory at benchmark time.
@@ -278,6 +343,10 @@ def main(argv: list[str] | None = None) -> int:
         manifest_output=args.manifest_output,
         collection_name=args.collection_name,
         flat_build_id=args.flat_build_id,
+        embedding_cache_path=args.embedding_cache,
+        embedding_cache_busy_timeout_seconds=(
+            args.embedding_cache_busy_timeout_seconds
+        ),
     )
     print(
         "Flat baseline built: "

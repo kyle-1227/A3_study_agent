@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -681,3 +682,48 @@ def test_index_paths_resolve_only_inside_explicit_project_root(tmp_path: Path) -
     escaping = RagIndexConfig.model_validate(payload)
     with pytest.raises(ValueError, match="catalog.data_root"):
         resolve_rag_index_config_paths(escaping, project_root=project_root)
+
+
+@pytest.mark.parametrize(
+    "path_field",
+    ("data_root", "index_root", "registry_path"),
+)
+def test_index_path_resolver_rejects_reparse_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_field: str,
+) -> None:
+    project_root = (tmp_path / "project").resolve()
+    data_root = project_root / "data"
+    index_root = project_root / "indexes"
+    data_root.mkdir(parents=True)
+    index_root.mkdir()
+    registry_path = index_root / "generation_registry.sqlite"
+    registry_path.write_bytes(b"registry")
+    payload = _index_payload(project_root)
+    catalog = payload["catalog"]
+    storage = payload["storage"]
+    assert isinstance(catalog, dict) and isinstance(storage, dict)
+    catalog["data_root"] = data_root
+    storage["index_root"] = index_root
+    config = RagIndexConfig.model_validate(payload)
+    targets = {
+        "data_root": data_root,
+        "index_root": index_root,
+        "registry_path": registry_path,
+    }
+    target = targets[path_field]
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path) -> object:
+        status = original_lstat(path)
+        if path == target:
+            return SimpleNamespace(
+                st_mode=status.st_mode,
+                st_file_attributes=0x0400,
+            )
+        return status
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    with pytest.raises(ValueError, match="symlink or reparse"):
+        resolve_rag_index_config_paths(config, project_root=project_root)

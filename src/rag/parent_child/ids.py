@@ -42,6 +42,14 @@ def make_loader_policy_fingerprint(policy: PageAwareLoaderConfig) -> str:
     """Hash the complete page extraction, cleaning, and assembly policy."""
 
     payload = policy.model_dump(mode="json")
+    if payload["pdf_ocr"] is None:
+        # Preserve the established V1 identity when OCR is explicitly absent.
+        payload.pop("pdf_ocr")
+    else:
+        pdf_ocr = dict(payload["pdf_ocr"])
+        pdf_ocr.pop("binary_path")
+        pdf_ocr.pop("tessdata_dir")
+        payload["pdf_ocr"] = pdf_ocr
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 

@@ -23,6 +23,14 @@ class SourceExtractionError(ParentChildError):
     """Raised when an explicitly supported source cannot be decoded or read."""
 
 
+class OcrRuntimeIdentityError(SourceExtractionError):
+    """Raised when the configured OCR runtime does not match its fingerprints."""
+
+
+class OcrProtocolError(SourceExtractionError):
+    """Raised when OCR execution or its strict response contract fails."""
+
+
 class ParentChildInvariantError(ParentChildError):
     """Raised when a domain invariant cannot be proven."""
 

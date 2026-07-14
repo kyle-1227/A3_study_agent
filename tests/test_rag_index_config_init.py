@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
+import fitz
 import pytest
 import yaml
 
 from scripts.init_rag_index_config import (
     _parser,
     main,
+    portable_runtime_config_from_source,
+    write_portable_runtime_config,
 )
 from src.config.rag_index_config import (
     ChunkPolicyConfig,
     compute_chunk_policy_id,
     load_rag_index_config,
+    resolve_rag_index_config_paths,
 )
 from src.rag.parent_child.project_paths import ProjectPathError
+from src.rag.parent_child.tesseract_ocr import (
+    compute_tesseract_runtime_manifest_sha256,
+)
 from src.rag.parent_child.tokenizer import resolve_jieba_runtime_identity
 from src.rag.subject_catalog import SubjectPolicyMapError
 
@@ -298,6 +306,13 @@ def test_init_generates_stable_strict_config_without_reading_api_keys(
         main(arguments)
 
 
+def test_legacy_chunk_policy_id_is_byte_stable() -> None:
+    policy = ChunkPolicyConfig.model_validate(_policy_payload())
+    assert compute_chunk_policy_id(policy) == (
+        "87e4eb5997cf6525fb839f55914af68b0f34a484d4c67c55f24e0f8b9311be72"
+    )
+
+
 def test_init_accepts_explicit_openrouter_embedding_protocol(
     tmp_path: Path,
 ) -> None:
@@ -407,3 +422,110 @@ def test_init_cli_requires_explicit_provider_routing(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         main(arguments)
+
+
+def test_portable_runtime_config_round_trips_absolute_ocr_paths(
+    tmp_path: Path,
+) -> None:
+    project_root, policy_path = _project(tmp_path)
+    assert main(_arguments(project_root, policy_path)) == 0
+    source_config_path = project_root / "config" / "rag" / "index.local.yaml"
+    payload = yaml.safe_load(source_config_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+
+    runtime_root = project_root / ".runtime_tools" / "tesseract"
+    tessdata = runtime_root / "tessdata"
+    (tessdata / "configs").mkdir(parents=True)
+    binary = runtime_root / "tesseract.exe"
+    binary.write_bytes(b"portable-binary")
+    (runtime_root / "engine.dll").write_bytes(b"portable-dll")
+    (tessdata / "configs" / "tsv").write_text(
+        "tessedit_create_tsv 1\n",
+        encoding="utf-8",
+    )
+    language_hashes: list[dict[str, str]] = []
+    for language in ("chi_sim", "eng"):
+        traineddata = tessdata / f"{language}.traineddata"
+        traineddata.write_bytes(f"portable-{language}".encode())
+        language_hashes.append(
+            {
+                "language": language,
+                "traineddata_sha256": hashlib.sha256(
+                    traineddata.read_bytes()
+                ).hexdigest(),
+            }
+        )
+    ocr_source = project_root / "data" / "math" / "book.pdf"
+    ocr_source.write_bytes(b"%PDF-portable-test")
+
+    chunk_policies = payload["chunk_policies"]
+    assert isinstance(chunk_policies, dict)
+    policy_payload = dict(next(iter(chunk_policies.values())))
+    policy_payload["extraction"] = {
+        "algorithm_version": "page_extract_tesseract_v2",
+        "pdf_extraction_method": "configured_pdf_text",
+        "text_extraction_method": "configured_utf8_text",
+        "pdf_ocr": {
+            "schema_version": "tesseract_ocr_policy_v1",
+            "engine_protocol": "tesseract_cli_tsv_v1",
+            "extraction_method": "tesseract_cli_tsv_v1",
+            "source_relpaths": ["math/book.pdf"],
+            "binary_path": str(binary.resolve()),
+            "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "runtime_manifest_sha256": (
+                compute_tesseract_runtime_manifest_sha256(binary, tessdata)
+            ),
+            "expected_version": "5.5.0",
+            "renderer_protocol": "pymupdf_pixmap_png_v1",
+            "pymupdf_version": fitz.VersionBind,
+            "mupdf_version": fitz.VersionFitz,
+            "tessdata_dir": str(tessdata.resolve()),
+            "language_assets": language_hashes,
+            "dpi": 300,
+            "render_colorspace": "rgb",
+            "render_alpha": False,
+            "render_annotations": True,
+            "oem": 1,
+            "psm": 3,
+            "thread_limit": 1,
+            "timeout_seconds": 30.0,
+            "output_format": "tsv_lines_v1",
+            "empty_page_policy": "allow_empty_physical_page_v1",
+        },
+    }
+    policy = ChunkPolicyConfig.model_validate(policy_payload)
+    policy_id = compute_chunk_policy_id(policy)
+    payload["chunk_policies"] = {policy_id: policy.model_dump(mode="json")}
+    payload["subject_policy_map"] = {"math": policy_id}
+    catalog = payload["catalog"]
+    assert isinstance(catalog, dict)
+    catalog["supported_extensions"] = [".pdf", ".txt"]
+    source_config_path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    runtime = portable_runtime_config_from_source(
+        project_root=project_root,
+        source_config_path=source_config_path.relative_to(project_root),
+        data_root=Path("data"),
+        index_root=Path("indexes"),
+        registry_path=Path("generation_registry.sqlite"),
+    )
+    output = write_portable_runtime_config(
+        project_root=project_root,
+        output_path=Path("config/rag/index.runtime.yaml"),
+        config=runtime,
+        overwrite=False,
+    )
+    written_payload = yaml.safe_load(output.read_text(encoding="utf-8"))
+    written_policy = next(iter(written_payload["chunk_policies"].values()))
+    written_ocr = written_policy["extraction"]["pdf_ocr"]
+    assert written_ocr["binary_path"] == ".runtime_tools/tesseract/tesseract.exe"
+    assert written_ocr["tessdata_dir"] == ".runtime_tools/tesseract/tessdata"
+    assert not Path(written_payload["catalog"]["data_root"]).is_absolute()
+    assert not Path(written_payload["storage"]["index_root"]).is_absolute()
+    assert resolve_rag_index_config_paths(
+        load_rag_index_config(output),
+        project_root=project_root,
+    ) == resolve_rag_index_config_paths(runtime, project_root=project_root)

@@ -131,6 +131,39 @@ def test_parser_requires_every_explicit_build_input() -> None:
         )
 
 
+def test_flat_build_receives_the_exact_declared_embedding_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_path = tmp_path / "artifacts" / "cache.sqlite"
+    context = SimpleNamespace(
+        root=tmp_path,
+        index_config_path=tmp_path / "config" / "index.yaml",
+        embedding_cache_path=cache_path,
+        inputs=SimpleNamespace(
+            build_id="flat_cache_test",
+            embedding_cache_busy_timeout_seconds=7.0,
+        ),
+    )
+    observed: dict[str, object] = {}
+    manifest = SimpleNamespace(collection_name="flat_cache_test", chunk_count=1)
+
+    def build(**kwargs: object) -> object:
+        observed.update(kwargs)
+        return manifest
+
+    monkeypatch.setattr(local_build, "build_flat_baseline", build)
+    monkeypatch.setattr(
+        local_build,
+        "_validate_flat_baseline",
+        lambda **kwargs: "validated",
+    )
+
+    assert local_build._build_flat_baseline(context) == "validated"
+    assert observed["embedding_cache_path"] == cache_path
+    assert observed["embedding_cache_busy_timeout_seconds"] == 7.0
+
+
 def test_plan_mode_writes_no_report_or_artifact(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

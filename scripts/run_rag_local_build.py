@@ -1644,6 +1644,10 @@ def _build_flat_baseline(context: BuildContext) -> FlatBaselineSummary:
         manifest_output=manifest_output,
         collection_name=_collection_name(context.inputs.build_id),
         flat_build_id=context.inputs.build_id,
+        embedding_cache_path=context.embedding_cache_path,
+        embedding_cache_busy_timeout_seconds=(
+            context.inputs.embedding_cache_busy_timeout_seconds
+        ),
     )
     return _validate_flat_baseline(
         context=context,

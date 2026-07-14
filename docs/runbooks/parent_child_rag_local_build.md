@@ -218,10 +218,12 @@ python scripts/build_flat_baseline.py `
   --persist-dir artifacts/rag/flat-baseline-<build-id>/chroma `
   --manifest-output artifacts/rag/flat-baseline-<build-id>/manifest.json `
   --collection-name flat_baseline_<build-id> `
-  --flat-build-id <build-id>
+  --flat-build-id <build-id> `
+  --embedding-cache artifacts/rag/embedding_cache/<cache>.sqlite `
+  --embedding-cache-busy-timeout-seconds 30
 ```
 
-保留该 manifest；它把 baseline 的 source/policy、embedding、BM25 tokenizer 和 chunk ID 集绑定到后续 benchmark。
+Embedding cache 必须与当前 embedding fingerprint 和 dimension 严格一致；identity、integrity 或 row 校验失败会终止构建。若本轮明确不使用 cache，改为显式传 `--no-embedding-cache`，仍必须传 busy-timeout。保留该 manifest；它把 baseline 的 source/policy、embedding、BM25 tokenizer 和 chunk ID 集绑定到后续 benchmark。
 
 ## 6. 构建 Parent–Child generation（不激活）
 
