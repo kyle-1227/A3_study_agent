@@ -143,3 +143,19 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
   builder/token-budget/error package and its tests were deleted. No
   compatibility import, original-message retry, deterministic memory text, or
   legacy budget adapter remains; retained memory storage/retrieval is unchanged.
+
+### 2026-07-14 Supervisor phrase-routing cleanup
+
+- Removed the private resource-request phrase tables and their singular/plural
+  detectors. They were not a transport fallback, but they represented a second,
+  query-text-based interpretation path beside the strict structured contract.
+- `supervisor_node` now has one auditable routing source:
+  `SupervisorOutput` produced by `invoke_structured_llm`, validated by Pydantic
+  and `validate_supervisor_output`, then projected into graph state.
+- A strong resource-generation phrase paired with a valid `unknown/general` QA
+  structured result remains QA and reaches the `qa` route; query text is not
+  reparsed to manufacture a resource request.
+- No fallback, silent default, alias-normalization bypass, provider/model
+  override, or validation bypass was introduced. `_sanitize_valid_intents`
+  remains an independently active import-time configuration concern and was
+  intentionally not changed in this cleanup.

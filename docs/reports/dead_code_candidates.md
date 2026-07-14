@@ -12,16 +12,35 @@ Initial governance report created on 2026-06-20. No dead code was deleted.
 
 Vulture has not been run in this first governance round. No dead-code candidates are approved for deletion.
 
-## 2026-07-10 Supervisor phrase-detector candidates
+## 2026-07-14 Supervisor phrase-detector cleanup
 
 Candidate: Legacy resource-request phrase detectors
 File: `src/graph/supervisor.py`
-Symbol: `_READABLE_*_MARKERS`, `_detect_requested_resource_types`, `_detect_requested_resource_type`
-Evidence: Repository reference scan finds runtime definitions and test imports only; `supervisor_node` uses strict structured output and does not call these helpers.
+Symbols: `_READABLE_RESOURCE_ACTION_MARKERS`,
+`_CODE_PRACTICE_ACTION_MARKERS`, `_READABLE_WEAK_REQUEST_MARKERS`,
+`_READABLE_EXPLANATION_MARKERS`, `_READABLE_RESOURCE_TYPE_MARKERS`,
+`_detect_requested_resource_types`, and `_detect_requested_resource_type`
+Evidence: Repository reference and dynamic-entry scans found only the runtime
+definitions, their self-calls, and private-helper tests. `supervisor_node`
+dispatches through `invoke_structured_llm` with `SupervisorOutput` and
+`validate_supervisor_output`; it projects only the validated structured fields.
 Confidence: High
-Dynamic reference checks: LangGraph builder and prompt/config scans show no dynamic symbol lookup for these private helpers.
-Related tests: `tests/test_supervisor.py`
-Recommended action: Keep report-only until explicit deletion approval; do not use these helpers as a runtime routing source.
+Dynamic reference checks: LangGraph builders, package exports, FastAPI routes,
+node registries, importlib/getattr calls, prompts, and configuration contain no
+dynamic lookup for these private helpers.
+Replacement tests: `tests/test_supervisor.py` now proves that a query containing
+strong resource-generation phrases cannot override a validated
+`unknown/general` QA result or its final `qa` route. The structured-runtime
+wiring test also requires `validate_supervisor_output` as the business validator.
+Executed action: The approved Agent-node zero-legacy plan explicitly authorized
+this deletion. The seven symbols and their implementation-only tests were
+removed; strict resource normalization, Pydantic/business validation, and route
+contracts were retained.
+Verification: Supervisor/Builder/Manifest regression `75 passed`; full backend
+`2273 passed, 6 skipped`; frontend 69 tests, typecheck, ESLint, and production
+build passed. Compileall, touched Ruff check/format, scoped mypy, diff check,
+and active-symbol scans passed. Vulture remains unavailable and was not
+reported as passing.
 
 ## 2026-07-10 RAG parent JSONL cleanup candidate
 

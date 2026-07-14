@@ -12,8 +12,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.graph.supervisor import (
     SupervisorOutput,
     _VALID_INTENTS,
-    _detect_requested_resource_type,
-    _detect_requested_resource_types,
     handle_unknown,
     route_after_supervisor,
     route_by_intent,
@@ -199,6 +197,7 @@ class TestSupervisorNode:
         assert kwargs["node_name"] == "supervisor"
         assert kwargs["llm_node"] == "supervisor"
         assert kwargs["schema"] is SupervisorOutput
+        assert kwargs["business_validator"] is validate_supervisor_output
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_unavailable_subject_candidates_are_filtered(self, mock_invoke):
@@ -345,6 +344,35 @@ class TestSupervisorNode:
         assert result["requested_resource_type"] == ""
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_query_phrase_cannot_override_structured_qa_contract(
+        self, mock_invoke
+    ):
+        mock_invoke.return_value = _result(
+            intent="unknown",
+            keywords=["mindmap"],
+            response_mode="qa",
+            qa_scope="general",
+        )
+
+        result = await supervisor_node(
+            {
+                "messages": [
+                    HumanMessage(
+                        content="Please create a Python mindmap and practice questions"
+                    )
+                ]
+            }
+        )
+
+        assert result["intent"] == "unknown"
+        assert result["response_mode"] == "qa"
+        assert result["qa_scope"] == "general"
+        assert result["requested_resource_type"] == ""
+        assert result["requested_resource_types"] == []
+        assert result["needs_mindmap"] is False
+        assert route_after_supervisor(result) == "qa"
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_resource_only_request_inherits_workspace_subject(self, mock_invoke):
         mock_invoke.return_value = _result(
             intent="academic",
@@ -457,53 +485,6 @@ class TestSupervisorNode:
             len(expected_types) > 1
         )
         assert result["requested_resource_type"] != "multi_resource"
-
-
-class TestResourceTypeDetection:
-    def test_detects_explicit_mindmap_generation(self):
-        assert (
-            _detect_requested_resource_type("Please create a machine learning mindmap")
-            == "mindmap"
-        )
-
-    def test_does_not_detect_mindmap_explanation_question(self):
-        assert _detect_requested_resource_type("What is a mindmap?") == ""
-
-    def test_detects_study_plan_requests(self):
-        assert (
-            _detect_requested_resource_type("Please create a Python study plan")
-            == "study_plan"
-        )
-        assert (
-            _detect_requested_resource_type("Give me a machine learning roadmap")
-            == "study_plan"
-        )
-
-    @pytest.mark.parametrize(
-        ("query", "expected"),
-        [
-            ("Python 的 list 和 tuple 有什么区别？", []),
-            ("给我一份 Python 复习资料", ["review_doc"]),
-            ("帮我生成 Python 思维导图", ["mindmap"]),
-            ("给我一份 Python 练习题", ["quiz"]),
-            ("帮我生成一份 Python 的复习资料和思维导图", ["review_doc", "mindmap"]),
-            ("帮我生成一份 Python 的复习资料和练习题", ["review_doc", "quiz"]),
-            (
-                "帮我生成一份 Python 的复习资料、思维导图和练习题",
-                ["review_doc", "mindmap", "quiz"],
-            ),
-        ],
-    )
-    def test_detects_requested_resource_types(self, query, expected):
-        assert _detect_requested_resource_types(query) == expected
-
-    def test_detects_multiple_resource_types_in_order(self):
-        assert _detect_requested_resource_types(
-            "请帮我生成机器学习思维导图和练习题"
-        ) == ["mindmap", "quiz"]
-
-    def test_does_not_detect_resource_list_for_explanation_question(self):
-        assert _detect_requested_resource_types("什么是思维导图？") == []
 
 
 class TestRouteByIntent:
