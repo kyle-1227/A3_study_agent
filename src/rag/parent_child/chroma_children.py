@@ -186,6 +186,10 @@ def _prepare_children(
             raise ChromaInputContractError(
                 "child generation_id differs from the requested generation"
             )
+        if "\x00" in child.content:
+            raise ChromaInputContractError(
+                "child content contains a forbidden NUL character"
+            )
         expected = _ExpectedChild(child)
         if expected.metadata.get("child_id") != expected.child_id:
             raise ChromaInputContractError(

@@ -41,7 +41,7 @@ def _require_supported_algorithms(policy: ChunkPolicyConfig) -> None:
         ),
         "cleaning.algorithm_version": (
             policy.cleaning.algorithm_version,
-            "page_clean_v1",
+            "page_clean_v2",
         ),
         "parent.algorithm_version": (
             policy.parent.algorithm_version,
@@ -118,6 +118,7 @@ def resolve_chunk_policy(
         page_assembly_algorithm_version=configured.page_assembly.algorithm_version,
         cleaning_algorithm_version=configured.cleaning.algorithm_version,
         cleaning_policy_id=cleaning_policy_id,
+        nul_character_policy=configured.cleaning.nul_character_policy,
         page_separator=configured.page_assembly.page_separator,
         normalize_newlines=configured.cleaning.normalize_newlines,
         strip_trailing_whitespace=configured.cleaning.strip_trailing_whitespace,

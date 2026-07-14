@@ -21,7 +21,10 @@ from src.rag.parent_child.bm25_artifact import (
     read_subject_bm25_artifact,
     write_subject_bm25_artifact,
 )
-from src.rag.parent_child.exceptions import AtomicSpanTooLargeError
+from src.rag.parent_child.exceptions import (
+    AtomicSpanTooLargeError,
+    SourceExtractionError,
+)
 from src.rag.parent_child.generation import GenerationWorkspace
 from src.rag.parent_child.ids import make_loader_policy_fingerprint
 from src.rag.parent_child.loader import load_cleaned_source
@@ -60,8 +63,9 @@ def _loader_config() -> PageAwareLoaderConfig:
         schema_version="page_aware_loader_policy_v1",
         extraction_algorithm_version="page_extract_v1",
         page_assembly_algorithm_version="page_assembly_v1",
-        cleaning_algorithm_version="page_clean_v1",
-        cleaning_policy_id="page_clean_v1",
+        cleaning_algorithm_version="page_clean_v2",
+        cleaning_policy_id="page_clean_v2",
+        nul_character_policy="replace_with_space_v1",
         page_separator="\n\f\n",
         normalize_newlines=True,
         strip_trailing_whitespace=True,
@@ -163,6 +167,53 @@ def _text_bundle(tmp_path: Path, *, generation_id: str = "gen-a"):
         loader,
     )
     return build_parent_child_bundle(source, _policy(loader), generation_id)
+
+
+def test_page_cleaning_replaces_nul_without_shifting_cleaned_offsets(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    source_path = data_root / "math" / "nul.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"alpha\x00beta")
+
+    source = load_cleaned_source(
+        SourceEntry(
+            schema_version="source_entry_v1",
+            source_path=source_path,
+            data_root=data_root,
+            subject="math",
+            doc_type="notes",
+        ),
+        _loader_config(),
+    )
+
+    assert source.content == "alpha beta"
+    assert len(source.content) == len("alpha\x00beta")
+    assert source.page_spans[0].start_char == 0
+    assert source.page_spans[0].end_char == len(source.content)
+
+
+def test_page_cleaning_reject_policy_fails_on_nul(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    source_path = data_root / "math" / "nul.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"alpha\x00beta")
+    values = _loader_config().model_dump(mode="python")
+    values["nul_character_policy"] = "reject"
+    reject_config = PageAwareLoaderConfig.model_validate(values)
+
+    with pytest.raises(SourceExtractionError, match="NUL"):
+        load_cleaned_source(
+            SourceEntry(
+                schema_version="source_entry_v1",
+                source_path=source_path,
+                data_root=data_root,
+                subject="math",
+                doc_type="notes",
+            ),
+            reject_config,
+        )
 
 
 def test_page_aware_pdf_preserves_empty_page_ordinal(tmp_path: Path) -> None:

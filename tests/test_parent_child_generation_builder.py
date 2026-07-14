@@ -15,6 +15,7 @@ from src.rag.parent_child.builder import (
     GenerationBuildRequest,
     GenerationBuilder,
 )
+from src.rag.parent_child.generation import validate_sealed_generation
 from src.rag.parent_child.registry import (
     GenerationRegistry,
     create_generation_registry,
@@ -67,7 +68,8 @@ def _chunk_policy() -> dict[str, object]:
             "page_separator": "\n\f\n",
         },
         "cleaning": {
-            "algorithm_version": "page_clean_v1",
+            "algorithm_version": "page_clean_v2",
+            "nul_character_policy": "replace_with_space_v1",
             "normalize_newlines": True,
             "strip_trailing_whitespace": True,
             "strip_outer_blank_lines": True,
@@ -364,3 +366,15 @@ def test_ready_generation_loads_exact_runtime_and_retrieves(tmp_path: Path) -> N
             assert result.retrieval_fingerprint
         finally:
             runtime.close()
+        record = registry.get_generation("gen-runtime-a")
+        assert record.manifest_sha256 is not None
+        manifest = validate_sealed_generation(
+            config.storage.index_root,
+            "gen-runtime-a",
+            expected_manifest_sha256=record.manifest_sha256,
+            expected_marker_schema_version=(config.storage.owner_marker_schema_version),
+        )
+        assert manifest.generation_id == "gen-runtime-a"
+        runtime_root = config.storage.index_root / ".runtime_chroma"
+        assert runtime_root.is_dir()
+        assert tuple(runtime_root.iterdir()) == ()

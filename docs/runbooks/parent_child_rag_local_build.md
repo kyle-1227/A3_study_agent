@@ -228,6 +228,20 @@ python scripts/build_parent_child_generation.py `
   --registry-mode existing
 ```
 
+### Sealed Chroma safety
+
+- `page_clean_v2` requires an explicit `nul_character_policy`. Local Chroma
+  builds should use `replace_with_space_v1`, which is deterministic and
+  length-preserving; `reject` is available when any extracted NUL must stop the
+  build. Child persistence independently rejects remaining NUL characters.
+- Chroma 1.5.x writes internal coordination state whenever a
+  `PersistentClient` is opened. Validators and retrieval runtimes therefore
+  open a marker-owned copy below the configured index root and remove it on
+  close. They never open the canonical sealed `chroma_children` directory.
+- A digest mismatch is not repairable by editing `manifest.json`. Keep the
+  generation inactive and build a new immutable generation after fixing the
+  source, cleaning policy, or runtime defect.
+
 成功只代表该 generation 为 `READY`（已密封、完整性验证完成），**不代表已服务流量，更不代表已通过效果验证**。本命令不调用 activate。
 
 ## 7. 同 GoldDataset benchmark 与正式 validation

@@ -198,6 +198,10 @@ def test_chroma_writer_persists_and_verifies_exact_children(tmp_path: Path) -> N
             (_child(child_hex="1", content="alpha", generation_id="gen-b"),),
             "generation_id differs",
         ),
+        (
+            (_child(child_hex="1", content="alpha\x00beta"),),
+            "forbidden NUL",
+        ),
     ],
 )
 def test_chroma_writer_rejects_invalid_child_set_before_creation(

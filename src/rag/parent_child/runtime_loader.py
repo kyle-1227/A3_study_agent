@@ -10,6 +10,11 @@ from src.config.rag_index_config import RagIndexConfig
 from src.rag.parent_child._storage_io import canonical_json_bytes, sha256_bytes
 from src.rag.parent_child.bm25_artifact import compute_tokenizer_fingerprint
 from src.rag.parent_child.builder import compute_embedding_fingerprint
+from src.rag.parent_child.chroma_runtime_snapshot import (
+    CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+    ChromaRuntimeSnapshot,
+    chroma_artifact_sha256,
+)
 from src.rag.parent_child.generation import validate_sealed_generation
 from src.rag.parent_child.manifests import (
     GenerationManifest,
@@ -103,6 +108,7 @@ class LoadedGenerationRuntime:
     generation_id: str
     available_subjects: tuple[str, ...]
     resources: GenerationResources
+    chroma_snapshot: ChromaRuntimeSnapshot
     retrieval_policy: HybridRetrievalPolicy
     cross_branch_rrf_k: int
     judge_preview_max_chars: int
@@ -117,7 +123,10 @@ class LoadedGenerationRuntime:
         )
 
     def close(self) -> None:
-        self.resources.close()
+        try:
+            self.resources.close()
+        finally:
+            self.chroma_snapshot.close()
 
 
 def _validate_manifest_against_config(
@@ -216,11 +225,16 @@ def load_generation_runtime(
 
     vector: ChromaChildSearchChannel | None = None
     parents: ParentStore | None = None
+    chroma_snapshot: ChromaRuntimeSnapshot | None = None
     try:
+        chroma_snapshot = ChromaRuntimeSnapshot.create(
+            index_root=config.storage.index_root,
+            source_directory=(generation_root / "chroma_children"),
+            expected_source_sha256=chroma_artifact_sha256(manifest),
+            owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        )
         vector = ChromaChildSearchChannel(
-            persist_directory=(generation_root / "chroma_children").resolve(
-                strict=True
-            ),
+            persist_directory=chroma_snapshot.persist_directory,
             collection_name=manifest.collection_name,
             generation_id=generation_id,
             expected_dimension=manifest.embedding.dimension,
@@ -267,15 +281,22 @@ def load_generation_runtime(
             generation_id=generation_id,
             available_subjects=available_subjects,
             resources=resources,
+            chroma_snapshot=chroma_snapshot,
             retrieval_policy=policy,
             cross_branch_rrf_k=config.retrieval.cross_branch_rrf_k,
             judge_preview_max_chars=config.retrieval.judge_preview_max_chars,
         )
     except Exception:
-        if parents is not None:
-            parents.close()
-        if vector is not None:
-            vector.close()
+        try:
+            if parents is not None:
+                parents.close()
+        finally:
+            try:
+                if vector is not None:
+                    vector.close()
+            finally:
+                if chroma_snapshot is not None:
+                    chroma_snapshot.close()
         raise
 
 

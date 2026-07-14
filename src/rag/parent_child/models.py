@@ -88,8 +88,9 @@ class PageAwareLoaderConfig(_StrictFrozenModel):
     schema_version: Literal["page_aware_loader_policy_v1"]
     extraction_algorithm_version: str
     page_assembly_algorithm_version: str
-    cleaning_algorithm_version: str
+    cleaning_algorithm_version: Literal["page_clean_v2"]
     cleaning_policy_id: str
+    nul_character_policy: Literal["replace_with_space_v1", "reject"]
     page_separator: str
     normalize_newlines: bool
     strip_trailing_whitespace: bool

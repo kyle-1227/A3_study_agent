@@ -82,6 +82,16 @@ def _prepare_page_lines(
     raw_text: str, config: PageAwareLoaderConfig
 ) -> tuple[str, ...]:
     text = raw_text
+    if "\x00" in text:
+        if config.nul_character_policy == "reject":
+            raise SourceExtractionError(
+                "Extracted source page contains a forbidden NUL character"
+            )
+        if config.nul_character_policy != "replace_with_space_v1":
+            raise AssertionError("PageAwareLoaderConfig must validate NUL policy")
+        # This is an explicit, length-preserving cleaning transform. It prevents
+        # Chroma FTS5 trigram corruption without shifting cleaned offsets.
+        text = text.replace("\x00", " ")
     if config.normalize_newlines:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
 

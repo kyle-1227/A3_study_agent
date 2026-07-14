@@ -132,9 +132,16 @@ class ChromaChildSearchChannel:
     def close(self) -> None:
         """Release the Chroma client context when supported by this version."""
 
-        exit_method = getattr(self._client, "__exit__", None)
-        if callable(exit_method):
-            exit_method(None, None, None)
+        client = getattr(self, "_client", None)
+        if client is None:
+            return
+        close_method = getattr(client, "close", None)
+        if not callable(close_method):
+            raise RuntimeResourceError("Chroma client has no close contract")
+        if getattr(self, "_closed", False):
+            return
+        close_method()
+        self._closed = True
 
     def _embed_query(self, query: str) -> list[float]:
         try:

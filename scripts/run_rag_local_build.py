@@ -1665,6 +1665,11 @@ def _validate_generation(
     )
     from src.rag.parent_child.builder import compute_embedding_fingerprint
     from src.rag.parent_child.chroma_children import iter_child_chroma_metadata_pages
+    from src.rag.parent_child.chroma_runtime_snapshot import (
+        CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        ChromaRuntimeSnapshot,
+        chroma_artifact_sha256,
+    )
     from src.rag.parent_child.generation import validate_sealed_generation
     from src.rag.parent_child.models import ChildMetadata
     from src.rag.parent_child.parent_store import ParentStore
@@ -1716,9 +1721,18 @@ def _validate_generation(
     }
     children_by_subject: dict[str, set[str]] = {}
     parent_ids: set[str] = set()
-    with chromadb.PersistentClient(
-        path=str(chroma_path), settings=Settings(anonymized_telemetry=False)
-    ) as client:
+    with (
+        ChromaRuntimeSnapshot.create(
+            index_root=context.config.storage.index_root,
+            source_directory=chroma_path,
+            expected_source_sha256=chroma_artifact_sha256(manifest),
+            owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        ) as chroma_snapshot,
+        chromadb.PersistentClient(
+            path=str(chroma_snapshot.persist_directory),
+            settings=Settings(anonymized_telemetry=False),
+        ) as client,
+    ):
         collection = client.get_collection(
             manifest.collection_name, embedding_function=None
         )

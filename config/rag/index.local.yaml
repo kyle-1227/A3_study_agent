@@ -26,7 +26,7 @@ catalog:
   symlink_policy: reject
   unclassified_directory_name: unclassified
 chunk_policies:
-  2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f:
+  950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15:
     atomic_blocks:
       hard_max_chars: 3200
       policy_version: atomic_v1
@@ -52,11 +52,12 @@ chunk_policies:
       size: 600
       whitespace_policy: preserve
     cleaning:
-      algorithm_version: page_clean_v1
+      algorithm_version: page_clean_v2
       collapse_blank_lines: true
       footer_bottom_lines: 1
       header_top_lines: 1
       normalize_newlines: true
+      nul_character_policy: replace_with_space_v1
       paragraph_deduplication: false
       repeated_line_min_pages: 2
       repeated_line_min_ratio: 0.5
@@ -172,8 +173,8 @@ storage:
   registry_schema_version: generation_registry_v1
   retention_generations: 3
 subject_policy_map:
-  big_data: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
-  computer: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
-  machine_learning: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
-  math: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
-  python: 2a40e2651c72c87646f6841c16aa9b090e30b375461136a9cc4d3e0babb1d77f
+  big_data: 950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15
+  computer: 950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15
+  machine_learning: 950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15
+  math: 950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15
+  python: 950a1a18f80241a8482f32295131e82e21f49edfba1afaa4891b74a1ee271c15

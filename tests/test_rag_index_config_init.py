@@ -31,7 +31,8 @@ def _policy_payload(*, short_unit_chars: int = 300) -> dict[str, object]:
             "page_separator": "\n\f\n",
         },
         "cleaning": {
-            "algorithm_version": "page_clean_v1",
+            "algorithm_version": "page_clean_v2",
+            "nul_character_policy": "replace_with_space_v1",
             "normalize_newlines": True,
             "strip_trailing_whitespace": True,
             "strip_outer_blank_lines": True,

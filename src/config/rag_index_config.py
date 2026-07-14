@@ -320,7 +320,8 @@ class PageAssemblyPolicyConfig(StrictRagConfigModel):
 
 
 class CleaningPolicyConfig(StrictRagConfigModel):
-    algorithm_version: NonBlankStr
+    algorithm_version: Literal["page_clean_v2"]
+    nul_character_policy: Literal["replace_with_space_v1", "reject"]
     normalize_newlines: bool
     strip_trailing_whitespace: bool
     strip_outer_blank_lines: bool
