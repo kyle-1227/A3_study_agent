@@ -198,3 +198,21 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 - Real PostgreSQL and real Provider E2E remain explicit delivery gates. The
   opt-in PostgreSQL concurrency test is skipped when
   `A3_TEST_POSTGRES_URI` is absent and is not reported as passing.
+
+### 2026-07-15 Learning-guidance strict storage reads
+
+- Legacy `SQLiteProfileStore.load()` initializes missing storage, catches all
+  profile JSON/schema failures, logs them, and returns `None`. It remains for
+  existing consumers and was not deleted or changed in this feature batch.
+- Legacy episodic row deserialization converts malformed metadata JSON to an
+  empty object and malformed embedding JSON to `None`. Existing memory
+  consumers retain that behavior; the production learning-guidance adapter is
+  forbidden from calling it.
+- Learning guidance now has separate concrete SQLite read methods that open an
+  existing database read-only, validate required tables and columns, reject
+  duplicate/non-finite JSON and schema drift, and expose content-safe typed
+  failures. These methods do not create storage and do not turn damaged rows
+  into unavailable profile/history results.
+- The strict API is intentionally not added to the abstract legacy store
+  interfaces. Production runtime composition must inject the concrete strict
+  adapters explicitly; it must not fall back to the legacy methods.
