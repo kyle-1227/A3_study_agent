@@ -32,6 +32,7 @@ services:
     volumes:
       - chroma_data:/app/chroma_store
       - ./data:/app/data
+      - ./indexes/parent_child:/app/indexes/parent_child:ro
 
   jaeger:
     image: jaegertracing/jaeger:2

@@ -8,6 +8,7 @@ __pycache__
 node_modules
 .next
 chroma_store
+indexes/parent_child
 logs
 drafts
 learning_notes
