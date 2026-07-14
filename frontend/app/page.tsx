@@ -12,6 +12,16 @@ import {
   type ResourceGenerationStep,
 } from "@/components/chat-area"
 import { PlanReview } from "@/components/plan-review"
+import type { ExerciseAssessmentSubmitResult } from "@/components/exercise-assessment"
+import {
+  AssessmentHttpError,
+  submitAssessmentAttempt,
+} from "@/lib/assessment-client"
+import {
+  parseAssessmentAttemptV1,
+  parseAssessmentSubmissionInput,
+  type AssessmentSubmissionInput,
+} from "@/lib/assessment-contracts"
 import {
   mergeResourceFinalIntoMessage,
   parseResourceFinalEvent,
@@ -164,9 +174,17 @@ function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
     .filter(Boolean) as ChatHistoryItem[]
 }
 
-function normalizeMessages(raw: unknown): Message[] {
-  if (!Array.isArray(raw)) return []
-  return raw
+type NormalizedMessages = {
+  messages: Message[]
+  rejectedResourceProjectionCount: number
+}
+
+function normalizeMessages(raw: unknown): NormalizedMessages {
+  if (!Array.isArray(raw)) {
+    return { messages: [], rejectedResourceProjectionCount: 0 }
+  }
+  let rejectedResourceProjectionCount = 0
+  const messages = raw
     .filter((item: any) => {
       return (
         item &&
@@ -176,10 +194,46 @@ function normalizeMessages(raw: unknown): Message[] {
       )
     })
     .map((item: Message) => {
-      if (!item.activities) return item
-      const parsed = parseActivityTimeline(item.activities)
-      return { ...item, activities: parsed.items }
+      const normalizedActivities = item.activities
+        ? parseActivityTimeline(item.activities).items
+        : undefined
+      const base = {
+        ...item,
+        activities: normalizedActivities,
+      }
+      if (item.role !== "assistant" || !item.resourceFinalPayload) {
+        if (item.exercise) rejectedResourceProjectionCount += 1
+        return { ...base, exercise: undefined }
+      }
+      try {
+        const event = parseResourceFinalEvent(item.resourceFinalPayload)
+        return mergeResourceFinalIntoMessage(
+          clearStoredResourceProjections(base),
+          event,
+          API_BASE_URL,
+        )
+      } catch {
+        rejectedResourceProjectionCount += 1
+        return clearStoredResourceProjections(base)
+      }
     })
+  return { messages, rejectedResourceProjectionCount }
+}
+
+function clearStoredResourceProjections(message: Message): Message {
+  return {
+    ...message,
+    mindmap: undefined,
+    reviewDoc: undefined,
+    reviewDocs: undefined,
+    exercise: undefined,
+    codePractice: undefined,
+    videoScript: undefined,
+    videoAnimation: undefined,
+    studyPlan: undefined,
+    resourceFinalPayload: undefined,
+    resourceFinalDedupeKey: undefined,
+  }
 }
 
 function makeChatTitle(content: string): string {
@@ -358,6 +412,7 @@ export default function Home() {
   const [canContinue, setCanContinue] = useState(false)
   const [stopPending, setStopPending] = useState(false)
   const [liveTurn, setLiveTurn] = useState<LiveTurnState | null>(null)
+  const [activeAssessmentKey, setActiveAssessmentKey] = useState("")
 
   // HIL state
   const [isInterrupted, setIsInterrupted] = useState(false)
@@ -390,6 +445,8 @@ export default function Home() {
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const frontendPerformanceTrackerRef = useRef<FrontendPerformanceTracker | null>(null)
   const liveTurnRef = useRef<LiveTurnState | null>(null)
+  const activeAssessmentKeyRef = useRef("")
+  const assessmentAbortControllerRef = useRef<AbortController | null>(null)
 
   const clearStopTimeout = useCallback(() => {
     if (stopTimeoutRef.current) {
@@ -406,6 +463,13 @@ export default function Home() {
       return
     }
     if (isBrowser()) localStorage.setItem(A3_CURRENT_THREAD_ID_KEY, threadId)
+  }, [])
+
+  const cancelActiveAssessment = useCallback(() => {
+    assessmentAbortControllerRef.current?.abort()
+    assessmentAbortControllerRef.current = null
+    activeAssessmentKeyRef.current = ""
+    setActiveAssessmentKey("")
   }, [])
 
   const beginFrontendPerformanceTracking = useCallback(() => {
@@ -460,12 +524,25 @@ export default function Home() {
     const storedThreadId = isBrowser() ? localStorage.getItem(A3_CURRENT_THREAD_ID_KEY) : null
     const storedChatId = isBrowser() ? localStorage.getItem(A3_CURRENT_CHAT_ID_KEY) : null
     const activeThreadId = storedThreadId || storedChatId || storedHistory[0]?.threadId || null
+    const restored = activeThreadId
+      ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), []))
+      : { messages: [], rejectedResourceProjectionCount: 0 }
 
     setChatHistory(storedHistory)
     setSelectedChatId(activeThreadId ?? undefined)
     threadIdRef.current = activeThreadId
     setCurrentThreadId(activeThreadId)
-    setMessages(activeThreadId ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), [])) : [])
+    setMessages(restored.messages)
+    if (restored.rejectedResourceProjectionCount > 0) {
+      setLogs((current) => [
+        ...current,
+        {
+          type: "warning",
+          message: `[CONTRACT] Rejected ${restored.rejectedResourceProjectionCount} stored resource projection(s).`,
+          ts: timestamp(),
+        },
+      ])
+    }
     setStorageReady(true)
   }, [])
 
@@ -639,6 +716,7 @@ export default function Home() {
   }, [])
 
   const handleNewChat = useCallback(() => {
+    cancelActiveAssessment()
     setSelectedChatId(undefined)
     setMessages([])
     setActivityTimeline([])
@@ -661,13 +739,17 @@ export default function Home() {
     assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
-  }, [setActiveThreadId])
+  }, [cancelActiveAssessment, setActiveThreadId])
 
   const handleSelectChat = useCallback((id: string) => {
+    cancelActiveAssessment()
     const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
     const threadId = chat?.threadId || id
+    const restored = normalizeMessages(
+      readJSON<unknown>(messageStorageKey(threadId), []),
+    )
     setSelectedChatId(threadId)
-    setMessages(normalizeMessages(readJSON<unknown>(messageStorageKey(threadId), [])))
+    setMessages(restored.messages)
     setActivityTimeline([])
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
@@ -688,10 +770,20 @@ export default function Home() {
     setLogs((prev) => [
       ...prev,
       { type: "info", message: `[INFO] Restored chat thread: ${threadId.slice(0, 8)}...`, ts: timestamp() },
+      ...(restored.rejectedResourceProjectionCount > 0
+        ? [
+            {
+              type: "warning" as const,
+              message: `[CONTRACT] Rejected ${restored.rejectedResourceProjectionCount} stored resource projection(s).`,
+              ts: timestamp(),
+            },
+          ]
+        : []),
     ])
-  }, [chatHistory, setActiveThreadId])
+  }, [cancelActiveAssessment, chatHistory, setActiveThreadId])
 
   const handleClearChatHistory = useCallback(() => {
+    cancelActiveAssessment()
     if (isBrowser()) {
       localStorage.removeItem(A3_CHAT_HISTORY_KEY)
       localStorage.removeItem(A3_CURRENT_CHAT_ID_KEY)
@@ -723,7 +815,7 @@ export default function Home() {
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
     setLogs([{ type: "info", message: "[INFO] 对话历史已清空。", ts: timestamp() }])
-  }, [setActiveThreadId])
+  }, [cancelActiveAssessment, setActiveThreadId])
 
   const handleClearChat = useCallback(async (id: string) => {
     const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
@@ -740,6 +832,7 @@ export default function Home() {
 
     setChatHistory(nextHistory)
     if (selectedChatId === id || selectedChatId === threadId) {
+      cancelActiveAssessment()
       setSelectedChatId(undefined)
       setMessages([])
       setActivityTimeline([])
@@ -788,7 +881,7 @@ export default function Home() {
         },
       ])
     }
-  }, [chatHistory, selectedChatId, setActiveThreadId])
+  }, [cancelActiveAssessment, chatHistory, selectedChatId, setActiveThreadId])
 
   const fetchGraphManifest = useCallback(async (
     expectedVersion = "",
@@ -1680,7 +1773,87 @@ export default function Home() {
     refreshThreadStatus(currentThreadId)
   }, [currentThreadId, refreshThreadStatus, storageReady])
 
+  const handleSubmitAssessment = useCallback(async (
+    submissionValue: AssessmentSubmissionInput,
+  ): Promise<ExerciseAssessmentSubmitResult> => {
+    let submission: AssessmentSubmissionInput
+    try {
+      submission = parseAssessmentSubmissionInput(submissionValue)
+    } catch {
+      return { status: "failed" }
+    }
+
+    const threadId = threadIdRef.current
+    const assessmentKey = `${submission.resourceId}:${submission.question.question_id}`
+    if (
+      !threadId ||
+      isLoading ||
+      abortControllerRef.current !== null ||
+      activeAssessmentKeyRef.current
+    ) {
+      return { status: "conflict" }
+    }
+
+    activeAssessmentKeyRef.current = assessmentKey
+    setActiveAssessmentKey(assessmentKey)
+    const controller = new AbortController()
+    assessmentAbortControllerRef.current = controller
+
+    try {
+      const attempt = parseAssessmentAttemptV1({
+        schema_version: "assessment_attempt_v1",
+        request_id: crypto.randomUUID(),
+        resource_id: submission.resourceId,
+        question_id: submission.question.question_id,
+        answer: submission.answer,
+        time_spent_seconds: submission.timeSpentSeconds,
+      })
+      const final = await submitAssessmentAttempt({
+        apiBaseUrl: API_BASE_URL,
+        threadId,
+        attempt,
+        fetchImpl: fetch,
+        headers: getAuthHeaders(),
+        signal: controller.signal,
+        reconnect: async (streamId, lastEventId, signal) => {
+          const response = await fetch(
+            `${API_BASE_URL}/streams/${encodeURIComponent(streamId)}`,
+            {
+              headers: { "Last-Event-ID": lastEventId, ...getAuthHeaders() },
+              signal,
+            },
+          )
+          const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
+          if (
+            !response.ok ||
+            !response.body ||
+            !contentType.includes("text/event-stream")
+          ) {
+            throw new Error("assessment_stream_replay_unavailable")
+          }
+          return response.body
+        },
+      })
+      if (threadIdRef.current !== threadId) return { status: "conflict" }
+      return { status: "completed", final }
+    } catch (error) {
+      if (error instanceof AssessmentHttpError && error.status === 409) {
+        return { status: "conflict" }
+      }
+      return { status: "failed" }
+    } finally {
+      if (assessmentAbortControllerRef.current === controller) {
+        assessmentAbortControllerRef.current = null
+      }
+      if (activeAssessmentKeyRef.current === assessmentKey) {
+        activeAssessmentKeyRef.current = ""
+        setActiveAssessmentKey("")
+      }
+    }
+  }, [isLoading])
+
   const handleSendMessage = useCallback(async (content: string) => {
+    if (activeAssessmentKeyRef.current) return
     const threadId = threadIdRef.current
     const requestId = crypto.randomUUID()
     beginRequestStream(requestId)
@@ -2141,6 +2314,8 @@ export default function Home() {
           onSendMessage={handleSendMessage}
           onStopGeneration={handleStopGeneration}
           onContinueThread={handleContinueThread}
+          onSubmitAssessment={handleSubmitAssessment}
+          activeAssessmentKey={activeAssessmentKey}
           isLoading={isLoading && !isInterrupted}
           canContinue={canContinue && !isLoading && !isInterrupted}
           stopPending={stopPending}

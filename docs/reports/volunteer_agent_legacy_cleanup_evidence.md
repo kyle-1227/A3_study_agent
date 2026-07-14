@@ -394,3 +394,31 @@ Vulture、Semgrep、import-linter、Gitleaks、Bandit 仅在安装时运行；�
   production graph/checkpoint gates remain outstanding; therefore
   `assessment_result_handler`, `adaptive_practice_responder`, the placeholder
   generator, and their state/config surfaces remain in place.
+
+## 19. Strict frontend assessment replacement progress (2026-07-14)
+
+- Resource Final V3 quiz cards are now exact-field parsed before message
+  projection or browser persistence. The duplicated public card list and
+  public artifact list must match exactly; private answer fields and unknown
+  fields fail the whole contract. Stored messages are rebuilt from a freshly
+  parsed V3 payload instead of trusting a persisted nested exercise object.
+- Added a strict assessment client on the shared `agent_stream_v2` transport.
+  It performs one POST with the caller's UUID, permits only explicit
+  Last-Event-ID GET replay, rejects sequence gaps/conflicting duplicates and
+  multiple or mismatched terminals, and binds thread/request/resource/question,
+  elapsed time, hash shape, and terminal truth. It never reads an HTTP error
+  body into diagnostics and never logs or persists the submitted answer.
+- Added interactive free-text/single-choice cards with explicit
+  idle/editing/submitting/correct/incorrect/failed/conflict states. The main
+  chat stream and assessment stream are mutually excluded, other cards are
+  disabled during assessment, and thread navigation aborts the active request.
+- Verification passed: focused frontend 61 tests; full frontend 27 files/117
+  tests, typecheck, full ESLint, and production build; compileall; full backend
+  `2334 passed, 7 skipped`; and diff check. Whole-repo Ruff still reports the
+  same 60 lint errors and 65 format files. Semgrep, import-linter, Gitleaks,
+  Bandit, and Vulture remain unavailable and were not recorded as passing.
+- The frontend-submission sub-gate is now satisfied. Deletion is still blocked
+  by real Provider E2E, real PostgreSQL endpoint/restart recovery, production
+  Parent-Child activation evidence, checkpoint migration, and a zero-legacy
+  checkpoint scan. The old assessment nodes and migration readers therefore
+  remain intentionally present.

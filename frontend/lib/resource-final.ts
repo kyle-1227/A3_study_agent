@@ -10,9 +10,27 @@ import type {
   VideoAnimationResult,
   VideoScriptResult,
 } from "@/components/chat-area"
+import type {
+  ExerciseLevel,
+  ExerciseQuestionType,
+  PublicExerciseCardV1,
+} from "@/lib/assessment-contracts"
 import { ContractParseError } from "@/lib/observability-contracts"
 
-type ResourcePayload = Record<string, unknown>
+export type ResourceFinalExerciseQuestionType = ExerciseQuestionType
+export type ResourceFinalExerciseLevel = ExerciseLevel
+export type ResourceFinalExerciseItem = PublicExerciseCardV1
+
+export interface ResourceFinalExerciseArtifact {
+  schema_version: "exercise_public_artifact_v1"
+  title: string
+  items: ResourceFinalExerciseItem[]
+}
+
+type ResourcePayload = Record<string, unknown> & {
+  exercise_artifact?: ResourceFinalExerciseArtifact
+  exercise_items?: ResourceFinalExerciseItem[]
+}
 
 export type ResourceFinalTerminalStatus =
   | "success"
@@ -118,8 +136,19 @@ type ResourceFinalIdentity = Partial<
 
 const RESOURCE_FINAL_ID_PATTERN = /^resource-final:v3:[0-9a-f]{64}$/
 const RESOURCE_ID_PATTERN = /^resource:v3:[0-9a-f]{64}$/
+const QUESTION_ID_PATTERN = /^question:v1:[0-9a-f]{64}$/
 const PAYLOAD_HASH_PATTERN = /^payload:v3:[0-9a-f]{64}$/
 const CODE_PATTERN = /^[a-z][a-z0-9_.-]{0,119}$/
+const EXERCISE_ITEM_FIELDS = [
+  "schema_version",
+  "question_id",
+  "question_type",
+  "level",
+  "question",
+  "choices",
+  "tags",
+] as const
+const EXERCISE_ARTIFACT_FIELDS = ["schema_version", "title", "items"] as const
 const FINAL_VALIDATION_FIELDS = [
   "schema_version",
   "resource_count",
@@ -329,6 +358,8 @@ export function mergeResourceFinalIntoMessage(
         objectValue(payload.exercise_artifact),
         apiBaseUrl,
         fallbackTitle,
+        resource.resource_id,
+        payload.exercise_items ?? [],
       )
       if (exercise) next.exercise = exercise
     } else if (resource.kind === "code_practice") {
@@ -425,12 +456,16 @@ function normalizeExercise(
   value: ResourcePayload | null,
   apiBaseUrl: string,
   fallbackTitle: string,
+  resourceId: string,
+  questions: ResourceFinalExerciseItem[],
 ): ExerciseResult | null {
   if (!value) return null
   const title = text(value.title) || fallbackTitle
   if (!title) return null
   return {
     title,
+    resourceId,
+    questions,
     filename: text(value.filename),
     markdownUrl: absoluteUrl(value.markdown_url, apiBaseUrl),
     docxFilename: text(value.docx_filename),
@@ -566,7 +601,7 @@ function parseResource(value: unknown, contract: string): ResourceFinalResource 
   if (!RESOURCE_ID_PATTERN.test(resourceId)) fail(contract, "resource_id is invalid")
   const payloadHash = boundedString(data.payload_hash, "payload_hash", contract, 80)
   if (!PAYLOAD_HASH_PATTERN.test(payloadHash)) fail(contract, "payload_hash is invalid")
-  const payload = record(data.payload, `${contract}.payload`)
+  let payload = record(data.payload, `${contract}.payload`)
   if (JSON.stringify(payload).length > MAX_RENDER_PAYLOAD_BYTES) {
     fail(contract, "payload exceeds the frontend safety limit")
   }
@@ -582,10 +617,7 @@ function parseResource(value: unknown, contract: string): ResourceFinalResource 
   const populated = expectedPayloadKeys[kind].some((key) => hasRenderValue(payload[key]))
   if (!populated) fail(contract, `${kind} payload has no renderable value`)
   if (kind === "quiz") {
-    rejectUnexpectedFields(payload, expectedPayloadKeys.quiz, `${contract}.payload`)
-    if (!Array.isArray(payload.exercise_items)) {
-      fail(contract, "quiz exercise_items must be an array")
-    }
+    payload = parseQuizPayload(payload, data.title, `${contract}.payload`)
   }
   const validation = parseResourceValidation(
     data.validation,
@@ -608,6 +640,155 @@ function parseResource(value: unknown, contract: string): ResourceFinalResource 
     artifact_refs: stringRecord(data.artifact_refs, `${contract}.artifact_refs`),
     validation,
   }
+}
+
+function parseQuizPayload(
+  payload: ResourcePayload,
+  resourceTitleValue: unknown,
+  contract: string,
+): ResourcePayload {
+  rejectUnexpectedFields(payload, ["exercise_artifact", "exercise_items"], contract)
+  const resourceTitle = boundedString(
+    resourceTitleValue,
+    "resource title",
+    contract,
+    240,
+  )
+  const exerciseItems = parseExerciseItems(
+    payload.exercise_items,
+    `${contract}.exercise_items`,
+  )
+  const artifactData = record(
+    payload.exercise_artifact,
+    `${contract}.exercise_artifact`,
+  )
+  rejectUnexpectedFields(
+    artifactData,
+    EXERCISE_ARTIFACT_FIELDS,
+    `${contract}.exercise_artifact`,
+  )
+  if (artifactData.schema_version !== "exercise_public_artifact_v1") {
+    fail(
+      `${contract}.exercise_artifact`,
+      "schema_version must equal exercise_public_artifact_v1",
+    )
+  }
+  const artifactTitle = boundedString(
+    artifactData.title,
+    "title",
+    `${contract}.exercise_artifact`,
+    240,
+  )
+  if (artifactTitle !== resourceTitle) {
+    fail(`${contract}.exercise_artifact`, "title must match resource title")
+  }
+  const artifactItems = parseExerciseItems(
+    artifactData.items,
+    `${contract}.exercise_artifact.items`,
+  )
+  if (JSON.stringify(artifactItems) !== JSON.stringify(exerciseItems)) {
+    fail(contract, "exercise_artifact items must match exercise_items exactly")
+  }
+  return {
+    exercise_artifact: {
+      schema_version: "exercise_public_artifact_v1",
+      title: artifactTitle,
+      items: artifactItems,
+    },
+    exercise_items: exerciseItems,
+  }
+}
+
+function parseExerciseItems(
+  value: unknown,
+  contract: string,
+): ResourceFinalExerciseItem[] {
+  const items = arrayValue(value, "exercise items", contract, 1_000)
+  if (items.length === 0) fail(contract, "exercise items must not be empty")
+  const parsed = items.map((item, index) =>
+    parseExerciseItem(item, `${contract}.${index}`),
+  )
+  requireUnique(
+    parsed.map((item) => item.question_id),
+    "question_id",
+    contract,
+  )
+  return parsed
+}
+
+function parseExerciseItem(
+  value: unknown,
+  contract: string,
+): ResourceFinalExerciseItem {
+  const data = record(value, contract)
+  rejectUnexpectedFields(data, EXERCISE_ITEM_FIELDS, contract)
+  if (data.schema_version !== "exercise_card_v1") {
+    fail(contract, "schema_version must equal exercise_card_v1")
+  }
+  const questionId = boundedString(data.question_id, "question_id", contract, 80)
+  if (!QUESTION_ID_PATTERN.test(questionId)) fail(contract, "question_id is invalid")
+  const questionType = parseExerciseQuestionType(
+    data.question_type,
+    "question_type",
+    contract,
+  )
+  const level = parseExerciseLevel(data.level, "level", contract)
+  const choices = stringArray(
+    data.choices,
+    "choices",
+    contract,
+    20,
+    MAX_RENDER_PAYLOAD_BYTES,
+  )
+  const tags = stringArray(
+    data.tags,
+    "tags",
+    contract,
+    80,
+    MAX_RENDER_PAYLOAD_BYTES,
+  )
+  if (tags.length === 0) fail(contract, "tags must not be empty")
+  requireUnique(choices, "choice", contract)
+  requireUnique(tags, "tag", contract)
+  if (questionType === "free_text" && choices.length > 0) {
+    fail(contract, "free_text questions must not define choices")
+  }
+  if (questionType === "single_choice" && choices.length < 2) {
+    fail(contract, "single_choice questions require at least two choices")
+  }
+  return {
+    schema_version: "exercise_card_v1",
+    question_id: questionId,
+    question_type: questionType,
+    level,
+    question: boundedString(data.question, "question", contract, 10_000),
+    choices,
+    tags,
+  }
+}
+
+function parseExerciseQuestionType(
+  value: unknown,
+  field: string,
+  contract: string,
+): ResourceFinalExerciseQuestionType {
+  const questionType = boundedString(value, field, contract, 40)
+  if (questionType === "free_text") return "free_text"
+  if (questionType === "single_choice") return "single_choice"
+  fail(contract, `${field} is invalid`)
+}
+
+function parseExerciseLevel(
+  value: unknown,
+  field: string,
+  contract: string,
+): ResourceFinalExerciseLevel {
+  const level = boundedString(value, field, contract, 40)
+  if (level === "basic") return "basic"
+  if (level === "intermediate") return "intermediate"
+  if (level === "application") return "application"
+  if (level === "self_check") return "self_check"
+  fail(contract, `${field} is invalid`)
 }
 
 function parseResourceValidation(

@@ -19,6 +19,16 @@ describe("parseAgentStreamEvent", () => {
     expect(parseAgentStreamEvent(payload).eventId).toBe("stream-1:1")
   })
 
+  it("accepts assessment_final as a public agent_stream_v2 event", () => {
+    const event = parseAgentStreamEvent({
+      ...payload,
+      type: "assessment_final",
+      event_id: "stream-1:2",
+      sequence: 2,
+    })
+    expect(event.type).toBe("assessment_final")
+  })
+
   it("rejects unknown fields and mismatched event ids", () => {
     expect(() => parseAgentStreamEvent({ ...payload, extra: true })).toThrow(
       AgentStreamContractError,

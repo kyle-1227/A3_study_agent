@@ -103,7 +103,11 @@ export function reduceLiveTurn(
     next = { ...next, activities: [...next.activities, event.data] }
   } else if (event.type === "tool_progress") {
     next = { ...next, tools: [...next.tools, event.data] }
-  } else if (event.type === "qa_final" || event.type === "resource_final") {
+  } else if (
+    event.type === "qa_final" ||
+    event.type === "resource_final" ||
+    event.type === "assessment_final"
+  ) {
     next = { ...next, committed: true }
   } else if (event.type === "interrupt" || event.type === "stopped") {
     next = { ...next, lifecycle: "waiting" }

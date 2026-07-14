@@ -26,9 +26,17 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ActivityStream } from "@/components/activity-stream"
+import {
+  ExerciseAssessment,
+  type ExerciseAssessmentSubmitResult,
+} from "@/components/exercise-assessment"
 import { ThreadContextCapsule } from "@/components/thread-context-capsule"
 import { Button } from "@/components/ui/button"
 import { useScrollActivity } from "@/hooks/use-scroll-activity"
+import type {
+  AssessmentSubmissionInput,
+  PublicExerciseCardV1,
+} from "@/lib/assessment-contracts"
 import type {
   ActivityEvent,
   ContextUsageReport,
@@ -124,6 +132,8 @@ export interface ReviewDocResult {
 
 export interface ExerciseResult {
   title: string
+  resourceId: string
+  questions: PublicExerciseCardV1[]
   markdownUrl?: string
   docxUrl?: string
   filename?: string
@@ -190,6 +200,10 @@ interface ChatAreaProps {
   onSendMessage: (content: string) => void
   onStopGeneration?: () => void
   onContinueThread?: () => void
+  onSubmitAssessment?: (
+    submission: AssessmentSubmissionInput,
+  ) => Promise<ExerciseAssessmentSubmitResult>
+  activeAssessmentKey?: string
   isLoading?: boolean
   canContinue?: boolean
   stopPending?: boolean
@@ -204,6 +218,8 @@ export function ChatArea({
   onSendMessage,
   onStopGeneration,
   onContinueThread,
+  onSubmitAssessment,
+  activeAssessmentKey = "",
   isLoading,
   canContinue,
   stopPending,
@@ -217,6 +233,7 @@ export function ChatArea({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const isScrolling = useScrollActivity(scrollContainerRef)
   const renderedLiveTurnContent = useAnimationFrameValue(liveTurnContent)
+  const assessmentActive = Boolean(activeAssessmentKey)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -225,7 +242,7 @@ export function ChatArea({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     const trimmed = input.trim()
-    if (trimmed && !isLoading) {
+    if (trimmed && !isLoading && !assessmentActive) {
       onSendMessage(trimmed)
       setInput("")
       setIsToolsOpen(false)
@@ -242,7 +259,7 @@ export function ChatArea({
   const handleMindmapTool = () => {
     const trimmed = input.trim()
     setIsToolsOpen(false)
-    if (trimmed && !isLoading) {
+    if (trimmed && !isLoading && !assessmentActive) {
       onSendMessage(`请生成知识点思维导图：${trimmed}`)
       setInput("")
       return
@@ -306,6 +323,9 @@ export function ChatArea({
                       ? liveTurnProgress
                       : null
                   }
+                  onSubmitAssessment={onSubmitAssessment}
+                  activeAssessmentKey={activeAssessmentKey}
+                  mainStreamActive={Boolean(isLoading)}
                 />
               )
             })
@@ -338,6 +358,7 @@ export function ChatArea({
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                disabled={assessmentActive}
                 placeholder="输入你的问题..."
                 rows={2}
                 className="max-h-[200px] min-h-[60px] w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
@@ -351,6 +372,7 @@ export function ChatArea({
                 size="icon"
                 className="h-9 w-9 rounded-full text-muted-foreground hover:bg-card/70 hover:text-primary"
                 title="添加内容"
+                disabled={assessmentActive}
               >
                 <Plus className="h-5 w-5" />
               </Button>
@@ -362,6 +384,7 @@ export function ChatArea({
                   onClick={() => setIsToolsOpen((open) => !open)}
                   className="h-9 w-9 rounded-full px-0 text-muted-foreground hover:bg-card/70 hover:text-primary sm:w-auto sm:px-3"
                   title="工具"
+                  disabled={assessmentActive}
                 >
                   <SlidersHorizontal className="h-4 w-4" />
                   <span className="hidden text-sm sm:inline">工具</span>
@@ -387,12 +410,28 @@ export function ChatArea({
                 closeSignal={contextWindowCloseSignal}
               />
               <Button
-                type={isLoading || canContinue ? "button" : "submit"}
+                type={isLoading || canContinue || assessmentActive ? "button" : "submit"}
                 size="icon"
                 onClick={isLoading ? onStopGeneration : canContinue ? onContinueThread : undefined}
-                disabled={isLoading ? stopPending : canContinue ? false : !input.trim()}
+                disabled={
+                  assessmentActive
+                    ? true
+                    : isLoading
+                      ? stopPending
+                      : canContinue
+                        ? false
+                        : !input.trim()
+                }
                 className="a3-button-primary h-9 w-9 rounded-full disabled:cursor-not-allowed disabled:opacity-50"
-                title={isLoading ? "Stop at safe checkpoint" : canContinue ? "Continue from checkpoint" : "Send"}
+                title={
+                  assessmentActive
+                    ? "Wait for the assessment request to finish"
+                    : isLoading
+                      ? "Stop at safe checkpoint"
+                      : canContinue
+                        ? "Continue from checkpoint"
+                        : "Send"
+                }
               >
                 {isLoading ? (
                   <PauseCircle className="h-4 w-4" />
@@ -497,10 +536,16 @@ function MessageBubble({
   message,
   streaming = false,
   streamingProgress = null,
+  onSubmitAssessment,
+  activeAssessmentKey = "",
+  mainStreamActive = false,
 }: {
   message: Message
   streaming?: boolean
   streamingProgress?: ChatAreaProps["liveTurnProgress"]
+  onSubmitAssessment?: ChatAreaProps["onSubmitAssessment"]
+  activeAssessmentKey?: string
+  mainStreamActive?: boolean
 }) {
   const isUser = message.role === "user"
   const hasAssistantPayload = Boolean(
@@ -559,7 +604,15 @@ function MessageBubble({
                   />
                 )}
             {message.mindmap && <MindmapCard mindmap={message.mindmap} />}
-            {message.exercise && <ExerciseDownloadCard exercise={message.exercise} markdownText={message.content} />}
+            {message.exercise && (
+              <ExerciseDownloadCard
+                exercise={message.exercise}
+                markdownText={message.content}
+                onSubmitAssessment={onSubmitAssessment}
+                activeAssessmentKey={activeAssessmentKey}
+                mainStreamActive={mainStreamActive}
+              />
+            )}
             {message.codePractice && (
               <CodePracticeCard
                 codePractice={message.codePractice}
@@ -626,7 +679,26 @@ function ReviewDocCard({ reviewDoc, markdownText }: { reviewDoc: ReviewDocResult
   )
 }
 
-function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseResult; markdownText: string }) {
+function ExerciseDownloadCard({
+  exercise,
+  markdownText,
+  onSubmitAssessment,
+  activeAssessmentKey,
+  mainStreamActive,
+}: {
+  exercise: ExerciseResult
+  markdownText: string
+  onSubmitAssessment?: ChatAreaProps["onSubmitAssessment"]
+  activeAssessmentKey: string
+  mainStreamActive: boolean
+}) {
+  const canRenderAssessment = Boolean(
+    onSubmitAssessment &&
+      exercise.resourceId &&
+      Array.isArray(exercise.questions) &&
+      exercise.questions.length > 0,
+  )
+
   return (
     <div className="overflow-hidden rounded-lg border border-[#C8D6C9] bg-[#F8FAF6]">
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
@@ -647,6 +719,32 @@ function ExerciseDownloadCard({ exercise, markdownText }: { exercise: ExerciseRe
           />
         </div>
       </div>
+      {canRenderAssessment ? (
+        <div className="space-y-3 border-t border-[#C8D6C9] p-3">
+          {exercise.questions.map((question) => {
+            const questionKey = `${exercise.resourceId}:${question.question_id}`
+            const anotherAssessmentActive = Boolean(
+              activeAssessmentKey && activeAssessmentKey !== questionKey,
+            )
+            const disabled = mainStreamActive || anotherAssessmentActive
+            const disabledReason = mainStreamActive
+              ? "主会话仍在运行，请等待本轮结束后作答。"
+              : anotherAssessmentActive
+                ? "另一道题正在评估，请等待结果后继续。"
+                : undefined
+            return (
+              <ExerciseAssessment
+                key={questionKey}
+                resourceId={exercise.resourceId}
+                question={question}
+                onSubmit={onSubmitAssessment!}
+                disabled={disabled}
+                disabledReason={disabledReason}
+              />
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -10,6 +10,7 @@ export const AGENT_STREAM_EVENT_TYPES = [
   "artifact_progress",
   "qa_final",
   "resource_final",
+  "assessment_final",
   "interrupt",
   "stopped",
   "stream_error",

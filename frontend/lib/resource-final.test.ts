@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { Message } from "@/components/chat-area"
+import type { ResourceFinalExerciseItem } from "@/lib/resource-final"
 import {
   mergeResourceFinalIntoMessage,
   parseResourceFinalEvent,
@@ -20,7 +21,7 @@ function payloadHash(seed: string): string {
 }
 
 function resourceValidation(
-  resourceType: "mindmap" | "review_doc",
+  resourceType: "mindmap" | "quiz" | "review_doc",
   terminalStatus: "success" | "partial_success" = "success",
 ): Record<string, unknown> {
   return {
@@ -34,6 +35,45 @@ function resourceValidation(
     remote_unverified_count: 0,
     failure_reason: "",
     warnings: [],
+  }
+}
+
+function publicExerciseCard(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    schema_version: "exercise_card_v1",
+    question_id: `question:v1:${"1".repeat(64)}`,
+    question_type: "free_text",
+    level: "basic",
+    question: "What does a Python list store?",
+    choices: [],
+    tags: ["python", "collections"],
+    ...overrides,
+  }
+}
+
+function quizResource(
+  exerciseItems: unknown[] = [publicExerciseCard()],
+  artifactItems: unknown[] = exerciseItems,
+): Record<string, unknown> {
+  return {
+    kind: "quiz",
+    status: "success",
+    resource_id: resourceId("2"),
+    payload_hash: payloadHash("3"),
+    title: "Python Quiz",
+    summary: "Validated public exercise cards are ready",
+    payload: {
+      exercise_artifact: {
+        schema_version: "exercise_public_artifact_v1",
+        title: "Python Quiz",
+        items: artifactItems,
+      },
+      exercise_items: exerciseItems,
+    },
+    artifact_refs: { markdown_url: "/artifacts/python-quiz.md" },
+    validation: resourceValidation("quiz"),
   }
 }
 
@@ -123,6 +163,103 @@ describe("Resource Final V3 contract helpers", () => {
     expect(event.terminal_status).toBe("success")
     expect(event.validation.renderableCount).toBe(1)
     expect(event.resources[0]?.kind).toBe("mindmap")
+  })
+
+  it("strictly parses and preserves exact public exercise cards", () => {
+    const cards = [
+      publicExerciseCard(),
+      publicExerciseCard({
+        question_id: `question:v1:${"2".repeat(64)}`,
+        question_type: "single_choice",
+        level: "application",
+        question: "Which value is mutable?",
+        choices: ["tuple", "list"],
+        tags: ["python", "mutability"],
+      }),
+    ]
+    const event = parseResourceFinalEvent(
+      rawEvent({ resources: [quizResource(cards)] }),
+    )
+    const parsedCards = event.resources[0]?.payload.exercise_items
+    const firstCard: ResourceFinalExerciseItem | undefined = parsedCards?.[0]
+
+    expect(parsedCards).toEqual(cards)
+    expect(event.resources[0]?.payload.exercise_artifact?.items).toEqual(cards)
+    expect(firstCard?.schema_version).toBe("exercise_card_v1")
+    expect(firstCard?.choices).toEqual([])
+
+    const merged = mergeResourceFinalIntoMessage(
+      {
+        id: "assistant-quiz",
+        role: "assistant",
+        content: "",
+        threadId: "thread-1",
+        requestId: "request-1",
+      },
+      event,
+      "http://api.test",
+    )
+    expect(merged.exercise?.resourceId).toBe(resourceId("2"))
+    expect(merged.exercise?.questions).toEqual(cards)
+  })
+
+  it.each([
+    ["answer", "server-only answer"],
+    ["answer_key", { accepted_answers: ["server-only answer"] }],
+    ["accepted_answers", ["server-only answer"]],
+    ["explanation", "server-only explanation"],
+    ["pitfall", "server-only pitfall"],
+    ["answer_explanation", "server-only explanation"],
+    ["match_mode", "exact"],
+    ["legacy_field", "unsupported"],
+  ])("rejects private or unknown exercise-card field %s", (field, privateValue) => {
+    const leakedCard = publicExerciseCard({ [field]: privateValue })
+
+    expect(() =>
+      parseResourceFinalEvent(
+        rawEvent({ resources: [quizResource([leakedCard])] }),
+      ),
+    ).toThrow(new RegExp(`unexpected field: ${field}`))
+  })
+
+  it("rejects private fields copied only into exercise_artifact items", () => {
+    const publicCard = publicExerciseCard()
+    const leakedArtifactCard = {
+      ...publicCard,
+      answer_key: { accepted_answers: ["server-only answer"] },
+    }
+
+    expect(() =>
+      parseResourceFinalEvent(
+        rawEvent({
+          resources: [quizResource([publicCard], [leakedArtifactCard])],
+        }),
+      ),
+    ).toThrow(/unexpected field: answer_key/)
+  })
+
+  it("rejects invalid public exercise-card structure and business rules", () => {
+    const missingTags = publicExerciseCard()
+    delete missingTags.tags
+    expect(() =>
+      parseResourceFinalEvent(
+        rawEvent({ resources: [quizResource([missingTags])] }),
+      ),
+    ).toThrow(/tags must be an array/)
+
+    const freeTextWithChoices = publicExerciseCard({ choices: ["A", "B"] })
+    expect(() =>
+      parseResourceFinalEvent(
+        rawEvent({ resources: [quizResource([freeTextWithChoices])] }),
+      ),
+    ).toThrow(/free_text questions must not define choices/)
+
+    const duplicate = publicExerciseCard()
+    expect(() =>
+      parseResourceFinalEvent(
+        rawEvent({ resources: [quizResource([duplicate, { ...duplicate }])] }),
+      ),
+    ).toThrow(/question_id values must be unique/)
   })
 
   it("merges every resource in a multi-resource event", () => {

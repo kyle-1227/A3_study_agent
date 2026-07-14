@@ -54,4 +54,10 @@ describe("reduceLiveTurn", () => {
     const stale = { ...event(2, "stream_error", { message: "old" }), requestId: "old" }
     expect(reduceLiveTurn(state, stale)).toBe(state)
   })
+
+  it("marks an assessment final as committed", () => {
+    const running = reduceLiveTurn(null, event(1, "stream_start"))
+    const committed = reduceLiveTurn(running, event(2, "assessment_final"))
+    expect(committed.committed).toBe(true)
+  })
 })
