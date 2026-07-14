@@ -30,6 +30,7 @@ reports/*
 
 # test
 .pytest_cache/
+/.pytest-tmp*/
 
 # some drafts
 docs/drafts/

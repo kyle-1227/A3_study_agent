@@ -39,7 +39,7 @@ def test_tracked_local_config_uses_bounded_long_run_embedding_retry() -> None:
     assert config.embedding.retry.max_backoff_seconds == 60.0
     assert config.embedding.retry.multiplier == 2.0
     assert config.embedding.batch_size == 8
-    assert config.embedding.max_in_flight_batches == 4
+    assert config.embedding.max_in_flight_batches == 1
     assert config.embedding.provider_routing is not None
     assert config.embedding.provider_routing.allow_fallbacks is False
 
