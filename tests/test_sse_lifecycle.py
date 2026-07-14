@@ -920,6 +920,185 @@ class TestSSEEvidenceSummaryResourceFinal:
         assert all_payloads[-1]["type"] == "resource_final"
 
 
+class TestSSEResourceFinalV3:
+    @pytest.mark.anyio
+    async def test_bundle_terminal_output_v3_wins_over_stale_checkpoint(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from langchain_core.messages import AIMessage
+
+        from app import generate_stream_drafts
+        from src.graph.resource_final_runtime import build_resource_final_v3_from_bundle
+
+        request_id = "00000000-0000-4000-8000-000000000001"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        resource_final = build_resource_final_v3_from_bundle(
+            thread_id="t-1",
+            request_id=request_id,
+            requested_resource_types=("mindmap", "review_doc"),
+            terminal_status="partial_success",
+            branch_results=(
+                {
+                    "resource_type": "mindmap",
+                    "status": "success",
+                    "title": "Machine learning map",
+                    "message_content": "Mindmap ready",
+                    "artifact": {
+                        "title": "Machine learning map",
+                        "tree": {"title": "Machine learning", "children": []},
+                        "xmind_url": "/artifacts/mindmaps/m1/map.xmind",
+                    },
+                    "artifacts": [],
+                    "state_updates": {},
+                    "validation": {
+                        "schema_version": "resource_validation_v1",
+                        "resource_type": "mindmap",
+                        "valid": True,
+                        "terminal_status": "success",
+                        "renderable_count": 1,
+                        "downloadable_count": 1,
+                        "verified_local_count": 1,
+                        "remote_unverified_count": 0,
+                        "failure_reason": "",
+                        "warnings": [],
+                    },
+                },
+                {
+                    "resource_type": "review_doc",
+                    "status": "failed",
+                    "error_code": "review_doc.provider_timeout",
+                    "error_type": "TimeoutError",
+                    "error_message_sanitized": "Review document provider timed out",
+                },
+            ),
+            blocked_resources=(),
+            recommendations=(),
+            summary="One resource completed and one failed",
+        )
+        end_event = {
+            "event": "on_chain_end",
+            "name": "resource_bundle_output",
+            "metadata": {"langgraph_node": "resource_bundle_output"},
+            "data": {
+                "output": {
+                    "resource_generation_status": "partial_success",
+                    "resource_final_v3": resource_final.model_dump(mode="json"),
+                    "messages": [AIMessage(content="# Resource bundle complete")],
+                }
+            },
+        }
+        mock_graph = _make_mock_graph(
+            [_node_start("resource_bundle_output"), end_event]
+        )
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "requested_resource_type": "code_practice",
+                    "code_practice_artifact": {
+                        "title": "stale resource",
+                        "markdown_url": "/artifacts/old.md",
+                    },
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts(
+            "q",
+            mock_graph,
+            thread_id="t-1",
+        ):
+            collected.append(draft)
+
+        resource_events = [
+            payload
+            for payload in draft_payloads(collected)
+            if payload.get("type") == "resource_final"
+        ]
+        assert len(resource_events) == 1
+        payload = resource_events[0]
+        assert payload["schema_version"] == "resource_final_v3"
+        assert payload["resource_final_id"] == resource_final.resource_final_id
+        assert payload["request_id"] == request_id
+        assert payload["terminal_status"] == "partial_success"
+        assert [resource["kind"] for resource in payload["resources"]] == ["mindmap"]
+        assert payload["errors"][0]["resource_type"] == "review_doc"
+        assert "resource_type" not in payload
+        assert "resource_id" not in payload
+        assert "resource" not in payload
+
+    @pytest.mark.anyio
+    async def test_evidence_block_emits_controlled_stop_v3(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from app import generate_stream_drafts
+        from src.graph.resource_final_runtime import build_resource_final_v3_from_bundle
+
+        request_id = "00000000-0000-4000-8000-000000000002"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        resource_final = build_resource_final_v3_from_bundle(
+            thread_id="t-1",
+            request_id=request_id,
+            requested_resource_types=("study_plan",),
+            terminal_status="controlled_stop",
+            branch_results=(),
+            blocked_resources=(
+                {
+                    "resource_type": "study_plan",
+                    "status": "blocked_insufficient_evidence",
+                    "reason_code": "evidence.insufficient",
+                    "blocked_requirement_ids": ["requirement-study-plan"],
+                },
+            ),
+            recommendations=(),
+            summary="Evidence is insufficient for a study plan",
+        )
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "thread_id": "t-1",
+                    "request_id": request_id,
+                    "resource_final_v3": resource_final.model_dump(mode="json"),
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts(
+            "q",
+            mock_graph,
+            thread_id="t-1",
+        ):
+            collected.append(draft)
+
+        resource_events = [
+            payload
+            for payload in draft_payloads(collected)
+            if payload.get("type") == "resource_final"
+        ]
+        assert len(resource_events) == 1
+        payload = resource_events[0]
+        assert payload["schema_version"] == "resource_final_v3"
+        assert payload["resource_final_id"] == resource_final.resource_final_id
+        assert payload["terminal_status"] == "controlled_stop"
+        assert payload["resources"] == []
+        assert payload["errors"] == []
+        assert payload["blocked_resources"][0]["resource_type"] == "study_plan"
+        assert "controlled_stop" not in payload
+        assert "resource_type" not in payload
+
+
 class TestSSEQAFinal:
     @pytest.mark.anyio
     async def test_qa_final_is_the_authoritative_producer_terminal(self):

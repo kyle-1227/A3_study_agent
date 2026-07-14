@@ -1382,7 +1382,8 @@ export default function Home() {
         error: outcome.state === "failed" ? outcome.summary : undefined,
         hasReceivedResourceFinal: outcome.hasReceivedResourceFinal,
         completionKind: outcome.completionKind,
-        lastResourceType: event.resource_type,
+        lastResourceType:
+          event.resources.map((resource) => resource.kind).join(", ") || undefined,
       }))
       return
     }

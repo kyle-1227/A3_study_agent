@@ -71,6 +71,8 @@ from src.graph.resource_contracts import (
     normalize_requested_resource_types,
     normalize_resource_type,
 )
+from src.graph.resource_final_runtime import build_resource_final_v3_from_bundle
+from src.graph.resource_final_v3 import ResourceFinalV3TerminalStatus
 from src.graph.resource_validation import (
     validate_renderable_resource_result,
 )
@@ -887,6 +889,7 @@ def _success_result(
             "message_content": "",
             "message_preview": "",
             "error_type": "ResourceValidationError",
+            "error_code": validation.failure_reason,
             "error_message_sanitized": validation.failure_reason,
             "elapsed_ms": elapsed_ms,
             "context_influence_entries": influence_entries,
@@ -930,6 +933,7 @@ def _failed_result(resource_type: str, exc: BaseException, elapsed_ms: int) -> d
         "message_content": "",
         "message_preview": "",
         "error_type": type(exc).__name__,
+        "error_code": f"{resource_type}.generation_failed",
         "error_message_sanitized": sanitize_error_message(str(exc), max_chars=1200),
         "elapsed_ms": elapsed_ms,
         "validation": None,
@@ -1391,8 +1395,8 @@ async def resource_bundle_output(state: LearningState) -> dict:
         {
             "resource_type": item.get("resource_type"),
             "status": "blocked_insufficient_evidence",
-            "blocked_requirement_ids": item.get("blocked_requirement_ids") or [],
-            "reason_code": item.get("reason_code") or "",
+            "blocked_requirement_ids": item.get("blocked_requirement_ids"),
+            "reason_code": item.get("reason_code"),
         }
         for item in readiness
         if item.get("readiness_state") == "blocked_insufficient_evidence"
@@ -1468,6 +1472,37 @@ async def resource_bundle_output(state: LearningState) -> dict:
         blocked_resources=blocked_resources,
     )
     bundle["message"] = message
+    resource_final_v3: dict[str, Any] = {}
+    if status != "skipped":
+        v3_terminal_status: ResourceFinalV3TerminalStatus
+        if status == "success":
+            v3_terminal_status = "success"
+        elif status == "partial_success":
+            v3_terminal_status = "partial_success"
+        elif status == "failed":
+            v3_terminal_status = "failed"
+        elif status == "blocked_insufficient_evidence":
+            v3_terminal_status = "controlled_stop"
+        else:
+            raise RuntimeError(
+                f"resource bundle has unsupported terminal status {status!r}"
+            )
+        thread_id = state.get("thread_id")
+        request_id = state.get("request_id")
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise RuntimeError("resource bundle requires a non-blank thread_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise RuntimeError("resource bundle requires a non-blank request_id")
+        resource_final_v3 = build_resource_final_v3_from_bundle(
+            thread_id=thread_id,
+            request_id=request_id,
+            requested_resource_types=requested,
+            terminal_status=v3_terminal_status,
+            branch_results=results,
+            blocked_resources=blocked_resources,
+            recommendations=(),
+            summary=message,
+        ).model_dump(mode="json")
     artifact_updates: dict[str, Any] = {}
     influence_entries = [
         entry
@@ -1561,6 +1596,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
         **state_updates,
         **artifact_updates,
         "resource_bundle_artifact": bundle,
+        "resource_final_v3": resource_final_v3,
         "resource_generation_debug": debug,
         "resource_generation_status": status,
         "context_influence_ledger": influence_update,

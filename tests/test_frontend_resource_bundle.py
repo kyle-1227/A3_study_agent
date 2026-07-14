@@ -8,16 +8,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _frontend_dedupe_key(event: dict) -> str:
-    resource_id = event.get("resource_id")
-    if isinstance(resource_id, str) and resource_id:
-        return f"resource_id:{resource_id}"
-    resource = event.get("resource") if isinstance(event.get("resource"), dict) else {}
+    resource_final_id = event.get("resource_final_id")
+    if isinstance(resource_final_id, str) and resource_final_id:
+        return f"resource_final_id:{resource_final_id}"
     return ":".join(
         [
-            "resource_payload",
+            "resource_final_payload",
             str(event.get("thread_id") or ""),
             str(event.get("request_id") or ""),
-            str(event.get("resource_type") or resource.get("kind") or ""),
             str(event.get("payload_hash") or ""),
         ]
     )
@@ -28,24 +26,24 @@ def test_resource_final_helper_prefers_normalized_payload_and_stable_dedupe():
         encoding="utf-8"
     )
 
-    assert "event.resource.payload" in helper_source
+    assert "for (const resource of event.resources)" in helper_source
     assert "parseResourceFinalEvent" in helper_source
     assert "terminal_status" in helper_source
     assert "resourceFinalOutcome" in helper_source
     assert "resourceFinalDedupeKey" in helper_source
-    assert "resource_id" in helper_source
+    assert "resource_final_id" in helper_source
     assert "payload_hash" in helper_source
-    assert "resource_type" in helper_source
+    assert "resources" in helper_source
     assert "mergeResourceFinalIntoMessage" in helper_source
 
 
 def test_frontend_dedupe_key_does_not_use_resource_type_only():
     first = {
         "type": "resource_final",
+        "schema_version": "resource_final_v3",
         "thread_id": "t1",
         "request_id": "r1",
-        "resource_type": "mindmap",
-        "payload_hash": "payload:v1:a",
+        "payload_hash": "payload:v3:a",
     }
     second = {
         **first,
@@ -57,7 +55,7 @@ def test_frontend_dedupe_key_does_not_use_resource_type_only():
 
     assert _frontend_dedupe_key(first) == _frontend_dedupe_key(repeated)
     assert _frontend_dedupe_key(first) != _frontend_dedupe_key(second)
-    assert _frontend_dedupe_key(first) != "mindmap"
+    assert _frontend_dedupe_key(first) != "resource_final"
 
 
 def test_page_uses_resource_final_helper_and_restores_persisted_payload():

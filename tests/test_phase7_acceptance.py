@@ -90,6 +90,7 @@ async def test_profile_interrupt_resumes_once_then_fan_in_builds_one_bundle(
                 "resource_type": "study_plan",
                 "status": "success",
                 "title": "Machine Learning Study Plan",
+                "message_content": "Study plan generated.",
                 "message_preview": "Study plan generated.",
                 "artifact": {
                     "title": "Machine Learning Study Plan",
@@ -107,12 +108,26 @@ async def test_profile_interrupt_resumes_once_then_fan_in_builds_one_bundle(
                         "markdown_url": "/artifacts/study-plans/phase7/plan.md",
                     },
                 },
+                "artifacts": [],
+                "validation": {
+                    "schema_version": "resource_validation_v1",
+                    "resource_type": "study_plan",
+                    "valid": True,
+                    "terminal_status": "success",
+                    "renderable_count": 1,
+                    "downloadable_count": 1,
+                    "verified_local_count": 1,
+                    "remote_unverified_count": 0,
+                    "failure_reason": "",
+                    "warnings": [],
+                },
                 "elapsed_ms": 20,
             },
             {
                 "resource_type": "mindmap",
                 "status": "success",
                 "title": "Machine Learning Map",
+                "message_content": "Mindmap generated.",
                 "message_preview": "Mindmap generated.",
                 "artifact": {
                     "title": "Machine Learning Map",
@@ -132,6 +147,19 @@ async def test_profile_interrupt_resumes_once_then_fan_in_builds_one_bundle(
                         "children": [],
                     },
                 },
+                "artifacts": [],
+                "validation": {
+                    "schema_version": "resource_validation_v1",
+                    "resource_type": "mindmap",
+                    "valid": True,
+                    "terminal_status": "success",
+                    "renderable_count": 1,
+                    "downloadable_count": 1,
+                    "verified_local_count": 1,
+                    "remote_unverified_count": 0,
+                    "failure_reason": "",
+                    "warnings": [],
+                },
                 "elapsed_ms": 15,
             },
         ],
@@ -145,8 +173,13 @@ async def test_profile_interrupt_resumes_once_then_fan_in_builds_one_bundle(
     assert len(bundle_update["last_generated_artifacts"]) == 2
     assert resource_final is not None
     assert resource_final["type"] == "resource_final"
-    assert resource_final["resource_type"] == "bundle"
-    assert resource_final["resource"]["kind"] == "bundle"
+    assert resource_final["schema_version"] == "resource_final_v3"
+    assert resource_final["terminal_status"] == "success"
+    assert resource_final["validation"]["success_count"] == 2
+    assert [resource["kind"] for resource in resource_final["resources"]] == [
+        "mindmap",
+        "study_plan",
+    ]
 
     activities = [
         build_activity_event(

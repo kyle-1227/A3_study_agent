@@ -519,6 +519,7 @@ def initial_request_reset_transient_state() -> dict:
         "resource_generation_plan": {},
         "resource_branch_results": RESOURCE_RESULTS_CLEAR,
         "resource_bundle_artifact": {},
+        "resource_final_v3": {},
         "resource_generation_debug": {},
         "resource_generation_status": "",
         "resource_evidence_readiness": [],
@@ -919,6 +920,7 @@ class LearningState(TypedDict):
     ]  # Parallel resource worker results
     resource_task: dict  # Dynamic Send payload owned by one resource worker
     resource_bundle_artifact: dict  # Aggregated multi-resource artifact metadata
+    resource_final_v3: dict  # Strict authoritative Resource Final V3 payload
     resource_generation_debug: (
         dict  # Resource generation execution status/debug summary
     )

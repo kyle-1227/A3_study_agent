@@ -1,10 +1,4 @@
-"""Strict, migration-ready Resource Final V3 contract.
-
-This module is deliberately not wired into the active SSE/runtime path yet.
-It defines the target contract and deterministic builders so persisted V1/V2
-payloads can be migrated and producers can be switched only after their
-replacement gates pass.
-"""
+"""Strict Resource Final V3 contract and deterministic identity builders."""
 
 from __future__ import annotations
 
@@ -25,7 +19,7 @@ from pydantic import (
 from src.assessment.checkpoint import validate_public_exercise_cards_v1
 
 
-RESOURCE_FINAL_V3_SCHEMA_VERSION = "resource_final_v3"
+RESOURCE_FINAL_V3_SCHEMA_VERSION: Literal["resource_final_v3"] = "resource_final_v3"
 RESOURCE_FINAL_V3_PAYLOAD_HASH_PREFIX = "payload:v3"
 RESOURCE_FINAL_V3_RESOURCE_ID_PREFIX = "resource:v3"
 RESOURCE_FINAL_V3_ID_PREFIX = "resource-final:v3"
@@ -195,7 +189,9 @@ ResourceFinalV3Resource: TypeAlias = Annotated[
     | ResourceFinalV3StudyPlan,
     Field(discriminator="kind"),
 ]
-_RESOURCE_ADAPTER = TypeAdapter(ResourceFinalV3Resource)
+_RESOURCE_ADAPTER: TypeAdapter[ResourceFinalV3Resource] = TypeAdapter(
+    ResourceFinalV3Resource
+)
 
 
 class ResourceFinalV3Recommendation(BaseModel):
@@ -460,6 +456,25 @@ def build_resource_final_v3(
     )
 
 
+def validate_resource_final_v3(value: object) -> ResourceFinalV3:
+    """Validate one persisted or transport V3 payload through strict JSON semantics."""
+
+    if isinstance(value, ResourceFinalV3):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError("Resource Final V3 payload must be an object")
+    return ResourceFinalV3.model_validate_json(
+        json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        strict=True,
+    )
+
+
 def stable_resource_final_v3_resource_hash(
     resource: _ResourceFinalV3ResourceBase,
 ) -> str:
@@ -561,4 +576,5 @@ __all__ = [
     "stable_resource_final_v3_id",
     "stable_resource_final_v3_resource_hash",
     "stable_resource_final_v3_resource_id",
+    "validate_resource_final_v3",
 ]

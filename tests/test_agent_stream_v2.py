@@ -127,6 +127,34 @@ def test_journal_replays_without_silent_eviction() -> None:
         journal.after(3)
 
 
+def test_journal_replays_the_same_resource_final_v3_identity() -> None:
+    sequencer = _sequencer()
+    journal = StreamJournal(
+        stream_id="stream-1",
+        max_events=8,
+        max_bytes=10000,
+        ttl_seconds=60,
+    )
+    start = sequencer.emit("stream_start")
+    resource_final_id = f"resource-final:v3:{'a' * 64}"
+    terminal = sequencer.emit(
+        "resource_final",
+        {
+            "schema_version": "resource_final_v3",
+            "resource_final_id": resource_final_id,
+            "payload_hash": f"payload:v3:{'b' * 64}",
+        },
+    )
+    done = sequencer.emit("stream_done")
+    for event in (start, terminal, done):
+        journal.append(event)
+
+    replayed = journal.after(start.sequence)
+    assert [event.type for event in replayed] == ["resource_final", "stream_done"]
+    assert replayed[0].event_id == terminal.event_id
+    assert replayed[0].data["resource_final_id"] == resource_final_id
+
+
 def test_journal_expiry_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     journal = StreamJournal(
         stream_id="stream-1",

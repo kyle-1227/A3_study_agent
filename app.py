@@ -84,6 +84,7 @@ from src.graph.resource_final import (
     completed_without_resource_payload,
     normalize_resource_final_payload,
 )
+from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.graph.qa import qa_final_payload, qa_final_trace_payload
 from src.llm.compaction import invoke_conversation_compaction
 from src.profile import get_profile_manager
@@ -2087,7 +2088,21 @@ def _legacy_resource_final_payload(final_state: dict) -> dict | None:
 
 
 def _resource_final_payload(final_state: dict) -> dict | None:
-    """Build a stable resource_final event while preserving legacy fields."""
+    """Return authoritative V3 state, or the migration-only legacy projection."""
+
+    raw_v3 = final_state.get("resource_final_v3")
+    if "resource_final_v3" in final_state and raw_v3 != {}:
+        resource_final = validate_resource_final_v3(raw_v3)
+        thread_id = str(final_state.get("thread_id") or "").strip()
+        request_id = str(final_state.get("request_id") or "").strip()
+        if thread_id and resource_final.thread_id != thread_id:
+            raise ValueError("Resource Final V3 thread_id does not match runtime state")
+        if request_id and resource_final.request_id != request_id:
+            raise ValueError(
+                "Resource Final V3 request_id does not match runtime state"
+            )
+        return resource_final.model_dump(mode="json")
+
     legacy_payload = _legacy_resource_final_payload(final_state)
     return normalize_resource_final_payload(legacy_payload, final_state)
 
@@ -3465,8 +3480,18 @@ async def _stream_graph_event_drafts(
                         if (
                             node_name == "resource_bundle_output"
                             and isinstance(output, dict)
-                            and isinstance(output.get("resource_bundle_artifact"), dict)
-                            and output.get("resource_bundle_artifact")
+                            and (
+                                (
+                                    isinstance(output.get("resource_final_v3"), dict)
+                                    and bool(output.get("resource_final_v3"))
+                                )
+                                or (
+                                    isinstance(
+                                        output.get("resource_bundle_artifact"), dict
+                                    )
+                                    and bool(output.get("resource_bundle_artifact"))
+                                )
+                            )
                         ):
                             terminal_resource_output = output
 
@@ -4106,19 +4131,36 @@ async def _stream_graph_event_drafts(
         resource_terminal_status = str(
             resource_payload.get("terminal_status") or "unknown"
         )
+        resource_final_identity = str(
+            resource_payload.get("resource_final_id")
+            or resource_payload.get("resource_id")
+            or ""
+        )
+        v3_resources = [
+            item
+            for item in (resource_payload.get("resources") or [])
+            if isinstance(item, dict)
+        ]
+        resource_types = [
+            str(item.get("kind") or "")
+            for item in v3_resources
+            if str(item.get("kind") or "").strip()
+        ]
+        if not resource_types and resource_payload.get("resource_type"):
+            resource_types = [str(resource_payload.get("resource_type"))]
         artifact_activity = build_activity_event(
             thread_id=thread_id,
             request_id=request_id,
             sequence=activity_sequence + 1,
             kind="artifact",
             status="failed" if resource_terminal_status == "failed" else "completed",
-            activity_key=f"resource_final:{resource_payload.get('resource_id', '')}",
+            activity_key=f"resource_final:{resource_final_identity}",
             title="Generated resource ready",
             summary="Renderable resource payload finalized",
             node="resource_bundle_output",
             safe_details={
-                "resource_id": resource_payload.get("resource_id", ""),
-                "resource_type": resource_payload.get("resource_type", ""),
+                "resource_final_id": resource_final_identity,
+                "resource_types": resource_types,
                 "terminal_status": resource_terminal_status,
             },
         )
@@ -4230,11 +4272,25 @@ async def _stream_graph_event_drafts(
             "sse_resource_final",
             {
                 "sent": True,
+                "schema_version": resource_payload.get("schema_version"),
+                "resource_final_id": resource_payload.get(
+                    "resource_final_id",
+                    "",
+                ),
                 "resource_id": resource_payload.get("resource_id", ""),
                 "payload_hash": resource_payload.get("payload_hash", ""),
                 "resource_type": resource_payload.get("resource_type", ""),
-                "terminal_status": resource_payload.get("terminal_status", "unknown"),
+                "resource_types": [
+                    item.get("kind", "")
+                    for item in (resource_payload.get("resources") or [])
+                    if isinstance(item, dict)
+                ],
+                "resource_count": len(resource_payload.get("resources") or []),
+                "blocked_count": len(resource_payload.get("blocked_resources") or []),
+                "error_count": len(resource_payload.get("errors") or []),
+                "terminal_status": resource_payload.get("terminal_status", ""),
                 "validation": resource_payload.get("validation", {}),
+                "summary_chars": len(str(resource_payload.get("summary") or "")),
                 "answer_chars": len(str(resource_payload.get("answer") or "")),
                 "has_mindmap": bool(resource_payload.get("mindmap")),
                 "has_review_doc": bool(resource_payload.get("review_doc")),

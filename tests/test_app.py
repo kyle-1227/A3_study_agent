@@ -794,6 +794,119 @@ class TestResourceFinalPayloadArtifacts:
         assert '"answer_key"' not in serialized
 
 
+class TestResourceFinalV3Projection:
+    @staticmethod
+    def _payload() -> dict:
+        from src.graph.resource_final_v3 import (
+            ResourceFinalV3ResourceValidation,
+            ResourceFinalV3Validation,
+            build_resource_final_v3,
+            build_resource_final_v3_resource,
+        )
+
+        resource_validation = ResourceFinalV3ResourceValidation(
+            schema_version="resource_validation_v1",
+            resource_type="mindmap",
+            valid=True,
+            terminal_status="success",
+            renderable_count=1,
+            downloadable_count=1,
+            verified_local_count=1,
+            remote_unverified_count=0,
+            failure_reason="",
+            warnings=(),
+        )
+        resource = build_resource_final_v3_resource(
+            thread_id="thread-1",
+            request_id="request-1",
+            kind="mindmap",
+            status="success",
+            title="Machine learning map",
+            summary="Mindmap ready",
+            payload={
+                "mindmap": {
+                    "title": "Machine learning map",
+                    "tree": {"title": "Machine learning"},
+                    "xmind_url": "/artifacts/map.xmind",
+                }
+            },
+            artifact_refs={"xmind_url": "/artifacts/map.xmind"},
+            validation=resource_validation,
+        )
+        final = build_resource_final_v3(
+            thread_id="thread-1",
+            request_id="request-1",
+            terminal_status="success",
+            resources=(resource,),
+            recommendations=(),
+            blocked_resources=(),
+            errors=(),
+            validation=ResourceFinalV3Validation(
+                schema_version="resource_final_validation_v3",
+                resource_count=1,
+                success_count=1,
+                partial_success_count=0,
+                failed_count=0,
+                blocked_count=0,
+                renderable_count=1,
+                downloadable_count=1,
+            ),
+            summary="Resource bundle ready",
+        )
+        return final.model_dump(mode="json")
+
+    def test_v3_is_authoritative_over_legacy_projection(self):
+        from app import _resource_final_payload
+
+        payload = self._payload()
+        projected = _resource_final_payload(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-1",
+                "resource_final_v3": payload,
+                "requested_resource_type": "study_plan",
+                "study_plan_artifact": {"title": "legacy must not win"},
+            }
+        )
+        assert projected == payload
+
+    @pytest.mark.parametrize(
+        "invalid_v3",
+        [None, [], "resource_final_v3", {"type": "resource_final"}],
+    )
+    def test_present_invalid_v3_never_falls_back_to_legacy(self, invalid_v3):
+        from app import _resource_final_payload
+
+        with pytest.raises((TypeError, ValueError)):
+            _resource_final_payload(
+                {
+                    "resource_final_v3": invalid_v3,
+                    "requested_resource_type": "study_plan",
+                    "study_plan_artifact": {"title": "legacy must not win"},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("identity_field", "identity_value"),
+        [("thread_id", "thread-other"), ("request_id", "request-other")],
+    )
+    def test_v3_identity_must_match_runtime_state(
+        self,
+        identity_field,
+        identity_value,
+    ):
+        from app import _resource_final_payload
+
+        state = {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "resource_final_v3": self._payload(),
+        }
+        state[identity_field] = identity_value
+        with pytest.raises(ValueError, match=identity_field):
+            _resource_final_payload(state)
+
+
 class TestStructuredResourceArtifactGuard:
     """_legacy_resource_final_payload must return None for structured types
     when no renderable artifact exists in state."""

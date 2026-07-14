@@ -103,6 +103,68 @@ def _quiz_binding(*, thread_id: str, request_id: str) -> dict:
     }
 
 
+def _branch_validation(resource_type: str, *, status: str = "success") -> dict:
+    return {
+        "schema_version": "resource_validation_v1",
+        "resource_type": resource_type,
+        "valid": True,
+        "terminal_status": status,
+        "renderable_count": 1,
+        "downloadable_count": 0,
+        "verified_local_count": 0,
+        "remote_unverified_count": 0,
+        "failure_reason": "",
+        "warnings": [],
+    }
+
+
+def _mindmap_branch_result(*, influence_entries: list[dict] | None = None) -> dict:
+    tree = {
+        "title": "Mock Map",
+        "children": [{"title": "Functions"}],
+    }
+    result = {
+        "resource_type": "mindmap",
+        "status": "success",
+        "title": "Mock Map",
+        "artifact": {"title": "Mock Map", "tree": tree, "xmind_url": "/m.xmind"},
+        "artifacts": [],
+        "state_updates": {
+            "mindmap_artifact": {
+                "title": "Mock Map",
+                "tree": tree,
+                "xmind_url": "/m.xmind",
+            },
+            "mindmap_tree": tree,
+        },
+        "message_content": "Generated mindmap: Mock Map",
+        "message_preview": "Generated mindmap: Mock Map",
+        "elapsed_ms": 10,
+        "validation": _branch_validation("mindmap"),
+    }
+    if influence_entries is not None:
+        result["context_influence_entries"] = influence_entries
+    return result
+
+
+def _failed_branch_result(resource_type: str) -> dict:
+    return {
+        "resource_type": resource_type,
+        "status": "failed",
+        "title": resource_type,
+        "artifact": {},
+        "artifacts": [],
+        "state_updates": {},
+        "message_content": "",
+        "message_preview": "",
+        "error_code": f"{resource_type}.generation_failed",
+        "error_type": "RuntimeError",
+        "error_message_sanitized": f"{resource_type} failed",
+        "elapsed_ms": 5,
+        "validation": None,
+    }
+
+
 def test_normalize_requested_resource_types_dedupes_and_aliases():
     assert normalize_requested_resource_types(
         ["mindmap", "exercise"], "quiz", "roadmap"
@@ -457,41 +519,8 @@ async def test_resource_bundle_output_partial_success_sets_artifacts_and_message
             "requested_resource_types": ["mindmap", "quiz"],
             "resource_generation_debug": {"stages": []},
             "resource_branch_results": [
-                {
-                    "resource_type": "mindmap",
-                    "status": "success",
-                    "title": "Mock Map",
-                    "artifact": {
-                        "title": "Mock Map",
-                        "tree": {"title": "Mock Map"},
-                        "xmind_url": "/m.xmind",
-                    },
-                    "artifacts": [],
-                    "state_updates": {
-                        "mindmap_artifact": {
-                            "title": "Mock Map",
-                            "tree": {"title": "Mock Map"},
-                            "xmind_url": "/m.xmind",
-                        },
-                        "mindmap_tree": {"title": "Mock Map"},
-                    },
-                    "message_content": "Generated mindmap: Mock Map",
-                    "message_preview": "Generated mindmap: Mock Map",
-                    "elapsed_ms": 10,
-                },
-                {
-                    "resource_type": "quiz",
-                    "status": "failed",
-                    "title": "quiz",
-                    "artifact": {},
-                    "artifacts": [],
-                    "state_updates": {},
-                    "message_content": "",
-                    "message_preview": "",
-                    "error_type": "RuntimeError",
-                    "error_message_sanitized": "quiz failed",
-                    "elapsed_ms": 5,
-                },
+                _mindmap_branch_result(),
+                _failed_branch_result("quiz"),
             ],
         }
     )
@@ -499,6 +528,10 @@ async def test_resource_bundle_output_partial_success_sets_artifacts_and_message
     assert result["resource_generation_status"] == "partial_success"
     assert result["resource_bundle_artifact"]["success_count"] == 1
     assert result["resource_bundle_artifact"]["failed_count"] == 1
+    assert result["resource_final_v3"]["schema_version"] == "resource_final_v3"
+    assert result["resource_final_v3"]["terminal_status"] == "partial_success"
+    assert len(result["resource_final_v3"]["resources"]) == 1
+    assert len(result["resource_final_v3"]["errors"]) == 1
     assert result["mindmap_artifact"]["title"] == "Mock Map"
     assert result["resource_artifacts_by_type"]["mindmap"]["title"] == "Mock Map"
     assert len(result["last_generated_artifacts"]) == 1
@@ -511,28 +544,18 @@ async def test_resource_bundle_output_partial_success_sets_artifacts_and_message
 async def test_resource_bundle_output_all_failed_returns_failed_bundle():
     result = await resource_bundle_output(
         {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
             "requested_resource_types": ["quiz"],
             "resource_generation_debug": {"stages": []},
-            "resource_branch_results": [
-                {
-                    "resource_type": "quiz",
-                    "status": "failed",
-                    "title": "quiz",
-                    "artifact": {},
-                    "artifacts": [],
-                    "state_updates": {},
-                    "message_content": "",
-                    "message_preview": "",
-                    "error_type": "RuntimeError",
-                    "error_message_sanitized": "quiz failed",
-                    "elapsed_ms": 5,
-                },
-            ],
+            "resource_branch_results": [_failed_branch_result("quiz")],
         }
     )
 
     assert result["resource_generation_status"] == "failed"
     assert result["resource_bundle_artifact"]["status"] == "failed"
+    assert result["resource_final_v3"]["terminal_status"] == "failed"
+    assert result["resource_final_v3"]["resources"] == []
     assert "所有请求的学习资源都生成失败" in result["messages"][0].content
 
 
@@ -553,18 +576,7 @@ async def test_resource_bundle_fan_in_persists_branch_influences_idempotently():
         metadata={"workflow": "mindmap", "iteration": 1},
     )
     state["resource_branch_results"] = [
-        {
-            "resource_type": "mindmap",
-            "status": "success",
-            "title": "Mock Map",
-            "artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}},
-            "artifacts": [],
-            "state_updates": {"mindmap_tree": {"title": "Mock Map"}},
-            "message_content": "Generated map",
-            "message_preview": "Generated map",
-            "elapsed_ms": 1,
-            "context_influence_entries": [entry, entry],
-        }
+        _mindmap_branch_result(influence_entries=[entry, entry])
     ]
 
     result = await resource_bundle_output(state)
@@ -672,32 +684,26 @@ def test_resource_summary_includes_study_plan_metrics_without_fixed_shape():
 
 
 async def test_resource_bundle_output_stores_message_on_bundle_artifact():
+    quiz_binding = _quiz_binding(thread_id="thread-1", request_id="request-1")
     result = await resource_bundle_output(
         {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
             "requested_resource_types": ["mindmap", "quiz"],
             "resource_generation_debug": {"stages": []},
             "resource_branch_results": [
-                {
-                    "resource_type": "mindmap",
-                    "status": "success",
-                    "title": "Mock Map",
-                    "artifact": {"title": "Mock Map", "tree": {"title": "Mock Map"}},
-                    "artifacts": [],
-                    "state_updates": {"mindmap_tree": {"title": "Mock Map"}},
-                    "message_content": "Generated mindmap: Mock Map",
-                    "message_preview": "Generated mindmap: Mock Map",
-                    "elapsed_ms": 10,
-                },
+                _mindmap_branch_result(),
                 {
                     "resource_type": "quiz",
                     "status": "success",
                     "title": "Mock Quiz",
-                    "artifact": {"title": "Mock Quiz"},
+                    "artifact": quiz_binding["exercise_artifact"],
                     "artifacts": [],
-                    "state_updates": {"exercise_items": [{"question": "Q1"}]},
+                    "state_updates": quiz_binding,
                     "message_content": "Generated quiz: Mock Quiz",
                     "message_preview": "Generated quiz: Mock Quiz",
                     "elapsed_ms": 10,
+                    "validation": quiz_binding["exercise_resource_v3"]["validation"],
                 },
             ],
         }
@@ -708,6 +714,10 @@ async def test_resource_bundle_output_stores_message_on_bundle_artifact():
     assert "### 思维导图" in message
     assert "### 练习题" in message
     assert result["messages"][0].content == message
+    assert result["resource_final_v3"]["terminal_status"] == "success"
+    assert [
+        resource["kind"] for resource in result["resource_final_v3"]["resources"]
+    ] == ["mindmap", "quiz"]
 
 
 def test_compose_bundle_message_single_success_preserves_resource_message():
