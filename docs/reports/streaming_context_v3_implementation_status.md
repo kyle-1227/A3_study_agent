@@ -440,3 +440,91 @@ event-loop、AsyncMock 与 pytest cache 权限债务。
 PostgreSQL endpoint/restart recovery、生产 index/generation/四变体证据、checkpoint 迁移与
 零旧 checkpoint 扫描仍缺失。因此本批没有删除 `assessment_result_handler`、
 `adaptive_practice_responder`、placeholder generator、正式旧图或迁移 reader。
+
+## 2026-07-14 候选 Parent-Child 图安全学习路径、自动推荐与真实 fan-in 闭环
+
+本批只改候选图，没有切换 `app.py` 当前正式图。候选资源链现在为：
+
+`search_query_rewriter → learner_path_planner → resource_evidence_planner →`
+`证据检索/判定/分配 → resource_worker fan-out → resource_bundle_aggregator →`
+`resource_recommendation_auto → resource_bundle_output → END`。
+
+- `EvidenceOrchestrationRuntime` 现在必须显式注入 `LearningGuidanceRuntime`；builder
+  不创建画像、历史、路径或推荐依赖，也没有默认 runtime。调用方还必须提供 lowercase
+  SHA-256 runtime fingerprint。该值、Provider 投影步数/字符上限及投影 schema 均已
+  纳入候选图 orchestration fingerprint，策略改变不会复用旧候选身份。
+- `learner_path_planner_output_v1` 在进入证据 planner 和 study-plan planner 前都会重新
+  校验 schema、`request_id/user_id/subject` 绑定。checkpoint JSON 解码后必须与输入的
+  canonical JSON 完全一致；数字、日期或字段 coercion 会被拒绝，不存在 alias repair。
+- path/recommendation checkpoint output 原子携带 guidance runtime fingerprint、投影
+  policy fingerprint 与实际 steps/chars 上限。Evidence Planner 和候选 finalizer 必须
+  与当前注入 runtime 完全匹配；runtime 或 policy 改变后不能消费旧输出。
+- 完整路径继续留在 checkpoint 供恢复和审计；Provider 只能消费与完整路径逐字段重建并
+  完全一致的 `learner_path_provider_projection_v1`。投影不含 `request_id`、`user_id`、
+  `profile_signal_ids` 或 `history_ids`，并受显式 steps/chars 硬上限约束；超限或投影篡改
+  会 typed fail-fast，不截断、不降级。
+- 路径节点从已验证的 `retrieval_plan[].subject` 重新计算作用域。仅单科且等于主科目时
+  才加载画像/历史和执行 path engine；多科或不匹配写入显式
+  `unsupported_subject_scope`。证据 planner 与 study-plan 消费端会再次校验，不能把旧的
+  单科 available 路径注入多科请求。
+- 新路径不会写入旧 `curriculum_context`。该字段只保留给尚未切换的正式旧图；候选
+  study-plan 直接消费严格 Provider-safe projection；完整输出与投影必须成对存在，旧
+  curriculum context 不能掩盖半个新契约。
+- `resource_bundle_aggregator` 只在内存中构造一次无推荐的严格 V3 投影以取得真实稳定
+  `resource_id`，对外只写最小 `recommendation_resource_context`；它不写 Message、
+  `resource_final_v3`、workspace、journal 或 SSE。
+- planner 写入的 `evidence_orchestration_fingerprint` 现由 retrieval router 起的每个
+  evidence 节点重新校验；资源 preflight、worker、aggregator、recommendation 与
+  finalizer 也由候选 builder 的 runtime guard 包裹。该指纹包含 policy、prompt/schema、
+  guidance runtime/policy、Parent-Child handoff、profile 与 web timeout，跨进程恢复时任一
+  语义变化都会在继续 Provider/资源工作前阻断。
+- 自动推荐只接收真实 success/partial-success 资源。失败与证据阻断资源不进入推荐
+  上下文；多科目或主科目不一致返回显式 `unsupported_subject_scope`，不把首个科目
+  静默套给所有资源。自动 recommendation item 的 `resource_id` 必须是已验证 bundle
+  中的真实生成资源且出现在 source IDs；Resource Final V3 和前端严格保留该 ID，并校验
+  ID 与资源类型，不能产生不可操作的伪推荐。
+- 最终节点重新严格校验 recommendation output 的 mode、请求/用户/科目身份及资源
+  引用，再一次性构造唯一 Resource Final V3。实测推荐前后单资源 `resource_id` 保持
+  不变，最终 `payload_hash/resource_final_id` 按推荐内容变化；quiz 私有答案不进入聚合
+  上下文或终态。
+- 真实编译的最小 LangGraph 已覆盖双 `Send` fan-in：mindmap 成功、quiz 失败时 worker
+  执行两次，但 aggregator、recommendation 与 finalizer 各一次且只有一个
+  `partial_success` Resource Final V3；空 task 只产生一次 controlled stop，推荐异常在
+  finalizer 前 fail-fast。
+- 缺用户、科目、画像、历史或真实资源时不会生成中性分数或空成功。当前公共 V3 仍
+  只有 `recommendations[]`，因此 unavailable reason 被前置写入公开 summary；机器可读
+  `recommendation_outcome` 仍是生产切换前必须补齐的公共契约门。
+
+本批不宣称显式推荐入口已完成。Supervisor 尚无严格 recommendation action，且当前
+Resource Final V3 的 success 要求至少一个真实资源，不能诚实表达 recommendation-only
+终态。显式入口必须在独立 spec 中同时决定路由和权威终态，不能伪装成资源成功。
+当前建议选择独立 `recommendation_final_v1`：它可绑定真实 catalog/KG candidate snapshot，
+不必削弱 Resource Final V3“成功必须含真实生成资源”的终态不变量；若选择扩展 V3，则需
+显式批准 recommendation-only success 语义及相应迁移。
+
+本阶段候选实现提交：`eee3d8e0b5042c16b1d975a2bea568652a6a2271`。
+
+验证结果（完成安全投影、恢复绑定、推荐资源绑定与真实 fan-in 后重新运行）：
+
+- 路径/候选图/study-plan/fan-in/Resource Final 聚焦：`167 passed`；
+- 候选图、资源 V3、stream/session、manifest 与 security 扩大回归：`274 passed`；
+- 全量后端：`2383 passed, 7 skipped, 7 warnings`；warning 是既有第三方弃用、
+  AsyncMock coroutine 与 pytest cache 权限债务；
+- `python -m compileall -q src tests app.py`、冷导入和 `git diff --check`：通过；
+- 本批 14 个触及 Python 文件 Ruff check/format：通过；
+- scoped mypy（`--follow-imports=skip --ignore-missing-imports`）：9 个触及源文件通过；
+  普通完整依赖跟随命令两次在 120 秒超时，因此未记为通过；
+- 前端：Vitest `27 files / 118 tests`、typecheck、完整 ESLint、Next production build
+  均通过；build 路由仍无 `/volunteer`；
+- 全仓 Ruff 仍为 60 项既有 lint debt，format check 仍为 65 个既有文件；
+- Semgrep、import-linter、Gitleaks、Bandit、Vulture 缺失，均未运行且未记为通过。
+
+生产门重新核对基于候选实现提交 `eee3d8e0`：`config/rag/index.yaml` 与
+`data/knowledge_graph.yaml` 仍不存在，`activation_enabled=false`，当前进程没有
+PostgreSQL/DeepSeek/Tavily/RAG reranker 凭据。`continuation_pc51` 仍标记
+`status=completed_experimental`、`activation_allowed=false`、
+`evaluation_eligible=false`、`experimental_only=true`、
+`activation_prohibited=true`，且 reranker probe 的
+`relevant_above_irrelevant=false`。真实 Provider E2E、真实 PostgreSQL restart、
+P0/PG/PR/PGR 生产证据和零旧 checkpoint 扫描均未完成，因此正式旧图、迁移 reader、
+alias 与旧节点实现继续保留，本批没有越过删除门。

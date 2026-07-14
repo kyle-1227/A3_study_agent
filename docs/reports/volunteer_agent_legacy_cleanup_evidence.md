@@ -422,3 +422,82 @@ Vulture、Semgrep、import-linter、Gitleaks、Bandit 仅在安装时运行；�
   Parent-Child activation evidence, checkpoint migration, and a zero-legacy
   checkpoint scan. The old assessment nodes and migration readers therefore
   remain intentionally present.
+
+## 20. Candidate safe learner-path, recommendation, and fan-in replacement progress (2026-07-14)
+
+- The candidate Parent-Child graph now injects a strict `LearningGuidanceRuntime`
+  and executes `learner_path_planner` before resource evidence planning. Both
+  the evidence planner and study-plan planner revalidate the checkpoint-safe
+  path schema and request/user/subject binding before consuming it. An explicit
+  lowercase SHA-256 guidance runtime fingerprint is part of the candidate
+  orchestration fingerprint; callable repr hashing is not used. Projection
+  step/character policy and schema are also fingerprinted.
+- The full learner path remains in the checkpoint, while Provider calls receive
+  only an exact `learner_path_provider_projection_v1` reconstructed from it.
+  The projection contains no request/user/profile/history identity fields and
+  has explicit step and character ceilings. Oversize, stale, schema-drifted, or
+  tampered projections fail before Provider dispatch; no truncation or fallback
+  path exists.
+- Path and recommendation checkpoint outputs atomically bind the guidance
+  runtime fingerprint, projection-policy fingerprint, and concrete limits.
+  Evidence and finalization consumers reject outputs from a changed runtime.
+- Learner-path scope is derived again from `retrieval_plan[].subject`. A path
+  engine is called only for one subject matching the graph's subject. Multi-
+  subject and mismatched requests return `unsupported_subject_scope` before
+  profile/history I/O, and both Provider consumers reject a stale single-
+  subject available path in a multi-subject state.
+- The candidate fan-in is now
+  `resource_bundle_aggregator → resource_recommendation_auto →`
+  `resource_bundle_output`. The aggregator never
+  writes a message or terminal payload. It derives stable IDs only from a
+  local, discarded strict projection and exposes no quiz answer material.
+- Every post-planner evidence node and every candidate resource node validates
+  the current orchestration fingerprint before continuing. The fingerprint
+  covers Parent-Child handoff, evidence/profile policy, prompts/schemas,
+  guidance runtime/projection policy, and Web timeout, so a resumed run cannot
+  mix old checkpoint semantics with a new process runtime.
+- The finalizer accepts only the automatic mode, revalidates recommendation
+  identity and source-resource references, and builds one Resource Final V3.
+  Missing profile/history/resources and unsupported multi-subject scope do not
+  create neutral scores or fake recommendations.
+- Automatic recommendation targets are now bound to an actual generated
+  bundle `resource_id`, retained in Resource Final V3, and checked again by the
+  strict frontend parser. A fabricated catalog/target ID cannot become an
+  actionable-looking automatic recommendation.
+- A compiled LangGraph test now proves real dual-`Send` fan-in: two workers join
+  into one aggregator, one recommendation node, and one finalizer/Resource Final
+  V3. The same graph-level fixture covers empty tasks and recommendation
+  fail-fast behavior.
+- The currently served graph still uses the original dispatcher and bundle
+  finalizer. Its old `curriculum_context` branch is retained only because the
+  production graph has not switched; the new candidate path does not write or
+  depend on that field. This is a documented temporary dependency to delete
+  with the formal graph, not a replacement implementation.
+- No old node was deleted in this slice. Explicit recommendation still lacks a
+  Supervisor action and a recommendation-only authoritative terminal. Public
+  Resource Final V3 also lacks a machine-readable recommendation availability
+  envelope; an empty array plus public summary is not sufficient for the final
+  public-contract deletion gate. The recommended next contract is an independent
+  `recommendation_final_v1` bound to a real catalog/KG candidate snapshot; this
+  preserves Resource Final V3's invariant that success contains a generated
+  resource. Extending V3 with recommendation-only success remains a user choice.
+- Candidate implementation commit:
+  `eee3d8e0b5042c16b1d975a2bea568652a6a2271`.
+- Verification passed with 167 focused path/graph/study-plan/fan-in/Resource
+  Final tests, 274
+  expanded candidate/Resource Final/stream/manifest/security tests, full backend
+  `2383 passed, 7 skipped`, frontend 118-test Vitest/typecheck/ESLint/build,
+  compileall, touched Ruff,
+  scoped mypy, cold imports, and diff checks. Ordinary dependency-following
+  mypy timed out twice at 120 seconds and was not recorded as passing. Whole-
+  repo Ruff remains at 60 lint findings and 65 formatting files. Semgrep,
+  import-linter, Gitleaks,
+  Bandit, and Vulture are unavailable and were not run.
+- The production deletion gate remains closed at candidate commit `eee3d8e0`:
+  the canonical production index and knowledge graph are absent,
+  rollout activation is false, the latest local continuation is experimental,
+  evaluation-ineligible, activation-disallowed and explicitly
+  activation-prohibited,
+  real Provider/PostgreSQL/four-variant evidence is incomplete, and no
+  zero-legacy checkpoint scan exists. The formal graph and migration readers
+  therefore remain required.
