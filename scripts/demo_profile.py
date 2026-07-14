@@ -18,19 +18,16 @@ import asyncio
 import os
 import sys
 
+from dotenv import load_dotenv
+
 # Ensure the project root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_openai import ChatOpenAI
-
-from src.profile import (
+from src.profile import (  # noqa: E402
     ProfileManager,
     SQLiteProfileStore,
-    UserProfile,
-    get_profile_manager,
     profile_to_summary,
     score_snapshot,
     top_skills,
@@ -104,13 +101,22 @@ async def demo_basic_flow():
         print(f"Updated: {profile.updated_at}")
         print(f"\nSkills ({len(profile.skills)}):")
         for name, entry in profile.skills.items():
-            print(f"  {name}: level={entry.level:.2f}, confidence={entry.confidence:.2f}, "
-                  f"evidence_count={entry.evidence_count}")
+            print(
+                f"  {name}: level={entry.level:.2f}, confidence={entry.confidence:.2f}, "
+                f"evidence_count={entry.evidence_count}"
+            )
 
-        print(f"\nLearning Style:")
+        print("\nLearning Style:")
         s = profile.learning_style
-        for dim in ["prefer_examples", "prefer_step_by_step", "prefer_concise",
-                     "prefer_theory", "prefer_practice", "prefer_visual", "prefer_analogy"]:
+        for dim in [
+            "prefer_examples",
+            "prefer_step_by_step",
+            "prefer_concise",
+            "prefer_theory",
+            "prefer_practice",
+            "prefer_visual",
+            "prefer_analogy",
+        ]:
             val = getattr(s, dim)
             bar = "█" * int(val * 20) + "░" * (20 - int(val * 20))
             print(f"  {dim:25s}: {bar} {val:.2f}")
@@ -202,12 +208,7 @@ if state.get("profile_context"):
     system_prompt = base_prompt + "\\n\\n" + state["profile_context"]
 ```
 
-5. For the volunteer (志愿填报) page:
-   - The frontend already sends user queries with regional context
-   - Add user_id to the query so the backend can attach profiles
-   - The backend merges profile context + regional context
-
-6. Future extensions:
+5. Future extensions:
    - Add profile-aware difficulty adjustment in academic.py
    - Use profile.goals to prioritize relevant search results
    - Use profile.learning_style to choose explanation format

@@ -501,3 +501,15 @@ Vulture、Semgrep、import-linter、Gitleaks、Bandit 仅在安装时运行；�
   real Provider/PostgreSQL/four-variant evidence is incomplete, and no
   zero-legacy checkpoint scan exists. The formal graph and migration readers
   therefore remain required.
+
+## 21. Retired volunteer guidance cleanup (2026-07-15)
+
+The user selected D10-B: retain the targeted localStorage purge for one
+migration release, then delete it. The purge component, marker, and focused
+test therefore remain intentionally active in this batch.
+
+Repository guidance no longer advertises the retired product. `PRODUCT.md` and
+`DESIGN.md` now require retired routes and storage to be removed after their
+migration window; `scripts/demo_profile.py` no longer instructs callers to
+integrate the volunteer page. Historical audit reports remain unchanged as
+evidence and are not runtime compatibility surfaces.

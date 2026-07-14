@@ -28,7 +28,7 @@ Avoid generic AI chatbot spectacle, purple-blue gradient SaaS styling, decorativ
 2. Keep the workbench calm. Use restrained color, consistent surfaces, and predictable controls so the learner can focus on the task.
 3. Explain enough, not everything. The UI should translate agent steps into human language without overwhelming the chat.
 4. Preserve learning context. Conversation history, resource artifacts, and node trails should feel connected, not like separate panels.
-5. Respect the legacy module boundary. The volunteer page may share the visual system, but its route, storage, and business behavior remain independent.
+5. Retire superseded product surfaces completely after their migration window; do not preserve hidden routes, storage, or business behavior indefinitely.
 
 ## Accessibility & Inclusion
 

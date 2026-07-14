@@ -159,7 +159,7 @@ The system is flat by default. Depth is conveyed through borders, tonal surfaces
 - **Error / Disabled:** danger text plus semantic icon, not color alone.
 
 ### Navigation
-- Left navigation uses plain rows, clear selected state, and a separate visual group for volunteer history. Collapsed navigation must preserve understandable tooltips.
+- Left navigation uses plain rows and a clear selected state. Collapsed navigation must preserve understandable tooltips.
 
 ### Graph and Trail Nodes
 - Running nodes use amber, completed nodes use green, error nodes use red, idle nodes use dashed neutral borders.
@@ -171,7 +171,7 @@ The system is flat by default. Depth is conveyed through borders, tonal surfaces
 - **Do** use the same status vocabulary in chat cards, Node Trail, Graph View, and logs.
 - **Do** keep the center chat column calm and readable, with a maximum comfortable line length.
 - **Do** make empty states useful with short capability prompts.
-- **Do** preserve volunteer route, storage keys, and request behavior while sharing the visual language.
+- **Do** remove retired routes and storage integrations once their explicit migration window closes.
 - **Do** verify every visible Chinese string before shipping.
 
 ### Don't:
@@ -179,4 +179,4 @@ The system is flat by default. Depth is conveyed through borders, tonal surfaces
 - **Don't** mix icon families or hand-roll SVG icons.
 - **Don't** use color alone to communicate error, success, or waiting states.
 - **Don't** allow mojibake text, broken placeholders, or malformed Chinese punctuation in visible UI.
-- **Don't** change backend SSE contracts, route names, or volunteer business logic during UI polish.
+- **Don't** revive retired routes or compatibility behavior during UI polish.
