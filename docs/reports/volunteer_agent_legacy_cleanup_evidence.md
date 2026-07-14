@@ -535,3 +535,23 @@ checkpoint rows, `9,863` blob rows, `25,535` write rows, and `10` migration
 version rows. No clear was executed in this batch: the old served backend may
 still write until the new RAG graph reaches its cutover window. Counts must be
 captured again immediately before backup and clear.
+
+## 23. Real local PostgreSQL sub-gate (2026-07-15)
+
+The existing healthy Docker PostgreSQL service was exercised with a connection
+URI assembled only in the test process from the container environment. The URI
+and password were neither printed nor written to `.env` or a report.
+
+The first real run isolated a Windows-only test-runner defect: pytest used the
+Proactor event loop, which psycopg async connections reject, while the formal
+backend already uses `postgres_compatible_event_loop`. The opt-in integration
+test now runs its scenario through an `asyncio.Runner` with that exact loop
+factory; no runtime lock code, retry, or fallback changed.
+
+After the fix, two independent `PostgresAssessmentExecutionLock` instances
+serialized the same thread advisory lock, and the real LangGraph PostgreSQL
+fixture wrote durable state, reopened a saver, reconstructed thread status, and
+removed its random test checkpoint. Both real tests passed. This closes the
+database availability, async-loop, lock, and saver-reopen sub-gates. It does not
+yet prove a full assessment HTTP process-restart flow or the new RAG served
+graph; those remain separate integration gates.
