@@ -513,3 +513,25 @@ Repository guidance no longer advertises the retired product. `PRODUCT.md` and
 migration window; `scripts/demo_profile.py` no longer instructs callers to
 integrate the volunteer page. Historical audit reports remain unchanged as
 evidence and are not runtime compatibility surfaces.
+
+## 22. Checkpoint migration retirement after decision D7 (2026-07-15)
+
+The user explicitly approved clearing existing checkpoints instead of
+preserving them through a node/schema migration. Static scans found no runtime,
+FastAPI, graph-builder, CLI-entrypoint, dynamic import, or configuration caller
+outside the self-contained `src.checkpoint_migration` package, its deliberately
+unwired script, and fake-only unit test. The script always stopped with a parser
+error because no production adapter had ever been connected.
+
+The unused package, script, and fake-only migration test were deleted. The
+replacement is `docs/runbooks/checkpoint_clear_cutover.md`, which requires a
+verified custom-format backup and stopped writers before clearing only
+`checkpoints`, `checkpoint_blobs`, and `checkpoint_writes`. It explicitly
+preserves `checkpoint_migrations`, forbids `CASCADE`, and requires a new-graph
+write/reload and zero-legacy verification after restart.
+
+A read-only probe of the existing Docker PostgreSQL instance observed `2,120`
+checkpoint rows, `9,863` blob rows, `25,535` write rows, and `10` migration
+version rows. No clear was executed in this batch: the old served backend may
+still write until the new RAG graph reaches its cutover window. Counts must be
+captured again immediately before backup and clear.
