@@ -578,6 +578,17 @@ The second live run passed both Provider calls. It returned a valid
 `adaptive_practice_batch_v1`, the required concept-error review task, and three
 unique stable question IDs. Focused assessment regressions passed `58`; both
 touched source files passed mypy, Bandit, Ruff, and Semgrep. This closes the
-real classifier/generator callback sub-gate. It still does not claim a full
-HTTP assessment submission with checkpoint restart/replay, which remains a
-separate end-to-end gate.
+real classifier/generator callback sub-gate.
+
+The same fixed sample was then exercised through the formal assessment SSE
+endpoint and the real PostgreSQL saver. A correct-answer control emitted
+`stream_start -> assessment_final -> stream_done`; after closing and reopening
+the saver, the recorded final had the same payload hash and a Provider-failure
+sentinel proved replay performed no new call. The incorrect-answer run then
+completed the full chain with real DeepSeek classification/generation, three
+adaptive tasks, and the same event sequence. After another saver reopen, the
+incorrect terminal, three tasks, and payload hash were identical, again without
+calling either Provider callback. Every random live thread was deleted in a
+`finally` block. This closes the assessment HTTP, real Provider, PostgreSQL
+restart, idempotent replay, and single-terminal sub-gate; it does not close any
+new-RAG served-graph or RAG Provider gate.
