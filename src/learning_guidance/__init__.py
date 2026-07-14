@@ -25,8 +25,19 @@ from src.learning_guidance.runtime import (
     LearningGuidanceContractError,
     LearningGuidanceRuntime,
 )
+from src.learning_guidance.recommendation_final import (
+    ExplicitRecommendationUnavailableReason,
+    RecommendationCandidateSnapshotV1,
+    RecommendationFinalCandidateV1,
+    RecommendationFinalContractError,
+    RecommendationFinalItemV1,
+    RecommendationFinalV1,
+    build_recommendation_final_v1,
+    validate_recommendation_final_v1,
+)
 
 __all__ = [
+    "ExplicitRecommendationUnavailableReason",
     "LearnerGoalSignalV1",
     "LearnerHistoryEventV1",
     "LearnerHistorySnapshotV1",
@@ -40,6 +51,11 @@ __all__ = [
     "LearningGuidanceContractError",
     "LearningGuidanceRuntime",
     "RecommendationMode",
+    "RecommendationCandidateSnapshotV1",
+    "RecommendationFinalCandidateV1",
+    "RecommendationFinalContractError",
+    "RecommendationFinalItemV1",
+    "RecommendationFinalV1",
     "RecommendationResourceContextV1",
     "RecommendationScoreFactorsV1",
     "RecommendationScoreWeightsV1",
@@ -48,4 +64,6 @@ __all__ = [
     "ResourceRecommendationEngineResultV1",
     "ResourceRecommendationItemV1",
     "ResourceRecommendationOutputV1",
+    "build_recommendation_final_v1",
+    "validate_recommendation_final_v1",
 ]
