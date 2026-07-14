@@ -212,7 +212,7 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "--reranker-retry-multiplier",
         "2.0",
         "--reranker-batch-size",
-        "20",
+        "40",
         "--reranker-protocol",
         "ranked_index_scores_v1",
         "--reranker-score-min",

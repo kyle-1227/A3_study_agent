@@ -165,7 +165,7 @@ def _index_payload() -> dict[str, object]:
             "api_key_env": "GOLD_TEST_RERANKER_KEY",
             "timeout_seconds": 1.0,
             "retry": _retry_payload(),
-            "batch_size": 2,
+            "batch_size": 4,
             "protocol": "ranked_index_scores_v1",
             "score_min": 0.0,
             "score_max": 1.0,

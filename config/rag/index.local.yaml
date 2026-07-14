@@ -124,7 +124,7 @@ embedding:
 reranker:
   api_key_env: RAG_RERANKER_API_KEY
   base_url: https://openrouter.ai/api/v1
-  batch_size: 40
+  batch_size: 80
   endpoint_path: /rerank
   model: nvidia/llama-nemotron-rerank-vl-1b-v2:free
   protocol: openrouter_ranked_index_scores_v1

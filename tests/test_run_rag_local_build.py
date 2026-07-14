@@ -239,6 +239,26 @@ def test_llm_configuration_has_no_environment_or_provider_default(
     assert local_build._llm_probe_config(context) is None
 
 
+def test_grounded_answer_prompt_requires_nonempty_insufficiency_explanation() -> None:
+    prompt = local_build._grounded_answer_prompt(
+        question="Why is evidence required?",
+        context_text="",
+    )
+
+    assert "answer must always be a non-empty string" in prompt
+    assert "use answer to state briefly" in prompt
+    assert "leave citations empty" in prompt
+    assert "[no retrieved evidence]" in prompt
+
+
+def test_grounded_answer_prompt_rejects_unstripped_question() -> None:
+    with pytest.raises(local_build.LocalBuildError, match="QuestionInvalid"):
+        local_build._grounded_answer_prompt(
+            question=" question ",
+            context_text="context",
+        )
+
+
 def test_dependency_preflight_fails_without_selecting_an_alternative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

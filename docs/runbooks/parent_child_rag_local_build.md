@@ -117,6 +117,10 @@ python scripts/init_rag_index_config.py --help
 - 每一个 `--chunk-policy NAME=PATH` 以及每一个 `--subject-policy SUBJECT=NAME`；SubjectCatalog 发现的学科和映射必须精确一致；
 - 所有 retrieval、context、multi-subject 参数。
 
+严格配置还要求 `reranker.batch_size >= vector_top_k + bm25_top_k`。Flat
+Baseline 会按既有语义一次 rerank 两路去重后的完整候选集；不得通过截断候选、
+拆分后拼接不可比分数或运行时缩小 batch 来绕过该约束。
+
 示意（省略其余**必填**参数）：
 
 ```powershell

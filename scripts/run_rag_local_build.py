@@ -2062,6 +2062,27 @@ def _validate_grounded_citations(
     return citations
 
 
+def _grounded_answer_prompt(*, question: str, context_text: str) -> str:
+    """Build the exact answer contract without weakening strict validation."""
+
+    if not question or question != question.strip():
+        raise LocalBuildError("GroundedSmokeQuestionInvalid")
+    if not isinstance(context_text, str):
+        raise LocalBuildError("GroundedSmokeContextInvalid")
+    return (
+        "Return only strict JSON with exactly these keys: answer, citations, "
+        "evidence_insufficient. answer must always be a non-empty string. citations "
+        "must be a JSON array of objects with source_relpath, page_start, page_end. "
+        "Answer only from Context. If the Context is insufficient, set "
+        "evidence_insufficient=true, leave citations empty, and use answer to state "
+        "briefly that the retrieved evidence is insufficient; do not use memory."
+        "\n\nQuestion:\n"
+        + question
+        + "\n\nContext:\n"
+        + (context_text if context_text else "[no retrieved evidence]")
+    )
+
+
 def _private_smoke_path(context: BuildContext) -> Path | None:
     requested = context.inputs.private_smoke_output
     if requested is None:
@@ -2137,15 +2158,9 @@ def _run_grounded_smoke(
             if candidate is None:
                 raise LocalBuildError("GroundedSmokeRetrievalResultMissing")
             coordinates, context_text = _context_for_grounded_smoke(candidate)
-            prompt = (
-                "Return only strict JSON with exactly these keys: answer, citations, "
-                "evidence_insufficient. citations must be a JSON array of objects with "
-                "source_relpath, page_start, page_end. Answer only from Context. If the "
-                "Context is insufficient, set evidence_insufficient=true and do not use "
-                "memory.\n\nQuestion:\n"
-                + query.query
-                + "\n\nContext:\n"
-                + (context_text if context_text else "[no retrieved evidence]")
+            prompt = _grounded_answer_prompt(
+                question=query.query,
+                context_text=context_text,
             )
             started = perf_counter_ns()
             completion = client.complete(

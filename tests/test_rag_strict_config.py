@@ -177,7 +177,7 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "api_key_env": "RERANKER_KEY_ENV",
             "timeout_seconds": 20.0,
             "retry": _retry_payload(),
-            "batch_size": 40,
+            "batch_size": 80,
             "protocol": "ranked_index_scores_v1",
             "score_min": 0.0,
             "score_max": 1.0,
@@ -225,6 +225,21 @@ def test_embedding_config_requires_bounded_explicit_concurrency(
     embedding["max_in_flight_batches"] = max_in_flight_batches
 
     with pytest.raises(ValidationError, match="max_in_flight_batches"):
+        RagIndexConfig.model_validate(payload)
+
+
+def test_reranker_batch_must_cover_all_flat_baseline_candidates(
+    tmp_path: Path,
+) -> None:
+    payload = _index_payload(tmp_path)
+    reranker = payload["reranker"]
+    assert isinstance(reranker, dict)
+    reranker["batch_size"] = 79
+
+    with pytest.raises(
+        ValidationError,
+        match=r"batch_size must cover vector_top_k \+ bm25_top_k",
+    ):
         RagIndexConfig.model_validate(payload)
 
 

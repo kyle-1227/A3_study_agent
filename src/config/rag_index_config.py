@@ -541,6 +541,14 @@ class RagIndexConfig(StrictRagConfigModel):
             )
         if self.retrieval.reranker_top_n > self.reranker.batch_size:
             raise ValueError("reranker_top_n must not exceed reranker.batch_size")
+        maximum_flat_candidates = (
+            self.retrieval.vector_top_k + self.retrieval.bm25_top_k
+        )
+        if maximum_flat_candidates > self.reranker.batch_size:
+            raise ValueError(
+                "reranker.batch_size must cover vector_top_k + bm25_top_k "
+                "for strict Flat Baseline retrieval"
+            )
         minimum_coverage_parents = (
             len(self.subject_policy_map) * self.retrieval.subject_coverage_quota
         )
