@@ -45,7 +45,13 @@ def test_checked_in_learning_guidance_policy_is_strict_and_complete() -> None:
     )
 
     assert config.schema_version == "learning_guidance_config_v1"
-    assert config.adapter_version == "learning_guidance_adapters_v1"
+    assert config.profile_adapter_version == "learning_guidance_profile_adapter_v1"
+    assert config.history_adapter_version == "learning_guidance_history_adapter_v1"
+    assert config.path_engine_version == "learning_guidance_path_engine_v1"
+    assert (
+        config.recommendation_engine_version
+        == "learning_guidance_recommendation_engine_v1"
+    )
     assert config.knowledge_graph_path == Path("data/knowledge_graph.yaml")
     assert (
         tuple(
@@ -146,3 +152,24 @@ def test_learning_guidance_policy_fingerprint_is_stable_and_sensitive() -> None:
 
     assert first.policy_fingerprint == second.policy_fingerprint
     assert first.policy_fingerprint != changed.policy_fingerprint
+
+
+def test_policy_fingerprint_excludes_deployment_path_identity() -> None:
+    first_payload = _payload()
+    second_payload = deepcopy(first_payload)
+    second_payload["knowledge_graph_path"] = "readonly/other-mount/graph.yaml"
+
+    first = LearningGuidanceConfigV1.model_validate(first_payload)
+    second = LearningGuidanceConfigV1.model_validate(second_payload)
+
+    assert first.policy_fingerprint == second.policy_fingerprint
+
+
+def test_history_limit_cannot_exceed_snapshot_contract(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["history_limit"] = 501
+
+    with pytest.raises(RagConfigValidationError) as error:
+        load_learning_guidance_config(_write_yaml(tmp_path / "history.yaml", payload))
+
+    assert ("history_limit", "less_than_equal") in error.value.validation_errors

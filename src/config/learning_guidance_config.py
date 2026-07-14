@@ -28,6 +28,7 @@ PreferenceDimension: TypeAlias = Literal[
 ]
 UnitFloat = Annotated[float, Field(ge=0.0, le=1.0)]
 PositiveInt = Annotated[int, Field(gt=0)]
+HistoryLimit = Annotated[int, Field(gt=0, le=500)]
 
 
 def _freeze_sequence(value: object) -> object:
@@ -103,11 +104,14 @@ class ResourceRecommendationPolicyV1(StrictRagConfigModel):
 
 class LearningGuidanceConfigV1(StrictRagConfigModel):
     schema_version: Literal["learning_guidance_config_v1"]
-    adapter_version: Literal["learning_guidance_adapters_v1"]
+    profile_adapter_version: Literal["learning_guidance_profile_adapter_v1"]
+    history_adapter_version: Literal["learning_guidance_history_adapter_v1"]
+    path_engine_version: Literal["learning_guidance_path_engine_v1"]
+    recommendation_engine_version: Literal["learning_guidance_recommendation_engine_v1"]
     knowledge_graph_path: ConfigPath
     provider_projection_max_steps: PositiveInt
     provider_projection_max_chars: PositiveInt
-    history_limit: PositiveInt
+    history_limit: HistoryLimit
     path_policy: LearnerPathPolicyV1
     recommendation_policy: ResourceRecommendationPolicyV1
 
@@ -121,8 +125,10 @@ class LearningGuidanceConfigV1(StrictRagConfigModel):
 
     @property
     def policy_fingerprint(self) -> str:
+        payload = self.model_dump(mode="json")
+        del payload["knowledge_graph_path"]
         payload = json.dumps(
-            self.model_dump(mode="json"),
+            payload,
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
