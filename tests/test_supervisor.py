@@ -10,14 +10,46 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph.supervisor import (
+    SupervisorConfigurationError,
     SupervisorOutput,
     _VALID_INTENTS,
+    _load_valid_intents_config,
+    _validate_valid_intents_config,
     handle_unknown,
     route_after_supervisor,
     route_by_intent,
     supervisor_node,
     validate_supervisor_output,
 )
+
+
+class TestSupervisorIntentConfiguration:
+    def test_accepts_exact_schema_intents(self):
+        configured = ["emotional", "unknown", "academic"]
+
+        assert _validate_valid_intents_config(configured) == frozenset(configured)
+
+    @pytest.mark.parametrize(
+        "configured",
+        [
+            None,
+            "academic",
+            [],
+            ["academic", "emotional"],
+            ["academic", "emotional", "unknown", "planning"],
+            ["academic", "emotional", "unknown", "unknown"],
+            ["academic", "emotional", " unknown"],
+            ["academic", "emotional", 3],
+        ],
+    )
+    def test_rejects_missing_drifted_or_repaired_values(self, configured):
+        with pytest.raises(SupervisorConfigurationError):
+            _validate_valid_intents_config(configured)
+
+    def test_loader_does_not_supply_a_default(self):
+        with patch("src.graph.supervisor.get_setting", return_value=None):
+            with pytest.raises(SupervisorConfigurationError):
+                _load_valid_intents_config()
 
 
 def _result(

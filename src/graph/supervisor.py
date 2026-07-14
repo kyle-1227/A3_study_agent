@@ -53,7 +53,7 @@ class SupervisorOutput(BaseModel):
     requested_resource_types: list[str] = Field(default_factory=list)
 
 
-_VALID_INTENTS: set[str] = set()
+_SUPERVISOR_SCHEMA_INTENTS = frozenset({"academic", "emotional", "unknown"})
 
 _VALID_RESOURCE_TYPES = set(SUPPORTED_RESOURCE_TYPES)
 
@@ -110,38 +110,46 @@ def normalize_requested_resource_types(*values: Any) -> list[str]:
     return normalized
 
 
-def _sanitize_valid_intents() -> set[str]:
-    """Sanitize supervisor.valid_intents config — planning is no longer legal."""
-    configured = get_setting(
-        "supervisor.valid_intents",
-        ["academic", "emotional", "unknown"],
-    )
-    if not isinstance(configured, list):
-        configured = ["academic", "emotional", "unknown"]
-    removed = [i for i in configured if i == "planning"]
-    sanitized = [i for i in configured if i != "planning"]
-    if removed:
-        logger.warning(
-            "supervisor.valid_intents contains 'planning' — sanitized. "
-            "Removed intents: %s. Effective intents: %s",
-            removed,
-            sanitized,
-        )
-        emit_a3_trace(
-            logger,
-            "supervisor_config_sanitize",
-            {
-                "configured": configured,
-                "removed_intents": removed,
-                "effective_intents": sanitized,
-            },
-            state={},
-            env_flag="LOG_A3_TRACE",
-        )
-    return set(sanitized)
+class SupervisorConfigurationError(RuntimeError):
+    """Raised when supervisor routing configuration disagrees with its schema."""
 
 
-_VALID_INTENTS = _sanitize_valid_intents()
+def _validate_valid_intents_config(configured: object) -> frozenset[str]:
+    """Require one exact, duplicate-free list matching ``SupervisorOutput``."""
+
+    if not isinstance(configured, list) or not configured:
+        raise SupervisorConfigurationError(
+            "supervisor.valid_intents must be a non-empty list"
+        )
+    if any(not isinstance(item, str) or not item.strip() for item in configured):
+        raise SupervisorConfigurationError(
+            "supervisor.valid_intents entries must be non-empty strings"
+        )
+    if any(item != item.strip() for item in configured):
+        raise SupervisorConfigurationError(
+            "supervisor.valid_intents entries must use canonical whitespace"
+        )
+    if len(configured) != len(set(configured)):
+        raise SupervisorConfigurationError(
+            "supervisor.valid_intents entries must be unique"
+        )
+
+    configured_intents = frozenset(configured)
+    if configured_intents != _SUPERVISOR_SCHEMA_INTENTS:
+        missing = sorted(_SUPERVISOR_SCHEMA_INTENTS - configured_intents)
+        unsupported = sorted(configured_intents - _SUPERVISOR_SCHEMA_INTENTS)
+        raise SupervisorConfigurationError(
+            "supervisor.valid_intents must exactly match SupervisorOutput; "
+            f"missing={missing}; unsupported={unsupported}"
+        )
+    return configured_intents
+
+
+def _load_valid_intents_config() -> frozenset[str]:
+    return _validate_valid_intents_config(get_setting("supervisor.valid_intents", None))
+
+
+_VALID_INTENTS = _load_valid_intents_config()
 
 
 def validate_supervisor_output(parsed: BaseModel) -> str:
