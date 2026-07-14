@@ -6,6 +6,7 @@ import asyncio
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import wraps
 import hashlib
 import json
 import logging
@@ -156,6 +157,127 @@ def _required_state_count(state: LearningState, field_name: str) -> int:
             reason=f"{field_name} must be an explicit non-negative integer",
         )
     return value
+
+
+EvidenceFailureSource = Literal[
+    "orchestration",
+    "local",
+    "web",
+    "judge",
+    "assignment",
+]
+
+
+def _failure_budget(
+    state: LearningState,
+    runtime: "EvidenceOrchestrationRuntime",
+) -> tuple[int, int, int]:
+    round_index = _required_state_count(state, "evidence_current_round")
+    raw_tasks = state.get("evidence_all_tasks")
+    if not isinstance(raw_tasks, list):
+        raise EvidenceOrchestrationRuntimeError(
+            code="invalid_failure_task_inventory",
+            reason="failure progress requires an explicit evidence_all_tasks list",
+        )
+    used_tasks = len(raw_tasks)
+    remaining_tasks = runtime.policy.max_total_search_tasks - used_tasks
+    if remaining_tasks < 0:
+        raise EvidenceBudgetExceededError(
+            code="failure_task_budget_exceeded",
+            reason="failure progress task inventory exceeds the configured budget",
+        )
+    return round_index, used_tasks, remaining_tasks
+
+
+def _emit_node_failure(
+    *,
+    state: LearningState,
+    source: EvidenceFailureSource,
+    reason_code: str,
+    error: Exception,
+    round_index: int,
+    used_tasks: int,
+    remaining_tasks: int,
+) -> None:
+    emit_evidence_trace(
+        logger,
+        {
+            "schema_version": EVIDENCE_TRACE_SCHEMA_VERSION,
+            "stage": "evidence_orchestration.failed",
+            "status": "failed",
+            "round_index": round_index,
+            "source": source,
+            "error_type": type(error).__name__,
+            "reason_code": reason_code,
+            "budget_used_tasks": used_tasks,
+            "budget_remaining_tasks": remaining_tasks,
+        },
+        state=state,
+    )
+
+
+def _with_sync_failure_boundary(
+    node: Callable[[LearningState], dict],
+    *,
+    runtime: "EvidenceOrchestrationRuntime",
+    source: EvidenceFailureSource,
+    reason_code: str,
+) -> Callable[[LearningState], dict]:
+    @wraps(node)
+    def guarded(state: LearningState) -> dict:
+        try:
+            return node(state)
+        except Exception as exc:
+            try:
+                round_index, used_tasks, remaining_tasks = _failure_budget(
+                    state, runtime
+                )
+            except (EvidenceOrchestrationRuntimeError, EvidenceBudgetExceededError):
+                raise exc
+            _emit_node_failure(
+                state=state,
+                source=source,
+                reason_code=reason_code,
+                error=exc,
+                round_index=round_index,
+                used_tasks=used_tasks,
+                remaining_tasks=remaining_tasks,
+            )
+            raise
+
+    return guarded
+
+
+def _with_async_failure_boundary(
+    node: Callable[[LearningState], Awaitable[dict]],
+    *,
+    runtime: "EvidenceOrchestrationRuntime",
+    source: EvidenceFailureSource,
+    reason_code: str,
+) -> Callable[[LearningState], Awaitable[dict]]:
+    @wraps(node)
+    async def guarded(state: LearningState) -> dict:
+        try:
+            return await node(state)
+        except Exception as exc:
+            try:
+                round_index, used_tasks, remaining_tasks = _failure_budget(
+                    state, runtime
+                )
+            except (EvidenceOrchestrationRuntimeError, EvidenceBudgetExceededError):
+                raise exc
+            _emit_node_failure(
+                state=state,
+                source=source,
+                reason_code=reason_code,
+                error=exc,
+                round_index=round_index,
+                used_tasks=used_tasks,
+                remaining_tasks=remaining_tasks,
+            )
+            raise
+
+    return guarded
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,7 +876,12 @@ def make_retrieval_round_router_node(
         )
         return {"evidence_orchestration_status": "retrieving"}
 
-    return retrieval_round_router
+    return _with_sync_failure_boundary(
+        retrieval_round_router,
+        runtime=runtime,
+        source="orchestration",
+        reason_code="retrieval_round_router_failed",
+    )
 
 
 def _query_batch_fingerprint(tasks: Sequence[RetrievalTask]) -> str:
@@ -1012,7 +1139,12 @@ def make_local_rag_search_batch_node(
             }
         }
 
-    return local_rag_search_batch
+    return _with_async_failure_boundary(
+        local_rag_search_batch,
+        runtime=runtime,
+        source="local",
+        reason_code="local_retrieval_node_failed",
+    )
 
 
 def make_web_research_search_batch_node(
@@ -1134,7 +1266,12 @@ def make_web_research_search_batch_node(
             }
         }
 
-    return web_research_search_batch
+    return _with_async_failure_boundary(
+        web_research_search_batch,
+        runtime=runtime,
+        source="web",
+        reason_code="web_retrieval_node_failed",
+    )
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -1296,7 +1433,12 @@ def make_retrieval_round_merge_node(
             "evidence_orchestration_status": "judging",
         }
 
-    return retrieval_round_merge
+    return _with_sync_failure_boundary(
+        retrieval_round_merge,
+        runtime=runtime,
+        source="orchestration",
+        reason_code="retrieval_round_merge_failed",
+    )
 
 
 def _ledger_entry(
@@ -1518,51 +1660,31 @@ def make_requirement_evidence_judge_node(
                 ),
             },
         )
-        try:
-            structured = await invoke_structured_llm(
-                node_name="requirement_evidence_judge",
-                llm_node="evidence_judge",
-                schema=RequirementCoverageBatch,
-                messages=[
-                    SystemMessage(
-                        content=(
-                            "Judge every supplied requirement exactly once. "
-                            "Never declare resource readiness or invent evidence ids."
-                        )
-                    ),
-                    HumanMessage(content=prompt),
-                ],
-                output_mode=get_llm_output_mode("requirement_evidence_judge"),
-                business_validator=lambda parsed: _coverage_business_validation(
-                    parsed,
-                    round_index=round_index,
-                    requirements=requirements,
-                    provisional_entries=provisional_entries,
-                    attempted_tasks=attempted_tasks,
-                    outcomes=outcomes,
+        structured = await invoke_structured_llm(
+            node_name="requirement_evidence_judge",
+            llm_node="evidence_judge",
+            schema=RequirementCoverageBatch,
+            messages=[
+                SystemMessage(
+                    content=(
+                        "Judge every supplied requirement exactly once. "
+                        "Never declare resource readiness or invent evidence ids."
+                    )
                 ),
-                state=state,
-                max_raw_chars=get_max_raw_chars("requirement_evidence_judge"),
-            )
-        except Exception as exc:
-            emit_evidence_trace(
-                logger,
-                {
-                    "schema_version": EVIDENCE_TRACE_SCHEMA_VERSION,
-                    "stage": "evidence_orchestration.failed",
-                    "status": "failed",
-                    "round_index": round_index,
-                    "source": "judge",
-                    "error_type": type(exc).__name__,
-                    "reason_code": "coverage_judge_failed",
-                    "budget_used_tasks": len(attempted_tasks),
-                    "budget_remaining_tasks": (
-                        runtime.policy.max_total_search_tasks - len(attempted_tasks)
-                    ),
-                },
-                state=state,
-            )
-            raise
+                HumanMessage(content=prompt),
+            ],
+            output_mode=get_llm_output_mode("requirement_evidence_judge"),
+            business_validator=lambda parsed: _coverage_business_validation(
+                parsed,
+                round_index=round_index,
+                requirements=requirements,
+                provisional_entries=provisional_entries,
+                attempted_tasks=attempted_tasks,
+                outcomes=outcomes,
+            ),
+            state=state,
+            max_raw_chars=get_max_raw_chars("requirement_evidence_judge"),
+        )
         parsed = structured.parsed
         if not isinstance(parsed, RequirementCoverageBatch):
             raise TypeError("judge result is not RequirementCoverageBatch")
@@ -1732,7 +1854,12 @@ def make_requirement_evidence_judge_node(
             ),
         }
 
-    return requirement_evidence_judge
+    return _with_async_failure_boundary(
+        requirement_evidence_judge,
+        runtime=runtime,
+        source="judge",
+        reason_code="coverage_judge_failed",
+    )
 
 
 def route_after_requirement_evidence_judge(state: LearningState) -> str:
@@ -1947,7 +2074,12 @@ def make_evidence_repair_planner_node(
             "evidence_orchestration_status": "repair_planned",
         }
 
-    return evidence_repair_planner
+    return _with_sync_failure_boundary(
+        evidence_repair_planner,
+        runtime=runtime,
+        source="orchestration",
+        reason_code="evidence_repair_planner_failed",
+    )
 
 
 def _accepted_ids(ledger: Sequence[EvidenceLedgerEntry]) -> set[str]:
@@ -2187,7 +2319,12 @@ def make_terminal_parent_hydration_node(
             },
         }
 
-    return parent_child_parent_hydration
+    return _with_async_failure_boundary(
+        parent_child_parent_hydration,
+        runtime=runtime,
+        source="assignment",
+        reason_code="terminal_parent_hydration_failed",
+    )
 
 
 def make_resource_evidence_assignment_node(
@@ -2345,7 +2482,12 @@ def make_resource_evidence_assignment_node(
             "evidence_orchestration_status": "complete",
         }
 
-    return resource_evidence_assignment
+    return _with_sync_failure_boundary(
+        resource_evidence_assignment,
+        runtime=runtime,
+        source="assignment",
+        reason_code="resource_evidence_assignment_failed",
+    )
 
 
 __all__ = [

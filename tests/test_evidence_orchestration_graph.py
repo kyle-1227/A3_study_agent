@@ -41,6 +41,7 @@ from src.graph.resource_generation import (
 from src.graph.web_research import WebResearchTask
 from src.graph.state import LearningState, initial_request_reset_transient_state
 from src.learning_guidance.runtime import LearningGuidanceRuntime
+from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 from src.observability.node_registry import get_node_runtime_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -820,6 +821,134 @@ def test_direct_web_execution_distinguishes_empty_from_provider_failure(
                 max_concurrent_tasks=2,
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("factory", "reason_code", "source"),
+    [
+        (
+            orchestration.make_retrieval_round_merge_node,
+            "retrieval_round_merge_failed",
+            "orchestration",
+        ),
+        (
+            orchestration.make_evidence_repair_planner_node,
+            "evidence_repair_planner_failed",
+            "orchestration",
+        ),
+        (
+            orchestration.make_resource_evidence_assignment_node,
+            "resource_evidence_assignment_failed",
+            "assignment",
+        ),
+    ],
+)
+def test_sync_orchestration_boundaries_emit_one_overall_failure(
+    factory,
+    reason_code: str,
+    source: str,
+):
+    runtime = _runtime()
+    state = {
+        "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
+        "evidence_current_round": 0,
+        "evidence_all_tasks": [],
+    }
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        with pytest.raises(Exception):
+            factory(runtime)(state)
+    finally:
+        reset_trace_event_sink(token)
+
+    failures = [
+        event for event in sink if event.get("stage") == "evidence_orchestration.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason_code"] == reason_code
+    assert failures[0]["source"] == source
+
+
+def test_local_source_failure_is_followed_by_one_overall_failure(monkeypatch):
+    runtime = _runtime()
+    batch = _quiz_draft_batch(runtime)
+
+    async def fake_planner(**_kwargs):
+        return SimpleNamespace(parsed=batch)
+
+    async def failed_parent_rag(_state):
+        raise RuntimeError("fixture local retrieval failure")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+    monkeypatch.setattr(
+        orchestration,
+        "make_parent_child_rag_node",
+        lambda _runtime: failed_parent_rag,
+    )
+    base_state = _planner_state()
+    planned = asyncio.run(
+        orchestration.make_resource_evidence_planner_node(runtime)(base_state)
+    )
+    state = {**base_state, **planned}
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        with pytest.raises(RuntimeError, match="fixture local retrieval failure"):
+            asyncio.run(orchestration.make_local_rag_search_batch_node(runtime)(state))
+    finally:
+        reset_trace_event_sink(token)
+
+    stages = [
+        event.get("stage")
+        for event in sink
+        if str(event.get("stage") or "").startswith("evidence_orchestration.")
+    ]
+    assert stages == [
+        "evidence_orchestration.source.failed",
+        "evidence_orchestration.failed",
+    ]
+    failures = [
+        event for event in sink if event.get("stage") == "evidence_orchestration.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["source"] == "local"
+
+
+def test_judge_failure_emits_one_overall_failure(monkeypatch):
+    runtime = _runtime()
+    batch = _quiz_draft_batch(runtime)
+
+    async def fake_planner(**_kwargs):
+        return SimpleNamespace(parsed=batch)
+
+    async def failed_judge(**_kwargs):
+        raise RuntimeError("fixture judge failure")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+    base_state = _planner_state()
+    planned = asyncio.run(
+        orchestration.make_resource_evidence_planner_node(runtime)(base_state)
+    )
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", failed_judge)
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        with pytest.raises(RuntimeError, match="fixture judge failure"):
+            asyncio.run(
+                orchestration.make_requirement_evidence_judge_node(runtime)(
+                    {**base_state, **planned}
+                )
+            )
+    finally:
+        reset_trace_event_sink(token)
+
+    failures = [
+        event for event in sink if event.get("stage") == "evidence_orchestration.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["source"] == "judge"
+    assert failures[0]["reason_code"] == "coverage_judge_failed"
 
 
 def test_terminal_hydration_is_one_shot_even_when_no_parent_is_selected(
