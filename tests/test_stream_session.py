@@ -60,6 +60,16 @@ async def _broken_source():
     raise RuntimeError("private provider failure detail")
 
 
+async def _assessment_source():
+    yield AgentStreamEventDraftV2(
+        type="assessment_final",
+        data={
+            "schema_version": "assessment_final_v1",
+            "payload_hash": f"assessment-final:v1:{'a' * 64}",
+        },
+    )
+
+
 async def _blocking_source(release: asyncio.Event):
     await release.wait()
     async for frame in _source():
@@ -118,6 +128,30 @@ async def test_second_subscriber_replays_from_last_event_id() -> None:
 
     assert [_sequence(frame) for frame in first] == list(range(1, len(first) + 1))
     assert [_sequence(frame) for frame in replay] == list(range(4, len(first) + 1))
+
+
+@pytest.mark.anyio
+async def test_assessment_final_is_replayable_with_one_authoritative_terminal() -> None:
+    manager = StreamSessionManager(_config())
+    session = await _create(
+        manager,
+        stream_id="stream-assessment-1",
+        operation="assessment_attempt",
+        source=_assessment_source(),
+    )
+    first = [frame async for frame in session.subscribe(after_sequence=0)]
+    replay = [frame async for frame in session.subscribe(after_sequence=1)]
+
+    assert [payload["type"] for payload in map(_payload, first)] == [
+        "stream_start",
+        "assessment_final",
+        "stream_done",
+    ]
+    assert [payload["type"] for payload in map(_payload, replay)] == [
+        "assessment_final",
+        "stream_done",
+    ]
+    assert _payload(first[-1])["data"]["terminal_type"] == "assessment_final"
 
 
 @pytest.mark.anyio

@@ -9,6 +9,7 @@ from langchain_core.messages import BaseMessage, ToolMessage, message_to_dict
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from src.assessment.attempt_journal import assessment_attempt_journal_reducer
 from src.assessment.checkpoint import assessment_checkpoint_resources_reducer
 from src.context_engineering.workspace import (
     TASK_WORKSPACE_CLEAR as _TASK_WORKSPACE_CLEAR,
@@ -727,6 +728,9 @@ class LearningState(TypedDict):
     assessment_checkpoint_resources: Annotated[
         dict, assessment_checkpoint_resources_reducer
     ]  # Durable server-only quiz cards and private answer keys for this thread
+    assessment_attempt_journal: Annotated[
+        dict, assessment_attempt_journal_reducer
+    ]  # Durable idempotency records containing hashes and public finals only
     last_qa_response: Annotated[
         dict, latest_dict_reducer
     ]  # Last bounded renderable qa_final payload

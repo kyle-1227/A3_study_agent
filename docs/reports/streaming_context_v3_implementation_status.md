@@ -344,3 +344,28 @@ checkpoint 已迁移；未知旧 pending node 继续由迁移门阻断。生产 
 真实四变体、provider E2E 与零旧 checkpoint 门仍未满足。全仓 Ruff 仍为 60 项既有 lint
 debt 和 65 个既有待格式化文件；Semgrep、import-linter、Gitleaks、Bandit、Vulture 均缺失，
 未运行且未记为通过。
+
+## 2026-07-14 Assessment terminal 与 durable journal 底座
+
+`assessment_final` 已加入 `agent_stream_v2` event/draft/authoritative-terminal 合约，完整支持
+sequencer 单终态、容量预留、session completion、Last-Event-ID journal replay 与
+`stream_done(terminal_type=assessment_final)`。QA、Resource、interrupt、stopped 和 error 的
+既有终态不变。
+
+新增 `AssessmentAttemptJournalV1` / `AssessmentAttemptRecordV1`：thread/request/hash/final/time
+全部严格验证，extra 禁止，JSON restore 不做 key 修复。LangGraph durable state 只记录请求
+内容 hash、公开 `AssessmentFinalV1` 和 UTC commit time；不记录 submitted answer、原题 answer
+key、accepted answers、canonical answer、answer explanation、provider body 或异常正文。
+
+`AssessmentCheckpointIdempotencyExecutor` 通过注入的 load/append callbacks 与存储解耦，按
+`(thread_id, request_id)` 本地串行化：相同 hash 重放同一 final，不同 hash 抛显式 conflict，
+operation 失败不写记录，每次 append 后必须复读并精确验证 durable record。锁使用引用计数，
+最后一个调用结束后删除，避免请求数导致进程内常驻增长。
+
+聚焦 journal/service/private-card/state/stream 回归 `97 passed`；compileall、10 个触及文件
+Ruff check/format、6 个源文件 scoped mypy、8 项 security tests 与 diff check 通过。全量后端
+`2288 passed, 6 skipped, 9 warnings`，前端 23 个 Vitest 文件/69 项测试、typecheck、完整
+ESLint 与 production build 通过。本节仅是 endpoint 前置底座：FastAPI route、真实
+structured classifier/generator、checkpoint callback adapter 和 PostgreSQL 多进程原子性/E2E
+尚未完成，不能据此删除旧 assessment 节点。全仓 Ruff 仍有 60 项既有 lint debt 和 65 个
+既有待格式化文件；Semgrep、import-linter、Gitleaks、Bandit、Vulture 仍缺失，未记为通过。

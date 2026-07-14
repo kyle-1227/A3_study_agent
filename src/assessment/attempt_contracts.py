@@ -21,6 +21,10 @@ _QUESTION_ID_PATTERN = r"^question:v1:[0-9a-f]{64}$"
 _ATTEMPT_HASH_PATTERN = r"^assessment-attempt:v1:[0-9a-f]{64}$"
 _FINAL_HASH_PATTERN = r"^assessment-final:v1:[0-9a-f]{64}$"
 
+ASSESSMENT_REQUEST_ID_PATTERN = _REQUEST_ID_PATTERN
+ASSESSMENT_THREAD_ID_PATTERN = _THREAD_ID_PATTERN
+ASSESSMENT_ATTEMPT_HASH_PATTERN = _ATTEMPT_HASH_PATTERN
+
 
 class AssessmentAttemptV1(BaseModel):
     """Strict request body for one exercise-card answer submission."""
@@ -443,7 +447,10 @@ def _stable_hash(prefix: str, payload: object) -> str:
 
 __all__ = [
     "ASSESSMENT_ATTEMPT_SCHEMA_VERSION",
+    "ASSESSMENT_ATTEMPT_HASH_PATTERN",
     "ASSESSMENT_FINAL_SCHEMA_VERSION",
+    "ASSESSMENT_REQUEST_ID_PATTERN",
+    "ASSESSMENT_THREAD_ID_PATTERN",
     "AdaptivePracticeBatchV1",
     "AdaptivePracticeInputV1",
     "AdaptivePracticeTaskV1",

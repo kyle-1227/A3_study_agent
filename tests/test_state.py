@@ -157,6 +157,7 @@ class TestTaskWorkspaceReducers:
         assert "activity_timeline" not in reset
         assert "last_qa_response" not in reset
         assert "assessment_checkpoint_resources" not in reset
+        assert "assessment_attempt_journal" not in reset
         assert reset["exercise_resource_v3"] == {}
         assert reset["response_mode"] == ""
         assert reset["qa_scope"] == ""

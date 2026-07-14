@@ -155,6 +155,33 @@ def test_journal_replays_the_same_resource_final_v3_identity() -> None:
     assert replayed[0].data["resource_final_id"] == resource_final_id
 
 
+def test_journal_replays_assessment_final_as_the_only_terminal() -> None:
+    sequencer = _sequencer()
+    journal = StreamJournal(
+        stream_id="stream-1",
+        max_events=8,
+        max_bytes=10000,
+        ttl_seconds=60,
+    )
+    start = sequencer.emit("stream_start")
+    terminal = sequencer.emit(
+        "assessment_final",
+        {
+            "schema_version": "assessment_final_v1",
+            "payload_hash": f"assessment-final:v1:{'a' * 64}",
+        },
+    )
+    done = sequencer.emit("stream_done")
+    for event in (start, terminal, done):
+        journal.append(event)
+
+    replayed = journal.after(start.sequence)
+    assert [event.type for event in replayed] == ["assessment_final", "stream_done"]
+    assert sequencer.terminal == "assessment_final"
+    with pytest.raises(StreamContractError, match="after stream_done"):
+        sequencer.emit("qa_final", {"payload_hash": "late"})
+
+
 def test_journal_expiry_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     journal = StreamJournal(
         stream_id="stream-1",

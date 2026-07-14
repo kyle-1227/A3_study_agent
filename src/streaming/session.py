@@ -20,7 +20,14 @@ from src.streaming.sse import encode_sse_event
 
 
 _AUTHORITATIVE_TERMINALS = frozenset(
-    {"qa_final", "resource_final", "interrupt", "stopped", "stream_error"}
+    {
+        "qa_final",
+        "resource_final",
+        "assessment_final",
+        "interrupt",
+        "stopped",
+        "stream_error",
+    }
 )
 
 

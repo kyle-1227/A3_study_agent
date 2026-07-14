@@ -159,3 +159,19 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
   override, or validation bypass was introduced. `_sanitize_valid_intents`
   remains an independently active import-time configuration concern and was
   intentionally not changed in this cleanup.
+
+### 2026-07-14 Assessment journal foundation
+
+- The assessment idempotency journal stores only a stable request hash and the
+  strict public terminal. It does not retain request content or private answer
+  keys as a replay fallback.
+- Invalid restored state, thread/request/final identity drift, journal
+  conflicts, capacity exhaustion, callback failure, or an append that is not
+  visible on reread all fail closed. No process-local success object is returned
+  as a substitute for missing durable state.
+- Operation failures are not cached. Retrying re-executes the same explicit
+  operation; it does not return a deterministic assessment, neutral score, or
+  fabricated adaptive practice task.
+- This foundation does not call the legacy placeholder practice generator and
+  does not claim the missing FastAPI/provider/PostgreSQL integration is
+  complete.

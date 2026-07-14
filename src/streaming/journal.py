@@ -11,7 +11,14 @@ from src.streaming.contracts import AgentStreamEventV2, StreamContractError
 
 
 _AUTHORITATIVE_TERMINALS = frozenset(
-    {"qa_final", "resource_final", "interrupt", "stopped", "stream_error"}
+    {
+        "qa_final",
+        "resource_final",
+        "assessment_final",
+        "interrupt",
+        "stopped",
+        "stream_error",
+    }
 )
 _RESERVED_TERMINAL_EVENT_BYTES = 4096
 
