@@ -182,6 +182,7 @@ class TestBuildGraph:
 
     def test_search_query_rewriter_is_shared_after_supervisor(self):
         graph = build_graph()
+        assert ("episodic_memory_retriever", "memory_use_decider") in graph.edges
         assert ("memory_use_decider", "search_query_rewriter") in graph.edges
         assert "memory_use_decider" in graph.nodes
         assert "search_query_rewriter" in graph.branches

@@ -154,6 +154,9 @@ def record_llm_input_influences(
             "provider_bound_messages_mutated": bool(
                 manifest.get("provider_bound_messages_mutated")
             ),
+            "context_injection_source_counts": (
+                _context_injection_source_counts(manifest)
+            ),
         },
         priority=45,
         injectable=False,
@@ -198,6 +201,23 @@ def record_structured_output_influence(
         state=state,
     ):
         record_influence_entry(entry)
+
+
+def _context_injection_source_counts(
+    manifest: Mapping[str, Any],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    raw_items = manifest.get("context_injection_items")
+    if not isinstance(raw_items, list):
+        return counts
+    for item in raw_items[:20]:
+        if not isinstance(item, Mapping):
+            continue
+        source_type = _safe_text(item.get("source_type"), 80)
+        if not source_type:
+            continue
+        counts[source_type] = counts.get(source_type, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def record_plain_output_influence(

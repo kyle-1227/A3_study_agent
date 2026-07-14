@@ -123,3 +123,19 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 2. Decide which fallback paths are intentional, deprecated, or removal candidates.
 3. Create separate specs before any cleanup.
 4. Do not remove fallback paths in unrelated feature work.
+
+### 2026-07-14 generate_answer memory injection replacement
+
+- Removed the silent `try/except` around the second, node-local memory
+  retrieval/prompt builder. `generate_answer` now has one provider-input path:
+  active Context Engineering selection followed by the manifest-guarded
+  provider dispatch.
+- Context Apply remains fail closed. Missing required rules, invalid policy,
+  packing failure, identity mismatch, or provider failure is not converted to
+  an original-message call or plausible answer.
+- `memory_use_policy=ignore` and pending `ask_user` prevent memory collection;
+  cross-thread memory is rejected by source policy. No fallback, silent
+  default, provider/model override, or OpenRouter DeepSeek path was added.
+- The user-visible legacy memory footer was removed. Safe source counts are
+  exposed only as content-free Influence Ledger metadata and provider dispatch
+  records; memory bodies are not written to those audit surfaces.

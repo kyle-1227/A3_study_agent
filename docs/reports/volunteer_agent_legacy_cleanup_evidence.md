@@ -80,13 +80,21 @@ blocked resources、errors、validation、summary、terminal status、稳定 has
 
 ## 5. legacy memory prompt 候选
 
-### 5.1 仍在运行的旧依赖
+### 5.1 替代链路已实现，旧层待独立删除
 
-`generate_answer` 仍动态导入 `src.context.context_builder.build_memory_context`，把生成文本
-前置到 system prompt；异常被吞掉。之后又直接读取 episodic/semantic results，将记忆正文
-追加到用户可见回答 footer。`src/context/token_manager.py` 独占
-`memory.token_budget`；对应旧测试为 `tests/test_context_builder.py` 与
-`tests/test_token_budget_strict_config.py`。
+`generate_answer` 已停止动态导入 `src.context.context_builder.build_memory_context`，不再
+重复检索 memory，也不再把 memory 文本前置到原始 system prompt 或追加到用户可见正文。
+正式 provider-bound 输入现在只接受 Context Engineering 最终选中的 `rules/memory/profile`
+项；`rules` 是无 memory 时的 required source，memory/profile 是 optional source。
+
+`MemoryContextProvider` 只读取 state 中已有的 conversation summary、episodic 和 semantic
+结果；显式 `ignore` 或待确认的 `ask_user` 会阻止 memory 注入。候选保留真实 thread/user
+身份，错 thread 项由 strict source policy 拒绝；稳定 logical item ID 保证同一记忆的新版本
+替换当前活跃版本，而不是让 Context Window V3 保留量持续累加。summary、episodic 与
+semantic 使用公平限额选择，避免某一桶挤掉其余记忆类型。
+
+当前仍待独立清理的是 `src/context/`、`src/memory/schema.py` 中仅供旧 builder 使用的
+`MemoryContextInjection`、旧 memory prompt 常量、`memory.token_budget` 及对应旧测试。
 
 ### 5.2 保留与替代
 
@@ -103,6 +111,18 @@ compaction、Context Window V3、完整 transcript/checkpoint、`LearningState.c
 - Influence Ledger/活动面板能解释记忆影响且不泄露正文；
 - 多轮、retry、resume、compact、Context Window V3 统计测试通过；
 - 删除后全库不存在 `src.context` 或 `memory.token_budget` 生产引用。
+
+替代验证已覆盖：实际 `generate_answer → invoke_plain_llm_fail_fast → CE → provider`
+dispatch、无 memory 的 rules-only 调用、显式 ignore、跨 thread 拒绝、manifest descriptor、
+session ledger source stats、Influence Ledger 安全来源计数、稳定 logical ID、三类 memory
+公平选择、Model View CE block 去重，以及正式图
+`episodic_memory_retriever → memory_use_decider → search_query_rewriter` 顺序。删除提交必须在
+全量质量门通过并形成替代快照后执行。
+
+替代快照验证结果：相关回归 `397 passed`，全量后端
+`2297 passed, 5 skipped`，前端 69 项测试/typecheck/ESLint/build、compileall、触及文件
+Ruff、CE scoped mypy、security tests 和 diff check 均通过。全仓既有 Ruff/type debt 与
+缺失的可选安全/死代码工具已在 Streaming V3 状态报告中单独记录，不作为通过项。
 
 ## 6. fallback 与假产物候选
 

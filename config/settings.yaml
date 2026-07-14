@@ -550,6 +550,34 @@ context_engineering:
           required_sources: []
           optional_sources: []
       node_policies:
+        generate_answer:
+          mode: active
+          risk_tier: 2
+          max_injected_context_tokens: 2800
+          max_items_total: 9
+          min_injectable_items: 1
+          injectable_sources:
+            - rules
+            - memory
+            - profile
+          required_sources:
+            - rules
+          optional_sources:
+            - memory
+            - profile
+          source_overrides:
+            rules:
+              max_items: 2
+              max_tokens: 600
+            memory:
+              max_items: 6
+              max_tokens: 1600
+              min_relevance_score: null
+              require_user_match: false
+              require_thread_match: true
+            profile:
+              max_items: 1
+              max_tokens: 500
         qa_agent:
           mode: active
           risk_tier: 2

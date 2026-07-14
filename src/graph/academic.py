@@ -7421,34 +7421,7 @@ async def generate_answer(state: LearningState) -> dict:
         resource_offer_instruction=_resource_offer_instruction(state),
     )
 
-    # ── Memory-augmented context injection ──────────────────────────────
     system_prompt = load_prompt("academic_system")
-    memory_context_text = ""
-    thread_id = state.get("thread_id", "")
-    if thread_id:
-        try:
-            from src.context.context_builder import build_memory_context
-
-            memory_injection = await build_memory_context(
-                user_id=thread_id,
-                current_query=question,
-                subject=state.get("subject", "") or state.get("primary_subject", ""),
-                profile_context="",
-                conversation_summary=state.get("conversation_summary", ""),
-            )
-            if memory_injection.context_text:
-                memory_context_text = memory_injection.context_text
-                system_prompt = f"{memory_context_text}\n\n{system_prompt}"
-                logger.debug(
-                    "Injected memory context into generate_answer: %d chars, %d estimated tokens",
-                    len(memory_context_text),
-                    memory_injection.total_estimated_tokens,
-                )
-        except Exception:
-            logger.debug(
-                "Failed to build memory context for generate_answer", exc_info=True
-            )
-
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
@@ -7467,36 +7440,6 @@ async def generate_answer(state: LearningState) -> dict:
             temperature=temperature,
         )
 
-    # ── Append memory influence explanation (transparent AI) ────────────
-    try:
-        episodic_results = state.get("episodic_memory_results") or []
-        semantic_results = state.get("semantic_memory_results") or []
-        all_dicts = episodic_results + semantic_results
-        relevant = [d for d in all_dicts if float(d.get("score", 0)) > 0.1][:3]
-        if relevant:
-            items: list[str] = []
-            for d in relevant:
-                content = str(d.get("content", ""))
-                preview = content[:120] + "..." if len(content) > 120 else content
-                reason = str(d.get("match_reason", ""))
-                reason_label = (
-                    reason.replace("keyword_overlap", "关键词匹配")
-                    .replace("vector_similarity", "语义相似")
-                    .replace("high_importance", "高重要性")
-                    .replace("fallback", "历史记录")
-                )
-                score = float(d.get("score", 0))
-                items.append(f"- {reason_label} (score={score:.2f}): {preview}")
-            if items:
-                memory_footer = (
-                    "\n\n---\n"
-                    "*以上回答参考了你的学习记忆:*\n" + "\n".join(items) + "\n"
-                    "*记忆系统帮助 AI 更准确地理解你的学习背景和薄弱点.*"
-                )
-                response = response.rstrip() + memory_footer
-    except Exception:
-        logger.debug("Failed to append memory explanation footer", exc_info=True)
-
     # Record decision trace (fire-and-forget)
     import asyncio as _asyncio
 
@@ -7507,9 +7450,8 @@ async def generate_answer(state: LearningState) -> dict:
             f"answer_generated len={len(response)}",
             evidence=f"context_chunks={len(context)}",
             steps=[
-                "memory_context_injected"
-                if memory_context_text
-                else "no_memory_context"
+                "context_engineering_provider_input_prepared",
+                "provider_input_manifest_emitted",
             ],
             confidence=0.7,
         )

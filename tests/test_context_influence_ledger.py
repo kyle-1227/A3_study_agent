@@ -94,6 +94,11 @@ def test_ledger_sanitizes_secrets_and_does_not_store_full_prompt():
                 "provider": "provider",
                 "model": "model",
                 "context_apply_applied": True,
+                "context_injection_items": [
+                    {"source_type": "memory"},
+                    {"source_type": "memory"},
+                    {"source_type": "profile"},
+                ],
             },
             schema_name="MindmapDraft",
             output_mode="native_json_schema_pydantic",
@@ -108,6 +113,15 @@ def test_ledger_sanitizes_secrets_and_does_not_store_full_prompt():
     assert "private prompt" not in serialized
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in serialized
     assert all(not entry["preview"] for entry in entries)
+    provider_entry = next(
+        entry
+        for entry in entries
+        if entry["kind"] == "provider_bound_messages_metadata"
+    )
+    assert provider_entry["metadata"]["context_injection_source_counts"] == {
+        "memory": 2,
+        "profile": 1,
+    }
 
 
 def test_corrupt_or_incompatible_ledger_degrades_safely():

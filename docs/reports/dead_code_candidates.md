@@ -277,3 +277,43 @@ SSE lifecycle suites (`303 passed`). Full backend regression passed with
 Approved action: delete fields, parsers, defaults, telemetry projection, and
 fixture arguments. Retain explicit typed failures, dropped reasons,
 observe-only scoring, and same-provider bounded transport retry.
+
+## 2026-07-14 legacy memory prompt replacement evidence
+
+Candidate: legacy memory prompt construction and token budget layer
+Files: `src/context/context_builder.py`, `src/context/token_manager.py`,
+`src/context/errors.py`, `src/context/__init__.py`, `src/memory/prompts.py`,
+`src/memory/schema.py`, `src/memory/__init__.py`, `config/settings.yaml`,
+`tests/test_context_builder.py`, and `tests/test_token_budget_strict_config.py`
+Symbols/config: `build_memory_context`, `format_memory_influence_explanation`,
+`MemoryContextInjection`, `MEMORY_CONTEXT_*`,
+`MEMORY_INFLUENCE_EXPLANATION_TEMPLATE`, and `memory.token_budget`
+Evidence: `generate_answer` now delegates all memory/profile/rules injection to
+the active Context Engineering node policy. The production-path replacement
+test proves that already-retrieved conversation, episodic, semantic, and
+profile state reaches the provider through one CE block and generates
+content-free dispatch descriptors. Explicit ignore, pending confirmation, and
+cross-thread memory do not reach the provider. Required rules keep the active
+path valid when optional memory/profile are absent. The provider does not
+import retrieval or embedding modules.
+Confidence: High after focused replacement tests; deletion remains a separate
+commit. The replacement snapshot now passes 397 focused tests, the full
+backend suite (`2297 passed, 5 skipped`), frontend tests/typecheck/lint/build,
+compileall, touched Ruff, CE scoped mypy, security tests, and diff check.
+Dynamic reference checks: after the replacement diff, active runtime use of
+these symbols is confined to the legacy `src/context` package and its exports;
+`MemoryContextInjection` and the old prompt constants have no independent
+consumer. The old tests and `memory.token_budget` validate only that legacy
+layer. `src.memory` storage, retrieval, consolidation, schemas unrelated to
+`MemoryContextInjection`, and top-level memory import smoke coverage must be
+retained or moved before deletion.
+Replacement tests: `tests/test_generate_answer_context_engineering.py`,
+`tests/test_memory_context_provider.py`,
+`tests/test_profile_rules_providers.py`,
+`tests/test_context_influence_ledger.py`, `tests/test_builder.py`,
+`tests/test_model_view_projection.py`, session ledger tests, and stream/app
+ledger update tests.
+Approved action: after the replacement snapshot passes all gates, delete only
+the listed legacy package/schema/constants/config/tests; retain
+`src/context_engineering`, `src/memory` business storage/retrieval, complete
+transcript/checkpoints, compaction, Context Window V3, and same-provider retry.

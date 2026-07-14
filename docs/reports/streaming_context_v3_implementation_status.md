@@ -243,3 +243,29 @@ observe-only importance scoring 与同 provider transport retry 均未改变。
 触及文件 Ruff check/format、前端 69 项 Vitest、typecheck、完整 ESLint 与 production
 build 均通过。活跃代码、官方配置和测试中三项旧字段扫描为零。可选 Semgrep、
 import-linter、Gitleaks、Bandit、Vulture 仍缺失，未记为通过。
+
+## 2026-07-14 academic memory Context Engineering 替代进度
+
+`generate_answer` 已从“节点内再次检索 + 旧 builder prepend + 正文 footer”切换为唯一的
+Context Engineering provider-input 路径。正式策略为 active：required `rules`，optional
+`memory/profile`；memory 最多 6 项/1600 tokens，按 thread 严格匹配，并允许无 relevance
+的 conversation summary。显式 ignore/待确认状态不注入 memory，错 thread 候选被拒绝。
+
+Memory/Profile ContextItem 使用稳定 logical ID，因此同一逻辑项内容更新会替换 V3 当前
+活跃版本；历史累计仍按真实 dispatch 单调增加。实际 provider dispatch 测试证明
+conversation summary、episodic、semantic、profile 与 rules 进入单一 CE block，dispatch
+descriptor、SessionContextMemoryLedgerV1 和 Influence Ledger 只记录安全身份、token 与来源
+计数，不保存正文。无 memory 时 required rules 路径仍正常调用，不模拟记忆或回退原消息。
+
+本节是替代快照，不是旧层删除结论。`src/context`、`MemoryContextInjection`、旧 prompt
+常量、`memory.token_budget` 和旧测试将在全量门通过后的独立提交中删除；当前正式图、
+checkpoint migration reader 与生产门保护项继续保留。
+
+替代快照质量门：相关 CE/academic/stream 回归 `397 passed`；全量后端
+`2297 passed, 5 skipped, 10 warnings`；前端 23 个 Vitest 文件/69 项测试、typecheck、
+完整 ESLint 和 Next production build 均通过；compileall、10 个触及 Python 文件的 Ruff
+check/format、4 个 CE 文件 scoped mypy、8 项 security tests 与 `git diff --check` 通过。
+`src/graph/academic.py` 全文件 mypy 仍报告 28 项既有错误，均不在本批 `generate_answer`
+改动行。全仓 Ruff 仍为 60 项既有错误/66 个既有待格式化文件。Semgrep、import-linter、
+Gitleaks、Bandit、Vulture 均缺失，未运行且未记为通过。全量 warning 仍是既有
+`aiosqlite` event-loop、AsyncMock 与 pytest cache 权限债务。

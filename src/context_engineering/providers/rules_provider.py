@@ -32,7 +32,11 @@ class RulesContextProvider:
                     compressible=False,
                     can_drop=False,
                     disclosure_level="summary",
-                    metadata={"rule_source": source, "rule_index": index},
+                    metadata={
+                        "rule_source": source,
+                        "rule_index": index,
+                        "purpose": "instruction_support",
+                    },
                     max_content_chars=context.max_content_chars_per_item,
                 )
                 for index, (source, title, content) in enumerate(rules)
