@@ -204,9 +204,14 @@ class ContextInjectionPolicy:
             min_shadow_score_for_analysis=0.0,
         )
     )
+    _optional_sources_explicit: bool = False
 
     def __post_init__(self) -> None:
-        if not self.optional_sources and self.injectable_sources:
+        if (
+            not self._optional_sources_explicit
+            and not self.optional_sources
+            and self.injectable_sources
+        ):
             object.__setattr__(self, "optional_sources", self.injectable_sources)
         if self.format.source_order:
             return

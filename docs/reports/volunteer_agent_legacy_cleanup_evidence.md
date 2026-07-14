@@ -344,3 +344,53 @@ Vulture、Semgrep、import-linter、Gitleaks、Bandit 仅在安装时运行；�
   structured provider callbacks, checkpoint read/write adapter, PostgreSQL
   recovery/concurrency proof, frontend submission, and final OpenAPI/E2E tests
   remain required.
+
+## 18. Strict assessment endpoint replacement progress (2026-07-14)
+
+- Added `POST /threads/{thread_id}/assessment-attempts` with the exact
+  `assessment_attempt_v1` request schema. The route resolves the private answer
+  key only from the thread checkpoint and emits exactly one
+  `assessment_final` or safe `stream_error`, followed by session-owned
+  `stream_done`.
+- Replaced the placeholder callback path at the endpoint boundary with two
+  provider-neutral strict runtimes: `error_classifier` and
+  `practice_generator`. Both use one configured output mode, Pydantic with
+  forbidden extras, explicit business validation, required rules-only Context
+  Engineering, and no provider/model override in business code.
+- Private evaluation data is wrapped in a provider-only envelope whose trace
+  preview begins with a non-sensitive notice. The shared structured-output
+  runtime now has an explicit `sensitive_trace=True` mode that preserves
+  counts/stages/types while removing message preview content, raw output,
+  provider error bodies, and validation text. Canary tests prove private
+  submitted answers and answer explanations do not enter public finals,
+  checkpoint journals, SSE errors, or structured-output trace payloads.
+- The durable journal now writes an `in_progress` claim before any provider
+  dispatch, then transitions the exact claim to `completed` or content-free
+  `failed`. Identical completed/failed requests replay without dispatch;
+  conflicting payloads fail; cancellation leaves a recovery-required claim and
+  never automatically redispatches.
+- Memory checkpointers use a process-local thread lock. PostgreSQL composition
+  uses a connection-scoped advisory lock derived from a domain-separated
+  thread hash. The SQL is parameterized and the DB URI is never traced. The
+  real two-connection PostgreSQL test is present but skipped unless
+  `A3_TEST_POSTGRES_URI` is explicitly configured.
+- Adaptive practice is consistently limited to 1-3 complete tasks. The draft
+  contract rejects repeated original questions, missing classification-specific
+  task types, non-canonical whitespace/tags, duplicate questions, blank fields,
+  schema drift, and unstable server-derived question identities.
+- Cold-import coverage removed an assessment/structured-output circular import
+  without deleting the legacy classifier/generator exports: the two old exports
+  remain available through explicit lazy loading until their deletion gate is
+  satisfied.
+- Verification: 310 focused/config/security/stream tests passed with one real
+  PostgreSQL test skipped; full backend passed with `2334 passed, 7 skipped,
+  12 warnings`; frontend baseline passed with 23 Vitest files/69 tests,
+  typecheck, full ESLint, and Next production build. Compileall, touched Ruff,
+  8-file scoped mypy, and `git diff --check` passed. Whole-repo Ruff still has
+  60 pre-existing lint errors and 65 pre-existing formatting files. Semgrep,
+  import-linter, Gitleaks, Bandit, and Vulture are missing and were not run.
+- This is not the old-assessment deletion gate. Frontend exercise submission,
+  real Provider E2E, real PostgreSQL endpoint/restart recovery, and the global
+  production graph/checkpoint gates remain outstanding; therefore
+  `assessment_result_handler`, `adaptive_practice_responder`, the placeholder
+  generator, and their state/config surfaces remain in place.

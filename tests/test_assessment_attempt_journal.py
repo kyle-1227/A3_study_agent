@@ -21,15 +21,21 @@ from src.assessment.attempt_journal import (
     AssessmentAttemptRecordV1,
     AssessmentCheckpointIdempotencyExecutor,
     AssessmentJournalPersistenceError,
+    LocalAssessmentExecutionLock,
     assessment_attempt_journal_reducer,
-    build_assessment_attempt_record_v1,
+    build_assessment_attempt_claim_v1,
+    complete_assessment_attempt_claim_v1,
     merge_assessment_attempt_journal_v1,
     validate_assessment_attempt_journal_v1,
 )
-from src.assessment.attempt_service import AssessmentRequestConflict
+from src.assessment.attempt_service import (
+    AssessmentRecordedFailure,
+    AssessmentRecoveryRequired,
+    AssessmentRequestConflict,
+)
 
 THREAD_ID = "thread-assessment-journal-1"
-REQUEST_ID = "request-assessment-journal-1"
+REQUEST_ID = "00000000-0000-4000-8000-000000000102"
 RESOURCE_ID = f"resource:v3:{'a' * 64}"
 QUESTION_ID = f"question:v1:{'b' * 64}"
 
@@ -86,10 +92,18 @@ class _MemoryJournalStore:
             )
 
 
-def _executor(store: _MemoryJournalStore) -> AssessmentCheckpointIdempotencyExecutor:
+def _executor(
+    store: _MemoryJournalStore,
+    *,
+    execution_lock: LocalAssessmentExecutionLock | None = None,
+) -> AssessmentCheckpointIdempotencyExecutor:
+    lock = execution_lock
+    if lock is None:
+        lock = LocalAssessmentExecutionLock()
     return AssessmentCheckpointIdempotencyExecutor(
         load_journal=store.load,
         append_journal=store.append,
+        execution_lock=lock,
     )
 
 
@@ -123,12 +137,13 @@ async def test_executor_serializes_duplicate_requests_and_replays_public_final()
 
     assert first == second == _final()
     assert counter == [1]
-    assert store.append_count == 1
+    assert store.append_count == 2
     journal = validate_assessment_attempt_journal_v1(
         store.value,
         thread_id=THREAD_ID,
     )
     assert len(journal.records) == 1
+    assert journal.records[0].status == "completed"
     serialized = json.dumps(journal.model_dump(mode="json"), ensure_ascii=False)
     for forbidden in (
         "answer_key",
@@ -137,6 +152,54 @@ async def test_executor_serializes_duplicate_requests_and_replays_public_final()
         "answer_explanation",
     ):
         assert forbidden not in serialized
+
+
+@pytest.mark.anyio
+async def test_shared_backend_lock_serializes_independent_executors():
+    store = _MemoryJournalStore()
+    shared_lock = LocalAssessmentExecutionLock()
+    first_executor = _executor(store, execution_lock=shared_lock)
+    second_executor = _executor(store, execution_lock=shared_lock)
+    counter = [0]
+
+    async def run_once(
+        executor: AssessmentCheckpointIdempotencyExecutor,
+    ) -> object:
+        return await executor.execute_once(
+            thread_id=THREAD_ID,
+            request_id=REQUEST_ID,
+            request_hash=_request_hash(),
+            operation=lambda: _operation(counter),
+        )
+
+    first, second = await asyncio.gather(
+        run_once(first_executor),
+        run_once(second_executor),
+    )
+
+    assert first == second == _final()
+    assert counter == [1]
+
+
+@pytest.mark.anyio
+async def test_claim_is_durable_before_operation_dispatch():
+    store = _MemoryJournalStore()
+    executor = _executor(store)
+
+    async def operation() -> AssessmentFinalV1:
+        journal = validate_assessment_attempt_journal_v1(store.value)
+        assert journal.records[0].status == "in_progress"
+        assert journal.records[0].final is None
+        return _final()
+
+    final = await executor.execute_once(
+        thread_id=THREAD_ID,
+        request_id=REQUEST_ID,
+        request_hash=_request_hash(),
+        operation=operation,
+    )
+
+    assert final == _final()
 
 
 def test_journal_record_does_not_retain_the_submitted_answer():
@@ -149,11 +212,15 @@ def test_journal_record_does_not_retain_the_submitted_answer():
         error_classification=None,
         adaptive_tasks=(),
     )
-    record = build_assessment_attempt_record_v1(
+    claim = build_assessment_attempt_claim_v1(
+        request_id=attempt.request_id,
         request_hash=stable_assessment_attempt_hash(
             thread_id=THREAD_ID,
             attempt=attempt,
         ),
+    )
+    record = complete_assessment_attempt_claim_v1(
+        claim=claim,
         final=final,
     )
 
@@ -183,7 +250,7 @@ async def test_executor_rejects_request_id_reuse_with_different_hash():
 
 
 @pytest.mark.anyio
-async def test_failed_operation_is_not_cached_and_can_be_retried():
+async def test_failed_operation_is_durably_replayed_without_retrying_operation():
     store = _MemoryJournalStore()
     executor = _executor(store)
 
@@ -197,15 +264,50 @@ async def test_failed_operation_is_not_cached_and_can_be_retried():
             request_hash=_request_hash(),
             operation=fail,
         )
-    assert store.value == {}
+    record = validate_assessment_attempt_journal_v1(store.value).records[0]
+    assert record.status == "failed"
+    serialized = json.dumps(record.model_dump(mode="json"), ensure_ascii=False)
+    assert "private answer" not in serialized
 
-    final = await executor.execute_once(
-        thread_id=THREAD_ID,
-        request_id=REQUEST_ID,
-        request_hash=_request_hash(),
-        operation=lambda: _operation([0]),
-    )
-    assert final == _final()
+    counter = [0]
+    with pytest.raises(AssessmentRecordedFailure) as exc_info:
+        await executor.execute_once(
+            thread_id=THREAD_ID,
+            request_id=REQUEST_ID,
+            request_hash=_request_hash(),
+            operation=lambda: _operation(counter),
+        )
+    assert exc_info.value.code == "assessment_idempotency_failed"
+    assert counter == [0]
+
+
+@pytest.mark.anyio
+async def test_cancelled_operation_leaves_claim_and_requires_explicit_recovery():
+    store = _MemoryJournalStore()
+    executor = _executor(store)
+
+    async def cancel() -> AssessmentFinalV1:
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.execute_once(
+            thread_id=THREAD_ID,
+            request_id=REQUEST_ID,
+            request_hash=_request_hash(),
+            operation=cancel,
+        )
+
+    record = validate_assessment_attempt_journal_v1(store.value).records[0]
+    assert record.status == "in_progress"
+    counter = [0]
+    with pytest.raises(AssessmentRecoveryRequired):
+        await executor.execute_once(
+            thread_id=THREAD_ID,
+            request_id=REQUEST_ID,
+            request_hash=_request_hash(),
+            operation=lambda: _operation(counter),
+        )
+    assert counter == [0]
 
 
 @pytest.mark.anyio
@@ -215,7 +317,7 @@ async def test_executor_fails_closed_when_append_is_not_durable():
 
     with pytest.raises(
         AssessmentJournalPersistenceError,
-        match="assessment_attempt_record_not_durable",
+        match="assessment_attempt_claim_not_durable",
     ):
         await executor.execute_once(
             thread_id=THREAD_ID,
@@ -226,8 +328,12 @@ async def test_executor_fails_closed_when_append_is_not_durable():
 
 
 def test_journal_json_contract_rejects_schema_drift_and_identity_conflicts():
-    record = build_assessment_attempt_record_v1(
+    claim = build_assessment_attempt_claim_v1(
+        request_id=REQUEST_ID,
         request_hash=_request_hash(),
+    )
+    record = complete_assessment_attempt_claim_v1(
+        claim=claim,
         final=_final(),
     )
     journal = AssessmentAttemptJournalV1(
@@ -254,8 +360,13 @@ def test_journal_json_contract_rejects_schema_drift_and_identity_conflicts():
         schema_version="assessment_attempt_record_v1",
         request_id=record.request_id,
         request_hash=f"assessment-attempt:v1:{'f' * 64}",
-        final=record.final,
+        status="completed",
+        started_at=record.started_at,
         committed_at=record.committed_at,
+        final=record.final,
+        error_code="",
+        failure_stage="",
+        exception_type="",
     )
     with pytest.raises(AssessmentAttemptJournalError) as conflict:
         merge_assessment_attempt_journal_v1(
@@ -270,8 +381,12 @@ def test_journal_json_contract_rejects_schema_drift_and_identity_conflicts():
 
 
 def test_record_rejects_request_identity_drift():
-    record = build_assessment_attempt_record_v1(
+    claim = build_assessment_attempt_claim_v1(
+        request_id=REQUEST_ID,
         request_hash=_request_hash(),
+    )
+    record = complete_assessment_attempt_claim_v1(
+        claim=claim,
         final=_final(),
     )
     with pytest.raises(ValidationError, match="request_id"):
@@ -279,6 +394,11 @@ def test_record_rejects_request_identity_drift():
             schema_version="assessment_attempt_record_v1",
             request_id="different-request",
             request_hash=record.request_hash,
-            final=record.final,
+            status=record.status,
+            started_at=record.started_at,
             committed_at=record.committed_at,
+            final=record.final,
+            error_code=record.error_code,
+            failure_stage=record.failure_stage,
+            exception_type=record.exception_type,
         )

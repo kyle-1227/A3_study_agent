@@ -29,14 +29,20 @@ from src.assessment.attempt_service import (
     AssessmentOperation,
     AssessmentRequestConflict,
 )
+from src.assessment.identity import stable_adaptive_practice_question_id
 
 THREAD_ID = "thread-assessment-1"
-REQUEST_ID = "request-assessment-1"
+REQUEST_ID = "00000000-0000-4000-8000-000000000101"
 RESOURCE_ID = f"resource:v3:{'a' * 64}"
 OTHER_RESOURCE_ID = f"resource:v3:{'b' * 64}"
 QUESTION_ID = f"question:v1:{'c' * 64}"
 OTHER_QUESTION_ID = f"question:v1:{'d' * 64}"
-ADAPTIVE_QUESTION_ID = f"question:v1:{'e' * 64}"
+ADAPTIVE_QUESTION_ID = stable_adaptive_practice_question_id(
+    task_type="review",
+    question="What is 1 + 2?",
+    tags=("arithmetic",),
+    difficulty=0.2,
+)
 
 
 @dataclass(frozen=True)

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import AsyncContextManager, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -18,7 +19,11 @@ from src.assessment.attempt_contracts import (
     AssessmentFinalV1,
 )
 from src.assessment.attempt_service import (
+    AssessmentAttemptServiceError,
+    AssessmentDependencyFailed,
     AssessmentOperation,
+    AssessmentRecordedFailure,
+    AssessmentRecoveryRequired,
     AssessmentRequestConflict,
 )
 
@@ -30,6 +35,13 @@ AssessmentJournalLoader = Callable[[str], Awaitable[object]]
 AssessmentJournalAppender = Callable[
     [str, "AssessmentAttemptJournalV1"], Awaitable[None]
 ]
+
+
+class AssessmentExecutionLock(Protocol):
+    """Serialize assessment execution for a thread across the active backend."""
+
+    def hold(self, thread_id: str) -> AsyncContextManager[None]:
+        """Hold the backend-specific thread lock for one complete operation."""
 
 
 class AssessmentAttemptJournalError(ValueError):
@@ -49,22 +61,57 @@ class AssessmentJournalPersistenceError(RuntimeError):
 
 
 class AssessmentAttemptRecordV1(BaseModel):
-    """One content-free request identity bound to its public final payload."""
+    """One content-free durable claim and its optional terminal outcome."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     schema_version: Literal["assessment_attempt_record_v1"]
     request_id: str = Field(pattern=ASSESSMENT_REQUEST_ID_PATTERN, max_length=160)
     request_hash: str = Field(pattern=ASSESSMENT_ATTEMPT_HASH_PATTERN)
-    final: AssessmentFinalV1
-    committed_at: datetime
+    status: Literal["in_progress", "completed", "failed"]
+    started_at: datetime
+    committed_at: datetime | None
+    final: AssessmentFinalV1 | None
+    error_code: str = Field(pattern=r"^assessment_[a-z0-9_]{1,120}$|^$")
+    failure_stage: Literal[
+        "",
+        "assessment",
+        "idempotency",
+        "error_classification",
+        "adaptive_practice",
+    ]
+    exception_type: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.]{0,159}$|^$")
 
     @model_validator(mode="after")
     def validate_record_identity(self) -> AssessmentAttemptRecordV1:
-        if self.request_id != self.final.request_id:
-            raise ValueError("record request_id must match final request_id")
-        if self.committed_at.tzinfo is None:
+        if self.started_at.tzinfo is None:
+            raise ValueError("started_at must include a timezone")
+        if self.committed_at is not None and self.committed_at.tzinfo is None:
             raise ValueError("committed_at must include a timezone")
+        if self.status == "in_progress":
+            if (
+                self.committed_at is not None
+                or self.final is not None
+                or self.error_code
+                or self.failure_stage
+                or self.exception_type
+            ):
+                raise ValueError("in_progress record cannot contain terminal data")
+            return self
+        if self.committed_at is None:
+            raise ValueError("terminal record requires committed_at")
+        if self.status == "completed":
+            if self.final is None:
+                raise ValueError("completed record requires final")
+            if self.request_id != self.final.request_id:
+                raise ValueError("record request_id must match final request_id")
+            if self.error_code or self.failure_stage or self.exception_type:
+                raise ValueError("completed record cannot contain failure data")
+            return self
+        if self.final is not None:
+            raise ValueError("failed record cannot contain final")
+        if not self.error_code or not self.failure_stage or not self.exception_type:
+            raise ValueError("failed record requires content-free failure metadata")
         return self
 
 
@@ -84,7 +131,10 @@ class AssessmentAttemptJournalV1(BaseModel):
         request_ids = [record.request_id for record in self.records]
         if len(request_ids) != len(set(request_ids)):
             raise ValueError("assessment journal request_id values must be unique")
-        if any(record.final.thread_id != self.thread_id for record in self.records):
+        if any(
+            record.final is not None and record.final.thread_id != self.thread_id
+            for record in self.records
+        ):
             raise ValueError("assessment journal final belongs to another thread")
         return self
 
@@ -99,19 +149,83 @@ def new_assessment_attempt_journal_v1(thread_id: str) -> AssessmentAttemptJourna
     )
 
 
-def build_assessment_attempt_record_v1(
+def build_assessment_attempt_claim_v1(
     *,
+    request_id: str,
     request_hash: str,
-    final: AssessmentFinalV1,
 ) -> AssessmentAttemptRecordV1:
-    """Bind a request hash to a public final without retaining request content."""
+    """Persist a content-free execution claim before any provider dispatch."""
 
     return AssessmentAttemptRecordV1(
         schema_version=ASSESSMENT_ATTEMPT_RECORD_SCHEMA_VERSION,
-        request_id=final.request_id,
+        request_id=request_id,
         request_hash=request_hash,
-        final=final,
+        status="in_progress",
+        started_at=datetime.now(timezone.utc),
+        committed_at=None,
+        final=None,
+        error_code="",
+        failure_stage="",
+        exception_type="",
+    )
+
+
+def complete_assessment_attempt_claim_v1(
+    *,
+    claim: AssessmentAttemptRecordV1,
+    final: AssessmentFinalV1,
+) -> AssessmentAttemptRecordV1:
+    """Transition one exact durable claim to its public successful terminal."""
+
+    if claim.status != "in_progress":
+        raise AssessmentAttemptJournalError(
+            code="assessment_attempt_claim_not_in_progress",
+            message="only an in_progress assessment claim can complete",
+        )
+    return AssessmentAttemptRecordV1(
+        schema_version=ASSESSMENT_ATTEMPT_RECORD_SCHEMA_VERSION,
+        request_id=claim.request_id,
+        request_hash=claim.request_hash,
+        status="completed",
+        started_at=claim.started_at,
         committed_at=datetime.now(timezone.utc),
+        final=final,
+        error_code="",
+        failure_stage="",
+        exception_type="",
+    )
+
+
+def fail_assessment_attempt_claim_v1(
+    *,
+    claim: AssessmentAttemptRecordV1,
+    error_code: str,
+    failure_stage: Literal[
+        "assessment",
+        "idempotency",
+        "error_classification",
+        "adaptive_practice",
+    ],
+    exception_type: str,
+) -> AssessmentAttemptRecordV1:
+    """Transition one exact durable claim to a content-free failed terminal."""
+
+    if claim.status != "in_progress":
+        raise AssessmentAttemptJournalError(
+            code="assessment_attempt_claim_not_in_progress",
+            message="only an in_progress assessment claim can fail",
+        )
+    return AssessmentAttemptRecordV1(
+        schema_version=ASSESSMENT_ATTEMPT_RECORD_SCHEMA_VERSION,
+        request_id=claim.request_id,
+        request_hash=claim.request_hash,
+        status="failed",
+        started_at=claim.started_at,
+        committed_at=datetime.now(timezone.utc),
+        final=None,
+        error_code=error_code,
+        failure_stage=failure_stage,
+        exception_type=exception_type,
     )
 
 
@@ -175,18 +289,34 @@ def merge_assessment_attempt_journal_v1(
         )
     )
     records = list(current.records)
-    by_request_id = {record.request_id: record for record in records}
+    indexes_by_request_id = {
+        record.request_id: index for index, record in enumerate(records)
+    }
     for record in incoming.records:
-        prior = by_request_id.get(record.request_id)
-        if prior is not None:
-            if prior != record:
-                raise AssessmentAttemptJournalError(
-                    code="assessment_attempt_journal_request_conflict",
-                    message="assessment request_id is bound to different journal data",
-                )
-            continue
+        prior_index = indexes_by_request_id.get(record.request_id)
+        if prior_index is not None:
+            prior = records[prior_index]
+            if prior == record:
+                continue
+            if (
+                prior.status == "in_progress"
+                and record.status in {"completed", "failed"}
+                and prior.request_hash == record.request_hash
+                and prior.started_at == record.started_at
+            ):
+                records[prior_index] = record
+                continue
+            raise AssessmentAttemptJournalError(
+                code="assessment_attempt_journal_request_conflict",
+                message="assessment request_id is bound to different journal data",
+            )
+        if record.status != "in_progress":
+            raise AssessmentAttemptJournalError(
+                code="assessment_attempt_terminal_without_claim",
+                message="assessment terminal update requires a durable claim",
+            )
         records.append(record)
-        by_request_id[record.request_id] = record
+        indexes_by_request_id[record.request_id] = len(records) - 1
     try:
         return AssessmentAttemptJournalV1(
             schema_version=ASSESSMENT_ATTEMPT_JOURNAL_SCHEMA_VERSION,
@@ -217,19 +347,56 @@ class _LockEntry:
     users: int
 
 
+class LocalAssessmentExecutionLock:
+    """Process-local execution lock used only with the memory checkpointer."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _LockEntry] = {}
+        self._entries_guard = asyncio.Lock()
+
+    @asynccontextmanager
+    async def hold(self, thread_id: str) -> AsyncIterator[None]:
+        if not thread_id.strip():
+            raise ValueError("assessment execution lock requires thread_id")
+        entry = await self._reserve(thread_id)
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            await self._release(thread_id, entry)
+
+    async def _reserve(self, thread_id: str) -> _LockEntry:
+        async with self._entries_guard:
+            entry = self._entries.get(thread_id)
+            if entry is None:
+                entry = _LockEntry(lock=asyncio.Lock(), users=0)
+                self._entries[thread_id] = entry
+            entry.users += 1
+            return entry
+
+    async def _release(self, thread_id: str, entry: _LockEntry) -> None:
+        async with self._entries_guard:
+            current = self._entries.get(thread_id)
+            if current is not entry or current.users <= 0:
+                raise RuntimeError("assessment execution lock registry is inconsistent")
+            current.users -= 1
+            if current.users == 0:
+                self._entries.pop(thread_id, None)
+
+
 class AssessmentCheckpointIdempotencyExecutor:
-    """Serialize locally and verify every injected checkpoint journal append."""
+    """Claim before dispatch and verify every checkpoint journal transition."""
 
     def __init__(
         self,
         *,
         load_journal: AssessmentJournalLoader,
         append_journal: AssessmentJournalAppender,
+        execution_lock: AssessmentExecutionLock,
     ) -> None:
         self._load_journal = load_journal
         self._append_journal = append_journal
-        self._lock_entries: dict[tuple[str, str], _LockEntry] = {}
-        self._lock_entries_guard = asyncio.Lock()
+        self._execution_lock = execution_lock
 
     async def execute_once(
         self,
@@ -239,45 +406,80 @@ class AssessmentCheckpointIdempotencyExecutor:
         request_hash: str,
         operation: AssessmentOperation,
     ) -> object:
-        key = (thread_id, request_id)
-        entry = await self._reserve_lock(key)
-        try:
-            async with entry.lock:
-                journal = await self._load(thread_id)
-                existing = find_assessment_attempt_record_v1(
-                    journal,
-                    request_id=request_id,
-                )
-                if existing is not None:
-                    if existing.request_hash != request_hash:
-                        raise AssessmentRequestConflict()
-                    return existing.final
+        async with self._execution_lock.hold(thread_id):
+            journal = await self._load(thread_id)
+            existing = find_assessment_attempt_record_v1(
+                journal,
+                request_id=request_id,
+            )
+            if existing is not None:
+                return _replay_record(existing, request_hash=request_hash)
 
+            claim = build_assessment_attempt_claim_v1(
+                request_id=request_id,
+                request_hash=request_hash,
+            )
+            await self._persist_record(
+                thread_id,
+                claim,
+                failure_code="assessment_attempt_claim_not_durable",
+            )
+            try:
                 raw_final = await operation()
                 final = AssessmentFinalV1.model_validate(raw_final, strict=True)
-                record = build_assessment_attempt_record_v1(
-                    request_hash=request_hash,
-                    final=final,
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_code, failure_stage, exception_type = _failure_metadata(exc)
+                failed = fail_assessment_attempt_claim_v1(
+                    claim=claim,
+                    error_code=error_code,
+                    failure_stage=failure_stage,
+                    exception_type=exception_type,
                 )
-                update = AssessmentAttemptJournalV1(
-                    schema_version=ASSESSMENT_ATTEMPT_JOURNAL_SCHEMA_VERSION,
-                    thread_id=thread_id,
-                    records=(record,),
+                await self._persist_record(
+                    thread_id,
+                    failed,
+                    failure_code="assessment_attempt_failure_not_durable",
                 )
-                await self._append_journal(thread_id, update)
+                raise
 
-                persisted = await self._load(thread_id)
-                persisted_record = find_assessment_attempt_record_v1(
-                    persisted,
-                    request_id=request_id,
+            completed = complete_assessment_attempt_claim_v1(
+                claim=claim,
+                final=final,
+            )
+            persisted_record = await self._persist_record(
+                thread_id,
+                completed,
+                failure_code="assessment_attempt_final_not_durable",
+            )
+            if persisted_record.final is None:
+                raise AssessmentJournalPersistenceError(
+                    code="assessment_attempt_final_missing"
                 )
-                if persisted_record != record:
-                    raise AssessmentJournalPersistenceError(
-                        code="assessment_attempt_record_not_durable"
-                    )
-                return persisted_record.final
-        finally:
-            await self._release_lock(key, entry)
+            return persisted_record.final
+
+    async def _persist_record(
+        self,
+        thread_id: str,
+        record: AssessmentAttemptRecordV1,
+        *,
+        failure_code: str,
+    ) -> AssessmentAttemptRecordV1:
+        update = AssessmentAttemptJournalV1(
+            schema_version=ASSESSMENT_ATTEMPT_JOURNAL_SCHEMA_VERSION,
+            thread_id=thread_id,
+            records=(record,),
+        )
+        await self._append_journal(thread_id, update)
+        persisted = await self._load(thread_id)
+        persisted_record = find_assessment_attempt_record_v1(
+            persisted,
+            request_id=record.request_id,
+        )
+        if persisted_record != record:
+            raise AssessmentJournalPersistenceError(code=failure_code)
+        return persisted_record
 
     async def _load(self, thread_id: str) -> AssessmentAttemptJournalV1:
         raw = await self._load_journal(thread_id)
@@ -290,29 +492,53 @@ class AssessmentCheckpointIdempotencyExecutor:
             )
         return validate_assessment_attempt_journal_v1(raw, thread_id=thread_id)
 
-    async def _reserve_lock(self, key: tuple[str, str]) -> _LockEntry:
-        async with self._lock_entries_guard:
-            entry = self._lock_entries.get(key)
-            if entry is None:
-                entry = _LockEntry(lock=asyncio.Lock(), users=0)
-                self._lock_entries[key] = entry
-            entry.users += 1
-            return entry
 
-    async def _release_lock(
-        self,
-        key: tuple[str, str],
-        entry: _LockEntry,
-    ) -> None:
-        async with self._lock_entries_guard:
-            current = self._lock_entries.get(key)
-            if current is not entry or current.users <= 0:
-                raise RuntimeError(
-                    "assessment idempotency lock registry is inconsistent"
-                )
-            current.users -= 1
-            if current.users == 0:
-                self._lock_entries.pop(key, None)
+def _replay_record(
+    record: AssessmentAttemptRecordV1,
+    *,
+    request_hash: str,
+) -> AssessmentFinalV1:
+    if record.request_hash != request_hash:
+        raise AssessmentRequestConflict()
+    if record.status == "in_progress":
+        raise AssessmentRecoveryRequired()
+    if record.status == "failed":
+        failure_stage = record.failure_stage
+        if failure_stage == "":
+            raise AssessmentAttemptJournalError(
+                code="assessment_attempt_failure_stage_missing",
+                message="failed assessment journal record has no stage",
+            )
+        raise AssessmentRecordedFailure(
+            code=record.error_code,
+            stage=failure_stage,
+            exception_type=record.exception_type,
+        )
+    if record.final is None:
+        raise AssessmentAttemptJournalError(
+            code="assessment_attempt_completed_final_missing",
+            message="completed assessment journal record has no final",
+        )
+    return record.final
+
+
+def _failure_metadata(
+    exc: Exception,
+) -> tuple[
+    str,
+    Literal[
+        "assessment",
+        "idempotency",
+        "error_classification",
+        "adaptive_practice",
+    ],
+    str,
+]:
+    if isinstance(exc, AssessmentDependencyFailed):
+        return exc.code, exc.stage, exc.exception_type
+    if isinstance(exc, AssessmentAttemptServiceError):
+        return exc.code, "assessment", type(exc).__name__
+    return "assessment_idempotency_failed", "idempotency", type(exc).__name__
 
 
 def _mapping_json(value: object) -> str:
@@ -335,11 +561,15 @@ __all__ = [
     "AssessmentAttemptJournalV1",
     "AssessmentAttemptRecordV1",
     "AssessmentCheckpointIdempotencyExecutor",
+    "AssessmentExecutionLock",
     "AssessmentJournalAppender",
     "AssessmentJournalLoader",
     "AssessmentJournalPersistenceError",
+    "LocalAssessmentExecutionLock",
     "assessment_attempt_journal_reducer",
-    "build_assessment_attempt_record_v1",
+    "build_assessment_attempt_claim_v1",
+    "complete_assessment_attempt_claim_v1",
+    "fail_assessment_attempt_claim_v1",
     "find_assessment_attempt_record_v1",
     "merge_assessment_attempt_journal_v1",
     "new_assessment_attempt_journal_v1",

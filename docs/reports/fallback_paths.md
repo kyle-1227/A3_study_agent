@@ -175,3 +175,26 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 - This foundation does not call the legacy placeholder practice generator and
   does not claim the missing FastAPI/provider/PostgreSQL integration is
   complete.
+
+### 2026-07-14 Strict assessment endpoint and failure replay
+
+- The endpoint uses one configured provider/model/output mode for each of
+  `error_classifier` and `practice_generator`. It adds no alternate provider,
+  alternate model, deterministic answer, neutral score, fabricated task, alias
+  repair, or validation bypass.
+- The journal foundation note above is superseded for operation failures:
+  before provider dispatch the runtime now persists a content-free
+  `in_progress` claim. Ordinary failure becomes a content-free `failed`
+  terminal and replays without another dispatch. Cancellation/crash leaves
+  `in_progress` and returns `assessment_request_recovery_required`; it does not
+  silently clear the claim or retry the provider.
+- A user may explicitly start a new request with a new UUID after reviewing a
+  failed/recovery-required result. The server never changes the UUID, answer,
+  or request hash on the user's behalf.
+- Same-provider bounded transport and structured semantic retries remain the
+  existing configured mechanisms. `sensitive_trace=True` changes diagnostics
+  only: it removes content-bearing trace fields and is not a model, provider,
+  parser, or business-result fallback.
+- Real PostgreSQL and real Provider E2E remain explicit delivery gates. The
+  opt-in PostgreSQL concurrency test is skipped when
+  `A3_TEST_POSTGRES_URI` is absent and is not reported as passing.

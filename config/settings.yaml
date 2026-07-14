@@ -299,6 +299,8 @@ context_engineering:
           - study_plan_reviewer_emotional
           - study_plan_consensus
           - qa_agent
+          - error_classifier
+          - practice_generator
       role: system
       position: after_system
       exclude_message_source: true
@@ -828,6 +830,20 @@ context_engineering:
             - memory
             - curriculum
             - artifact
+        error_classifier:
+          inherit: agent_nodes
+          required_sources:
+            - rules
+          optional_sources: []
+          injectable_sources:
+            - rules
+        practice_generator:
+          inherit: agent_nodes
+          required_sources:
+            - rules
+          optional_sources: []
+          injectable_sources:
+            - rules
         adaptive_practice_responder:
           inherit: agent_nodes
           required_sources:
@@ -1522,7 +1538,7 @@ assessment:
     temperature: 0.0
   practice_generator:
     temperature: 0.2
-    max_adaptive_tasks: 5
+    max_adaptive_tasks: 3
   spaced_repetition:
     intervals: [1, 3, 7, 14, 30]     # Ebbinghaus review intervals (days)
     max_intervals: 5

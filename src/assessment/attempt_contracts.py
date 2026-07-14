@@ -9,12 +9,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.assessment.identity import stable_exercise_question_id
+from src.assessment.identity import (
+    stable_adaptive_practice_question_id,
+    stable_exercise_question_id,
+)
 
 ASSESSMENT_ATTEMPT_SCHEMA_VERSION = "assessment_attempt_v1"
 ASSESSMENT_FINAL_SCHEMA_VERSION = "assessment_final_v1"
 
-_REQUEST_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9:._/-]{0,159}$"
+_REQUEST_ID_PATTERN = (
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 _THREAD_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9:._/-]{0,159}$"
 _RESOURCE_ID_PATTERN = r"^resource:v3:[0-9a-f]{64}$"
 _QUESTION_ID_PATTERN = r"^question:v1:[0-9a-f]{64}$"
@@ -250,10 +256,73 @@ class AdaptivePracticeTaskV1(BaseModel):
                 "adaptive task question, answer, explanation, and reason "
                 "must not be blank"
             )
+        if any(value != value.strip() for value in required_text):
+            raise ValueError("adaptive task text fields must be canonical")
         if any(not value.strip() for value in self.tags):
             raise ValueError("adaptive task tags must not contain blank values")
+        if any(value != value.strip() for value in self.tags):
+            raise ValueError("adaptive task tags must be canonical")
         if len(set(self.tags)) != len(self.tags):
             raise ValueError("adaptive task tags must be unique")
+        expected_question_id = stable_adaptive_practice_question_id(
+            task_type=self.task_type,
+            question=self.question,
+            tags=self.tags,
+            difficulty=self.difficulty,
+        )
+        if self.question_id != expected_question_id:
+            raise ValueError("adaptive task question_id does not match public content")
+        return self
+
+
+class AdaptivePracticeTaskDraftV1(BaseModel):
+    """Strict provider output before deterministic question identity projection."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["adaptive_practice_task_draft_v1"]
+    task_type: Literal["similar", "harder", "review"]
+    question: str = Field(min_length=1, max_length=10_000)
+    answer: str = Field(min_length=1, max_length=10_000)
+    explanation: str = Field(min_length=1, max_length=10_000)
+    reason: str = Field(min_length=1, max_length=2_000)
+    tags: tuple[str, ...] = Field(min_length=1, max_length=80)
+    difficulty: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_complete_draft(self) -> AdaptivePracticeTaskDraftV1:
+        required_text = (self.question, self.answer, self.explanation, self.reason)
+        if any(not value.strip() for value in required_text):
+            raise ValueError("adaptive task draft fields must not be blank")
+        if any(value != value.strip() for value in required_text):
+            raise ValueError("adaptive task draft fields must be canonical")
+        if any(not value.strip() for value in self.tags):
+            raise ValueError("adaptive task draft tags must not contain blank values")
+        if any(value != value.strip() for value in self.tags):
+            raise ValueError("adaptive task draft tags must be canonical")
+        if len(set(self.tags)) != len(self.tags):
+            raise ValueError("adaptive task draft tags must be unique")
+        return self
+
+
+class AdaptivePracticeDraftBatchV1(BaseModel):
+    """Non-empty strict provider batch before stable IDs are computed."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["adaptive_practice_draft_batch_v1"]
+    tasks: tuple[AdaptivePracticeTaskDraftV1, ...] = Field(
+        min_length=1,
+        max_length=3,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_questions(self) -> AdaptivePracticeDraftBatchV1:
+        identities = [
+            (task.task_type, task.question.strip().casefold()) for task in self.tasks
+        ]
+        if len(set(identities)) != len(identities):
+            raise ValueError("adaptive task draft questions must be unique")
         return self
 
 
@@ -263,7 +332,7 @@ class AdaptivePracticeBatchV1(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     schema_version: Literal["adaptive_practice_batch_v1"]
-    tasks: tuple[AdaptivePracticeTaskV1, ...] = Field(min_length=1, max_length=20)
+    tasks: tuple[AdaptivePracticeTaskV1, ...] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_unique_question_ids(self) -> AdaptivePracticeBatchV1:
@@ -311,7 +380,7 @@ class AssessmentFinalV1(BaseModel):
     is_correct: bool
     time_spent_seconds: float = Field(ge=0.0, le=86_400.0)
     error_classification: AssessmentErrorClassificationV1 | None
-    adaptive_tasks: tuple[AdaptivePracticeTaskV1, ...] = Field(max_length=20)
+    adaptive_tasks: tuple[AdaptivePracticeTaskV1, ...] = Field(max_length=3)
     payload_hash: str = Field(pattern=_FINAL_HASH_PATTERN)
 
     @model_validator(mode="after")
@@ -451,8 +520,10 @@ __all__ = [
     "ASSESSMENT_FINAL_SCHEMA_VERSION",
     "ASSESSMENT_REQUEST_ID_PATTERN",
     "ASSESSMENT_THREAD_ID_PATTERN",
+    "AdaptivePracticeDraftBatchV1",
     "AdaptivePracticeBatchV1",
     "AdaptivePracticeInputV1",
+    "AdaptivePracticeTaskDraftV1",
     "AdaptivePracticeTaskV1",
     "AssessmentAttemptV1",
     "AssessmentCheckpointResourcesV1",

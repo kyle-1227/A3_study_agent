@@ -369,3 +369,35 @@ ESLint 与 production build 通过。本节仅是 endpoint 前置底座：FastAP
 structured classifier/generator、checkpoint callback adapter 和 PostgreSQL 多进程原子性/E2E
 尚未完成，不能据此删除旧 assessment 节点。全仓 Ruff 仍有 60 项既有 lint debt 和 65 个
 既有待格式化文件；Semgrep、import-linter、Gitleaks、Bandit、Vulture 仍缺失，未记为通过。
+
+## 2026-07-14 Assessment attempt SSE endpoint 与严格恢复语义
+
+已新增严格 `POST /threads/{thread_id}/assessment-attempts`。请求只接受
+`assessment_attempt_v1`，`request_id` 必须为 canonical UUID；服务端从 thread checkpoint
+校验 resource/question 身份并读取私有答案，浏览器与 journal 均不接收 submitted answer、
+原题 accepted answers、canonical answer 或 answer explanation。正确结果直接形成
+`assessment_final_v1`；错误结果必须经过严格错因分类和 1-3 道完整新练习的 Pydantic 与业务
+校验。`assessment_final` 是唯一权威终态，`stream_done` 仍只由 session 追加。
+
+Provider 输入使用 `assessment_private_provider_envelope_v1`。结构化调用显式启用
+`sensitive_trace=True`：trace 保留 node/provider/model、阶段、计数、耗时和 error type，但删除
+message preview 正文、raw output、provider error body、validation/parsing/business error 正文。
+分类 business validator 还会阻断原题私密长文本或完整字段回显；canary 回归证明这些值不会进入
+SSE、公开 final、checkpoint journal 或 structured-output trace。
+
+幂等执行现为 pre-dispatch durable claim：`in_progress -> completed|failed`。相同 hash 的成功或
+失败跨 service 重建后直接重放，不再次调用 Provider；不同 hash 显式 conflict；取消/崩溃留下
+`in_progress` 并返回 recovery-required，禁止自动重做。memory checkpointer 使用进程锁；
+PostgreSQL 使用 connection-scoped parameterized advisory lock。真实双连接测试已提供，但当前未
+配置 `A3_TEST_POSTGRES_URI`，因此记为 skipped，不记为通过。
+
+本批质量门：compileall、触及文件 Ruff check/format、8 个源文件 scoped mypy、`git diff --check`
+通过；assessment/config/security/structured/stream 联合回归 `310 passed, 1 skipped`；全量后端
+`2334 passed, 7 skipped, 12 warnings`；前端基线 23 个 Vitest 文件/69 项测试、typecheck、完整
+ESLint 与 Next production build 通过。全仓 Ruff 仍有 60 项既有 lint debt 和 65 个既有待格式化
+文件；Semgrep、import-linter、Gitleaks、Bandit、Vulture 缺失，均未运行。warning 仍是既有
+aiosqlite event-loop、AsyncMock、第三方弃用与 pytest cache 权限债务。
+
+旧 assessment 节点尚未删除：前端题卡提交、真实 Provider E2E、真实 PostgreSQL endpoint/restart
+恢复与总生产切换门仍未满足。当前实现不能据此宣称“Agent 节点零旧实现”完成，也不会提前删除
+`assessment_result_handler`、`adaptive_practice_responder` 或 placeholder generator。

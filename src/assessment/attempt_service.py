@@ -45,9 +45,11 @@ class AssessmentIdempotencyExecutor(Protocol):
 
     Implementations must serialize ``(thread_id, request_id)`` operations, replay
     the stored final for an identical request hash, raise
-    ``AssessmentRequestConflict`` for a different hash, and retain no result when
-    ``operation`` raises. The eventual API adapter must bind this protocol to the
-    durable run/checkpoint journal rather than process-local memory.
+    ``AssessmentRequestConflict`` for a different hash, persist a content-free
+    claim before ``operation``, and persist a safe failed terminal when the
+    operation raises. An unresolved claim must block automatic redispatch. The API
+    adapter binds this protocol to the durable checkpoint journal and the
+    checkpointer-specific execution lock.
     """
 
     async def execute_once(
@@ -94,6 +96,42 @@ class AssessmentRequestConflict(AssessmentAttemptServiceError):
         super().__init__(
             code="assessment_request_id_conflict",
             message="assessment request_id was already used with different content",
+        )
+
+
+class AssessmentRecoveryRequired(AssessmentAttemptServiceError):
+    """Raised when a durable pre-dispatch claim has no recorded terminal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            code="assessment_request_recovery_required",
+            message="assessment request has an unresolved durable execution claim",
+        )
+
+
+class AssessmentRecordedFailure(AssessmentAttemptServiceError):
+    """Replay one content-free failure terminal without executing dependencies."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        stage: Literal[
+            "assessment",
+            "idempotency",
+            "error_classification",
+            "adaptive_practice",
+        ],
+        exception_type: str,
+    ) -> None:
+        self.stage = stage
+        self.exception_type = exception_type
+        super().__init__(
+            code=code,
+            message=(
+                "assessment request previously failed: "
+                f"stage={stage}, exception_type={exception_type}"
+            ),
         )
 
 
@@ -148,12 +186,16 @@ class AssessmentAttemptService:
             thread_id=thread_id,
             attempt=attempt,
         )
+        if checkpoint.thread_id != thread_id:
+            raise AssessmentIdentityError("thread_mismatch")
+        resource = _find_resource(checkpoint, resource_id=attempt.resource_id)
+        question = _find_question(resource, question_id=attempt.question_id)
 
         async def operation() -> AssessmentFinalV1:
             return await self._evaluate(
                 thread_id=thread_id,
                 attempt=attempt,
-                checkpoint=checkpoint,
+                question=question,
             )
 
         try:
@@ -193,13 +235,8 @@ class AssessmentAttemptService:
         *,
         thread_id: str,
         attempt: AssessmentAttemptV1,
-        checkpoint: AssessmentCheckpointResourcesV1,
+        question: AssessmentQuestionRecordV1,
     ) -> AssessmentFinalV1:
-        if checkpoint.thread_id != thread_id:
-            raise AssessmentIdentityError("thread_mismatch")
-
-        resource = _find_resource(checkpoint, resource_id=attempt.resource_id)
-        question = _find_question(resource, question_id=attempt.question_id)
         is_correct = answer_matches(
             submitted_answer=attempt.answer,
             answer_key=question.answer_key,
@@ -315,5 +352,7 @@ __all__ = [
     "AssessmentIdentityError",
     "AssessmentIdempotencyExecutor",
     "AssessmentOperation",
+    "AssessmentRecordedFailure",
+    "AssessmentRecoveryRequired",
     "AssessmentRequestConflict",
 ]

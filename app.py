@@ -25,6 +25,34 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 from pydantic import ValidationError
 
+from src.assessment.attempt_contracts import (
+    AssessmentAttemptV1,
+    AssessmentCheckpointResourcesV1,
+    stable_assessment_attempt_hash,
+)
+from src.assessment.attempt_journal import (
+    AssessmentAttemptJournalV1,
+    AssessmentCheckpointIdempotencyExecutor,
+    AssessmentExecutionLock,
+    LocalAssessmentExecutionLock,
+)
+from src.assessment.attempt_service import (
+    AssessmentAttemptService,
+    AssessmentAttemptServiceError,
+    AssessmentDependencyFailed,
+    AssessmentIdentityError,
+    AssessmentRecordedFailure,
+    AssessmentRecoveryRequired,
+    AssessmentRequestConflict,
+)
+from src.assessment.checkpoint import (
+    AssessmentCheckpointError,
+    validate_assessment_checkpoint_resources_v1,
+)
+from src.assessment.runtime import (
+    classify_assessment_error_v1,
+    generate_adaptive_practice_v1,
+)
 from src.context_engineering.schema import sanitize_error_message
 from src.context_engineering.compaction import (
     CompactionResultV1,
@@ -63,6 +91,7 @@ from src.database.checkpointer import (
     get_db_uri,
     make_thread_config,
 )
+from src.database.assessment_lock import PostgresAssessmentExecutionLock
 from src.config import get_setting
 from src.graph.builder import get_compiled_graph
 from src.graph.state import (
@@ -689,6 +718,21 @@ async def lifespan(app: FastAPI):
                 env_flag="LOG_A3_TRACE",
             )
         app.state.graph = graph
+        assessment_execution_lock: AssessmentExecutionLock | None = None
+        if ckp_type == "postgres":
+            if not db_uri:
+                raise RuntimeError("PostgreSQL assessment execution requires DB_URI")
+            assessment_execution_lock = PostgresAssessmentExecutionLock(db_uri)
+        elif ckp_type == "memory":
+            assessment_execution_lock = LocalAssessmentExecutionLock()
+        app.state.assessment_attempt_service = (
+            _build_assessment_attempt_service(
+                graph,
+                execution_lock=assessment_execution_lock,
+            )
+            if assessment_execution_lock is not None
+            else None
+        )
         yield
 
     shutdown_tracing()
@@ -4423,6 +4467,151 @@ def _stream_request_fingerprint(operation: str, payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+async def _load_assessment_checkpoint_resources(
+    graph,
+    *,
+    thread_id: str,
+) -> AssessmentCheckpointResourcesV1:
+    config = make_thread_config(thread_id)
+    state_snapshot = await graph.aget_state(config)
+    if not _has_checkpoint_state(state_snapshot):
+        raise HTTPException(status_code=404, detail="assessment_checkpoint_not_found")
+    values = _state_values(state_snapshot)
+    raw = values.get("assessment_checkpoint_resources")
+    if not isinstance(raw, dict) or not raw:
+        raise HTTPException(
+            status_code=404,
+            detail="assessment_resources_not_found",
+        )
+    try:
+        checkpoint = validate_assessment_checkpoint_resources_v1(raw)
+    except AssessmentCheckpointError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    if checkpoint.thread_id != thread_id:
+        raise HTTPException(
+            status_code=409,
+            detail="assessment_checkpoint_thread_mismatch",
+        )
+    return checkpoint
+
+
+def _build_assessment_attempt_service(
+    graph,
+    *,
+    execution_lock: AssessmentExecutionLock,
+) -> AssessmentAttemptService:
+    async def load_journal(thread_id: str) -> object:
+        config = make_thread_config(thread_id)
+        state_snapshot = await graph.aget_state(config)
+        if not _has_checkpoint_state(state_snapshot):
+            raise RuntimeError("assessment checkpoint is unavailable")
+        return _state_values(state_snapshot).get("assessment_attempt_journal", {})
+
+    async def append_journal(
+        thread_id: str,
+        update: AssessmentAttemptJournalV1,
+    ) -> None:
+        config = make_thread_config(thread_id)
+        state_snapshot = await graph.aget_state(config)
+        if not _has_checkpoint_state(state_snapshot):
+            raise RuntimeError("assessment checkpoint is unavailable")
+        values = _state_values(state_snapshot)
+        await safe_update_thread_state(
+            graph,
+            config,
+            {"assessment_attempt_journal": update.model_dump(mode="json")},
+            state=values,
+        )
+
+    return AssessmentAttemptService(
+        idempotency=AssessmentCheckpointIdempotencyExecutor(
+            load_journal=load_journal,
+            append_journal=append_journal,
+            execution_lock=execution_lock,
+        ),
+        error_classifier=classify_assessment_error_v1,
+        adaptive_generator=generate_adaptive_practice_v1,
+    )
+
+
+def _assessment_stream_error_data(exc: Exception) -> dict:
+    if isinstance(exc, AssessmentRequestConflict):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment request conflicts with an existing request",
+            "recoverable": False,
+        }
+    if isinstance(exc, AssessmentIdentityError):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment target identity validation failed",
+            "reason": exc.reason,
+            "recoverable": False,
+        }
+    if isinstance(exc, AssessmentRecoveryRequired):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment request requires explicit recovery",
+            "recoverable": False,
+        }
+    if isinstance(exc, AssessmentRecordedFailure):
+        return {
+            "error_type": exc.code,
+            "message": (
+                "Assessment attempt failed"
+                if exc.stage == "assessment"
+                else "Assessment dependency failed"
+            ),
+            "stage": exc.stage,
+            "exception_type": sanitize_error_message(
+                exc.exception_type,
+                max_chars=120,
+            ),
+            "recoverable": False,
+        }
+    if isinstance(exc, AssessmentDependencyFailed):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment dependency failed",
+            "stage": exc.stage,
+            "exception_type": sanitize_error_message(
+                exc.exception_type,
+                max_chars=120,
+            ),
+            "recoverable": False,
+        }
+    if isinstance(exc, AssessmentAttemptServiceError):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment attempt failed",
+            "recoverable": False,
+        }
+    return {
+        "error_type": "assessment_attempt_failed",
+        "message": "Assessment attempt failed",
+        "recoverable": False,
+    }
+
+
+async def _assessment_attempt_stream_source(
+    *,
+    service: AssessmentAttemptService,
+    thread_id: str,
+    attempt: AssessmentAttemptV1,
+    checkpoint: AssessmentCheckpointResourcesV1,
+) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
+    try:
+        final = await service.submit(
+            thread_id=thread_id,
+            attempt=attempt,
+            checkpoint=checkpoint,
+        )
+    except Exception as exc:
+        yield _stream_draft("stream_error", _assessment_stream_error_data(exc))
+        return
+    yield _stream_draft("assessment_final", final.model_dump(mode="json"))
+
+
 def _new_thread_id_for_request(request_id: str) -> str:
     """Keep retries without a client thread_id bound to one stable thread."""
 
@@ -5144,6 +5333,57 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
 @app.post("/threads/{thread_id}/stop")
 async def stop_thread_endpoint(thread_id: str, req: StopRequest, request: Request):
     return await request_thread_stop(request.app.state.graph, thread_id, req.reason)
+
+
+@app.post("/threads/{thread_id}/assessment-attempts")
+async def assessment_attempt_endpoint(
+    thread_id: str,
+    attempt: AssessmentAttemptV1,
+    request: Request,
+):
+    if not thread_id.strip():
+        raise HTTPException(status_code=422, detail="thread_id_must_not_be_blank")
+    service = getattr(request.app.state, "assessment_attempt_service", None)
+    if not isinstance(service, AssessmentAttemptService):
+        raise HTTPException(
+            status_code=503,
+            detail="assessment_service_unavailable",
+        )
+    checkpoint = await _load_assessment_checkpoint_resources(
+        request.app.state.graph,
+        thread_id=thread_id,
+    )
+    request_id = attempt.request_id
+    operation = "assessment_attempt"
+    request_fingerprint = stable_assessment_attempt_hash(
+        thread_id=thread_id,
+        attempt=attempt,
+    )
+    stream_id = str(uuid.uuid4())
+    try:
+        session = await stream_session_manager.create(
+            stream_id=stream_id,
+            request_id=request_id,
+            thread_id=thread_id,
+            operation=operation,
+            request_fingerprint=request_fingerprint,
+            source=_assessment_attempt_stream_source(
+                service=service,
+                thread_id=thread_id,
+                attempt=attempt,
+                checkpoint=checkpoint,
+            ),
+        )
+        response_body = session.subscribe(after_sequence=0)
+    except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
+        raise HTTPException(status_code=410, detail="stream_request_expired") from exc
+    except StreamSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return StreamingResponse(
+        response_body,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/threads/{thread_id}/status", response_model=ThreadStatusResponse)

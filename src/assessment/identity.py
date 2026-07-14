@@ -10,6 +10,7 @@ from collections.abc import Sequence
 EXERCISE_QUESTION_ID_PREFIX = "question:v1"
 _LEVELS = frozenset({"basic", "intermediate", "application", "self_check"})
 _QUESTION_TYPES = frozenset({"free_text", "single_choice"})
+_ADAPTIVE_TASK_TYPES = frozenset({"similar", "harder", "review"})
 
 
 def stable_exercise_question_id(
@@ -71,4 +72,56 @@ def stable_exercise_question_id(
     return f"{EXERCISE_QUESTION_ID_PREFIX}:{hashlib.sha256(canonical).hexdigest()}"
 
 
-__all__ = ["EXERCISE_QUESTION_ID_PREFIX", "stable_exercise_question_id"]
+def stable_adaptive_practice_question_id(
+    *,
+    task_type: str,
+    question: str,
+    tags: Sequence[str],
+    difficulty: float,
+) -> str:
+    """Hash the public adaptive-question surface into a stable identity."""
+
+    if not isinstance(task_type, str) or not isinstance(question, str):
+        raise ValueError("adaptive question identity text values must be strings")
+    if any(not isinstance(tag, str) for tag in tags):
+        raise ValueError("adaptive question identity tags must be strings")
+    if not isinstance(difficulty, int | float) or isinstance(difficulty, bool):
+        raise ValueError("adaptive question identity difficulty must be numeric")
+
+    normalized_task_type = task_type.strip()
+    normalized_question = question.strip()
+    normalized_tags = tuple(sorted(tag.strip() for tag in tags))
+    normalized_difficulty = float(difficulty)
+    if (
+        normalized_task_type not in _ADAPTIVE_TASK_TYPES
+        or not normalized_question
+        or not normalized_tags
+        or any(not tag for tag in normalized_tags)
+        or len(set(normalized_tags)) != len(normalized_tags)
+        or not 0.0 <= normalized_difficulty <= 1.0
+    ):
+        raise ValueError(
+            "adaptive question identity requires a canonical task_type, question, "
+            "tags, and difficulty"
+        )
+
+    canonical = json.dumps(
+        {
+            "task_type": normalized_task_type,
+            "question": normalized_question,
+            "tags": normalized_tags,
+            "difficulty": normalized_difficulty,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{EXERCISE_QUESTION_ID_PREFIX}:{hashlib.sha256(canonical).hexdigest()}"
+
+
+__all__ = [
+    "EXERCISE_QUESTION_ID_PREFIX",
+    "stable_adaptive_practice_question_id",
+    "stable_exercise_question_id",
+]

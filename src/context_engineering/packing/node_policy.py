@@ -431,6 +431,7 @@ def _policy_from_node_policy(
         injectable_sources=node_policy.injectable_sources,
         required_sources=node_policy.required_sources,
         optional_sources=node_policy.optional_sources,
+        _optional_sources_explicit=True,
         exclude_message_source=node_policy.exclude_message_source,
         route_rollout=route,
         quality=quality,

@@ -817,6 +817,32 @@ def test_agent_injectable_sources_are_node_specific():
             "injectable": ("rules", "profile", "trajectory", "memory"),
             "excluded": ("evidence", "artifact", "curriculum"),
         },
+        "error_classifier": {
+            "required": ("rules",),
+            "optional": (),
+            "injectable": ("rules",),
+            "excluded": (
+                "evidence",
+                "artifact",
+                "curriculum",
+                "memory",
+                "profile",
+                "trajectory",
+            ),
+        },
+        "practice_generator": {
+            "required": ("rules",),
+            "optional": (),
+            "injectable": ("rules",),
+            "excluded": (
+                "evidence",
+                "artifact",
+                "curriculum",
+                "memory",
+                "profile",
+                "trajectory",
+            ),
+        },
         "recommendation_provider": {
             "required": ("rules",),
             "optional": ("profile", "trajectory", "curriculum"),
@@ -904,6 +930,8 @@ def test_structured_active_rollout_includes_selected_resource_subnodes():
         "study_plan_reviewer_academic",
         "study_plan_reviewer_emotional",
         "study_plan_consensus",
+        "error_classifier",
+        "practice_generator",
     }
 
     assert expected_active.issubset(active_nodes)
