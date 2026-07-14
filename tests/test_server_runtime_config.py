@@ -68,6 +68,7 @@ def test_reload_configuration_is_required(monkeypatch):
 def test_backend_launcher_uses_config_and_only_explicitly_overrides_reload(monkeypatch):
     captured: dict[str, object] = {}
     override_values: list[bool | None] = []
+    expected_workspace_root = Path(run_backend.__file__).resolve().parent.parent
 
     monkeypatch.setattr(
         run_backend, "load_server_reload_config", lambda: _config(enabled=False)
@@ -80,7 +81,8 @@ def test_backend_launcher_uses_config_and_only_explicitly_overrides_reload(monke
         enabled_override: bool | None,
     ) -> dict[str, bool]:
         override_values.append(enabled_override)
-        assert workspace_root.name == "A3_study_agent"
+        assert workspace_root == expected_workspace_root
+        assert (workspace_root / "pyproject.toml").is_file()
         return {"reload": bool(enabled_override)}
 
     monkeypatch.setattr(run_backend, "resolve_uvicorn_reload_options", resolve_options)

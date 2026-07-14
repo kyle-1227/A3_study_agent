@@ -1,5 +1,6 @@
 [importlinter]
 root_package = src
+include_external_packages = True
 
 [importlinter:contract:llm-does-not-import-graph-business]
 name = src.llm must not import graph business nodes
@@ -23,6 +24,7 @@ forbidden_modules =
 [importlinter:contract:provider-sdks-stay-out-of-business-nodes]
 name = Provider SDKs stay out of graph/profile/tools business nodes
 type = forbidden
+allow_indirect_imports = True
 source_modules =
     src.graph.academic
     src.graph.builder

@@ -2,6 +2,18 @@
 
 Quality gates are layered. Use the smallest meaningful set for the change, then expand when risk increases.
 
+## Reproducible Python Tooling
+
+Install the repository-pinned Python quality group in an isolated environment:
+
+```powershell
+python -m pip install -e ".[quality]"
+```
+
+The group pins Bandit, import-linter, mypy, Ruff, and Vulture. Semgrep and
+Gitleaks remain separate platform tools; report either one as unavailable when
+it is not installed instead of treating another scanner as an equivalent pass.
+
 ## Always
 
 Before editing:
