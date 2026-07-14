@@ -16,7 +16,9 @@ from src.rag.parent_child.chroma_children import (
     iter_child_chroma_metadata_pages,
     write_child_chroma_artifact,
 )
+from src.rag.parent_child.embedding_batches import EmbeddingBatchExecutionError
 from src.rag.parent_child.models import ChildDocument, ChildMetadata
+from src.rag.parent_child.provider_clients import ProviderReportedError
 
 
 class DeterministicEmbedding:
@@ -35,6 +37,15 @@ class DeterministicEmbedding:
 class WrongDimensionEmbedding:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [[1.0] for _ in texts]
+
+
+class FailingProviderEmbedding:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        del texts
+        raise self.error
 
 
 class _PagedMetadataCollection:
@@ -229,6 +240,47 @@ def test_chroma_writer_rejects_embedding_dimension_mismatch(tmp_path: Path) -> N
             max_in_flight_batches=1,
             embedding_provider=WrongDimensionEmbedding(),
         )
+
+
+def test_chroma_writer_preserves_only_sanitized_embedding_failure(
+    tmp_path: Path,
+) -> None:
+    staging_root = _staging_root(tmp_path)
+    secret = "sk-secret-do-not-report"
+    provider_error = ProviderReportedError(
+        code=429,
+        retryable=True,
+        attempts_exhausted=True,
+    )
+    provider_error.response_body = {"authorization": secret}
+    provider_error.request_url = f"https://provider.invalid/?key={secret}"
+
+    with pytest.raises(ChromaEmbeddingContractError) as captured:
+        write_child_chroma_artifact(
+            (_child(child_hex="1", content="alpha"),),
+            generation_staging_root=staging_root,
+            persist_directory=staging_root / "chroma_children",
+            generation_id="gen-a",
+            collection_name="children-v1",
+            distance_metric="cosine",
+            expected_dimension=3,
+            batch_size=8,
+            max_in_flight_batches=1,
+            embedding_provider=FailingProviderEmbedding(provider_error),
+        )
+
+    batch_failure = captured.value.__cause__
+    assert isinstance(batch_failure, EmbeddingBatchExecutionError)
+    assert batch_failure.batch_start == 0
+    assert batch_failure.batch_size == 1
+    assert batch_failure.cause_type == "ProviderReportedError"
+    assert batch_failure.provider_code == 429
+    assert batch_failure.retryable is True
+    assert batch_failure.attempts_exhausted is True
+    assert batch_failure.__cause__ is None
+    assert batch_failure.__context__ is None
+    assert secret not in str(captured.value)
+    assert secret not in repr(vars(batch_failure))
 
 
 def test_chroma_writer_is_staging_only_and_immutable(tmp_path: Path) -> None:

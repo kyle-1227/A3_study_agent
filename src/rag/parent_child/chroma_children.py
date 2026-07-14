@@ -480,10 +480,10 @@ def write_child_chroma_artifact(
                         metadatas=[item.metadata for item in batch],
                         embeddings=vectors,
                     )
-            except EmbeddingBatchExecutionError:
+            except EmbeddingBatchExecutionError as exc:
                 raise ChromaEmbeddingContractError(
                     "document embedding failed during bounded batch execution"
-                ) from None
+                ) from exc
             collection_names = {item.name for item in client.list_collections()}
             if collection_names != {collection_name}:
                 raise ChromaVerificationError(
