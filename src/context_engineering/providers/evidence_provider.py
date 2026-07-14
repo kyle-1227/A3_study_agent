@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.config.evidence_orchestration_contracts import ResourceEvidenceAssignment
 from src.context_engineering.evidence_normalizer import (
     normalize_evidence_candidate_score,
 )
@@ -71,6 +72,7 @@ def _existing_evidence_candidates(
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
+    assigned_evidence_ids = _assigned_evidence_ids(state)
     candidates: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for bucket in (
@@ -107,6 +109,11 @@ def _existing_evidence_candidates(
                     original_exception_type="TypeError",
                 )
             evidence_id = str(item.get("evidence_id") or item.get("source_id") or "")
+            if (
+                assigned_evidence_ids is not None
+                and evidence_id not in assigned_evidence_ids
+            ):
+                continue
             dedupe_key = evidence_id or f"{bucket}:{len(candidates)}"
             if dedupe_key in seen_ids:
                 continue
@@ -114,7 +121,24 @@ def _existing_evidence_candidates(
             candidates.append({**item, "_context_source_bucket": bucket})
             if len(candidates) >= limit:
                 return candidates
+    if assigned_evidence_ids is not None and not candidates:
+        raise ContextProviderError(
+            provider=EvidenceContextProvider.name,
+            source_type=EvidenceContextProvider.source_type,
+            stage="assignment_filter",
+            message="resource evidence assignment resolved to no provider candidates",
+            original_exception_type="EvidenceAssignmentResolutionError",
+        )
     return candidates
+
+
+def _assigned_evidence_ids(state: dict[str, Any]) -> frozenset[str] | None:
+    if "resource_evidence_assignment" not in state:
+        return None
+    assignment = ResourceEvidenceAssignment.model_validate(
+        state["resource_evidence_assignment"]
+    )
+    return frozenset(assignment.evidence_ids)
 
 
 def _workspace_evidence_summaries(state: dict[str, Any]) -> list[dict[str, Any]]:

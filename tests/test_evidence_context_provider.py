@@ -6,6 +6,9 @@ import logging
 
 import pytest
 
+from src.config.evidence_orchestration_contracts import (
+    make_resource_assignment_fingerprint,
+)
 from src.context_engineering.providers.base import ProviderContext
 from src.context_engineering.providers import evidence_provider
 from src.context_engineering.providers.evidence_provider import EvidenceContextProvider
@@ -189,6 +192,109 @@ def test_evidence_provider_dedupes_existing_bucket_overlap():
 
     assert len(items) == 1
     assert items[0].content == "first"
+
+
+def _resource_assignment(*evidence_ids: str) -> dict:
+    subjects = ("computer_science",)
+    requirement_ids = ("requirement:1",)
+    return {
+        "resource_type": "quiz",
+        "subjects": list(subjects),
+        "requirement_ids": list(requirement_ids),
+        "evidence_ids": list(evidence_ids),
+        "assignment_fingerprint": make_resource_assignment_fingerprint(
+            resource_type="quiz",
+            subjects=subjects,
+            requirement_ids=requirement_ids,
+            evidence_ids=evidence_ids,
+        ),
+    }
+
+
+def test_evidence_provider_enforces_assignment_across_every_bucket():
+    state = {
+        "resource_evidence_assignment": _resource_assignment(
+            "assigned:graded",
+            "assigned:workspace",
+        ),
+        "graded_evidence": [
+            {
+                "evidence_id": "assigned:graded",
+                "content": "Assigned current evidence.",
+            },
+            {
+                "evidence_id": "unassigned:graded",
+                "content": "Leaked current evidence.",
+            },
+        ],
+        "task_workspace": {
+            "evidence_summaries": [
+                {
+                    "evidence_id": "assigned:workspace",
+                    "summary": "Assigned workspace evidence.",
+                    "purpose": "factual_grounding",
+                },
+                {
+                    "evidence_id": "unassigned:workspace",
+                    "summary": "Leaked workspace evidence.",
+                    "purpose": "factual_grounding",
+                },
+            ]
+        },
+        "local_evidence": [
+            {
+                "evidence_id": "unassigned:local",
+                "content": "Leaked local evidence.",
+            }
+        ],
+        "web_evidence_candidates": [
+            {
+                "evidence_id": "unassigned:web",
+                "content": "Leaked web evidence.",
+            }
+        ],
+    }
+
+    items = EvidenceContextProvider().collect(_context(state))
+
+    assert [item.metadata["evidence_id"] for item in items] == [
+        "assigned:graded",
+        "assigned:workspace",
+    ]
+    serialized = repr(items)
+    assert "Leaked" not in serialized
+    assert "unassigned:" not in serialized
+
+
+def test_evidence_provider_fails_when_assignment_resolves_to_no_candidates():
+    state = {
+        "resource_evidence_assignment": _resource_assignment("assigned:missing"),
+        "graded_evidence": [
+            {"evidence_id": "unassigned:graded", "content": "not assigned"}
+        ],
+    }
+
+    with pytest.raises(
+        ContextProviderError, match="resolved to no provider candidates"
+    ):
+        EvidenceContextProvider().collect(_context(state))
+
+
+def test_evidence_provider_rejects_invalid_assignment_instead_of_falling_back():
+    assignment = _resource_assignment("assigned:1")
+    assignment["assignment_fingerprint"] = "0" * 64
+
+    with pytest.raises(ContextProviderError, match="assignment_fingerprint"):
+        EvidenceContextProvider().collect(
+            _context(
+                {
+                    "resource_evidence_assignment": assignment,
+                    "graded_evidence": [
+                        {"evidence_id": "assigned:1", "content": "candidate"}
+                    ],
+                }
+            )
+        )
 
 
 def test_evidence_provider_supports_compatible_content_fields():
