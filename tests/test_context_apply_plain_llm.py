@@ -36,7 +36,6 @@ def _policy(
     *,
     enabled: bool = True,
     nodes: tuple[str, ...] = ("plain_node",),
-    fallback_on_error: bool = False,
     max_tokens: int = 10000,
     mode: str = "active",
     required_sources: tuple[str, ...] = (),
@@ -44,7 +43,6 @@ def _policy(
     return ContextInjectionPolicy(
         enabled=enabled,
         apply_enabled_nodes=nodes,
-        fallback_on_error=fallback_on_error,
         allow_structured_output=False,
         role="system",
         position="after_system",
@@ -70,7 +68,6 @@ def _policy(
         budget=ApplyBudgetPolicy(
             graceful_degradation_enabled=False,
             drop_order=("priority_asc", "token_estimate_desc", "id_asc"),
-            fallback_if_empty_after_drop=fallback_on_error,
         ),
         format=ApplyFormatPolicy(
             group_by_source=True,
@@ -86,7 +83,6 @@ def _policy(
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
         ),
@@ -573,7 +569,7 @@ async def test_apply_error_does_not_fallback_to_original_messages(monkeypatch):
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     _patch_orchestrator(
         monkeypatch,
-        policy=_policy(max_tokens=1, fallback_on_error=False),
+        policy=_policy(max_tokens=1),
         trace_payloads=trace_payloads,
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)
@@ -817,7 +813,7 @@ async def test_apply_error_without_fallback_raises_before_llm_and_emits_safe_err
     monkeypatch.setattr(llm_module, "get_node_llm", lambda _node: mock_llm)
     _patch_orchestrator(
         monkeypatch,
-        policy=_policy(max_tokens=1, fallback_on_error=False),
+        policy=_policy(max_tokens=1),
         items=[_item(content="api_key=sk-secret-value cookie=session must not leak")],
     )
     monkeypatch.setattr(llm_module, "get_llm_call_max_retries", lambda *_, **__: 0)

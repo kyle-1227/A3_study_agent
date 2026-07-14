@@ -21,7 +21,6 @@ def _policy(*, max_tokens: int = 10000) -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=("plain_node",),
-        fallback_on_error=True,
         allow_structured_output=False,
         role="system",
         position="after_system",

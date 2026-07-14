@@ -11,6 +11,23 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ## Observed Legacy Risk Areas
 
+### 2026-07-14 Context Apply inert fallback-field cleanup
+
+- Removed the unused Context Apply policy fields `fallback_on_error` and
+  `fallback_if_empty_after_drop` from dataclasses, configuration parsing,
+  official settings, and test fixtures. Neither field had a runtime branch;
+  storing them only advertised behavior that did not exist.
+- Removed `fallback_to_rule_based` from importance-scoring policy, aggregate
+  telemetry, trace projection, SSE progress, settings, and tests. Importance
+  scoring failure still reports typed reason, error type, sanitized warnings,
+  and elapsed time; it does not execute or claim a rule-based substitute.
+- Whole-item budget degradation, source filtering, drop reasons, required
+  source failures, observe-only importance scoring, and same-provider
+  transport retry are unchanged.
+- Active-code/config/test scans contain none of the three field names. Related
+  Context Apply regression passed with 303 tests; full backend regression
+  passed with 2280 tests and 5 skips.
+
 ### 2026-07-13 Structured-output single-mode cleanup
 
 - Removed the legacy `fallback_modes` configuration/API/result/trace contract
@@ -55,11 +72,12 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 - Added manifest enforcement for active provider transport paths before any
   generated/chat-completion LLM request is sent.
-- Existing `invoke_with_fallback()` and `async_invoke_with_fallback()` remain
-  report-only legacy helpers because they are covered by historical tests and
-  are not used by production graph call sites.
-- New production LLM paths must not call these legacy fallback helpers; direct
-  provider invocation should stay behind manifest-guarded transport.
+- The later single-provider cleanup removed `get_fallback_llm`,
+  `invoke_with_fallback`, `async_invoke_with_fallback`, and their `FALLBACK_*`
+  environment contract. `tests/test_llm_single_provider_retry.py` now guards
+  their absence while preserving bounded same-provider transport retry.
+- Production LLM paths must remain behind manifest-guarded transport and must
+  not reintroduce cross-provider or cross-model retry.
 
 ### 2026-06-29 Context Engineering Phase 0
 
@@ -75,9 +93,10 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ### `src/graph/llm.py`
 
-- Module docstring and helpers describe resilient fallback/failover behavior.
-- `get_node_llm`, `get_primary_llm`, and `get_fallback_llm` include provider/model/base_url/api_key defaults.
-- Fallback model/env behavior appears coupled to DeepSeek defaults.
+- Cross-model fallback helpers are removed. `get_node_llm` and
+  `get_primary_llm` still contain legacy provider/model/base-url defaults and
+  OpenRouter header handling; those configuration paths remain separate
+  report-only debt and were not changed by the Context Apply cleanup.
 
 ### `src/llm/structured_output.py`
 
@@ -93,7 +112,10 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 
 ### Tests
 
-- `tests/test_llm_fallback.py`, `tests/test_deepseek_structured_output.py`, and `tests/test_structured_retry.py` are relevant when changing fallback or structured-output behavior.
+- `tests/test_llm_single_provider_retry.py`,
+  `tests/test_deepseek_structured_output.py`, and
+  `tests/test_structured_retry.py` are relevant when changing provider retry
+  or structured-output behavior.
 
 ## Follow-Up
 

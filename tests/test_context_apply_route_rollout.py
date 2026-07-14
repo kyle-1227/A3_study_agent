@@ -46,7 +46,6 @@ def _apply_config() -> dict[str, Any]:
     return {
         "enabled": True,
         "apply_enabled_nodes": ["review_doc_agent"],
-        "fallback_on_error": True,
         "allow_structured_output": False,
         "role": "system",
         "position": "after_system",
@@ -70,7 +69,6 @@ def _apply_config() -> dict[str, Any]:
         "budget": {
             "graceful_degradation_enabled": True,
             "drop_order": ["priority_asc", "token_estimate_desc", "id_asc"],
-            "fallback_if_empty_after_drop": True,
         },
         "format": {
             "group_by_source": True,
@@ -192,7 +190,6 @@ def test_importance_scorer_node_conflict_disables_shadow(monkeypatch):
         "max_items_to_score": 3,
         "max_content_preview_chars": 100,
         "timeout_seconds": 1,
-        "fallback_to_rule_based": True,
         "emit_shadow_telemetry": True,
         "min_shadow_score_for_analysis": 0.5,
     }

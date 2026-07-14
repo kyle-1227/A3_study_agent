@@ -42,7 +42,6 @@ def _policy() -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=("review_doc_agent",),
-        fallback_on_error=True,
         allow_structured_output=False,
         role="system",
         position="after_system",
@@ -152,7 +151,6 @@ def test_trace_builders_do_not_output_forbidden_payload_keys():
             scored_count=1,
             kept_count=1,
             dropped_count=0,
-            fallback_to_rule_based=False,
             scoring_elapsed_ms=3.0,
             warnings=["db_uri=postgresql://u:p@h/db"],
         ),

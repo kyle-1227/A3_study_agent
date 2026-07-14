@@ -292,7 +292,6 @@ def _apply_runtime_policy(
         budget=replace(
             policy.budget,
             graceful_degradation_enabled=True,
-            fallback_if_empty_after_drop=False,
         ),
         format=replace(
             policy.format,

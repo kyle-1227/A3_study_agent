@@ -31,7 +31,6 @@ def _policy() -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=("plain_node",),
-        fallback_on_error=True,
         allow_structured_output=False,
         role="system",
         position="after_system",
@@ -195,7 +194,6 @@ def test_context_importance_scored_event_is_aggregate_only():
             scored_count=2,
             kept_count=1,
             dropped_count=1,
-            fallback_to_rule_based=False,
             scoring_elapsed_ms=12.5,
             warnings=["db_uri=postgresql://u:p@h/db"],
         ),
@@ -299,7 +297,6 @@ async def test_context_apply_events_are_forwarded_as_safe_sse():
                 "scored_count": 2,
                 "kept_count": 1,
                 "dropped_count": 1,
-                "fallback_to_rule_based": False,
                 "scoring_elapsed_ms": 5,
                 "disabled_reason": "",
                 "error_reason": "",

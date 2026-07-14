@@ -250,3 +250,30 @@ Verification after deletion:
   60 pre-existing findings and `ruff format --check .` reports 66 pre-existing
   files. The optional Semgrep, import-linter, Gitleaks, Bandit, and Vulture
   executables are missing and were not reported as passing.
+
+## 2026-07-14 Context Apply inert fallback-field cleanup evidence
+
+Candidate: inert Context Apply fallback policy and telemetry fields
+Files: `src/context_engineering/packing/apply.py`,
+`src/context_engineering/packing/importance.py`,
+`src/context_engineering/packing/apply_trace.py`,
+`src/context_engineering/packing/node_policy.py`, `app.py`, and
+`config/settings.yaml`
+Symbols: `fallback_on_error`, `fallback_if_empty_after_drop`, and
+`fallback_to_rule_based`
+Evidence: tracked reference inspection found no conditional or alternative
+execution for the first two fields. The third field was copied from policy to
+failure telemetry but never invoked rule-based selection. Official settings
+fixed all three to false. Removing them leaves budget degradation, source/drop
+accounting, importance scoring success/failure, and provider retry unchanged.
+Confidence: High.
+Dynamic reference checks: no Pydantic alias, environment resolver, prompt,
+LangGraph node lookup, FastAPI route, or frontend parser accesses these names.
+All active source/config/test references are removed in this diff.
+Replacement tests: Context Apply message, policy, node-policy, budget,
+route-rollout, plain/structured LLM, trace, importance, Phase-3B boundary, and
+SSE lifecycle suites (`303 passed`). Full backend regression passed with
+`2280 passed, 5 skipped`.
+Approved action: delete fields, parsers, defaults, telemetry projection, and
+fixture arguments. Retain explicit typed failures, dropped reasons,
+observe-only scoring, and same-provider bounded transport retry.

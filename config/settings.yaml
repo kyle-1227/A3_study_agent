@@ -270,7 +270,6 @@ context_engineering:
     apply:
       enabled: true
       apply_enabled_nodes: []
-      fallback_on_error: false
       allow_structured_output: true
       structured_output_context:
         enabled: true
@@ -880,7 +879,6 @@ context_engineering:
           - recency_asc
           - token_estimate_desc
           - id_asc
-        fallback_if_empty_after_drop: false
       format:
         group_by_source: true
         include_untrusted_context_warning: true
@@ -894,7 +892,6 @@ context_engineering:
         max_items_to_score: 0
         max_content_preview_chars: 0
         timeout_seconds: 0
-        fallback_to_rule_based: false
         emit_shadow_telemetry: false
         min_shadow_score_for_analysis: 0.0
         enabled_for_observe_only: false

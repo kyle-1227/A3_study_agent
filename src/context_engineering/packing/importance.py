@@ -82,7 +82,6 @@ class ContextImportanceTelemetry:
     scored_count: int
     kept_count: int
     dropped_count: int
-    fallback_to_rule_based: bool
     scoring_elapsed_ms: float
     disabled_reason: str = ""
     error_reason: str = ""
@@ -182,7 +181,6 @@ def aggregate_importance_success(
         scored_count=len(scored),
         kept_count=kept_count,
         dropped_count=max(len(scored) - kept_count, 0),
-        fallback_to_rule_based=False,
         scoring_elapsed_ms=_elapsed_ms(started_at),
     )
 
@@ -190,7 +188,6 @@ def aggregate_importance_success(
 def aggregate_importance_failure(
     *,
     items: list[ContextItem],
-    policy: ImportanceScoringPolicy,
     started_at: float | None,
     reason: str,
     error_type: str = "",
@@ -205,7 +202,6 @@ def aggregate_importance_failure(
         scored_count=0,
         kept_count=0,
         dropped_count=0,
-        fallback_to_rule_based=bool(policy.fallback_to_rule_based),
         scoring_elapsed_ms=_elapsed_ms(started_at) if started_at is not None else 0.0,
         disabled_reason=reason
         if reason.startswith("context_importance_scorer")

@@ -43,7 +43,6 @@ def _enabled_apply_config() -> dict[str, Any]:
     return {
         "enabled": True,
         "apply_enabled_nodes": ["plain_node"],
-        "fallback_on_error": True,
         "allow_structured_output": False,
         "role": "system",
         "position": "after_system",
@@ -63,7 +62,6 @@ def _enabled_apply_config() -> dict[str, Any]:
         "budget": {
             "graceful_degradation_enabled": True,
             "drop_order": ["priority_asc", "token_estimate_desc", "id_asc"],
-            "fallback_if_empty_after_drop": True,
         },
         "format": {
             "group_by_source": True,

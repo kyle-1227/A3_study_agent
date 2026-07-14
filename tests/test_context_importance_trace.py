@@ -22,7 +22,6 @@ def _policy() -> ImportanceScoringPolicy:
         max_items_to_score=3,
         max_content_preview_chars=300,
         timeout_seconds=1.0,
-        fallback_to_rule_based=True,
         emit_shadow_telemetry=True,
         min_shadow_score_for_analysis=0.5,
     )
@@ -56,7 +55,6 @@ def test_importance_telemetry_and_prompt_preview_redact_item_secrets():
     scorer_messages = build_importance_scorer_messages(items=[item], policy=policy)
     telemetry = aggregate_importance_failure(
         items=[item],
-        policy=policy,
         started_at=None,
         reason="context_importance_llm_failed",
         warning="raw response had api_key=sk-secret-value",

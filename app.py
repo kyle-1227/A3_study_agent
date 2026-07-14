@@ -3009,9 +3009,6 @@ async def _stream_graph_event_drafts(
                     "scored_count": event.get("scored_count", 0),
                     "kept_count": event.get("kept_count", 0),
                     "dropped_count": event.get("dropped_count", 0),
-                    "fallback_to_rule_based": bool(
-                        event.get("fallback_to_rule_based", False)
-                    ),
                     "scoring_elapsed_ms": event.get("scoring_elapsed_ms", 0),
                     "disabled_reason": sanitize_error_message(
                         event.get("disabled_reason", ""),

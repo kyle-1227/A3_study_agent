@@ -200,7 +200,6 @@ def build_context_importance_scored_event(
         "scored_count": telemetry.scored_count,
         "kept_count": telemetry.kept_count,
         "dropped_count": telemetry.dropped_count,
-        "fallback_to_rule_based": telemetry.fallback_to_rule_based,
         "scoring_elapsed_ms": telemetry.scoring_elapsed_ms,
         "disabled_reason": sanitize_error_message(telemetry.disabled_reason),
         "error_reason": sanitize_error_message(telemetry.error_reason),

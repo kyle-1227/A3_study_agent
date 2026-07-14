@@ -111,7 +111,6 @@ class ApplyBudgetPolicy:
 
     graceful_degradation_enabled: bool
     drop_order: tuple[str, ...]
-    fallback_if_empty_after_drop: bool
 
 
 @dataclass(frozen=True)
@@ -136,7 +135,6 @@ class ImportanceScoringPolicy:
     max_items_to_score: int
     max_content_preview_chars: int
     timeout_seconds: float
-    fallback_to_rule_based: bool
     emit_shadow_telemetry: bool
     min_shadow_score_for_analysis: float
     enabled_for_observe_only: bool = False
@@ -149,7 +147,6 @@ class ContextInjectionPolicy:
 
     enabled: bool
     apply_enabled_nodes: tuple[str, ...]
-    fallback_on_error: bool
     allow_structured_output: bool
     role: InjectionRole | str
     position: InjectionPosition | str
@@ -183,7 +180,6 @@ class ContextInjectionPolicy:
         default_factory=lambda: ApplyBudgetPolicy(
             graceful_degradation_enabled=False,
             drop_order=("priority_asc", "token_estimate_desc", "id_asc"),
-            fallback_if_empty_after_drop=False,
         )
     )
     format: ApplyFormatPolicy = field(
@@ -204,7 +200,6 @@ class ContextInjectionPolicy:
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
         )
@@ -401,12 +396,6 @@ def get_context_injection_policy(
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=apply_enabled_nodes,
-        fallback_on_error=_required_bool(
-            apply_config,
-            "fallback_on_error",
-            node_name=node_name,
-            llm_node=llm_node,
-        ),
         allow_structured_output=_required_bool(
             apply_config,
             "allow_structured_output",
@@ -940,7 +929,6 @@ def _disabled_policy() -> ContextInjectionPolicy:
     return ContextInjectionPolicy(
         enabled=False,
         apply_enabled_nodes=(),
-        fallback_on_error=False,
         allow_structured_output=False,
         role="",
         position="",
@@ -1385,13 +1373,6 @@ def _required_budget_policy(
             llm_node=llm_node,
         ),
         drop_order=drop_order,
-        fallback_if_empty_after_drop=_required_nested_bool(
-            raw,
-            "fallback_if_empty_after_drop",
-            path="context_engineering.packer.apply.budget",
-            node_name=node_name,
-            llm_node=llm_node,
-        ),
     )
 
 
@@ -1472,7 +1453,6 @@ def _required_importance_scoring_policy(
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=False,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
             enabled_for_observe_only=bool(
@@ -1528,13 +1508,6 @@ def _required_importance_scoring_policy(
         timeout_seconds=_required_positive_float(
             raw,
             "timeout_seconds",
-            path="context_engineering.packer.apply.importance_scoring",
-            node_name=node_name,
-            llm_node=llm_node,
-        ),
-        fallback_to_rule_based=_required_nested_bool(
-            raw,
-            "fallback_to_rule_based",
             path="context_engineering.packer.apply.importance_scoring",
             node_name=node_name,
             llm_node=llm_node,

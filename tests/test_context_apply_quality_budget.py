@@ -26,7 +26,6 @@ def _policy(
     return ContextInjectionPolicy(
         enabled=True,
         apply_enabled_nodes=("review_doc_agent",),
-        fallback_on_error=True,
         allow_structured_output=False,
         role="system",
         position="after_system",
@@ -50,7 +49,6 @@ def _policy(
         budget=ApplyBudgetPolicy(
             graceful_degradation_enabled=True,
             drop_order=("priority_asc", "token_estimate_desc", "id_asc"),
-            fallback_if_empty_after_drop=True,
         ),
         format=ApplyFormatPolicy(
             group_by_source=True,
@@ -66,7 +64,6 @@ def _policy(
             max_items_to_score=0,
             max_content_preview_chars=0,
             timeout_seconds=0.0,
-            fallback_to_rule_based=True,
             emit_shadow_telemetry=False,
             min_shadow_score_for_analysis=0.0,
         ),
