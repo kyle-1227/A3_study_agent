@@ -286,7 +286,7 @@ class AdaptivePracticeTaskDraftV1(BaseModel):
     answer: str = Field(min_length=1, max_length=10_000)
     explanation: str = Field(min_length=1, max_length=10_000)
     reason: str = Field(min_length=1, max_length=2_000)
-    tags: tuple[str, ...] = Field(min_length=1, max_length=80)
+    tags: list[str] = Field(min_length=1, max_length=80)
     difficulty: float = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
@@ -311,7 +311,7 @@ class AdaptivePracticeDraftBatchV1(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     schema_version: Literal["adaptive_practice_draft_batch_v1"]
-    tasks: tuple[AdaptivePracticeTaskDraftV1, ...] = Field(
+    tasks: list[AdaptivePracticeTaskDraftV1] = Field(
         min_length=1,
         max_length=3,
     )

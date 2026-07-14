@@ -208,7 +208,7 @@ async def generate_adaptive_practice_v1(
                 answer=task.answer,
                 explanation=task.explanation,
                 reason=task.reason,
-                tags=task.tags,
+                tags=tuple(task.tags),
                 difficulty=task.difficulty,
             )
             for task in parsed.tasks

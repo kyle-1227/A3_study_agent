@@ -555,3 +555,29 @@ removed its random test checkpoint. Both real tests passed. This closes the
 database availability, async-loop, lock, and saver-reopen sub-gates. It does not
 yet prove a full assessment HTTP process-restart flow or the new RAG served
 graph; those remain separate integration gates.
+
+## 24. Real DeepSeek assessment runtime sub-gate (2026-07-15)
+
+A fixed, non-user binary-search error sample was sent through the configured
+DeepSeek assessment classifier and adaptive-practice generator. The existing
+`DEEPSEEK_API_KEY` was loaded into one process only; no key, prompt body,
+student answer, generated question, answer, or Provider body was printed or
+persisted.
+
+The first live run proved the classifier callback but exposed a real contract
+bug in the generator: strict Pydantic fields declared as Python tuples cannot
+accept JSON arrays after tool arguments are decoded. Unit tests had constructed
+the draft with tuples and therefore hid the production failure. The two
+Provider-only draft arrays (`tasks` and task `tags`) now require strict lists;
+tuple input is covered by negative tests and remains rejected. The runtime then
+performs one explicit list-to-tuple projection when building the final immutable
+`AdaptivePracticeBatchV1`; structured-output parsing itself was not loosened.
+
+The second live run passed both Provider calls. It returned a valid
+`assessment_error_classification_v1`, a three-item
+`adaptive_practice_batch_v1`, the required concept-error review task, and three
+unique stable question IDs. Focused assessment regressions passed `58`; both
+touched source files passed mypy, Bandit, Ruff, and Semgrep. This closes the
+real classifier/generator callback sub-gate. It still does not claim a full
+HTTP assessment submission with checkpoint restart/replay, which remains a
+separate end-to-end gate.

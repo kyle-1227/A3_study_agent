@@ -88,7 +88,7 @@ def _draft(
     return AdaptivePracticeDraftBatchV1.model_validate(
         {
             "schema_version": "adaptive_practice_draft_batch_v1",
-            "tasks": (
+            "tasks": [
                 {
                     "schema_version": "adaptive_practice_task_draft_v1",
                     "task_type": task_type,
@@ -96,10 +96,10 @@ def _draft(
                     "answer": "3",
                     "explanation": "One plus two equals three.",
                     "reason": "Review a simpler addition fact after a concept error.",
-                    "tags": ("arithmetic",),
+                    "tags": ["arithmetic"],
                     "difficulty": 0.2,
                 },
-            ),
+            ],
         },
         strict=True,
     )
@@ -272,9 +272,26 @@ def test_adaptive_draft_forbids_schema_drift_and_blank_content():
         AdaptivePracticeTaskDraftV1.model_validate(payload, strict=True)
 
     payload = _draft().tasks[0].model_dump()
-    payload["tags"] = ("arithmetic", " arithmetic ")
+    payload["tags"] = ["arithmetic", " arithmetic "]
     with pytest.raises(ValidationError):
         AdaptivePracticeTaskDraftV1.model_validate(payload, strict=True)
+
+
+def test_adaptive_draft_requires_json_array_shapes_without_tuple_coercion():
+    parsed = _draft()
+
+    assert isinstance(parsed.tasks, list)
+    assert isinstance(parsed.tasks[0].tags, list)
+
+    batch_payload = parsed.model_dump(mode="python")
+    batch_payload["tasks"] = tuple(batch_payload["tasks"])
+    with pytest.raises(ValidationError):
+        AdaptivePracticeDraftBatchV1.model_validate(batch_payload, strict=True)
+
+    task_payload = parsed.tasks[0].model_dump(mode="python")
+    task_payload["tags"] = tuple(task_payload["tags"])
+    with pytest.raises(ValidationError):
+        AdaptivePracticeTaskDraftV1.model_validate(task_payload, strict=True)
 
 
 def test_adaptive_draft_batch_rejects_more_than_three_tasks():
