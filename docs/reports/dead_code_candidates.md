@@ -348,3 +348,35 @@ two stale phase guards that still required the deleted 4096 budget; they were
 converted to absence regressions rather than deleted. Optional Semgrep,
 import-linter, Gitleaks, Bandit, and Vulture remain unavailable and were not
 reported as passing.
+
+## 2026-07-14 superseded RAG generation-router cleanup evidence
+
+Candidate: Obsolete candidate-graph generation marker
+Files: `src/graph/evidence_orchestration.py`, `src/graph/state.py`, and
+`src/observability/node_registry.py`
+Symbols: `make_rag_generation_router_node`, `rag_generation_router`, and
+`rag_generation_route`
+Evidence: The current served graph and the resource-aware candidate graph do
+not register the node. The candidate graph routes directly from query rewrite
+to `resource_evidence_planner`, which already writes the bound runtime's
+`evidence_orchestration_fingerprint`. Exact references before cleanup were
+limited to the orphan factory/export, transient/TypedDict state, metadata, one
+graph absence assertion, and reports.
+Dynamic reference checks: package exports, LangGraph builders, FastAPI routes,
+node registry consumers, importlib/getattr calls, prompts, configuration, CLI
+entry points, and tests exposed no hidden runtime caller.
+Replacement tests: `tests/test_evidence_orchestration_graph.py` locks current
+topology, module export absence, state/reset absence, metadata absence, and
+active planner fingerprint emission.
+Executed action: The approved Agent-node zero-legacy plan authorized deletion
+after replacement. The factory/export/state/metadata remnants were removed;
+the planner, strict validation, separate hydration nodes, trace, and repair
+loop were retained.
+Checkpoint boundary: historical candidate checkpoints are not rewritten by
+this cleanup. Unknown old pending nodes remain subject to the explicit
+migration blocker; no resume compatibility is claimed.
+Verification: 51 focused tests, compileall, touched Ruff check/format,
+three-file scoped mypy, diff check, and active-symbol scans passed. Full
+backend (`2274 passed, 6 skipped`) and frontend Vitest (69 tests), typecheck,
+ESLint, and production build passed. Vulture was unavailable and was not
+reported as passing.

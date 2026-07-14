@@ -428,7 +428,6 @@ def initial_request_reset_transient_state() -> dict:
         "parent_child_retrieval_fingerprint": "",
         "parent_child_hydration": {},
         # resource-aware evidence orchestration candidate
-        "rag_generation_route": "",
         "evidence_orchestration_fingerprint": "",
         "evidence_orchestration_status": "",
         "evidence_requested_resource_types": [],
@@ -889,7 +888,6 @@ class LearningState(TypedDict):
     parent_child_generation_id: str  # Generation pinned for this request
     parent_child_retrieval_fingerprint: str  # Retrieval policy fingerprint
     parent_child_hydration: dict  # Content-free post-Judge hydration summary
-    rag_generation_route: str  # Explicit candidate graph route selected by graph build
     evidence_orchestration_fingerprint: str  # Joint policy/profile/index fingerprint
     evidence_orchestration_status: str  # planned / retrieving / repairing / terminal
     evidence_requested_resource_types: list[str]  # Original canonical resource request

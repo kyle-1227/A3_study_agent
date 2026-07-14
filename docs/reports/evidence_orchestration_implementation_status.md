@@ -1,6 +1,6 @@
 # Resource-aware evidence orchestration implementation status
 
-Date: 2026-07-12
+Date: 2026-07-12 (updated 2026-07-14)
 Branch baseline: `39df529`
 
 ## Outcome
@@ -12,16 +12,15 @@ The served application still calls `get_compiled_graph()`. No rollout stage, act
 ## Candidate flow
 
 1. `search_query_rewriter` supplies canonical subject branches.
-2. `rag_generation_router` marks the explicitly constructed joint candidate.
-3. `resource_evidence_planner` produces one strict requirement per requested resource, subject, and configured profile need.
-4. `retrieval_round_router` validates task bindings, source policy, round budget, total budget, and no-repeat signatures.
-5. `local_rag_search_batch` and `web_research_search_batch` execute in parallel. Empty task sets are explicit skips and make no provider call.
-6. `retrieval_round_merge` is the sole owner of cumulative candidate, outcome, and child-only Parent-Child snapshots.
-7. `requirement_evidence_judge` returns exactly one coverage row for every requirement. Code, not the LLM, derives resource readiness.
-8. `evidence_repair_planner` schedules only blocked required gaps. `local_then_web_on_gap` must complete a successful-or-empty local attempt before it can schedule Web.
-9. The loop stops on readiness, the two-round supplement limit, or one supplement round with no measurable progress.
-10. `parent_child_parent_hydration` hydrates accepted child evidence once, after terminal judging.
-11. `resource_evidence_assignment` assigns accepted evidence per ready resource. Blocked resources never enter a worker and receive `blocked_insufficient_evidence`; no degraded artifact is produced.
+2. The explicit resource branch enters `resource_evidence_planner` directly. The planner produces one strict requirement per requested resource, subject, and configured profile need and writes the runtime orchestration fingerprint.
+3. `retrieval_round_router` validates task bindings, source policy, round budget, total budget, and no-repeat signatures.
+4. `local_rag_search_batch` and `web_research_search_batch` execute in parallel. Empty task sets are explicit skips and make no provider call.
+5. `retrieval_round_merge` is the sole owner of cumulative candidate, outcome, and child-only Parent-Child snapshots.
+6. `requirement_evidence_judge` returns exactly one coverage row for every requirement. Code, not the LLM, derives resource readiness.
+7. `evidence_repair_planner` schedules only blocked required gaps. `local_then_web_on_gap` must complete a successful-or-empty local attempt before it can schedule Web.
+8. The loop stops on readiness, the two-round supplement limit, or one supplement round with no measurable progress.
+9. `resource_parent_hydration` hydrates accepted resource child evidence once, after terminal judging; academic evidence uses the separate `academic_parent_hydration` node.
+10. `resource_evidence_assignment` assigns accepted evidence per ready resource. Blocked resources never enter a worker and receive `blocked_insufficient_evidence`; no degraded artifact is produced.
 
 ## Strict runtime limits
 
@@ -114,3 +113,28 @@ Ruff format check passes 21 of the 22 scoped Python files. The shared `academic.
 5. The app has not been wired to select `get_compiled_resource_evidence_parent_child_graph(...)`; rollout remains an explicit future control-plane action.
 
 These blockers must not be bypassed with synthetic gold, a degraded candidate, a hidden fallback, or a request-time primary retry.
+
+## 2026-07-14 superseded router cleanup
+
+The 2026-07-12 initial candidate briefly used `rag_generation_router` and
+`rag_generation_route` to select between a joint hydration node's academic and
+resource behavior. Commit `5d6f51a` replaced that topology with a direct
+`resource_evidence_planner` edge and distinct academic/resource hydration
+nodes. The planner already writes the same
+`evidence_orchestration_fingerprint` from its bound runtime.
+
+After static, dynamic import, graph, registry, prompt, config, and test scans
+confirmed no current consumer, the obsolete router factory/export, transient
+state field, TypedDict field, and node metadata were removed. The graph test
+now locks the absence of the old factory, state, and metadata while separately
+proving the active planner still emits the runtime fingerprint. Existing
+checkpoints are not rewritten by this code cleanup; an old pending candidate
+node remains subject to the explicit checkpoint migration/unknown-node block
+gate and is not claimed as migrated.
+
+Focused verification: 51 evidence graph/trace/state/manifest tests passed;
+compileall, touched Ruff check/format, three-file scoped mypy, diff check, and
+active old-symbol scans passed. The final backend suite passed with
+`2274 passed, 6 skipped`; frontend Vitest (69 tests), typecheck, ESLint, and
+production build also passed. This cleanup does not activate the candidate or
+change any production blocker above.

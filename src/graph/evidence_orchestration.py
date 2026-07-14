@@ -610,21 +610,6 @@ def make_resource_evidence_planner_node(
     return resource_evidence_planner
 
 
-def make_rag_generation_router_node(
-    runtime: EvidenceOrchestrationRuntime,
-) -> Callable[[LearningState], dict]:
-    """Create an explicit candidate marker; served-primary selection stays external."""
-
-    def rag_generation_router(state: LearningState) -> dict:
-        del state
-        return {
-            "rag_generation_route": "resource_evidence_parent_child",
-            "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
-        }
-
-    return rag_generation_router
-
-
 def make_retrieval_round_router_node(
     runtime: EvidenceOrchestrationRuntime,
 ) -> Callable[[LearningState], dict]:
@@ -2288,7 +2273,6 @@ __all__ = [
     "ParentChildRoundSnapshot",
     "make_evidence_repair_planner_node",
     "make_local_rag_search_batch_node",
-    "make_rag_generation_router_node",
     "make_requirement_evidence_judge_node",
     "make_resource_evidence_assignment_node",
     "make_resource_evidence_planner_node",

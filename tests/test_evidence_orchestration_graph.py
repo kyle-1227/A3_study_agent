@@ -38,6 +38,8 @@ from src.graph.resource_generation import (
     resource_orchestrator,
 )
 from src.graph.web_research import WebResearchTask
+from src.graph.state import LearningState, initial_request_reset_transient_state
+from src.observability.node_registry import get_node_runtime_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -183,6 +185,14 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
     assert candidate.compile() is not None
 
 
+def test_candidate_graph_has_no_superseded_generation_router_contract():
+    assert not hasattr(orchestration, "make_rag_generation_router_node")
+    assert "make_rag_generation_router_node" not in orchestration.__all__
+    assert "rag_generation_route" not in LearningState.__annotations__
+    assert "rag_generation_route" not in initial_request_reset_transient_state()
+    assert get_node_runtime_metadata("rag_generation_router") is None
+
+
 def test_candidate_query_route_requires_explicit_canonical_resources():
     assert (
         route_after_candidate_query_rewrite(
@@ -215,6 +225,9 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
         orchestration.make_resource_evidence_planner_node(runtime)(_planner_state())
     )
 
+    assert planned["evidence_orchestration_fingerprint"] == (
+        runtime.orchestration_fingerprint
+    )
     assert len(planned["evidence_requirements"]) == 2
     initial_tasks = [
         RetrievalTask.model_validate(item) for item in planned["evidence_current_tasks"]

@@ -149,15 +149,6 @@ for item in (
         order=25,
     ),
     _metadata(
-        "rag_generation_router",
-        label="RAG generation routing",
-        description="Select the explicitly configured legacy or evidence-aware graph path.",
-        role="router",
-        group="routing",
-        stage_rank=28,
-        order=28,
-    ),
-    _metadata(
         "resource_evidence_planner",
         label="Resource evidence planning",
         description="Compile bounded evidence requirements for requested resources and subjects.",

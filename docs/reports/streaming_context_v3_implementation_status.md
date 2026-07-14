@@ -322,3 +322,25 @@ import-linter、Gitleaks、Bandit、Vulture 仍缺失，未运行且未记为通
 该提交不删除仍在 import-time 使用的 `_sanitize_valid_intents`，也不触碰正式图、
 Parent-Child 生产配置、checkpoint alias/migration reader 或并行 RAG 工作。生产 index、
 generation 激活、真实 P0/PG/PR/PGR、真实 provider E2E 与零旧 checkpoint 门仍未满足。
+
+## 2026-07-14 RAG generation-router 残留独立清理
+
+当前候选图在 `search_query_rewriter` 后直接进入 `resource_evidence_planner`，planner 已写入
+绑定 runtime 的 `evidence_orchestration_fingerprint`；academic/resource hydration 也已拆成
+两个物理节点。此前遗留的 `make_rag_generation_router_node` 只返回固定 route 和相同
+fingerprint，当前正式图和候选图都没有注册它。
+
+本批删除 factory/export、`rag_generation_route` transient/TypedDict 字段与孤立 metadata，
+并新增 module/state/reset/registry/topology absence 回归；已有 mock planner 测试增加真实替代
+fingerprint 断言。严格 evidence schema/business validator、候选图拓扑、trace、repair loop、
+完整 transcript/checkpoint 与当前正式图均未改变。
+
+聚焦质量门为 51 项 evidence graph/trace/state/manifest 测试，compileall、4 个触及文件 Ruff
+check/format、3 个源文件 scoped mypy、diff check 和旧符号归零扫描均通过；全量后端
+`2274 passed, 6 skipped, 11 warnings`，前端 23 个 Vitest 文件/69 项测试、typecheck、完整
+ESLint 与 production build 通过。warning 是既有第三方、aiosqlite event-loop、AsyncMock
+与 pytest cache 权限债务。早期候选图曾短暂存在该 node ID，因此本代码清理不宣称
+checkpoint 已迁移；未知旧 pending node 继续由迁移门阻断。生产 index、generation 激活、
+真实四变体、provider E2E 与零旧 checkpoint 门仍未满足。全仓 Ruff 仍为 60 项既有 lint
+debt 和 65 个既有待格式化文件；Semgrep、import-linter、Gitleaks、Bandit、Vulture 均缺失，
+未运行且未记为通过。
