@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 import type { AgentStreamEventType, AgentStreamEventV2 } from "@/lib/agent-stream-contracts"
 import { LiveTurnSequenceError, reduceLiveTurn } from "@/lib/live-turn"
 
+const REQUEST_ID = "00000000-0000-4000-8000-000000000001"
+
 function event(
   sequence: number,
   type: AgentStreamEventType,
@@ -14,7 +16,7 @@ function event(
     streamId: "stream-1",
     eventId: `stream-1:${sequence}`,
     sequence,
-    requestId: "request-1",
+    requestId: REQUEST_ID,
     threadId: "thread-1",
     createdAt: "2026-07-13T00:00:00Z",
     data,
@@ -49,15 +51,66 @@ describe("reduceLiveTurn", () => {
     )
   })
 
-  it("ignores an old request instead of overwriting the active turn", () => {
+  it("rejects identity drift instead of silently ignoring it", () => {
     const state = reduceLiveTurn(null, event(1, "stream_start"))
     const stale = { ...event(2, "stream_error", { message: "old" }), requestId: "old" }
-    expect(reduceLiveTurn(state, stale)).toBe(state)
+    expect(() => reduceLiveTurn(state, stale)).toThrow(LiveTurnSequenceError)
   })
 
   it("marks an assessment final as committed", () => {
     const running = reduceLiveTurn(null, event(1, "stream_start"))
     const committed = reduceLiveTurn(running, event(2, "assessment_final"))
     expect(committed.committed).toBe(true)
+  })
+
+  it("aborts active evidence progress on stopped before stream_done", () => {
+    let state = reduceLiveTurn(null, event(1, "stream_start"))
+    state = reduceLiveTurn(
+      state,
+      event(2, "evidence_progress", {
+        schema_version: "evidence_progress_v1",
+        progress_id: `evidence-progress:v1:${"a".repeat(64)}`,
+        request_id: REQUEST_ID,
+        thread_id: "thread-1",
+        lifecycle_key: "plan",
+        phase_status: "completed",
+        details: {
+          stage: "evidence_orchestration.plan.accepted",
+          requirement_count: 1,
+          resource_count: 1,
+          subject_count: 1,
+          budget_max_rounds: 2,
+          budget_max_tasks: 4,
+        },
+      }),
+    )
+    state = reduceLiveTurn(
+      state,
+      event(3, "evidence_progress", {
+        schema_version: "evidence_progress_v1",
+        progress_id: `evidence-progress:v1:${"b".repeat(64)}`,
+        request_id: REQUEST_ID,
+        thread_id: "thread-1",
+        lifecycle_key: "round:0",
+        phase_status: "running",
+        details: {
+          stage: "evidence_orchestration.round.started",
+          round_index: 0,
+          task_count: 1,
+          local_task_count: 1,
+          web_task_count: 0,
+          budget_used_tasks: 1,
+          budget_remaining_tasks: 3,
+        },
+      }),
+    )
+    expect(() => reduceLiveTurn(state, event(4, "stream_done"))).toThrow(
+      "before evidence progress terminated",
+    )
+
+    state = reduceLiveTurn(state, event(4, "stopped"))
+    state = reduceLiveTurn(state, event(5, "stream_done"))
+    expect(state.evidenceProgress.aborted).toBe(true)
+    expect(state.lifecycle).toBe("waiting")
   })
 })

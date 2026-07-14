@@ -1,4 +1,11 @@
 import type { AgentStreamEventV2 } from "@/lib/agent-stream-contracts"
+import {
+  abortEvidenceProgress,
+  emptyEvidenceProgressTimeline,
+  parseEvidenceProgressEvent,
+  reduceEvidenceProgress,
+  type EvidenceProgressTimeline,
+} from "@/lib/evidence-progress"
 
 export type LiveTurnLifecycle = "running" | "waiting" | "completed" | "failed"
 
@@ -20,6 +27,7 @@ export interface LiveTurnState {
   blocks: Record<string, LiveContentBlock>
   activities: Record<string, unknown>[]
   tools: Record<string, unknown>[]
+  evidenceProgress: EvidenceProgressTimeline
   provisionalAnswer: string
   lastSequence: number
   committed: boolean
@@ -48,7 +56,7 @@ export function reduceLiveTurn(
     event.requestId !== state.requestId ||
     event.threadId !== state.threadId
   ) {
-    return state
+    throw new LiveTurnSequenceError("stream identity changed within one live turn")
   }
   if (event.sequence <= state.lastSequence) return state
   if (event.sequence !== state.lastSequence + 1) {
@@ -101,6 +109,14 @@ export function reduceLiveTurn(
     }
   } else if (event.type === "activity_update") {
     next = { ...next, activities: [...next.activities, event.data] }
+  } else if (event.type === "evidence_progress") {
+    next = {
+      ...next,
+      evidenceProgress: reduceEvidenceProgress(
+        next.evidenceProgress,
+        parseEvidenceProgressEvent(event.data),
+      ),
+    }
   } else if (event.type === "tool_progress") {
     next = { ...next, tools: [...next.tools, event.data] }
   } else if (
@@ -110,15 +126,29 @@ export function reduceLiveTurn(
   ) {
     next = { ...next, committed: true }
   } else if (event.type === "interrupt" || event.type === "stopped") {
-    next = { ...next, lifecycle: "waiting" }
+    next = {
+      ...next,
+      lifecycle: "waiting",
+      evidenceProgress: abortEvidenceProgress(next.evidenceProgress),
+    }
   } else if (event.type === "stream_error") {
     next = {
       ...next,
       lifecycle: "failed",
       error: stringValue(event.data.message) || "stream_error",
       provisionalAnswer: "",
+      evidenceProgress: abortEvidenceProgress(next.evidenceProgress),
     }
   } else if (event.type === "stream_done") {
+    if (
+      next.evidenceProgress.order.length > 0 &&
+      !next.evidenceProgress.terminal &&
+      !next.evidenceProgress.aborted
+    ) {
+      throw new LiveTurnSequenceError(
+        "stream_done received before evidence progress terminated",
+      )
+    }
     next = { ...next, lifecycle: next.lifecycle === "running" ? "completed" : next.lifecycle }
   }
   return next
@@ -134,6 +164,7 @@ function emptyLiveTurn(event: AgentStreamEventV2): LiveTurnState {
     blocks: {},
     activities: [],
     tools: [],
+    evidenceProgress: emptyEvidenceProgressTimeline(),
     provisionalAnswer: "",
     lastSequence: event.sequence,
     committed: false,

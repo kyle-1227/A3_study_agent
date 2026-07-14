@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,6 +167,7 @@ from src.observability.contracts import (
     ContextUsageReport,
     GraphManifest,
 )
+from src.observability.evidence_trace import is_evidence_trace_stage
 from src.observability.graph_manifest import (
     build_graph_manifest,
     get_physical_graph_node_ids,
@@ -195,6 +197,11 @@ from src.streaming.contracts import (
     AgentStreamEventDraftV2,
     ContentBlockPayloadV1,
     StreamContractError,
+)
+from src.streaming.evidence_progress import (
+    EvidenceProgressV1,
+    reset_evidence_progress_sink,
+    set_evidence_progress_sink,
 )
 from src.streaming.journal import StreamJournalExpiredError
 from src.streaming.session import (
@@ -1967,6 +1974,10 @@ async def _stream_graph_event_drafts(
     active_nodes: list[str] = []
     trace_events: list[dict] = []
     trace_sink_token = set_trace_event_sink(trace_events)
+    evidence_progress_events: deque[EvidenceProgressV1] = deque()
+    evidence_progress_sink_token = set_evidence_progress_sink(
+        evidence_progress_events.append
+    )
     provisional_events: list[dict] = []
     provisional_sink_token = set_provisional_event_sink(provisional_events.append)
     context_usage_history: list[dict] = []
@@ -2171,6 +2182,15 @@ async def _stream_graph_event_drafts(
         )
         yield await _record_activity(stream_started)
 
+    def _drain_evidence_progress_events() -> list[AgentStreamEventDraftV2]:
+        return [
+            _stream_draft(
+                "evidence_progress",
+                evidence_progress_events.popleft().model_dump(mode="json"),
+            )
+            for _ in range(len(evidence_progress_events))
+        ]
+
     async def _drain_trace_events() -> list[AgentStreamEventDraftV2]:
         nonlocal llm_input_manifests, manifest_state_context
         nonlocal worker_interrupted_seen, recovered_profile_completion_request
@@ -2178,6 +2198,8 @@ async def _stream_graph_event_drafts(
         while trace_events:
             event = trace_events.pop(0)
             stage = event.get("stage")
+            if is_evidence_trace_stage(stage):
+                continue
             activity_payload = await _activity_from_trace(event)
             if activity_payload:
                 drained.append(activity_payload)
@@ -3162,6 +3184,8 @@ async def _stream_graph_event_drafts(
         ):
             for provisional_payload in _drain_provisional_events():
                 yield provisional_payload
+            for progress_payload in _drain_evidence_progress_events():
+                yield progress_payload
             for trace_payload in await _drain_trace_events():
                 yield trace_payload
             event_type = event["event"]
@@ -3304,6 +3328,8 @@ async def _stream_graph_event_drafts(
                                         block_index=block_index,
                                     )
 
+                    for progress_payload in _drain_evidence_progress_events():
+                        yield progress_payload
                     for trace_payload in await _drain_trace_events():
                         yield trace_payload
 
@@ -3353,6 +3379,8 @@ async def _stream_graph_event_drafts(
                     )
         for provisional_payload in _drain_provisional_events():
             yield provisional_payload
+        for progress_payload in _drain_evidence_progress_events():
+            yield progress_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
         for block_payload in _close_open_content_blocks(
@@ -3363,6 +3391,8 @@ async def _stream_graph_event_drafts(
     except Exception as e:
         for provisional_payload in _drain_provisional_events():
             yield provisional_payload
+        for progress_payload in _drain_evidence_progress_events():
+            yield progress_payload
         for trace_payload in await _drain_trace_events():
             yield trace_payload
         for block_payload in _close_open_content_blocks(
@@ -3438,6 +3468,7 @@ async def _stream_graph_event_drafts(
             finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
         return
     finally:
+        reset_evidence_progress_sink(evidence_progress_sink_token)
         reset_provisional_event_sink(provisional_sink_token)
         reset_trace_event_sink(trace_sink_token)
 
@@ -4707,7 +4738,10 @@ async def _generate_resume_stream_drafts_impl(
     else:
         resume_value = edited_plan
 
-    resume_input = Command(resume=resume_value)
+    resume_input = Command(
+        resume=resume_value,
+        update={"request_id": resume_request_id, "thread_id": thread_id},
+    )
     _emit_graph_config_trace(
         graph,
         config,
@@ -5071,7 +5105,10 @@ async def _generate_continue_stream_drafts_impl(
         },
     )
 
-    resume_input = Command(resume={"type": "user_stop", "action": "continue"})
+    resume_input = Command(
+        resume={"type": "user_stop", "action": "continue"},
+        update={"request_id": continue_request_id, "thread_id": thread_id},
+    )
     _emit_graph_config_trace(
         graph,
         config,

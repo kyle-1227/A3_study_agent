@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from tests.stream_draft_helpers import draft_payloads
 from src.observability.a3_trace import emit_a3_trace
+from src.observability.evidence_trace import emit_evidence_trace
 from src.observability.llm_input import (
     build_llm_input_observation,
     emit_llm_input_usage,
@@ -77,6 +78,54 @@ def _graph(
     graph.aget_state = AsyncMock(return_value=state_snapshot)
     graph.aupdate_state = AsyncMock()
     return graph
+
+
+@pytest.mark.anyio
+async def test_evidence_trace_emits_only_top_level_progress() -> None:
+    from app import _stream_graph_event_drafts
+
+    request_id = "00000000-0000-4000-8000-000000000001"
+
+    async def events():
+        emit_evidence_trace(
+            logging.getLogger("test_evidence_progress_sse"),
+            {
+                "schema_version": "evidence_orchestration_trace_v1",
+                "stage": "evidence_orchestration.plan.accepted",
+                "orchestration_fingerprint": "a" * 64,
+                "profile_fingerprint": "b" * 64,
+                "requirement_count": 1,
+                "resource_count": 1,
+                "subject_count": 1,
+                "budget_max_rounds": 2,
+                "budget_max_tasks": 8,
+            },
+            state={"request_id": request_id, "thread_id": "t1"},
+        )
+        yield _node_event("evidence_requirement_planner", "on_chain_start")
+        yield _node_event("evidence_requirement_planner", "on_chain_end")
+
+    graph = _graph(events(), activity=True)
+    collected = []
+    async for item in _stream_graph_event_drafts(
+        graph,
+        {"request_id": request_id, "thread_id": "t1"},
+        {"configurable": {"thread_id": "t1"}},
+        "t1",
+        request_id=request_id,
+        preserve_context_history=True,
+    ):
+        collected.append(item)
+
+    payloads = _payloads(collected)
+    evidence = [item for item in payloads if item.get("type") == "evidence_progress"]
+    assert [item["details"]["stage"] for item in evidence] == [
+        "evidence_orchestration.plan.accepted"
+    ]
+    assert not any(
+        item.get("type") == "activity_event" and item.get("kind") == "evidence_progress"
+        for item in payloads
+    )
 
 
 @pytest.mark.anyio

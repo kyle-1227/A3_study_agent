@@ -1,3 +1,5 @@
+import { parseEvidenceProgressEvent } from "@/lib/evidence-progress"
+
 export const AGENT_STREAM_SCHEMA_VERSION = "agent_stream_v2" as const
 
 export const AGENT_STREAM_EVENT_TYPES = [
@@ -6,6 +8,7 @@ export const AGENT_STREAM_EVENT_TYPES = [
   "content_block_delta",
   "content_block_stop",
   "activity_update",
+  "evidence_progress",
   "tool_progress",
   "artifact_progress",
   "qa_final",
@@ -69,16 +72,25 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEventV2 {
   if (!Number.isFinite(Date.parse(createdAt)) || !/(?:Z|[+-]\d\d:\d\d)$/.test(createdAt)) {
     fail("created_at must be timezone-aware")
   }
+  const requestId = boundedString(data.request_id, "request_id", 160)
+  const threadId = boundedString(data.thread_id, "thread_id", 160)
+  const eventData = record(data.data, "data")
+  if (data.type === "evidence_progress") {
+    const progress = parseEvidenceProgressEvent(eventData)
+    if (progress.requestId !== requestId || progress.threadId !== threadId) {
+      fail("evidence_progress identity does not match stream envelope")
+    }
+  }
   return {
     schemaVersion: AGENT_STREAM_SCHEMA_VERSION,
     type: data.type as AgentStreamEventType,
     streamId,
     eventId,
     sequence,
-    requestId: boundedString(data.request_id, "request_id", 160),
-    threadId: boundedString(data.thread_id, "thread_id", 160),
+    requestId,
+    threadId,
     createdAt,
-    data: record(data.data, "data"),
+    data: eventData,
   }
 }
 

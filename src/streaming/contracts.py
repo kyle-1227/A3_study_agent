@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.streaming.evidence_progress import EvidenceProgressV1
+
 
 AGENT_STREAM_SCHEMA_VERSION: Literal["agent_stream_v2"] = "agent_stream_v2"
 
@@ -17,6 +19,7 @@ AgentStreamEventType: TypeAlias = Literal[
     "content_block_delta",
     "content_block_stop",
     "activity_update",
+    "evidence_progress",
     "tool_progress",
     "artifact_progress",
     "qa_final",
@@ -32,6 +35,7 @@ AgentStreamDraftType: TypeAlias = Literal[
     "content_block_delta",
     "content_block_stop",
     "activity_update",
+    "evidence_progress",
     "tool_progress",
     "artifact_progress",
     "qa_final",
@@ -93,6 +97,8 @@ class AgentStreamEventDraftV2(BaseModel):
     def _validate_content_block(self) -> "AgentStreamEventDraftV2":
         if self.type.startswith("content_block_"):
             ContentBlockPayloadV1.model_validate(self.data)
+        elif self.type == "evidence_progress":
+            EvidenceProgressV1.model_validate(self.data)
         return self
 
 
@@ -122,6 +128,12 @@ class AgentStreamEventV2(BaseModel):
             raise ValueError("event_id must equal '<stream_id>:<sequence>'")
         if self.created_at.tzinfo is None:
             raise ValueError("created_at must include a timezone")
+        if self.type == "evidence_progress":
+            progress = EvidenceProgressV1.model_validate(self.data)
+            if progress.request_id != self.request_id:
+                raise ValueError("evidence progress request_id does not match stream")
+            if progress.thread_id != self.thread_id:
+                raise ValueError("evidence progress thread_id does not match stream")
         return self
 
 

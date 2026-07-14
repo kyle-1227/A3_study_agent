@@ -15,10 +15,12 @@ import {
 } from "lucide-react"
 
 import { ManifestGraph } from "@/components/manifest-graph"
+import { EvidenceProgressPanel } from "@/components/evidence-progress-panel"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { activitiesForRequest } from "@/lib/activity-reducer"
 import type { GraphViewMode } from "@/lib/graph-layout"
+import type { EvidenceProgressTimeline } from "@/lib/evidence-progress"
 import type {
   ActivityEvent,
   GraphManifest,
@@ -35,6 +37,7 @@ export interface LogEntry {
 interface RightPanelProps {
   logs: LogEntry[]
   activities: ActivityEvent[]
+  evidenceProgress: EvidenceProgressTimeline
   tokenUsage: { input: number; output: number; total: number }
   graphManifest: GraphManifest | null
   graphManifestError: GraphManifestUnavailable | null
@@ -46,6 +49,7 @@ interface RightPanelProps {
 export function RightPanel({
   logs,
   activities,
+  evidenceProgress,
   tokenUsage,
   graphManifest,
   graphManifestError,
@@ -160,7 +164,12 @@ export function RightPanel({
 
               <ScrollArea className="min-h-0 flex-1 px-3">
                 {viewTab === "trail" ? (
-                  <ActivityTrail activities={requestActivities} />
+                  <div className="space-y-2">
+                    {(!currentRequestId || evidenceProgress.requestId === currentRequestId) ? (
+                      <EvidenceProgressPanel timeline={evidenceProgress} />
+                    ) : null}
+                    <ActivityTrail activities={requestActivities} />
+                  </div>
                 ) : (
                   <GraphSurface
                     manifest={graphManifest}

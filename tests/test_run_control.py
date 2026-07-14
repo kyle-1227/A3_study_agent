@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -619,6 +620,8 @@ async def test_resume_memory_confirmation_sends_choice_command():
         "type": "memory_confirmation",
         "choice": "use",
     }
+    assert getattr(resume_input, "update")["thread_id"] == "thread-1"
+    UUID(getattr(resume_input, "update")["request_id"])
     assert payloads[0]["run_status"] == "continuing"
     assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
 
@@ -750,6 +753,9 @@ async def test_continue_user_stop_clears_stop_before_command_resume():
     first_update = graph.aupdate_state.await_args_list[0].args[1]
     assert first_update["stop_requested"] is False
     assert first_update["run_status"] == "continuing"
+    resume_input = graph.astream_events.call_args.args[0]
+    assert getattr(resume_input, "update")["thread_id"] == "thread-1"
+    UUID(getattr(resume_input, "update")["request_id"])
     payloads = _payloads(collected)
     assert payloads[0]["run_status"] == "continuing"
     assert graph.astream_events.called

@@ -81,6 +81,10 @@ import {
 } from "@/lib/agent-stream-contracts"
 import { consumeAgentStreamV2 } from "@/lib/agent-stream-client"
 import {
+  emptyEvidenceProgressTimeline,
+  type EvidenceProgressTimeline,
+} from "@/lib/evidence-progress"
+import {
   parseThreadContextWindowV3,
   type ThreadContextWindowV3,
 } from "@/lib/thread-context-window-v3"
@@ -401,6 +405,9 @@ export default function Home() {
     { type: "info", message: "[INFO] 系统已初始化。", ts: "--:--:--" },
   ])
   const [activityTimeline, setActivityTimeline] = useState<ActivityEvent[]>([])
+  const [evidenceProgress, setEvidenceProgress] = useState<EvidenceProgressTimeline>(
+    emptyEvidenceProgressTimeline,
+  )
   const [tokenUsage, setTokenUsage] = useState({ input: 0, output: 0, total: 0 })
   const [contextUsageState, setContextUsageState] = useState(EMPTY_CONTEXT_USAGE_STATE)
   const [backgroundContextWindow, setBackgroundContextWindow] = useState<BackgroundContextWindow | null>(null)
@@ -720,6 +727,7 @@ export default function Home() {
     setSelectedChatId(undefined)
     setMessages([])
     setActivityTimeline([])
+    setEvidenceProgress(emptyEvidenceProgressTimeline())
     setLogs([{ type: "info", message: "[INFO] 已开始新对话。", ts: timestamp() }])
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
@@ -751,6 +759,7 @@ export default function Home() {
     setSelectedChatId(threadId)
     setMessages(restored.messages)
     setActivityTimeline([])
+    setEvidenceProgress(emptyEvidenceProgressTimeline())
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
     setThreadContextWindowV3(null)
@@ -796,6 +805,7 @@ export default function Home() {
     setSelectedChatId(undefined)
     setMessages([])
     setActivityTimeline([])
+    setEvidenceProgress(emptyEvidenceProgressTimeline())
     setTokenUsage({ input: 0, output: 0, total: 0 })
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
@@ -836,6 +846,7 @@ export default function Home() {
       setSelectedChatId(undefined)
       setMessages([])
       setActivityTimeline([])
+      setEvidenceProgress(emptyEvidenceProgressTimeline())
       setTokenUsage({ input: 0, output: 0, total: 0 })
       setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
       setBackgroundContextWindow(null)
@@ -1506,7 +1517,6 @@ export default function Home() {
       current.requestId === event.requestId &&
       current.threadId === event.threadId
     if (sameStream && event.sequence <= current.lastSequence) return
-    if (current !== null && !sameStream) return
 
     let next: LiveTurnState
     try {
@@ -1526,6 +1536,7 @@ export default function Home() {
     }
     liveTurnRef.current = next
     setLiveTurn(next)
+    setEvidenceProgress(next.evidenceProgress)
 
     if (event.type === "stream_start") {
       setActiveRequestId(event.requestId)
@@ -1535,6 +1546,7 @@ export default function Home() {
     if (event.type === "content_block_start" || event.type === "content_block_delta" || event.type === "content_block_stop") {
       return
     }
+    if (event.type === "evidence_progress") return
     if (
       event.type === "activity_update" ||
       event.type === "tool_progress" ||
@@ -2383,6 +2395,7 @@ export default function Home() {
       <RightPanel
         logs={logs}
         activities={activityTimeline}
+        evidenceProgress={evidenceProgress}
         tokenUsage={tokenUsage}
         graphManifest={graphManifest}
         graphManifestError={graphManifestError}

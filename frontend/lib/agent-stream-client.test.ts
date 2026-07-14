@@ -66,4 +66,56 @@ describe("consumeAgentStreamV2", () => {
       }),
     ).rejects.toThrow("SSE id does not match")
   })
+
+  it("rejects identity drift and sequence gaps before dispatch", async () => {
+    const identityDrift = event(2, "stream_error").replace(
+      '"thread_id":"thread-1"',
+      '"thread_id":"thread-2"',
+    )
+    await expect(
+      consumeAgentStreamV2({
+        initialBody: body(event(1, "stream_start") + identityDrift),
+        onEvent: vi.fn(),
+        reconnect: vi.fn(),
+      }),
+    ).rejects.toThrow("stream event identity changed")
+
+    await expect(
+      consumeAgentStreamV2({
+        initialBody: body(event(1, "stream_start") + event(3, "stream_error")),
+        onEvent: vi.fn(),
+        reconnect: vi.fn(),
+      }),
+    ).rejects.toThrow("stream sequence gap")
+  })
+
+  it("ignores exact replay duplicates and rejects conflicting replay", async () => {
+    vi.useFakeTimers()
+    const received: string[] = []
+    const reconnect = vi.fn(async () =>
+      body(event(1, "stream_start") + event(2, "stream_error") + event(3, "stream_done")),
+    )
+    const replay = consumeAgentStreamV2({
+      initialBody: body(event(1, "stream_start")),
+      onEvent: (item) => received.push(item.eventId),
+      reconnect,
+    })
+    await vi.runAllTimersAsync()
+    await replay
+    expect(received).toEqual(["stream-1:1", "stream-1:2", "stream-1:3"])
+
+    const conflicting = event(1, "stream_start").replace('"data":{}', '"data":{"drift":true}')
+    const conflictReconnect = vi.fn(async () => body(conflicting))
+    const conflict = consumeAgentStreamV2({
+      initialBody: body(event(1, "stream_start")),
+      onEvent: vi.fn(),
+      reconnect: conflictReconnect,
+    })
+    const rejection = expect(conflict).rejects.toThrow(
+      "replayed stream sequence conflicts",
+    )
+    await vi.runAllTimersAsync()
+    await rejection
+    vi.useRealTimers()
+  })
 })

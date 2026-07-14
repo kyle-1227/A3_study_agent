@@ -10,6 +10,11 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from src.observability.a3_trace import emit_a3_trace
+from src.streaming.evidence_progress import (
+    build_evidence_progress,
+    evidence_progress_sink_active,
+    publish_evidence_progress,
+)
 
 EVIDENCE_TRACE_SCHEMA_VERSION = "evidence_orchestration_trace_v1"
 EVIDENCE_TRACE_ENV_FLAG = "LOG_EVIDENCE_ORCHESTRATION_TRACE"
@@ -244,7 +249,9 @@ EvidenceTraceEvent: TypeAlias = Annotated[
     Field(discriminator="stage"),
 ]
 
-_EVIDENCE_TRACE_ADAPTER = TypeAdapter(EvidenceTraceEvent)
+_EVIDENCE_TRACE_ADAPTER: TypeAdapter[EvidenceTraceEvent] = TypeAdapter(
+    EvidenceTraceEvent
+)
 EVIDENCE_TRACE_STAGES = frozenset(
     {
         "evidence_orchestration.plan.accepted",
@@ -293,6 +300,24 @@ def emit_evidence_trace(
     """Validate and emit one evidence trace event before any sink side effect."""
     validated = validate_evidence_trace_event(event)
     payload = validated.model_dump(mode="json")
+    if evidence_progress_sink_active():
+        if state is None:
+            raise ValueError(
+                "streaming evidence progress requires graph state identity"
+            )
+        request_id = state.get("request_id")
+        thread_id = state.get("thread_id")
+        if not request_id or not thread_id:
+            raise ValueError(
+                "streaming evidence progress requires request_id and thread_id"
+            )
+        publish_evidence_progress(
+            build_evidence_progress(
+                payload,
+                request_id=str(request_id),
+                thread_id=str(thread_id),
+            )
+        )
     stage = str(payload.pop("stage"))
     emit_a3_trace(
         logger,

@@ -28,6 +28,10 @@ export async function consumeAgentStreamV2({
   let lastEventId = ""
   let retryMs: number | null = null
   let streamDone = false
+  let requestId = ""
+  let threadId = ""
+  let lastSequence = 0
+  const seenEvents = new Map<number, string>()
 
   const dispatchFrames = (frames: SSEFrame[]) => {
     for (const frame of frames) {
@@ -38,7 +42,34 @@ export async function consumeAgentStreamV2({
       if (frame.id !== event.eventId) {
         throw new Error("SSE id does not match payload event_id")
       }
-      streamId = event.streamId
+      if (!streamId) {
+        if (event.type !== "stream_start" || event.sequence !== 1) {
+          throw new Error("first stream event must be stream_start sequence 1")
+        }
+        streamId = event.streamId
+        requestId = event.requestId
+        threadId = event.threadId
+      } else if (
+        event.streamId !== streamId ||
+        event.requestId !== requestId ||
+        event.threadId !== threadId
+      ) {
+        throw new Error("stream event identity changed")
+      }
+      const serialized = JSON.stringify(event)
+      if (event.sequence <= lastSequence) {
+        if (seenEvents.get(event.sequence) !== serialized) {
+          throw new Error("replayed stream sequence conflicts with the original event")
+        }
+        continue
+      }
+      if (event.sequence !== lastSequence + 1) {
+        throw new Error(
+          `stream sequence gap: expected ${lastSequence + 1}, received ${event.sequence}`,
+        )
+      }
+      lastSequence = event.sequence
+      seenEvents.set(event.sequence, serialized)
       lastEventId = event.eventId
       if (frame.retry !== undefined) retryMs = frame.retry
       onEvent(event)

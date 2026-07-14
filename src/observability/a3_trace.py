@@ -39,14 +39,18 @@ def _truncate(value: Any, max_chars: int = 500, max_items: int = 20) -> Any:
 
 
 def _trace_ids_from_state(state: dict | None) -> dict[str, str]:
-    state = state or {}
-    configurable = (
-        state.get("configurable") if isinstance(state.get("configurable"), dict) else {}
+    state_data: dict[str, Any] = state if state is not None else {}
+    configurable_value = state_data.get("configurable")
+    configurable: dict[str, Any] = (
+        configurable_value if isinstance(configurable_value, dict) else {}
     )
-    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    metadata_value = state_data.get("metadata")
+    metadata: dict[str, Any] = (
+        metadata_value if isinstance(metadata_value, dict) else {}
+    )
 
     def _pick(*keys: str) -> str:
-        for source in (state, configurable, metadata):
+        for source in (state_data, configurable, metadata):
             for key in keys:
                 value = source.get(key)
                 if value:
