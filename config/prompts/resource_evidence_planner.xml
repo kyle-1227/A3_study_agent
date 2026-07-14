@@ -17,6 +17,9 @@ Canonical subjects selected by the query rewriter:
 Validated retrieval plan:
 {retrieval_plan_json}
 
+Provider-safe learner path projection (available or explicitly unavailable):
+{learner_path_provider_projection_json}
+
 Configured resource evidence profiles:
 {profiles_json}
 

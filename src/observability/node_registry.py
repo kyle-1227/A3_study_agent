@@ -154,8 +154,20 @@ for item in (
         description="Compile bounded evidence requirements for requested resources and subjects.",
         role="planner",
         group="evidence",
-        stage_rank=30,
+        stage_rank=32,
+        order=32,
+    ),
+    _metadata(
+        "learner_path_planner",
+        label="Learner path planning",
+        description="Build a strict learner path from bound profile and history evidence.",
+        role="planner",
+        group="guidance",
+        stage_rank=31,
         order=31,
+        capture_rules=(
+            _rule("curriculum", "learner_path_planner_output", priority=80),
+        ),
     ),
     _metadata(
         "search_query_rewriter",
@@ -481,6 +493,31 @@ for item in (
         group="resources",
         stage_rank=65,
         order=65,
+    ),
+    _metadata(
+        "resource_bundle_aggregator",
+        label="Resource bundle aggregation",
+        description="Validate real resource branches and expose only recommendation identity context.",
+        role="middleware",
+        group="resources",
+        stage_rank=88,
+        order=88,
+    ),
+    _metadata(
+        "resource_recommendation_auto",
+        label="Automatic resource recommendation",
+        description="Rank generated resources from strictly bound learner evidence.",
+        role="agent",
+        group="resources",
+        stage_rank=90,
+        order=90,
+        capture_rules=(
+            _rule(
+                "curriculum",
+                "resource_recommendation_output",
+                priority=80,
+            ),
+        ),
     ),
     _metadata(
         "resource_bundle_output",

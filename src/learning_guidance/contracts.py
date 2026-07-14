@@ -8,6 +8,8 @@ and history evidence used by its engine.
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 import math
 from typing import Literal
 
@@ -32,6 +34,7 @@ LearnerPathUnavailableReason = Literal[
     "missing_subject",
     "profile_unavailable",
     "history_unavailable",
+    "unsupported_subject_scope",
 ]
 RecommendationUnavailableReason = Literal[
     "missing_user_id",
@@ -39,7 +42,11 @@ RecommendationUnavailableReason = Literal[
     "profile_unavailable",
     "history_unavailable",
     "generated_resources_unavailable",
+    "unsupported_subject_scope",
 ]
+
+LEARNER_PATH_PROVIDER_MAX_STEPS = 50
+LEARNER_PATH_PROVIDER_MAX_CHARS = 65_536
 
 
 def _validate_identifier_tuple(
@@ -267,6 +274,96 @@ class LearnerPathPlanV1(_StrictContract):
         return self
 
 
+class LearnerPathProviderStepV1(_StrictContract):
+    step_id: str = Field(min_length=1, max_length=160)
+    position: int = Field(ge=1)
+    topic_id: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=300)
+    status: Literal["ready", "blocked", "reinforce", "repeat", "skip"]
+    estimated_hours: float = Field(gt=0.0)
+    reason: str = Field(min_length=1, max_length=1000)
+    recommended_resource_types: tuple[ResourceType, ...]
+
+    @field_validator("recommended_resource_types")
+    @classmethod
+    def validate_resource_types(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return _validate_identifier_tuple(
+            value,
+            field_name="recommended_resource_types",
+            allow_empty=True,
+        )
+
+
+class LearnerPathProviderProjectionV1(_StrictContract):
+    """Bounded provider payload with no user, request, profile, or history IDs."""
+
+    schema_version: Literal["learner_path_provider_projection_v1"]
+    status: Literal["available", "unavailable"]
+    unavailable_reason: LearnerPathUnavailableReason | None
+    subject: str | None = Field(max_length=120)
+    summary: str | None = Field(max_length=2000)
+    steps: tuple[LearnerPathProviderStepV1, ...] = Field(
+        max_length=LEARNER_PATH_PROVIDER_MAX_STEPS,
+    )
+
+    @model_validator(mode="after")
+    def validate_status_payload(self) -> "LearnerPathProviderProjectionV1":
+        if self.status == "available":
+            if (
+                self.unavailable_reason is not None
+                or self.subject is None
+                or self.summary is None
+                or not self.steps
+            ):
+                raise ValueError(
+                    "available provider projection requires subject, summary, and steps"
+                )
+            positions = tuple(step.position for step in self.steps)
+            if positions != tuple(range(1, len(self.steps) + 1)):
+                raise ValueError("provider projection positions must be contiguous")
+            return self
+        if self.unavailable_reason is None or self.summary is not None or self.steps:
+            raise ValueError(
+                "unavailable provider projection requires only an explicit reason"
+            )
+        return self
+
+
+def build_learner_path_provider_policy_fingerprint(
+    *,
+    max_steps: int,
+    max_chars: int,
+) -> str:
+    """Fingerprint the exact bounded Provider projection policy and schema."""
+
+    if (
+        isinstance(max_steps, bool)
+        or not 1 <= max_steps <= LEARNER_PATH_PROVIDER_MAX_STEPS
+    ):
+        raise ValueError("max_steps must be within the provider projection contract")
+    if (
+        isinstance(max_chars, bool)
+        or not 1 <= max_chars <= LEARNER_PATH_PROVIDER_MAX_CHARS
+    ):
+        raise ValueError("max_chars must be within the provider projection contract")
+    encoded = json.dumps(
+        {
+            "schema_version": "learner_path_provider_policy_v1",
+            "max_steps": max_steps,
+            "max_chars": max_chars,
+            "projection_schema": (LearnerPathProviderProjectionV1.model_json_schema()),
+        },
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class RecommendationResourceContextV1(_StrictContract):
     resource_id: str = Field(min_length=1, max_length=200)
     resource_type: ResourceType
@@ -346,12 +443,12 @@ class RecommendationScoreFactorsV1(_StrictContract):
 
 
 class ResourceRecommendationItemV1(_StrictContract):
-    recommendation_id: str = Field(min_length=1, max_length=200)
+    recommendation_id: str = Field(min_length=1, max_length=160)
     resource_id: str = Field(min_length=1, max_length=200)
     resource_type: ResourceType
     subject: str = Field(min_length=1, max_length=120)
     topic_id: str = Field(min_length=1, max_length=160)
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=240)
     rank: int = Field(ge=1)
     score_factors: RecommendationScoreFactorsV1
     reason: str = Field(min_length=1, max_length=1000)
@@ -420,6 +517,16 @@ class ResourceRecommendationBatchV1(_StrictContract):
 
 class LearnerPathPlannerOutputV1(_StrictContract):
     schema_version: Literal["learner_path_planner_output_v1"]
+    runtime_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_projection_policy_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_projection_max_steps: int = Field(
+        ge=1,
+        le=LEARNER_PATH_PROVIDER_MAX_STEPS,
+    )
+    provider_projection_max_chars: int = Field(
+        ge=1,
+        le=LEARNER_PATH_PROVIDER_MAX_CHARS,
+    )
     request_id: str = Field(min_length=1, max_length=160)
     status: Literal["available", "unavailable"]
     unavailable_reason: LearnerPathUnavailableReason | None
@@ -429,6 +536,12 @@ class LearnerPathPlannerOutputV1(_StrictContract):
 
     @model_validator(mode="after")
     def validate_status_payload(self) -> "LearnerPathPlannerOutputV1":
+        expected_policy_fingerprint = build_learner_path_provider_policy_fingerprint(
+            max_steps=self.provider_projection_max_steps,
+            max_chars=self.provider_projection_max_chars,
+        )
+        if self.provider_projection_policy_fingerprint != expected_policy_fingerprint:
+            raise ValueError("provider projection policy fingerprint mismatch")
         if self.status == "available":
             if self.unavailable_reason is not None or self.plan is None:
                 raise ValueError("available planner output requires only a plan")
@@ -448,6 +561,16 @@ class LearnerPathPlannerOutputV1(_StrictContract):
 
 class ResourceRecommendationOutputV1(_StrictContract):
     schema_version: Literal["resource_recommendation_output_v1"]
+    runtime_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_projection_policy_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_projection_max_steps: int = Field(
+        ge=1,
+        le=LEARNER_PATH_PROVIDER_MAX_STEPS,
+    )
+    provider_projection_max_chars: int = Field(
+        ge=1,
+        le=LEARNER_PATH_PROVIDER_MAX_CHARS,
+    )
     request_id: str = Field(min_length=1, max_length=160)
     mode: RecommendationMode
     status: Literal["available", "unavailable"]
@@ -458,6 +581,12 @@ class ResourceRecommendationOutputV1(_StrictContract):
 
     @model_validator(mode="after")
     def validate_status_payload(self) -> "ResourceRecommendationOutputV1":
+        expected_policy_fingerprint = build_learner_path_provider_policy_fingerprint(
+            max_steps=self.provider_projection_max_steps,
+            max_chars=self.provider_projection_max_chars,
+        )
+        if self.provider_projection_policy_fingerprint != expected_policy_fingerprint:
+            raise ValueError("provider projection policy fingerprint mismatch")
         if self.status == "available":
             if self.unavailable_reason is not None or self.batch is None:
                 raise ValueError(
@@ -482,14 +611,19 @@ class ResourceRecommendationOutputV1(_StrictContract):
 
 
 __all__ = [
+    "build_learner_path_provider_policy_fingerprint",
     "LearnerGoalSignalV1",
     "LearnerHistoryEventV1",
     "LearnerHistorySnapshotV1",
     "LearnerPathEngineRequestV1",
     "LearnerPathPlanV1",
+    "LearnerPathProviderProjectionV1",
+    "LearnerPathProviderStepV1",
     "LearnerPathPlannerOutputV1",
     "LearnerPathStepV1",
     "LearnerPathUnavailableReason",
+    "LEARNER_PATH_PROVIDER_MAX_CHARS",
+    "LEARNER_PATH_PROVIDER_MAX_STEPS",
     "LearnerPreferenceSignalV1",
     "LearnerProfileSnapshotV1",
     "LearnerSkillSignalV1",

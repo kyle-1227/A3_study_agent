@@ -529,6 +529,7 @@ def initial_request_reset_transient_state() -> dict:
         "learning_path": {},
         "curriculum_context": "",
         "learner_path_planner_output": {},
+        "learner_path_provider_projection": {},
         "quiz_results": [],
         "adaptive_tasks": [],
         "recommendations": [],
@@ -934,6 +935,9 @@ class LearningState(TypedDict):
     learning_path: dict  # Curriculum Engine: LearningPath serialized
     curriculum_context: str  # KG-aware context string for study_plan_planner
     learner_path_planner_output: dict  # Strict learner_path_planner_output_v1
+    learner_path_provider_projection: (
+        dict  # Strict bounded learner_path_provider_projection_v1; no identity fields
+    )
     quiz_results: list[
         dict
     ]  # Assessment: recent quiz attempts with error classifications

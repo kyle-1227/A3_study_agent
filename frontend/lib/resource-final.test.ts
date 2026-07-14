@@ -374,6 +374,7 @@ describe("Resource Final V3 contract helpers", () => {
   it("rejects duplicate recommendation identity and rank", () => {
     const recommendation = {
       recommendation_id: "recommendation-1",
+      resource_id: mindmapResource().resource_id,
       resource_type: "mindmap",
       trigger: "automatic",
       rank: 1,
@@ -385,6 +386,21 @@ describe("Resource Final V3 contract helpers", () => {
         rawEvent({ recommendations: [recommendation, { ...recommendation }] }),
       ),
     ).toThrow(/recommendation_id/)
+  })
+
+  it("rejects an automatic recommendation outside generated resources", () => {
+    const recommendation = {
+      recommendation_id: "recommendation-1",
+      resource_id: "resource-not-generated",
+      resource_type: "mindmap",
+      trigger: "automatic",
+      rank: 1,
+      title: "Review this map",
+      reason: "Matches the current learning goal",
+    }
+    expect(() =>
+      parseResourceFinalEvent(rawEvent({ recommendations: [recommendation] })),
+    ).toThrow(/must target a generated resource/)
   })
 
   it("deduplicates by Resource Final V3 identity", () => {

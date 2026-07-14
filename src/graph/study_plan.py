@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Literal, Mapping
 
@@ -16,6 +17,7 @@ from src.context_engineering.workspace import (
     workspace_trace_payload,
 )
 from src.graph.llm import invoke_plain_llm_fail_fast
+from src.graph.learning_guidance import learner_path_provider_projection_from_state
 from src.graph.state import LearningState
 from src.llm.structured_output import (
     StructuredLLMResult,
@@ -947,7 +949,23 @@ async def study_plan_planner(state: LearningState) -> dict:
     curriculum_context = state.get("curriculum_context", "")
 
     curriculum_section = ""
-    if curriculum_context:
+    if state.get("learner_path_planner_output") or state.get(
+        "learner_path_provider_projection"
+    ):
+        learner_path_projection = learner_path_provider_projection_from_state(state)
+        learner_path_json = json.dumps(
+            learner_path_projection.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        curriculum_section = (
+            "\n\n[Provider-safe Learner Path Projection V1 — use the available "
+            "plan or respect "
+            "the explicit unavailable reason]\n"
+            f"{learner_path_json}\n"
+        )
+    elif curriculum_context:
         curriculum_section = (
             f"\n\n[Curriculum Engine Context — use this to adjust topic ordering, "
             f"skip mastered topics, reinforce weak topics, and respect prerequisites]\n"

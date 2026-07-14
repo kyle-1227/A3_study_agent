@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Mapping
+from typing import TypeVar
 
+from src.graph.resource_final_v3 import ResourceFinalV3Recommendation
 from src.graph.state import LearningState
 from src.learning_guidance.contracts import (
+    LEARNER_PATH_PROVIDER_MAX_CHARS,
+    LEARNER_PATH_PROVIDER_MAX_STEPS,
     LearnerHistorySnapshotV1,
     LearnerPathEngineRequestV1,
     LearnerPathPlanV1,
     LearnerPathPlannerOutputV1,
+    LearnerPathProviderProjectionV1,
+    LearnerPathProviderStepV1,
     LearnerPathUnavailableReason,
     LearnerProfileSnapshotV1,
     RecommendationMode,
@@ -26,8 +33,16 @@ from src.learning_guidance.runtime import (
 
 
 LEARNER_PATH_OUTPUT_STATE_KEY = "learner_path_planner_output"
+LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY = "learner_path_provider_projection"
 RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY = "resource_recommendation_output"
 RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY = "recommendation_resource_context"
+
+_StrictStateModelT = TypeVar(
+    "_StrictStateModelT",
+    LearnerPathPlannerOutputV1,
+    LearnerPathProviderProjectionV1,
+    ResourceRecommendationOutputV1,
+)
 
 
 def _required_state_text(state: Mapping[str, object], field_name: str) -> str:
@@ -62,8 +77,143 @@ def _optional_state_text(
     return value
 
 
+def _retrieval_plan_subjects(state: Mapping[str, object]) -> tuple[str, ...]:
+    raw_plan = state.get("retrieval_plan")
+    if not isinstance(raw_plan, (list, tuple)) or not raw_plan:
+        raise LearningGuidanceContractError(
+            code="invalid_learner_path_subject_scope",
+            reason="learner path planning requires a non-empty retrieval plan",
+        )
+    subjects: list[str] = []
+    for item in raw_plan:
+        if not isinstance(item, Mapping):
+            raise LearningGuidanceContractError(
+                code="invalid_learner_path_subject_scope",
+                reason="retrieval plan entries must be strict objects",
+            )
+        subject = item.get("subject")
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or subject != subject.strip()
+        ):
+            raise LearningGuidanceContractError(
+                code="invalid_learner_path_subject_scope",
+                reason=("retrieval plan subjects must be normalized non-blank strings"),
+            )
+        if subject not in subjects:
+            subjects.append(subject)
+    return tuple(subjects)
+
+
+def _learner_path_scope_reason(
+    state: Mapping[str, object],
+    *,
+    subject: str,
+) -> LearnerPathUnavailableReason | None:
+    subjects = _retrieval_plan_subjects(state)
+    if len(subjects) != 1 or subjects[0] != subject:
+        return "unsupported_subject_scope"
+    return None
+
+
+def _provider_projection_for_output(
+    output: LearnerPathPlannerOutputV1,
+    *,
+    max_steps: int,
+    max_chars: int,
+) -> LearnerPathProviderProjectionV1:
+    if (
+        isinstance(max_steps, bool)
+        or not 1 <= max_steps <= LEARNER_PATH_PROVIDER_MAX_STEPS
+    ):
+        raise ValueError("max_steps must be within the provider projection contract")
+    if (
+        isinstance(max_chars, bool)
+        or not 1 <= max_chars <= LEARNER_PATH_PROVIDER_MAX_CHARS
+    ):
+        raise ValueError("max_chars must be within the provider projection contract")
+    if (
+        output.provider_projection_max_steps != max_steps
+        or output.provider_projection_max_chars != max_chars
+    ):
+        raise LearningGuidanceContractError(
+            code="learner_path_provider_projection_policy_mismatch",
+            reason="projection limits differ from the learner path output binding",
+        )
+
+    if output.status == "available":
+        if output.plan is None:
+            raise AssertionError("available learner path output requires a plan")
+        if len(output.plan.steps) > max_steps:
+            raise LearningGuidanceContractError(
+                code="learner_path_provider_projection_too_large",
+                reason="learner path exceeds the configured provider step limit",
+            )
+        projection = LearnerPathProviderProjectionV1(
+            schema_version="learner_path_provider_projection_v1",
+            status="available",
+            unavailable_reason=None,
+            subject=output.subject,
+            summary=output.plan.summary,
+            steps=tuple(
+                LearnerPathProviderStepV1(
+                    step_id=step.step_id,
+                    position=step.position,
+                    topic_id=step.topic_id,
+                    title=step.title,
+                    status=step.status,
+                    estimated_hours=step.estimated_hours,
+                    reason=step.reason,
+                    recommended_resource_types=step.recommended_resource_types,
+                )
+                for step in output.plan.steps
+            ),
+        )
+    else:
+        projection = LearnerPathProviderProjectionV1(
+            schema_version="learner_path_provider_projection_v1",
+            status="unavailable",
+            unavailable_reason=output.unavailable_reason,
+            subject=output.subject,
+            summary=None,
+            steps=(),
+        )
+
+    encoded = json.dumps(
+        projection.model_dump(mode="json"),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(encoded) > max_chars:
+        raise LearningGuidanceContractError(
+            code="learner_path_provider_projection_too_large",
+            reason="learner path exceeds the configured provider character limit",
+        )
+    return projection
+
+
+def _learner_path_state_update(
+    *,
+    output: LearnerPathPlannerOutputV1,
+    runtime: LearningGuidanceRuntime,
+) -> dict[str, object]:
+    projection = _provider_projection_for_output(
+        output,
+        max_steps=runtime.provider_projection_max_steps,
+        max_chars=runtime.provider_projection_max_chars,
+    )
+    return {
+        LEARNER_PATH_OUTPUT_STATE_KEY: output.model_dump(mode="json"),
+        LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY: projection.model_dump(mode="json"),
+    }
+
+
 def _path_unavailable(
     *,
+    runtime: LearningGuidanceRuntime,
     request_id: str,
     reason: LearnerPathUnavailableReason,
     user_id: str | None,
@@ -71,6 +221,12 @@ def _path_unavailable(
 ) -> dict[str, object]:
     output = LearnerPathPlannerOutputV1(
         schema_version="learner_path_planner_output_v1",
+        runtime_fingerprint=runtime.runtime_fingerprint,
+        provider_projection_policy_fingerprint=(
+            runtime.provider_projection_policy_fingerprint
+        ),
+        provider_projection_max_steps=runtime.provider_projection_max_steps,
+        provider_projection_max_chars=runtime.provider_projection_max_chars,
         request_id=request_id,
         status="unavailable",
         unavailable_reason=reason,
@@ -78,11 +234,12 @@ def _path_unavailable(
         subject=subject,
         plan=None,
     )
-    return {LEARNER_PATH_OUTPUT_STATE_KEY: output.model_dump(mode="json")}
+    return _learner_path_state_update(output=output, runtime=runtime)
 
 
 def _recommendation_unavailable(
     *,
+    runtime: LearningGuidanceRuntime,
     request_id: str,
     mode: RecommendationMode,
     reason: RecommendationUnavailableReason,
@@ -91,6 +248,12 @@ def _recommendation_unavailable(
 ) -> dict[str, object]:
     output = ResourceRecommendationOutputV1(
         schema_version="resource_recommendation_output_v1",
+        runtime_fingerprint=runtime.runtime_fingerprint,
+        provider_projection_policy_fingerprint=(
+            runtime.provider_projection_policy_fingerprint
+        ),
+        provider_projection_max_steps=runtime.provider_projection_max_steps,
+        provider_projection_max_chars=runtime.provider_projection_max_chars,
         request_id=request_id,
         mode=mode,
         status="unavailable",
@@ -194,6 +357,37 @@ def _recommendation_resources(
     return tuple(resources)
 
 
+def automatic_recommendation_scope_reason(
+    state: Mapping[str, object],
+    *,
+    subject: str,
+) -> RecommendationUnavailableReason | None:
+    """Reject multi-subject or mismatched generated-resource recommendation scope."""
+
+    raw = state.get("evidence_requested_subjects")
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise LearningGuidanceContractError(
+            code="invalid_evidence_requested_subjects",
+            reason="automatic recommendation requires explicit evidence subjects",
+        )
+    subjects: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip() or item != item.strip():
+            raise LearningGuidanceContractError(
+                code="invalid_evidence_requested_subjects",
+                reason="evidence subjects must be normalized non-blank strings",
+            )
+        subjects.append(item)
+    if len(subjects) != len(set(subjects)):
+        raise LearningGuidanceContractError(
+            code="invalid_evidence_requested_subjects",
+            reason="evidence subjects must be unique",
+        )
+    if len(subjects) != 1 or subjects[0] != subject:
+        return "unsupported_subject_scope"
+    return None
+
+
 def _validate_recommendation_binding(
     batch: ResourceRecommendationBatchV1,
     *,
@@ -232,6 +426,352 @@ def _validate_recommendation_binding(
                 code="unknown_recommendation_resource_evidence",
                 reason="recommendation references generated resources outside its request",
             )
+        if request.mode == "automatic_after_generation" and (
+            item.resource_id not in allowed_resource_ids
+            or item.resource_id not in item.source_resource_ids
+        ):
+            raise LearningGuidanceContractError(
+                code="unknown_recommendation_target_resource",
+                reason=(
+                    "automatic recommendation must target and cite a verified "
+                    "generated resource"
+                ),
+            )
+
+
+def _strict_json_state_model(
+    raw: object,
+    *,
+    field_name: str,
+    model_type: type[_StrictStateModelT],
+    max_serialized_chars: int | None,
+) -> _StrictStateModelT:
+    if not isinstance(raw, Mapping):
+        raise LearningGuidanceContractError(
+            code=f"invalid_{field_name}",
+            reason=f"{field_name} must be a strict JSON object",
+        )
+    try:
+        encoded = json.dumps(
+            dict(raw),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if max_serialized_chars is not None and len(encoded) > max_serialized_chars:
+            raise LearningGuidanceContractError(
+                code=f"{field_name}_too_large",
+                reason=f"{field_name} exceeds its serialized character limit",
+            )
+        # Pydantic strict models reject their own JSON datetime/tuple transport
+        # forms. Decode those JSON-native forms, then require byte-for-byte
+        # canonical equality so no scalar coercion or repair can be accepted.
+        parsed = model_type.model_validate_json(encoded, strict=False)
+        canonical = json.dumps(
+            parsed.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if canonical != encoded:
+            raise ValueError(f"{field_name} is not canonical JSON")
+        return parsed
+    except (TypeError, ValueError) as exc:
+        raise LearningGuidanceContractError(
+            code=f"invalid_{field_name}",
+            reason=f"{field_name} violates its strict schema",
+        ) from exc
+
+
+def learner_path_output_from_state(
+    state: Mapping[str, object],
+) -> LearnerPathPlannerOutputV1:
+    """Revalidate the checkpoint-safe learner path output without coercion."""
+
+    parsed = _strict_json_state_model(
+        state.get(LEARNER_PATH_OUTPUT_STATE_KEY),
+        field_name=LEARNER_PATH_OUTPUT_STATE_KEY,
+        model_type=LearnerPathPlannerOutputV1,
+        max_serialized_chars=None,
+    )
+    if not isinstance(parsed, LearnerPathPlannerOutputV1):
+        raise AssertionError("learner path parser returned the wrong model type")
+    expected_request_id = _required_state_text(state, "request_id")
+    expected_user_id = _optional_state_text(state, "user_id")
+    expected_subject = _optional_state_text(state, "subject")
+    if parsed.request_id != expected_request_id:
+        raise LearningGuidanceContractError(
+            code="learner_path_request_mismatch",
+            reason="learner path output request_id differs from graph state",
+        )
+    if parsed.user_id != expected_user_id:
+        raise LearningGuidanceContractError(
+            code="learner_path_user_mismatch",
+            reason="learner path output user_id differs from graph state",
+        )
+    if parsed.subject != expected_subject:
+        raise LearningGuidanceContractError(
+            code="learner_path_subject_mismatch",
+            reason="learner path output subject differs from graph state",
+        )
+    if expected_subject is None:
+        if not (
+            parsed.status == "unavailable"
+            and parsed.unavailable_reason == "missing_subject"
+        ):
+            raise LearningGuidanceContractError(
+                code="learner_path_scope_mismatch",
+                reason="learner path output must reflect the missing subject",
+            )
+        return parsed
+
+    scope_reason = _learner_path_scope_reason(state, subject=expected_subject)
+    if scope_reason is not None:
+        if not (
+            parsed.status == "unavailable" and parsed.unavailable_reason == scope_reason
+        ):
+            raise LearningGuidanceContractError(
+                code="learner_path_scope_mismatch",
+                reason=(
+                    "learner path output does not reflect the retrieval plan scope"
+                ),
+            )
+        return parsed
+
+    if expected_user_id is None and not (
+        parsed.status == "unavailable"
+        and parsed.unavailable_reason == "missing_user_id"
+    ):
+        raise LearningGuidanceContractError(
+            code="learner_path_user_mismatch",
+            reason="learner path output must reflect the missing user_id",
+        )
+    if parsed.unavailable_reason == "unsupported_subject_scope":
+        raise LearningGuidanceContractError(
+            code="learner_path_scope_mismatch",
+            reason=(
+                "learner path output reports an unsupported scope for a single "
+                "matching subject"
+            ),
+        )
+    return parsed
+
+
+def _validate_guidance_output_runtime_binding(
+    output: LearnerPathPlannerOutputV1 | ResourceRecommendationOutputV1,
+    *,
+    runtime: LearningGuidanceRuntime,
+) -> None:
+    if output.runtime_fingerprint != runtime.runtime_fingerprint:
+        raise LearningGuidanceContractError(
+            code="learning_guidance_runtime_mismatch",
+            reason="checkpoint guidance output belongs to a different runtime",
+        )
+    if (
+        output.provider_projection_policy_fingerprint
+        != runtime.provider_projection_policy_fingerprint
+        or output.provider_projection_max_steps != runtime.provider_projection_max_steps
+        or output.provider_projection_max_chars != runtime.provider_projection_max_chars
+    ):
+        raise LearningGuidanceContractError(
+            code="learning_guidance_projection_policy_mismatch",
+            reason="checkpoint guidance output uses a different projection policy",
+        )
+
+
+def _learner_path_provider_projection_for_output_from_state(
+    state: Mapping[str, object],
+    *,
+    output: LearnerPathPlannerOutputV1,
+) -> LearnerPathProviderProjectionV1:
+    max_steps = output.provider_projection_max_steps
+    max_chars = output.provider_projection_max_chars
+    projection = _strict_json_state_model(
+        state.get(LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY),
+        field_name=LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY,
+        model_type=LearnerPathProviderProjectionV1,
+        max_serialized_chars=max_chars,
+    )
+    expected = _provider_projection_for_output(
+        output,
+        max_steps=max_steps,
+        max_chars=max_chars,
+    )
+    if projection != expected:
+        raise LearningGuidanceContractError(
+            code="learner_path_provider_projection_mismatch",
+            reason="provider projection differs from the validated learner path output",
+        )
+    return projection
+
+
+def learner_path_provider_projection_from_state(
+    state: Mapping[str, object],
+) -> LearnerPathProviderProjectionV1:
+    """Return the exact projection under its self-validated checkpoint policy."""
+
+    output = learner_path_output_from_state(state)
+    return _learner_path_provider_projection_for_output_from_state(
+        state,
+        output=output,
+    )
+
+
+def learner_path_provider_projection_for_runtime_from_state(
+    state: Mapping[str, object],
+    *,
+    runtime: LearningGuidanceRuntime,
+) -> LearnerPathProviderProjectionV1:
+    """Return a projection only when its checkpoint runtime is still current."""
+
+    output = learner_path_output_from_state(state)
+    _validate_guidance_output_runtime_binding(output, runtime=runtime)
+    return _learner_path_provider_projection_for_output_from_state(
+        state,
+        output=output,
+    )
+
+
+def resource_recommendation_output_from_state(
+    state: Mapping[str, object],
+    *,
+    expected_mode: RecommendationMode,
+) -> ResourceRecommendationOutputV1:
+    """Revalidate one recommendation result and its fixed graph entry mode."""
+
+    parsed = _strict_json_state_model(
+        state.get(RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY),
+        field_name=RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY,
+        model_type=ResourceRecommendationOutputV1,
+        max_serialized_chars=None,
+    )
+    if not isinstance(parsed, ResourceRecommendationOutputV1):
+        raise AssertionError("recommendation parser returned the wrong model type")
+    if parsed.mode != expected_mode:
+        raise LearningGuidanceContractError(
+            code="recommendation_mode_mismatch",
+            reason="recommendation output mode differs from the graph entry mode",
+        )
+    expected_request_id = _required_state_text(state, "request_id")
+    expected_user_id = _optional_state_text(state, "user_id")
+    expected_subject = _optional_state_text(state, "subject")
+    if parsed.request_id != expected_request_id:
+        raise LearningGuidanceContractError(
+            code="recommendation_request_mismatch",
+            reason="recommendation output request_id differs from graph state",
+        )
+    if parsed.user_id != expected_user_id:
+        raise LearningGuidanceContractError(
+            code="recommendation_user_mismatch",
+            reason="recommendation output user_id differs from graph state",
+        )
+    if parsed.subject != expected_subject:
+        raise LearningGuidanceContractError(
+            code="recommendation_subject_mismatch",
+            reason="recommendation output subject differs from graph state",
+        )
+    if parsed.status == "available" and parsed.mode == "automatic_after_generation":
+        if parsed.batch is None:
+            raise AssertionError("available recommendation output requires a batch")
+        allowed_resource_ids = frozenset(
+            item.resource_id for item in _recommendation_resources(state)
+        )
+        for item in parsed.batch.items:
+            if not set(item.source_resource_ids).issubset(allowed_resource_ids):
+                raise LearningGuidanceContractError(
+                    code="unknown_recommendation_resource_evidence",
+                    reason=(
+                        "recommendation output references resources outside the "
+                        "verified bundle context"
+                    ),
+                )
+            if (
+                item.resource_id not in allowed_resource_ids
+                or item.resource_id not in item.source_resource_ids
+            ):
+                raise LearningGuidanceContractError(
+                    code="unknown_recommendation_target_resource",
+                    reason=(
+                        "automatic recommendation target is outside the verified "
+                        "bundle context"
+                    ),
+                )
+    return parsed
+
+
+def resource_recommendation_output_for_runtime_from_state(
+    state: Mapping[str, object],
+    *,
+    expected_mode: RecommendationMode,
+    runtime: LearningGuidanceRuntime,
+) -> ResourceRecommendationOutputV1:
+    """Return a recommendation only when its checkpoint runtime is current."""
+
+    output = resource_recommendation_output_from_state(
+        state,
+        expected_mode=expected_mode,
+    )
+    _validate_guidance_output_runtime_binding(output, runtime=runtime)
+    return output
+
+
+def resource_final_recommendations(
+    output: ResourceRecommendationOutputV1,
+) -> tuple[ResourceFinalV3Recommendation, ...]:
+    """Project a validated recommendation batch into Resource Final V3."""
+
+    if output.status == "unavailable":
+        return ()
+    if output.batch is None:
+        raise AssertionError("available recommendation output requires a batch")
+    if output.mode == "automatic_after_generation":
+        trigger = "automatic"
+    elif output.mode == "explicit_request":
+        trigger = "explicit_request"
+    else:
+        raise AssertionError("validated recommendation output has an unknown mode")
+    return tuple(
+        ResourceFinalV3Recommendation(
+            recommendation_id=item.recommendation_id,
+            resource_id=item.resource_id,
+            resource_type=item.resource_type,
+            trigger=trigger,
+            rank=item.rank,
+            title=item.title,
+            reason=item.reason,
+        )
+        for item in output.batch.items
+    )
+
+
+_RECOMMENDATION_UNAVAILABLE_MESSAGES: dict[
+    RecommendationUnavailableReason,
+    str,
+] = {
+    "missing_user_id": "缺少明确的用户身份",
+    "missing_subject": "缺少明确的学习科目",
+    "profile_unavailable": "学习画像不可用",
+    "history_unavailable": "学习历史不可用",
+    "generated_resources_unavailable": "没有真实生成且可推荐的资源",
+    "unsupported_subject_scope": "资源跨多个科目或与当前主科目不一致",
+}
+
+
+def recommendation_public_status_message(
+    output: ResourceRecommendationOutputV1,
+) -> str:
+    """Return a bounded public status without inventing a neutral score."""
+
+    if output.status == "available":
+        if output.batch is None:
+            raise AssertionError("available recommendation output requires a batch")
+        return f"个性化推荐已生成（{len(output.batch.items)} 项）。"
+    if output.unavailable_reason is None:
+        raise AssertionError("unavailable recommendation output requires a reason")
+    reason = _RECOMMENDATION_UNAVAILABLE_MESSAGES[output.unavailable_reason]
+    return f"个性化推荐暂不可用 [{output.unavailable_reason}]：{reason}。"
 
 
 async def _load_available_context(
@@ -276,19 +816,30 @@ def make_learner_path_planner_node(
         request_id = _required_state_text(state, "request_id")
         user_id = _optional_state_text(state, "user_id")
         subject = _optional_state_text(state, "subject")
-        if user_id is None:
-            return _path_unavailable(
-                request_id=request_id,
-                reason="missing_user_id",
-                user_id=None,
-                subject=subject,
-            )
         if subject is None:
             return _path_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 reason="missing_subject",
                 user_id=user_id,
                 subject=None,
+            )
+        scope_reason = _learner_path_scope_reason(state, subject=subject)
+        if scope_reason is not None:
+            return _path_unavailable(
+                runtime=runtime,
+                request_id=request_id,
+                reason=scope_reason,
+                user_id=user_id,
+                subject=subject,
+            )
+        if user_id is None:
+            return _path_unavailable(
+                runtime=runtime,
+                request_id=request_id,
+                reason="missing_user_id",
+                user_id=None,
+                subject=subject,
             )
 
         profile, history = await _load_available_context(
@@ -298,6 +849,7 @@ def make_learner_path_planner_node(
         )
         if profile is None:
             return _path_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 reason="profile_unavailable",
                 user_id=user_id,
@@ -305,6 +857,7 @@ def make_learner_path_planner_node(
             )
         if history is None:
             return _path_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 reason="history_unavailable",
                 user_id=user_id,
@@ -328,6 +881,12 @@ def make_learner_path_planner_node(
         _validate_plan_binding(plan, request=request)
         output = LearnerPathPlannerOutputV1(
             schema_version="learner_path_planner_output_v1",
+            runtime_fingerprint=runtime.runtime_fingerprint,
+            provider_projection_policy_fingerprint=(
+                runtime.provider_projection_policy_fingerprint
+            ),
+            provider_projection_max_steps=runtime.provider_projection_max_steps,
+            provider_projection_max_chars=runtime.provider_projection_max_chars,
             request_id=request_id,
             status="available",
             unavailable_reason=None,
@@ -335,7 +894,7 @@ def make_learner_path_planner_node(
             subject=subject,
             plan=plan,
         )
-        return {LEARNER_PATH_OUTPUT_STATE_KEY: output.model_dump(mode="json")}
+        return _learner_path_state_update(output=output, runtime=runtime)
 
     return learner_path_planner
 
@@ -358,6 +917,7 @@ def make_resource_recommendation_node(
         subject = _optional_state_text(state, "subject")
         if user_id is None:
             return _recommendation_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 mode=mode,
                 reason="missing_user_id",
@@ -366,6 +926,7 @@ def make_resource_recommendation_node(
             )
         if subject is None:
             return _recommendation_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 mode=mode,
                 reason="missing_subject",
@@ -373,13 +934,26 @@ def make_resource_recommendation_node(
                 subject=None,
             )
 
-        generated_resources = (
-            _recommendation_resources(state)
-            if mode == "automatic_after_generation"
-            else ()
-        )
+        if mode == "automatic_after_generation":
+            scope_reason = automatic_recommendation_scope_reason(
+                state,
+                subject=subject,
+            )
+            if scope_reason is not None:
+                return _recommendation_unavailable(
+                    runtime=runtime,
+                    request_id=request_id,
+                    mode=mode,
+                    reason=scope_reason,
+                    user_id=user_id,
+                    subject=subject,
+                )
+            generated_resources = _recommendation_resources(state)
+        else:
+            generated_resources = ()
         if mode == "automatic_after_generation" and not generated_resources:
             return _recommendation_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 mode=mode,
                 reason="generated_resources_unavailable",
@@ -394,6 +968,7 @@ def make_resource_recommendation_node(
         )
         if profile is None:
             return _recommendation_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 mode=mode,
                 reason="profile_unavailable",
@@ -402,6 +977,7 @@ def make_resource_recommendation_node(
             )
         if history is None:
             return _recommendation_unavailable(
+                runtime=runtime,
                 request_id=request_id,
                 mode=mode,
                 reason="history_unavailable",
@@ -430,6 +1006,12 @@ def make_resource_recommendation_node(
         _validate_recommendation_binding(batch, request=request)
         output = ResourceRecommendationOutputV1(
             schema_version="resource_recommendation_output_v1",
+            runtime_fingerprint=runtime.runtime_fingerprint,
+            provider_projection_policy_fingerprint=(
+                runtime.provider_projection_policy_fingerprint
+            ),
+            provider_projection_max_steps=runtime.provider_projection_max_steps,
+            provider_projection_max_chars=runtime.provider_projection_max_chars,
             request_id=request_id,
             mode=mode,
             status="available",
@@ -447,8 +1029,17 @@ def make_resource_recommendation_node(
 
 __all__ = [
     "LEARNER_PATH_OUTPUT_STATE_KEY",
+    "LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY",
     "RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY",
     "RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY",
+    "automatic_recommendation_scope_reason",
+    "learner_path_output_from_state",
+    "learner_path_provider_projection_for_runtime_from_state",
+    "learner_path_provider_projection_from_state",
     "make_learner_path_planner_node",
     "make_resource_recommendation_node",
+    "recommendation_public_status_message",
+    "resource_final_recommendations",
+    "resource_recommendation_output_for_runtime_from_state",
+    "resource_recommendation_output_from_state",
 ]

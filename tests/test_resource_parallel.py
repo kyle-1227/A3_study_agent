@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphInterrupt
+from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 
 from src.assessment.attempt_contracts import AssessmentQuizSourceItemV1
@@ -18,18 +20,40 @@ from src.context_engineering.influence import (
 from src.assessment.identity import stable_exercise_question_id
 from src.graph import resource_generation as rg
 from src.graph.assessment_quiz import build_assessment_quiz_projection_v1
-from src.graph.resource_final_v3 import ResourceFinalV3ResourceValidation
+from src.graph.resource_final_v3 import (
+    ResourceFinalV3,
+    ResourceFinalV3ResourceValidation,
+)
 from src.graph.resource_generation import (
     dispatch_resource_workers,
+    dispatch_resource_workers_to_recommendation_aggregator,
     normalize_requested_resource_types,
+    resource_bundle_aggregator,
     resource_bundle_output,
+    resource_bundle_output_with_recommendations,
     resource_orchestrator,
     resource_preflight_router,
     resource_worker,
     route_after_resource_preflight,
 )
-from src.graph.state import resource_branch_results_reducer
+from src.graph.state import LearningState, resource_branch_results_reducer
+from src.learning_guidance.runtime import LearningGuidanceRuntime
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+
+
+async def _unexpected_guidance_dependency(*_args, **_kwargs):
+    raise AssertionError("resource bundle tests must not invoke guidance dependencies")
+
+
+GUIDANCE_RUNTIME = LearningGuidanceRuntime(
+    runtime_fingerprint="7" * 64,
+    provider_projection_max_steps=50,
+    provider_projection_max_chars=65_536,
+    load_profile=_unexpected_guidance_dependency,
+    load_history=_unexpected_guidance_dependency,
+    plan_learning_path=_unexpected_guidance_dependency,
+    recommend_resources=_unexpected_guidance_dependency,
+)
 
 
 def _public_quiz_item() -> dict:
@@ -165,6 +189,117 @@ def _failed_branch_result(resource_type: str) -> dict:
     }
 
 
+def _automatic_recommendation_output(
+    source_resource_id: str,
+    *,
+    request_id: str = "request-1",
+) -> dict:
+    return {
+        "schema_version": "resource_recommendation_output_v1",
+        "runtime_fingerprint": GUIDANCE_RUNTIME.runtime_fingerprint,
+        "provider_projection_policy_fingerprint": (
+            GUIDANCE_RUNTIME.provider_projection_policy_fingerprint
+        ),
+        "provider_projection_max_steps": (
+            GUIDANCE_RUNTIME.provider_projection_max_steps
+        ),
+        "provider_projection_max_chars": (
+            GUIDANCE_RUNTIME.provider_projection_max_chars
+        ),
+        "request_id": request_id,
+        "mode": "automatic_after_generation",
+        "status": "available",
+        "unavailable_reason": None,
+        "user_id": "learner-1",
+        "subject": "math",
+        "batch": {
+            "schema_version": "resource_recommendation_batch_v1",
+            "mode": "automatic_after_generation",
+            "user_id": "learner-1",
+            "subject": "math",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "items": [
+                {
+                    "recommendation_id": "recommendation-math-mindmap",
+                    "resource_id": source_resource_id,
+                    "resource_type": "mindmap",
+                    "subject": "math",
+                    "topic_id": "functions",
+                    "title": "函数知识结构强化",
+                    "rank": 1,
+                    "score_factors": {
+                        "weakness": 0.8,
+                        "forgetting": 0.6,
+                        "preference": 0.4,
+                        "goal": 0.2,
+                        "combined": 0.5,
+                        "weights": {
+                            "weakness": 0.25,
+                            "forgetting": 0.25,
+                            "preference": 0.25,
+                            "goal": 0.25,
+                        },
+                    },
+                    "reason": "学习画像与最近学习记录均支持继续强化函数知识结构。",
+                    "profile_signal_ids": ["skill-math", "goal-math"],
+                    "history_ids": ["history-math-1"],
+                    "source_resource_ids": [source_resource_id],
+                }
+            ],
+            "summary": "已基于真实生成资源给出一项个性化推荐。",
+        },
+    }
+
+
+def _automatic_recommendation_unavailable(reason: str) -> dict:
+    return {
+        "schema_version": "resource_recommendation_output_v1",
+        "runtime_fingerprint": GUIDANCE_RUNTIME.runtime_fingerprint,
+        "provider_projection_policy_fingerprint": (
+            GUIDANCE_RUNTIME.provider_projection_policy_fingerprint
+        ),
+        "provider_projection_max_steps": (
+            GUIDANCE_RUNTIME.provider_projection_max_steps
+        ),
+        "provider_projection_max_chars": (
+            GUIDANCE_RUNTIME.provider_projection_max_chars
+        ),
+        "request_id": "request-1",
+        "mode": "automatic_after_generation",
+        "status": "unavailable",
+        "unavailable_reason": reason,
+        "user_id": "learner-1",
+        "subject": "math",
+        "batch": None,
+    }
+
+
+def _compile_candidate_resource_test_graph(
+    *,
+    orchestrator,
+    worker,
+    aggregator,
+    recommendation,
+    finalizer,
+):
+    graph = StateGraph(LearningState)
+    graph.add_node("resource_orchestrator", orchestrator)
+    graph.add_node("resource_worker", worker)
+    graph.add_node("resource_bundle_aggregator", aggregator)
+    graph.add_node("resource_recommendation_auto", recommendation)
+    graph.add_node("resource_bundle_output", finalizer)
+    graph.set_entry_point("resource_orchestrator")
+    graph.add_conditional_edges(
+        "resource_orchestrator",
+        dispatch_resource_workers_to_recommendation_aggregator,
+    )
+    graph.add_edge("resource_worker", "resource_bundle_aggregator")
+    graph.add_edge("resource_bundle_aggregator", "resource_recommendation_auto")
+    graph.add_edge("resource_recommendation_auto", "resource_bundle_output")
+    graph.add_edge("resource_bundle_output", END)
+    return graph.compile()
+
+
 def test_normalize_requested_resource_types_dedupes_and_aliases():
     assert normalize_requested_resource_types(
         ["mindmap", "exercise"], "quiz", "roadmap"
@@ -257,6 +392,437 @@ def test_dispatch_resource_workers_returns_send_packets():
         "mindmap",
         "quiz",
     ]
+
+
+def test_candidate_dispatch_routes_empty_plan_to_recommendation_aggregator():
+    sends = dispatch_resource_workers_to_recommendation_aggregator(
+        {"resource_generation_plan": {"tasks": []}}
+    )
+
+    assert len(sends) == 1
+    assert sends[0].node == "resource_bundle_aggregator"
+
+
+async def test_candidate_compiled_graph_fans_in_two_sends_before_one_final():
+    calls = {
+        "worker": 0,
+        "aggregator": 0,
+        "recommendation": 0,
+        "finalizer": 0,
+    }
+    worker_resource_types: list[str] = []
+    emitted_resource_finals: list[dict] = []
+
+    async def fake_orchestrator(_state: LearningState) -> dict:
+        return {
+            "resource_generation_plan": {
+                "tasks": [
+                    {
+                        "task_id": "resource:mindmap",
+                        "resource_type": "mindmap",
+                        "status": "pending",
+                    },
+                    {
+                        "task_id": "resource:quiz",
+                        "resource_type": "quiz",
+                        "status": "pending",
+                    },
+                ]
+            },
+            "resource_generation_status": "running",
+        }
+
+    async def fake_worker(state: LearningState) -> dict:
+        calls["worker"] += 1
+        resource_type = state["resource_task"]["resource_type"]
+        worker_resource_types.append(resource_type)
+        branch = (
+            _mindmap_branch_result()
+            if resource_type == "mindmap"
+            else _failed_branch_result("quiz")
+        )
+        return {"resource_branch_results": [branch]}
+
+    async def counting_aggregator(state: LearningState) -> dict:
+        calls["aggregator"] += 1
+        return await resource_bundle_aggregator(state)
+
+    async def fake_recommendation(state: LearningState) -> dict:
+        calls["recommendation"] += 1
+        contexts = state["recommendation_resource_context"]
+        assert len(contexts) == 1
+        assert contexts[0]["resource_type"] == "mindmap"
+        return {
+            "resource_recommendation_output": _automatic_recommendation_output(
+                contexts[0]["resource_id"]
+            )
+        }
+
+    async def counting_finalizer(state: LearningState) -> dict:
+        calls["finalizer"] += 1
+        output = await resource_bundle_output_with_recommendations(
+            state,
+            runtime=GUIDANCE_RUNTIME,
+        )
+        emitted_resource_finals.append(output["resource_final_v3"])
+        return output
+
+    compiled = _compile_candidate_resource_test_graph(
+        orchestrator=fake_orchestrator,
+        worker=fake_worker,
+        aggregator=counting_aggregator,
+        recommendation=fake_recommendation,
+        finalizer=counting_finalizer,
+    )
+    result = await compiled.ainvoke(
+        {
+            "thread_id": "thread-1",
+            "session_id": "thread-1",
+            "request_id": "request-1",
+            "user_id": "learner-1",
+            "subject": "math",
+            "evidence_requested_subjects": ["math"],
+            "requested_resource_types": ["mindmap", "quiz"],
+            "resource_generation_debug": {"stages": []},
+            "resource_branch_results": [],
+        }
+    )
+
+    assert calls == {
+        "worker": 2,
+        "aggregator": 1,
+        "recommendation": 1,
+        "finalizer": 1,
+    }
+    assert sorted(worker_resource_types) == ["mindmap", "quiz"]
+    assert len(emitted_resource_finals) == 1
+    parsed = ResourceFinalV3.model_validate_json(
+        json.dumps(result["resource_final_v3"], ensure_ascii=False)
+    )
+    assert parsed.terminal_status == "partial_success"
+    assert [resource.kind for resource in parsed.resources] == ["mindmap"]
+    assert [error.resource_type for error in parsed.errors] == ["quiz"]
+    assert len(parsed.recommendations) == 1
+    assert parsed.payload_hash == emitted_resource_finals[0]["payload_hash"]
+
+
+async def test_candidate_compiled_graph_empty_plan_reaches_controlled_stop_once():
+    calls = {
+        "worker": 0,
+        "aggregator": 0,
+        "recommendation": 0,
+        "finalizer": 0,
+    }
+
+    async def fake_orchestrator(_state: LearningState) -> dict:
+        return {
+            "resource_generation_plan": {"tasks": []},
+            "resource_generation_status": "skipped",
+        }
+
+    async def forbidden_worker(_state: LearningState) -> dict:
+        calls["worker"] += 1
+        raise AssertionError("an empty resource plan must not execute a worker")
+
+    async def counting_aggregator(state: LearningState) -> dict:
+        calls["aggregator"] += 1
+        return await resource_bundle_aggregator(state)
+
+    async def unavailable_recommendation(state: LearningState) -> dict:
+        calls["recommendation"] += 1
+        assert state["recommendation_resource_context"] == []
+        return {
+            "resource_recommendation_output": _automatic_recommendation_unavailable(
+                "generated_resources_unavailable"
+            )
+        }
+
+    async def counting_finalizer(state: LearningState) -> dict:
+        calls["finalizer"] += 1
+        return await resource_bundle_output_with_recommendations(
+            state,
+            runtime=GUIDANCE_RUNTIME,
+        )
+
+    compiled = _compile_candidate_resource_test_graph(
+        orchestrator=fake_orchestrator,
+        worker=forbidden_worker,
+        aggregator=counting_aggregator,
+        recommendation=unavailable_recommendation,
+        finalizer=counting_finalizer,
+    )
+    result = await compiled.ainvoke(
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "user_id": "learner-1",
+            "subject": "math",
+            "evidence_requested_subjects": ["math"],
+            "requested_resource_types": ["quiz"],
+            "resource_evidence_readiness": [
+                {
+                    "resource_type": "quiz",
+                    "readiness_state": "blocked_insufficient_evidence",
+                    "blocked_requirement_ids": ["requirement-quiz"],
+                    "reason_code": "required_evidence_incomplete",
+                }
+            ],
+            "resource_generation_debug": {"stages": []},
+            "resource_branch_results": [],
+        }
+    )
+
+    assert calls == {
+        "worker": 0,
+        "aggregator": 1,
+        "recommendation": 1,
+        "finalizer": 1,
+    }
+    parsed = ResourceFinalV3.model_validate_json(
+        json.dumps(result["resource_final_v3"], ensure_ascii=False)
+    )
+    assert parsed.terminal_status == "controlled_stop"
+    assert [item.resource_type for item in parsed.blocked_resources] == ["quiz"]
+    assert parsed.recommendations == ()
+
+
+async def test_candidate_compiled_graph_recommendation_error_is_fail_fast():
+    calls = {
+        "worker": 0,
+        "aggregator": 0,
+        "recommendation": 0,
+        "finalizer": 0,
+    }
+
+    async def fake_orchestrator(_state: LearningState) -> dict:
+        return {
+            "resource_generation_plan": {
+                "tasks": [
+                    {
+                        "task_id": "resource:mindmap",
+                        "resource_type": "mindmap",
+                        "status": "pending",
+                    }
+                ]
+            },
+            "resource_generation_status": "running",
+        }
+
+    async def fake_worker(_state: LearningState) -> dict:
+        calls["worker"] += 1
+        return {"resource_branch_results": [_mindmap_branch_result()]}
+
+    async def counting_aggregator(state: LearningState) -> dict:
+        calls["aggregator"] += 1
+        return await resource_bundle_aggregator(state)
+
+    async def failing_recommendation(_state: LearningState) -> dict:
+        calls["recommendation"] += 1
+        raise RuntimeError("recommendation execution failed")
+
+    async def forbidden_finalizer(_state: LearningState) -> dict:
+        calls["finalizer"] += 1
+        raise AssertionError("a recommendation error must not reach finalization")
+
+    compiled = _compile_candidate_resource_test_graph(
+        orchestrator=fake_orchestrator,
+        worker=fake_worker,
+        aggregator=counting_aggregator,
+        recommendation=failing_recommendation,
+        finalizer=forbidden_finalizer,
+    )
+    with pytest.raises(RuntimeError, match="recommendation execution failed"):
+        await compiled.ainvoke(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-1",
+                "user_id": "learner-1",
+                "subject": "math",
+                "evidence_requested_subjects": ["math"],
+                "requested_resource_types": ["mindmap"],
+                "resource_generation_debug": {"stages": []},
+                "resource_branch_results": [],
+            }
+        )
+
+    assert calls == {
+        "worker": 1,
+        "aggregator": 1,
+        "recommendation": 1,
+        "finalizer": 0,
+    }
+
+
+async def test_candidate_aggregator_then_finalizer_emits_one_recommended_v3():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_mindmap_branch_result()],
+    }
+
+    aggregate = await resource_bundle_aggregator(state)
+
+    assert set(aggregate) == {"recommendation_resource_context"}
+    assert "messages" not in aggregate
+    assert "resource_final_v3" not in aggregate
+    resource_id = aggregate["recommendation_resource_context"][0]["resource_id"]
+    baseline = await resource_bundle_output(state)
+    final = await resource_bundle_output_with_recommendations(
+        {
+            **state,
+            **aggregate,
+            "resource_recommendation_output": _automatic_recommendation_output(
+                resource_id
+            ),
+        },
+        runtime=GUIDANCE_RUNTIME,
+    )
+    parsed = ResourceFinalV3.model_validate_json(
+        json.dumps(final["resource_final_v3"], ensure_ascii=False)
+    )
+
+    assert parsed.resources[0].resource_id == resource_id
+    assert baseline["resource_final_v3"]["resources"][0]["resource_id"] == resource_id
+    assert baseline["resource_final_v3"]["payload_hash"] != parsed.payload_hash
+    assert len(parsed.recommendations) == 1
+    assert parsed.recommendations[0].trigger == "automatic"
+    assert parsed.recommendations[0].recommendation_id == (
+        "recommendation-math-mindmap"
+    )
+    assert parsed.recommendations[0].resource_id == resource_id
+    assert final["messages"][0].content.startswith("个性化推荐已生成（1 项）。")
+
+    tampered_final = json.loads(
+        json.dumps(final["resource_final_v3"], ensure_ascii=False)
+    )
+    tampered_final["recommendations"][0]["resource_id"] = "resource-not-generated"
+    with pytest.raises(
+        ValueError,
+        match="automatic recommendation must target a generated resource",
+    ):
+        ResourceFinalV3.model_validate_json(
+            json.dumps(tampered_final, ensure_ascii=False)
+        )
+
+
+async def test_candidate_finalizer_keeps_unavailable_status_public_and_empty():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        "requested_resource_types": ["quiz"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_failed_branch_result("quiz")],
+    }
+    aggregate = await resource_bundle_aggregator(state)
+    final = await resource_bundle_output_with_recommendations(
+        {
+            **state,
+            **aggregate,
+            "resource_recommendation_output": (
+                _automatic_recommendation_unavailable("generated_resources_unavailable")
+            ),
+        },
+        runtime=GUIDANCE_RUNTIME,
+    )
+
+    assert final["resource_final_v3"]["recommendations"] == []
+    assert final["resource_final_v3"]["summary"].startswith(
+        "个性化推荐暂不可用 [generated_resources_unavailable]"
+    )
+
+
+async def test_candidate_finalizer_rejects_tampered_recommendation_source():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_mindmap_branch_result()],
+    }
+    aggregate = await resource_bundle_aggregator(state)
+
+    with pytest.raises(
+        RuntimeError,
+        match="unknown_recommendation_resource_evidence",
+    ):
+        await resource_bundle_output_with_recommendations(
+            {
+                **state,
+                **aggregate,
+                "resource_recommendation_output": (
+                    _automatic_recommendation_output("resource-not-in-bundle")
+                ),
+            },
+            runtime=GUIDANCE_RUNTIME,
+        )
+
+
+async def test_candidate_finalizer_rejects_tampered_bundle_context():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_mindmap_branch_result()],
+    }
+    aggregate = await resource_bundle_aggregator(state)
+    aggregate["recommendation_resource_context"][0]["resource_id"] = "resource-tampered"
+
+    with pytest.raises(
+        RuntimeError,
+        match="recommendation_resource_context_mismatch",
+    ):
+        await resource_bundle_output_with_recommendations(
+            {
+                **state,
+                **aggregate,
+                "resource_recommendation_output": (
+                    _automatic_recommendation_output("resource-tampered")
+                ),
+            },
+            runtime=GUIDANCE_RUNTIME,
+        )
+
+
+async def test_candidate_finalizer_rejects_changed_guidance_runtime():
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_mindmap_branch_result()],
+    }
+    aggregate = await resource_bundle_aggregator(state)
+    resource_id = aggregate["recommendation_resource_context"][0]["resource_id"]
+
+    with pytest.raises(RuntimeError, match="learning_guidance_runtime_mismatch"):
+        await resource_bundle_output_with_recommendations(
+            {
+                **state,
+                **aggregate,
+                "resource_recommendation_output": (
+                    _automatic_recommendation_output(resource_id)
+                ),
+            },
+            runtime=replace(GUIDANCE_RUNTIME, runtime_fingerprint="8" * 64),
+        )
 
 
 async def test_resource_worker_success_uses_runner_without_writing_messages(
@@ -373,6 +939,23 @@ async def test_resource_bundle_output_does_not_copy_private_quiz_checkpoint():
     public_json = json.dumps(public_surface, ensure_ascii=False, sort_keys=True)
     assert "SERVER_ONLY_ANSWER" not in public_json
     assert "assessment_checkpoint_resources" not in result
+
+    aggregate = await resource_bundle_aggregator(
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "user_id": "learner-1",
+            "subject": "math",
+            "evidence_requested_subjects": ["math"],
+            "requested_resource_types": ["quiz"],
+            "assessment_checkpoint_resources": binding[
+                "assessment_checkpoint_resources"
+            ],
+            "resource_branch_results": [branch],
+        }
+    )
+    assert "SERVER_ONLY_ANSWER" not in json.dumps(aggregate, ensure_ascii=False)
+    assert set(aggregate) == {"recommendation_resource_context"}
 
 
 async def test_resource_worker_emits_safe_internal_subnode_traces(monkeypatch):

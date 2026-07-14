@@ -56,6 +56,12 @@ from src.graph.mindmap import (
     mindmap_rewrite,
     should_rewrite_mindmap,
 )
+from src.graph.learning_guidance import (
+    automatic_recommendation_scope_reason,
+    recommendation_public_status_message,
+    resource_final_recommendations,
+    resource_recommendation_output_for_runtime_from_state,
+)
 from src.graph.review_doc import (
     review_doc_agent,
     review_doc_output,
@@ -72,11 +78,20 @@ from src.graph.resource_contracts import (
     normalize_resource_type,
 )
 from src.graph.resource_final_runtime import build_resource_final_v3_from_bundle
-from src.graph.resource_final_v3 import ResourceFinalV3TerminalStatus
+from src.graph.resource_final_v3 import (
+    ResourceFinalV3,
+    ResourceFinalV3Recommendation,
+    ResourceFinalV3TerminalStatus,
+)
 from src.graph.resource_validation import (
     validate_renderable_resource_result,
 )
 from src.graph.state import LearningState, RESOURCE_RESULTS_CLEAR
+from src.learning_guidance.contracts import RecommendationResourceContextV1
+from src.learning_guidance.runtime import (
+    LearningGuidanceContractError,
+    LearningGuidanceRuntime,
+)
 from src.graph.study_plan import (
     route_after_study_plan_consensus,
     study_plan_agent,
@@ -360,6 +375,20 @@ def dispatch_resource_workers(state: LearningState) -> list[Send]:
     tasks = (state.get("resource_generation_plan") or {}).get("tasks") or []
     if not tasks:
         return [Send("resource_bundle_output", dict(state))]
+    return [
+        Send("resource_worker", {**dict(state), "resource_task": task})
+        for task in tasks
+    ]
+
+
+def dispatch_resource_workers_to_recommendation_aggregator(
+    state: LearningState,
+) -> list[Send]:
+    """Candidate-only fan-out whose empty path still reaches recommendation."""
+
+    tasks = (state.get("resource_generation_plan") or {}).get("tasks") or []
+    if not tasks:
+        return [Send("resource_bundle_aggregator", dict(state))]
     return [
         Send("resource_worker", {**dict(state), "resource_task": task})
         for task in tasks
@@ -1361,9 +1390,20 @@ def _resource_summary(result: dict) -> dict:
     }
 
 
-@traced_node
-async def resource_bundle_output(state: LearningState) -> dict:
-    """Aggregate resource worker results into one final user-visible bundle."""
+@dataclass(frozen=True, slots=True)
+class _ResourceBundleInputs:
+    requested: tuple[str, ...]
+    results: tuple[dict[str, Any], ...]
+    complete_successes: tuple[dict[str, Any], ...]
+    partial_successes: tuple[dict[str, Any], ...]
+    renderable_results: tuple[dict[str, Any], ...]
+    failures: tuple[dict[str, Any], ...]
+    blocked_resources: tuple[dict[str, Any], ...]
+    status: str
+    message: str
+
+
+def _collect_resource_bundle_inputs(state: LearningState) -> _ResourceBundleInputs:
     evidence_requested = list(state.get("evidence_requested_resource_types") or [])
     requested = (
         evidence_requested
@@ -1373,25 +1413,25 @@ async def resource_bundle_output(state: LearningState) -> dict:
             state.get("requested_resource_type") or "",
         )
     )
-    results = [
+    results = tuple(
         result
         for result in state.get("resource_branch_results") or []
         if isinstance(result, dict) and result.get("resource_type")
-    ]
-    complete_successes = [
+    )
+    complete_successes = tuple(
         result for result in results if result.get("status") == "success"
-    ]
-    partial_successes = [
+    )
+    partial_successes = tuple(
         result for result in results if result.get("status") == "partial_success"
-    ]
-    renderable_results = [*complete_successes, *partial_successes]
-    failures = [result for result in results if result.get("status") == "failed"]
-    readiness = [
+    )
+    renderable_results = (*complete_successes, *partial_successes)
+    failures = tuple(result for result in results if result.get("status") == "failed")
+    readiness = tuple(
         item
         for item in (state.get("resource_evidence_readiness") or [])
         if isinstance(item, dict)
-    ]
-    blocked_resources = [
+    )
+    blocked_resources = tuple(
         {
             "resource_type": item.get("resource_type"),
             "status": "blocked_insufficient_evidence",
@@ -1400,7 +1440,7 @@ async def resource_bundle_output(state: LearningState) -> dict:
         }
         for item in readiness
         if item.get("readiness_state") == "blocked_insufficient_evidence"
-    ]
+    )
 
     if partial_successes or (renderable_results and (failures or blocked_resources)):
         status = "partial_success"
@@ -1412,6 +1452,156 @@ async def resource_bundle_output(state: LearningState) -> dict:
         status = "failed"
     else:
         status = "skipped"
+
+    message = _append_blocked_resource_message(
+        _compose_bundle_message(
+            status,
+            list(renderable_results),
+            list(failures),
+        ),
+        status=status,
+        blocked_resources=list(blocked_resources),
+    )
+    return _ResourceBundleInputs(
+        requested=tuple(requested),
+        results=results,
+        complete_successes=complete_successes,
+        partial_successes=partial_successes,
+        renderable_results=renderable_results,
+        failures=failures,
+        blocked_resources=blocked_resources,
+        status=status,
+        message=message,
+    )
+
+
+def _resource_final_terminal_status(status: str) -> ResourceFinalV3TerminalStatus:
+    if status == "success":
+        return "success"
+    if status == "partial_success":
+        return "partial_success"
+    if status == "failed":
+        return "failed"
+    if status == "blocked_insufficient_evidence":
+        return "controlled_stop"
+    raise RuntimeError(f"resource bundle has unsupported terminal status {status!r}")
+
+
+def _build_resource_final_for_bundle(
+    state: LearningState,
+    *,
+    inputs: _ResourceBundleInputs,
+    recommendations: tuple[ResourceFinalV3Recommendation, ...],
+    summary: str,
+) -> ResourceFinalV3:
+    if inputs.status == "skipped":
+        raise RuntimeError("a skipped resource bundle cannot produce Resource Final V3")
+    thread_id = state.get("thread_id")
+    request_id = state.get("request_id")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise RuntimeError("resource bundle requires a non-blank thread_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise RuntimeError("resource bundle requires a non-blank request_id")
+    return build_resource_final_v3_from_bundle(
+        thread_id=thread_id,
+        request_id=request_id,
+        requested_resource_types=inputs.requested,
+        terminal_status=_resource_final_terminal_status(inputs.status),
+        branch_results=inputs.results,
+        blocked_resources=inputs.blocked_resources,
+        recommendations=recommendations,
+        summary=summary,
+    )
+
+
+def _recommendation_context_for_bundle(
+    state: LearningState,
+    *,
+    inputs: _ResourceBundleInputs,
+) -> tuple[RecommendationResourceContextV1, ...]:
+    if inputs.status == "skipped":
+        raise RuntimeError("candidate resource flow reached a skipped bundle")
+    subject = state.get("subject")
+    if (
+        not isinstance(subject, str)
+        or not subject.strip()
+        or subject != subject.strip()
+    ):
+        return ()
+    if automatic_recommendation_scope_reason(state, subject=subject) is not None:
+        return ()
+    provisional = _build_resource_final_for_bundle(
+        state,
+        inputs=inputs,
+        recommendations=(),
+        summary=inputs.message,
+    )
+    return tuple(
+        RecommendationResourceContextV1(
+            resource_id=resource.resource_id,
+            resource_type=resource.kind,
+            subject=subject,
+        )
+        for resource in provisional.resources
+    )
+
+
+def _validate_recommendation_context_for_bundle(
+    state: LearningState,
+    *,
+    inputs: _ResourceBundleInputs,
+) -> None:
+    expected = _recommendation_context_for_bundle(state, inputs=inputs)
+    raw = state.get("recommendation_resource_context")
+    if not isinstance(raw, (list, tuple)):
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_resource_context",
+            reason="candidate finalizer requires a recommendation context sequence",
+        )
+    try:
+        actual = tuple(
+            RecommendationResourceContextV1.model_validate(item) for item in raw
+        )
+    except (TypeError, ValueError) as exc:
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_resource_context",
+            reason="candidate recommendation context violates its strict schema",
+        ) from exc
+    if actual != expected:
+        raise LearningGuidanceContractError(
+            code="recommendation_resource_context_mismatch",
+            reason="recommendation context differs from verified bundle resources",
+        )
+
+
+@traced_node
+async def resource_bundle_aggregator(state: LearningState) -> dict[str, object]:
+    """Build only verified recommendation context; never emit a terminal result."""
+
+    inputs = _collect_resource_bundle_inputs(state)
+    contexts = _recommendation_context_for_bundle(state, inputs=inputs)
+    return {
+        "recommendation_resource_context": [
+            item.model_dump(mode="json") for item in contexts
+        ]
+    }
+
+
+async def _resource_bundle_output_impl(
+    state: LearningState,
+    *,
+    recommendations: tuple[ResourceFinalV3Recommendation, ...],
+    recommendation_status_message: str,
+) -> dict:
+    inputs = _collect_resource_bundle_inputs(state)
+    requested = list(inputs.requested)
+    results = list(inputs.results)
+    complete_successes = list(inputs.complete_successes)
+    partial_successes = list(inputs.partial_successes)
+    renderable_results = list(inputs.renderable_results)
+    failures = list(inputs.failures)
+    blocked_resources = list(inputs.blocked_resources)
+    status = inputs.status
 
     state_updates: dict = {}
     for result in renderable_results:
@@ -1466,41 +1656,18 @@ async def resource_bundle_output(state: LearningState) -> dict:
             "stages": stages,
         }
     )
-    message = _append_blocked_resource_message(
-        _compose_bundle_message(status, renderable_results, failures),
-        status=status,
-        blocked_resources=blocked_resources,
+    message = (
+        f"{recommendation_status_message}\n\n{inputs.message}"
+        if recommendation_status_message and inputs.message
+        else recommendation_status_message or inputs.message
     )
     bundle["message"] = message
     resource_final_v3: dict[str, Any] = {}
     if status != "skipped":
-        v3_terminal_status: ResourceFinalV3TerminalStatus
-        if status == "success":
-            v3_terminal_status = "success"
-        elif status == "partial_success":
-            v3_terminal_status = "partial_success"
-        elif status == "failed":
-            v3_terminal_status = "failed"
-        elif status == "blocked_insufficient_evidence":
-            v3_terminal_status = "controlled_stop"
-        else:
-            raise RuntimeError(
-                f"resource bundle has unsupported terminal status {status!r}"
-            )
-        thread_id = state.get("thread_id")
-        request_id = state.get("request_id")
-        if not isinstance(thread_id, str) or not thread_id.strip():
-            raise RuntimeError("resource bundle requires a non-blank thread_id")
-        if not isinstance(request_id, str) or not request_id.strip():
-            raise RuntimeError("resource bundle requires a non-blank request_id")
-        resource_final_v3 = build_resource_final_v3_from_bundle(
-            thread_id=thread_id,
-            request_id=request_id,
-            requested_resource_types=requested,
-            terminal_status=v3_terminal_status,
-            branch_results=results,
-            blocked_resources=blocked_resources,
-            recommendations=(),
+        resource_final_v3 = _build_resource_final_for_bundle(
+            state,
+            inputs=inputs,
+            recommendations=recommendations,
             summary=message,
         ).model_dump(mode="json")
     artifact_updates: dict[str, Any] = {}
@@ -1602,3 +1769,53 @@ async def resource_bundle_output(state: LearningState) -> dict:
         "context_influence_ledger": influence_update,
         "messages": [AIMessage(content=message)] if message else [],
     }
+
+
+@traced_node
+async def resource_bundle_output(state: LearningState) -> dict:
+    """Finalize the currently served graph without candidate recommendations."""
+
+    return await _resource_bundle_output_impl(
+        state,
+        recommendations=(),
+        recommendation_status_message="",
+    )
+
+
+@traced_node
+async def resource_bundle_output_with_recommendations(
+    state: LearningState,
+    *,
+    runtime: LearningGuidanceRuntime,
+) -> dict:
+    """Finalize the candidate graph after one strict automatic recommendation."""
+
+    inputs = _collect_resource_bundle_inputs(state)
+    _validate_recommendation_context_for_bundle(state, inputs=inputs)
+    output = resource_recommendation_output_for_runtime_from_state(
+        state,
+        expected_mode="automatic_after_generation",
+        runtime=runtime,
+    )
+    return await _resource_bundle_output_impl(
+        state,
+        recommendations=resource_final_recommendations(output),
+        recommendation_status_message=recommendation_public_status_message(output),
+    )
+
+
+def make_resource_bundle_output_with_recommendations_node(
+    runtime: LearningGuidanceRuntime,
+) -> Callable[[LearningState], Awaitable[dict]]:
+    """Bind candidate finalization to the current guidance runtime."""
+
+    if not isinstance(runtime, LearningGuidanceRuntime):
+        raise TypeError("runtime must be LearningGuidanceRuntime")
+
+    async def candidate_resource_bundle_output(state: LearningState) -> dict:
+        return await resource_bundle_output_with_recommendations(
+            state,
+            runtime=runtime,
+        )
+
+    return candidate_resource_bundle_output

@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
+import json
 
 import pytest
 from pydantic import ValidationError
 
 from src.graph.learning_guidance import (
     LEARNER_PATH_OUTPUT_STATE_KEY,
+    LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY,
     RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY,
     RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY,
+    learner_path_provider_projection_for_runtime_from_state,
+    learner_path_provider_projection_from_state,
     make_learner_path_planner_node,
     make_resource_recommendation_node,
+    resource_recommendation_output_from_state,
 )
 from src.graph.state import initial_request_reset_transient_state
 from src.learning_guidance.contracts import (
     LearnerGoalSignalV1,
     LearnerHistoryEventV1,
     LearnerHistorySnapshotV1,
+    LearnerPathEngineRequestV1,
     LearnerPathPlanV1,
     LearnerPathStepV1,
     LearnerPreferenceSignalV1,
@@ -27,6 +34,7 @@ from src.learning_guidance.contracts import (
     RecommendationScoreFactorsV1,
     RecommendationScoreWeightsV1,
     ResourceRecommendationBatchV1,
+    ResourceRecommendationEngineRequestV1,
     ResourceRecommendationItemV1,
 )
 from src.learning_guidance.runtime import (
@@ -137,6 +145,11 @@ def _recommendation_batch(
     source_resource_ids = (
         ("generated-quiz-1",) if mode == "automatic_after_generation" else ()
     )
+    resource_id = (
+        "generated-quiz-1"
+        if mode == "automatic_after_generation"
+        else "recommended-quiz-2"
+    )
     return ResourceRecommendationBatchV1(
         schema_version="resource_recommendation_batch_v1",
         mode=mode,
@@ -146,7 +159,7 @@ def _recommendation_batch(
         items=(
             ResourceRecommendationItemV1(
                 recommendation_id=f"recommendation-{mode}",
-                resource_id="recommended-quiz-2",
+                resource_id=resource_id,
                 resource_type="quiz",
                 subject="python",
                 topic_id="python-basics",
@@ -180,8 +193,8 @@ class RuntimeStub:
         self.history_result: LearnerHistorySnapshotV1 | None = self.history
         self.profile_calls: list[str] = []
         self.history_calls: list[tuple[str, str]] = []
-        self.path_requests = []
-        self.recommendation_requests = []
+        self.path_requests: list[LearnerPathEngineRequestV1] = []
+        self.recommendation_requests: list[ResourceRecommendationEngineRequestV1] = []
         self.path_error: Exception | None = None
         self.recommendation_error: Exception | None = None
 
@@ -205,13 +218,36 @@ class RuntimeStub:
             raise self.recommendation_error
         return _recommendation_batch(request.mode, user_id=request.user_id)
 
-    def runtime(self) -> LearningGuidanceRuntime:
+    def runtime(
+        self,
+        *,
+        provider_projection_max_steps: int = 50,
+        provider_projection_max_chars: int = 65_536,
+    ) -> LearningGuidanceRuntime:
         return LearningGuidanceRuntime(
+            runtime_fingerprint="1" * 64,
+            provider_projection_max_steps=provider_projection_max_steps,
+            provider_projection_max_chars=provider_projection_max_chars,
             load_profile=self.load_profile,
             load_history=self.load_history,
             plan_learning_path=self.plan_learning_path,
             recommend_resources=self.recommend_resources,
         )
+
+
+def _retrieval_plan(*subjects: str) -> list[dict[str, object]]:
+    return [
+        {
+            "subject": subject,
+            "role": "core_concept",
+            "local_retrieval_query": f"{subject} course concepts",
+            "web_research_seed_query": f"{subject} official tutorial",
+            "purpose": "support the requested learning resource",
+            "priority": 1.0,
+            "_parent_child_priority_explicit": True,
+        }
+        for subject in subjects
+    ]
 
 
 def _state(**updates):
@@ -220,6 +256,8 @@ def _state(**updates):
         "thread_id": "thread-must-not-be-used-as-user",
         "user_id": "learner-1",
         "subject": "python",
+        "evidence_requested_subjects": ["python"],
+        "retrieval_plan": _retrieval_plan("python"),
     }
     state.update(updates)
     return state
@@ -252,9 +290,33 @@ def test_contracts_forbid_schema_drift_and_default_score_mismatch() -> None:
             ),
         )
 
+    batch_payload = _recommendation_batch("automatic_after_generation").model_dump(
+        mode="python"
+    )
+    batch_payload["items"][0]["title"] = "x" * 241
+    with pytest.raises(ValidationError, match="at most 240 characters"):
+        ResourceRecommendationBatchV1.model_validate(batch_payload)
+
 
 def test_new_request_reset_has_explicit_empty_user_id() -> None:
-    assert initial_request_reset_transient_state()["user_id"] == ""
+    reset = initial_request_reset_transient_state()
+    assert reset["user_id"] == ""
+    assert reset[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY] == {}
+
+
+def test_learning_guidance_runtime_requires_explicit_stable_fingerprint() -> None:
+    stub = RuntimeStub()
+
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        LearningGuidanceRuntime(
+            runtime_fingerprint="not-a-digest",
+            provider_projection_max_steps=50,
+            provider_projection_max_chars=65_536,
+            load_profile=stub.load_profile,
+            load_history=stub.load_history,
+            plan_learning_path=stub.plan_learning_path,
+            recommend_resources=stub.recommend_resources,
+        )
 
 
 def test_app_user_id_state_value_never_uses_thread_identity() -> None:
@@ -282,7 +344,8 @@ async def test_learner_path_requires_explicit_user_id_without_thread_fallback() 
 @pytest.mark.anyio
 async def test_learner_path_passes_real_user_id_and_strict_context() -> None:
     stub = RuntimeStub()
-    node = make_learner_path_planner_node(stub.runtime())
+    runtime = stub.runtime()
+    node = make_learner_path_planner_node(runtime)
 
     update = await node(_state())
 
@@ -293,6 +356,221 @@ async def test_learner_path_passes_real_user_id_and_strict_context() -> None:
     assert stub.history_calls == [("learner-1", "python")]
     assert stub.path_requests[0].user_id == "learner-1"
     assert stub.path_requests[0].user_id != "thread-must-not-be-used-as-user"
+
+    projection = update[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY]
+    encoded = json.dumps(
+        projection,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert len(encoded) <= runtime.provider_projection_max_chars
+    assert projection["status"] == "available"
+    assert projection["steps"][0]["step_id"] == "path-step-python-basics"
+    for forbidden_field in (
+        "request_id",
+        "user_id",
+        "profile_signal_ids",
+        "history_ids",
+        "runtime_fingerprint",
+        "provider_projection_policy_fingerprint",
+    ):
+        assert f'"{forbidden_field}"' not in encoded
+    assert "learner-1" not in encoded
+    assert "history-python-1" not in encoded
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "retrieval_subjects",
+    [
+        ("python", "math"),
+        ("math",),
+    ],
+)
+async def test_learner_path_rejects_unsupported_retrieval_subject_scope_before_io(
+    retrieval_subjects: tuple[str, ...],
+) -> None:
+    stub = RuntimeStub()
+    node = make_learner_path_planner_node(stub.runtime())
+
+    update = await node(_state(retrieval_plan=_retrieval_plan(*retrieval_subjects)))
+
+    output = update[LEARNER_PATH_OUTPUT_STATE_KEY]
+    projection = update[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY]
+    assert output["status"] == "unavailable"
+    assert output["unavailable_reason"] == "unsupported_subject_scope"
+    assert projection["status"] == "unavailable"
+    assert projection["unavailable_reason"] == "unsupported_subject_scope"
+    assert stub.profile_calls == []
+    assert stub.history_calls == []
+    assert stub.path_requests == []
+
+
+@pytest.mark.anyio
+async def test_learner_path_provider_projection_length_limit_fails_without_truncation() -> (
+    None
+):
+    stub = RuntimeStub()
+    node = make_learner_path_planner_node(stub.runtime(provider_projection_max_chars=1))
+
+    with pytest.raises(LearningGuidanceContractError) as error:
+        await node(_state())
+
+    assert error.value.code == "learner_path_provider_projection_too_large"
+    assert len(stub.path_requests) == 1
+
+
+@pytest.mark.anyio
+async def test_learner_path_provider_projection_step_limit_fails_without_truncation() -> (
+    None
+):
+    stub = RuntimeStub()
+    first_step = _path_plan().steps[0]
+    two_step_plan = LearnerPathPlanV1(
+        schema_version="learner_path_plan_v1",
+        user_id="learner-1",
+        subject="python",
+        generated_at=NOW,
+        steps=(
+            first_step,
+            LearnerPathStepV1(
+                step_id="path-step-python-practice",
+                position=2,
+                topic_id="python-practice",
+                subject="python",
+                title="Python 基础练习",
+                status="ready",
+                estimated_hours=1.0,
+                reason="在基础巩固后完成一轮练习。",
+                recommended_resource_types=("quiz",),
+                profile_signal_ids=("skill-python",),
+                history_ids=("history-python-1",),
+            ),
+        ),
+        summary="先巩固基础，再完成练习。",
+    )
+
+    async def plan_two_steps(request):
+        stub.path_requests.append(request)
+        return two_step_plan
+
+    runtime = replace(
+        stub.runtime(provider_projection_max_steps=1),
+        plan_learning_path=plan_two_steps,
+    )
+    node = make_learner_path_planner_node(runtime)
+
+    with pytest.raises(LearningGuidanceContractError) as error:
+        await node(_state())
+
+    assert error.value.code == "learner_path_provider_projection_too_large"
+    assert len(stub.path_requests) == 1
+
+
+@pytest.mark.anyio
+async def test_learner_path_provider_projection_rejects_tamper_and_stale_state() -> (
+    None
+):
+    stub = RuntimeStub()
+    node = make_learner_path_planner_node(stub.runtime())
+    state = _state()
+    update = await node(state)
+
+    parsed = learner_path_provider_projection_from_state(
+        {**state, **update},
+    )
+    assert parsed.status == "available"
+
+    tampered_projection = {
+        **update[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY],
+        "summary": "tampered summary",
+    }
+    with pytest.raises(LearningGuidanceContractError) as tamper_error:
+        learner_path_provider_projection_from_state(
+            {
+                **state,
+                **update,
+                LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY: tampered_projection,
+            },
+        )
+    assert tamper_error.value.code == "learner_path_provider_projection_mismatch"
+
+    with pytest.raises(LearningGuidanceContractError) as stale_error:
+        learner_path_provider_projection_from_state(
+            {**state, **update, "request_id": "stale-request"},
+        )
+    assert stale_error.value.code == "learner_path_request_mismatch"
+
+    with pytest.raises(LearningGuidanceContractError) as scope_error:
+        learner_path_provider_projection_from_state(
+            {
+                **state,
+                **update,
+                "retrieval_plan": _retrieval_plan("python", "math"),
+            },
+        )
+    assert scope_error.value.code == "learner_path_scope_mismatch"
+
+    tampered_policy_output = {
+        **update[LEARNER_PATH_OUTPUT_STATE_KEY],
+        "provider_projection_max_steps": 49,
+    }
+    with pytest.raises(LearningGuidanceContractError) as policy_binding_error:
+        learner_path_provider_projection_from_state(
+            {
+                **state,
+                **update,
+                LEARNER_PATH_OUTPUT_STATE_KEY: tampered_policy_output,
+            }
+        )
+    assert policy_binding_error.value.code == "invalid_learner_path_planner_output"
+
+
+@pytest.mark.anyio
+async def test_learner_path_provider_projection_forbids_identity_schema_drift() -> None:
+    stub = RuntimeStub()
+    node = make_learner_path_planner_node(stub.runtime())
+    state = _state()
+    update = await node(state)
+    leaked_projection = {
+        **update[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY],
+        "request_id": state["request_id"],
+    }
+
+    with pytest.raises(LearningGuidanceContractError) as error:
+        learner_path_provider_projection_from_state(
+            {
+                **state,
+                **update,
+                LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY: leaked_projection,
+            },
+        )
+
+    assert error.value.code == "invalid_learner_path_provider_projection"
+
+
+@pytest.mark.anyio
+async def test_learner_path_checkpoint_rejects_changed_guidance_runtime() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    node = make_learner_path_planner_node(runtime)
+    state = _state()
+    update = await node(state)
+
+    with pytest.raises(LearningGuidanceContractError) as runtime_error:
+        learner_path_provider_projection_for_runtime_from_state(
+            {**state, **update},
+            runtime=replace(runtime, runtime_fingerprint="2" * 64),
+        )
+    assert runtime_error.value.code == "learning_guidance_runtime_mismatch"
+
+    with pytest.raises(LearningGuidanceContractError) as policy_error:
+        learner_path_provider_projection_for_runtime_from_state(
+            {**state, **update},
+            runtime=replace(runtime, provider_projection_max_steps=49),
+        )
+    assert policy_error.value.code == ("learning_guidance_projection_policy_mismatch")
 
 
 @pytest.mark.anyio
@@ -386,6 +664,33 @@ async def test_automatic_recommendation_requires_real_generated_resource() -> No
 
 
 @pytest.mark.anyio
+async def test_automatic_recommendation_rejects_multi_subject_scope_explicitly() -> (
+    None
+):
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="automatic_after_generation",
+    )
+    state = _state(evidence_requested_subjects=["python", "math"])
+    state[RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY] = [
+        RecommendationResourceContextV1(
+            resource_id="generated-quiz-1",
+            resource_type="quiz",
+            subject="python",
+        )
+    ]
+
+    update = await node(state)
+
+    output = update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]
+    assert output["status"] == "unavailable"
+    assert output["unavailable_reason"] == "unsupported_subject_scope"
+    assert stub.profile_calls == []
+    assert stub.recommendation_requests == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("state_updates", "missing_dependency", "expected_reason"),
     [
@@ -435,11 +740,14 @@ async def test_recommendation_rejects_unbound_engine_evidence() -> None:
     stub = RuntimeStub()
 
     async def unbound_recommendation(request):
-        batch = _recommendation_batch(request.mode)
-        item = batch.items[0].model_copy(update={"history_ids": ("unknown-history",)})
-        return batch.model_copy(update={"items": (item,)})
+        payload = _recommendation_batch(request.mode).model_dump(mode="python")
+        payload["items"][0]["history_ids"] = ("unknown-history",)
+        return ResourceRecommendationBatchV1.model_validate(payload)
 
     runtime = LearningGuidanceRuntime(
+        runtime_fingerprint="2" * 64,
+        provider_projection_max_steps=50,
+        provider_projection_max_chars=65_536,
         load_profile=stub.load_profile,
         load_history=stub.load_history,
         plan_learning_path=stub.plan_learning_path,
@@ -452,3 +760,82 @@ async def test_recommendation_rejects_unbound_engine_evidence() -> None:
         match="unknown_recommendation_history_evidence",
     ):
         await node(_state())
+
+
+@pytest.mark.anyio
+async def test_automatic_recommendation_rejects_unbound_target_resource() -> None:
+    stub = RuntimeStub()
+
+    async def unbound_target_recommendation(request):
+        payload = _recommendation_batch(request.mode).model_dump(mode="python")
+        payload["items"][0]["resource_id"] = "catalog-resource-not-generated"
+        return ResourceRecommendationBatchV1.model_validate(payload)
+
+    runtime = replace(
+        stub.runtime(),
+        recommend_resources=unbound_target_recommendation,
+    )
+    node = make_resource_recommendation_node(
+        runtime,
+        mode="automatic_after_generation",
+    )
+    state = _state()
+    state[RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY] = [
+        RecommendationResourceContextV1(
+            resource_id="generated-quiz-1",
+            resource_type="quiz",
+            subject="python",
+        )
+    ]
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="unknown_recommendation_target_resource",
+    ):
+        await node(state)
+
+
+@pytest.mark.anyio
+async def test_recommendation_checkpoint_projection_rejects_stale_request() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+    state = _state()
+    update = await node(state)
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_request_mismatch",
+    ):
+        resource_recommendation_output_from_state(
+            {
+                **state,
+                **update,
+                "request_id": "stale-request",
+            },
+            expected_mode="explicit_request",
+        )
+
+
+@pytest.mark.anyio
+async def test_recommendation_checkpoint_projection_rejects_json_coercion() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+    state = _state()
+    update = await node(state)
+    drifted = update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]
+    drifted["batch"]["items"][0]["rank"] = "1"
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="invalid_resource_recommendation_output",
+    ):
+        resource_recommendation_output_from_state(
+            {**state, RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY: drifted},
+            expected_mode="explicit_request",
+        )

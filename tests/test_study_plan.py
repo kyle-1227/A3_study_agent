@@ -29,6 +29,9 @@ from src.graph.study_plan import (
     study_plan_reviewer_academic,
     validate_study_plan_artifact,
 )
+from src.learning_guidance.contracts import (
+    build_learner_path_provider_policy_fingerprint,
+)
 from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
 
 
@@ -78,6 +81,69 @@ def _approved_output_state(artifact: StudyPlanArtifact | None = None) -> dict:
     }
 
 
+def _learner_path_output() -> dict:
+    policy_fingerprint = build_learner_path_provider_policy_fingerprint(
+        max_steps=50,
+        max_chars=65_536,
+    )
+    return {
+        "schema_version": "learner_path_planner_output_v1",
+        "runtime_fingerprint": "6" * 64,
+        "provider_projection_policy_fingerprint": policy_fingerprint,
+        "provider_projection_max_steps": 50,
+        "provider_projection_max_chars": 65_536,
+        "request_id": "request-plan-1",
+        "status": "available",
+        "unavailable_reason": None,
+        "user_id": "learner-plan-1",
+        "subject": "math",
+        "plan": {
+            "schema_version": "learner_path_plan_v1",
+            "user_id": "learner-plan-1",
+            "subject": "math",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "steps": [
+                {
+                    "step_id": "path-functions",
+                    "position": 1,
+                    "topic_id": "functions",
+                    "subject": "math",
+                    "title": "强化函数基础",
+                    "status": "reinforce",
+                    "estimated_hours": 2.0,
+                    "reason": "近期评估显示函数基础需要强化。",
+                    "recommended_resource_types": ["study_plan"],
+                    "profile_signal_ids": ["skill-functions"],
+                    "history_ids": ["history-functions-1"],
+                }
+            ],
+            "summary": "先强化函数基础。",
+        },
+    }
+
+
+def _learner_path_provider_projection() -> dict:
+    return {
+        "schema_version": "learner_path_provider_projection_v1",
+        "status": "available",
+        "unavailable_reason": None,
+        "subject": "math",
+        "summary": "先强化函数基础。",
+        "steps": [
+            {
+                "step_id": "path-functions",
+                "position": 1,
+                "topic_id": "functions",
+                "title": "强化函数基础",
+                "status": "reinforce",
+                "estimated_hours": 2.0,
+                "reason": "近期评估显示函数基础需要强化。",
+                "recommended_resource_types": ["study_plan"],
+            }
+        ],
+    }
+
+
 @pytest.mark.anyio
 async def test_study_plan_planner_empty_outline_raises():
     with patch(
@@ -89,6 +155,83 @@ async def test_study_plan_planner_empty_outline_raises():
             )
     assert invoke.call_args.kwargs["temperature"] == 0.2
     assert invoke.call_args.kwargs["max_raw_chars"] == 12000
+
+
+@pytest.mark.anyio
+async def test_study_plan_planner_consumes_only_provider_safe_learner_path():
+    state = {
+        "messages": [HumanMessage(content="make a plan")],
+        "request_id": "request-plan-1",
+        "user_id": "learner-plan-1",
+        "subject": "math",
+        "retrieval_plan": [{"subject": "math"}],
+        "learner_path_planner_output": _learner_path_output(),
+        "learner_path_provider_projection": _learner_path_provider_projection(),
+    }
+    with patch(
+        "src.graph.study_plan.invoke_plain_llm_fail_fast",
+        return_value="Functions-first outline",
+    ) as invoke:
+        result = await study_plan_planner(state)
+
+    prompt = invoke.call_args.kwargs["messages"][1].content
+    assert '"step_id":"path-functions"' in prompt
+    assert "Provider-safe" in prompt
+    for forbidden_field in (
+        "request_id",
+        "user_id",
+        "profile_signal_ids",
+        "history_ids",
+        "runtime_fingerprint",
+        "provider_projection_policy_fingerprint",
+    ):
+        assert f'"{forbidden_field}"' not in prompt
+    assert "request-plan-1" not in prompt
+    assert "learner-plan-1" not in prompt
+    assert "skill-functions" not in prompt
+    assert "history-functions-1" not in prompt
+    assert result["study_plan_outline"] == "Functions-first outline"
+
+
+@pytest.mark.anyio
+async def test_study_plan_planner_rejects_stale_learner_path_before_llm():
+    state = {
+        "messages": [HumanMessage(content="make a plan")],
+        "request_id": "request-plan-1",
+        "user_id": "learner-plan-1",
+        "subject": "math",
+        "retrieval_plan": [{"subject": "math"}],
+        "learner_path_planner_output": {
+            **_learner_path_output(),
+            "request_id": "stale-request",
+        },
+        "learner_path_provider_projection": _learner_path_provider_projection(),
+    }
+    with patch(
+        "src.graph.study_plan.invoke_plain_llm_fail_fast",
+        side_effect=AssertionError("stale path must fail before LLM dispatch"),
+    ):
+        with pytest.raises(RuntimeError, match="learner_path_request_mismatch"):
+            await study_plan_planner(state)
+
+
+@pytest.mark.anyio
+async def test_study_plan_planner_rejects_unpaired_provider_projection() -> None:
+    state = {
+        "messages": [HumanMessage(content="make a plan")],
+        "request_id": "request-plan-1",
+        "user_id": "learner-plan-1",
+        "subject": "math",
+        "retrieval_plan": [{"subject": "math"}],
+        "learner_path_provider_projection": _learner_path_provider_projection(),
+        "curriculum_context": "legacy context must not mask an unpaired projection",
+    }
+    with patch(
+        "src.graph.study_plan.invoke_plain_llm_fail_fast",
+        side_effect=AssertionError("unpaired projection must fail before LLM dispatch"),
+    ):
+        with pytest.raises(RuntimeError, match="invalid_learner_path_planner_output"):
+            await study_plan_planner(state)
 
 
 def test_validate_study_plan_artifact_rejects_missing_evidence_usage():

@@ -198,6 +198,7 @@ class ResourceFinalV3Recommendation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     recommendation_id: str = Field(pattern=_NONEMPTY_ID_PATTERN, max_length=160)
+    resource_id: str = Field(pattern=_NONEMPTY_ID_PATTERN, max_length=200)
     resource_type: ResourceFinalV3ResourceKind
     trigger: Literal["automatic", "explicit_request"]
     rank: int = Field(ge=1, le=100)
@@ -335,6 +336,20 @@ class ResourceFinalV3Content(BaseModel):
         recommendation_ranks = [item.rank for item in self.recommendations]
         if len(set(recommendation_ranks)) != len(recommendation_ranks):
             raise ValueError("recommendation ranks must be unique")
+
+        resource_by_id = {item.resource_id: item for item in self.resources}
+        for recommendation in self.recommendations:
+            if recommendation.trigger != "automatic":
+                continue
+            target = resource_by_id.get(recommendation.resource_id)
+            if target is None:
+                raise ValueError(
+                    "automatic recommendation must target a generated resource"
+                )
+            if target.kind != recommendation.resource_type:
+                raise ValueError(
+                    "automatic recommendation resource type must match its target"
+                )
 
         for resource in self.resources:
             expected_id = stable_resource_final_v3_resource_id(

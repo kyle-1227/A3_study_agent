@@ -82,6 +82,7 @@ export interface ResourceFinalResource {
 
 export interface ResourceFinalRecommendation {
   recommendation_id: string
+  resource_id: string
   resource_type: ResourceFinalResourceKind
   trigger: "automatic" | "explicit_request"
   rank: number
@@ -864,7 +865,15 @@ function parseRecommendation(
   const data = record(value, contract)
   rejectUnexpectedFields(
     data,
-    ["recommendation_id", "resource_type", "trigger", "rank", "title", "reason"],
+    [
+      "recommendation_id",
+      "resource_id",
+      "resource_type",
+      "trigger",
+      "rank",
+      "title",
+      "reason",
+    ],
     contract,
   )
   const trigger = boundedString(data.trigger, "trigger", contract, 40)
@@ -880,6 +889,7 @@ function parseRecommendation(
       contract,
       160,
     ),
+    resource_id: boundedString(data.resource_id, "resource_id", contract, 200),
     resource_type: parseResourceKind(data.resource_type, "resource_type", contract),
     trigger,
     rank,
@@ -1029,6 +1039,17 @@ function validateTerminalTruth(event: ResourceFinalEvent, contract: string): voi
     "recommendation rank",
     contract,
   )
+  const resourceById = new Map(event.resources.map((item) => [item.resource_id, item]))
+  for (const recommendation of event.recommendations) {
+    if (recommendation.trigger !== "automatic") continue
+    const target = resourceById.get(recommendation.resource_id)
+    if (!target) {
+      fail(contract, "automatic recommendation must target a generated resource")
+    }
+    if (target.kind !== recommendation.resource_type) {
+      fail(contract, "automatic recommendation resource type must match its target")
+    }
+  }
 }
 
 function stringRecord(value: unknown, contract: string): Record<string, string> {

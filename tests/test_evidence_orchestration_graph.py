@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,7 @@ from src.graph.resource_generation import (
 )
 from src.graph.web_research import WebResearchTask
 from src.graph.state import LearningState, initial_request_reset_transient_state
+from src.learning_guidance.runtime import LearningGuidanceRuntime
 from src.observability.node_registry import get_node_runtime_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +52,22 @@ class _NoopRetriever:
 
     def hydrate_kept_multi(self, result, kept_child_ids):
         raise AssertionError("empty hydration test must not call the retriever")
+
+
+async def _unexpected_guidance_dependency(*_args, **_kwargs):
+    raise AssertionError("this evidence-orchestration test must not call guidance")
+
+
+def _learning_guidance_runtime() -> LearningGuidanceRuntime:
+    return LearningGuidanceRuntime(
+        runtime_fingerprint="3" * 64,
+        provider_projection_max_steps=50,
+        provider_projection_max_chars=65_536,
+        load_profile=_unexpected_guidance_dependency,
+        load_history=_unexpected_guidance_dependency,
+        plan_learning_path=_unexpected_guidance_dependency,
+        recommend_resources=_unexpected_guidance_dependency,
+    )
 
 
 def _runtime() -> orchestration.EvidenceOrchestrationRuntime:
@@ -70,6 +88,7 @@ def _runtime() -> orchestration.EvidenceOrchestrationRuntime:
         profiles=load_resource_evidence_profiles(
             ROOT / "config" / "rag" / "resource_evidence_profiles.yaml"
         ),
+        learning_guidance=_learning_guidance_runtime(),
         web_timeout_seconds=10.0,
     )
 
@@ -96,11 +115,14 @@ def _quiz_draft_batch(runtime: orchestration.EvidenceOrchestrationRuntime):
 
 
 def _planner_state():
+    guidance = _learning_guidance_runtime()
     return {
         "messages": [HumanMessage(content="请生成函数复习测验")],
         "request_id": "request-evidence-1",
         "session_id": "session-evidence-1",
         "thread_id": "thread-evidence-1",
+        "user_id": "",
+        "subject": "math",
         "response_mode": "resource",
         "requested_resource_type": "quiz",
         "requested_resource_types": ["quiz"],
@@ -114,6 +136,91 @@ def _planner_state():
                 "purpose": "support the requested quiz",
                 "priority": 1.0,
                 "_parent_child_priority_explicit": True,
+            }
+        ],
+        "learner_path_planner_output": {
+            "schema_version": "learner_path_planner_output_v1",
+            "runtime_fingerprint": guidance.runtime_fingerprint,
+            "provider_projection_policy_fingerprint": (
+                guidance.provider_projection_policy_fingerprint
+            ),
+            "provider_projection_max_steps": (guidance.provider_projection_max_steps),
+            "provider_projection_max_chars": (guidance.provider_projection_max_chars),
+            "request_id": "request-evidence-1",
+            "status": "unavailable",
+            "unavailable_reason": "missing_user_id",
+            "user_id": None,
+            "subject": "math",
+            "plan": None,
+        },
+        "learner_path_provider_projection": {
+            "schema_version": "learner_path_provider_projection_v1",
+            "status": "unavailable",
+            "unavailable_reason": "missing_user_id",
+            "subject": "math",
+            "summary": None,
+            "steps": [],
+        },
+    }
+
+
+def _available_math_path_output() -> dict:
+    guidance = _learning_guidance_runtime()
+    return {
+        "schema_version": "learner_path_planner_output_v1",
+        "runtime_fingerprint": guidance.runtime_fingerprint,
+        "provider_projection_policy_fingerprint": (
+            guidance.provider_projection_policy_fingerprint
+        ),
+        "provider_projection_max_steps": guidance.provider_projection_max_steps,
+        "provider_projection_max_chars": guidance.provider_projection_max_chars,
+        "request_id": "request-evidence-1",
+        "status": "available",
+        "unavailable_reason": None,
+        "user_id": "learner-math-1",
+        "subject": "math",
+        "plan": {
+            "schema_version": "learner_path_plan_v1",
+            "user_id": "learner-math-1",
+            "subject": "math",
+            "generated_at": "2026-07-14T00:00:00Z",
+            "steps": [
+                {
+                    "step_id": "path-functions-reinforce",
+                    "position": 1,
+                    "topic_id": "functions",
+                    "subject": "math",
+                    "title": "强化函数概念",
+                    "status": "reinforce",
+                    "estimated_hours": 2.0,
+                    "reason": "最近学习记录显示函数概念仍需强化。",
+                    "recommended_resource_types": ["quiz"],
+                    "profile_signal_ids": ["skill-functions"],
+                    "history_ids": ["history-functions-1"],
+                }
+            ],
+            "summary": "先强化函数概念，再进入后续主题。",
+        },
+    }
+
+
+def _available_math_path_provider_projection() -> dict:
+    return {
+        "schema_version": "learner_path_provider_projection_v1",
+        "status": "available",
+        "unavailable_reason": None,
+        "subject": "math",
+        "summary": "先强化函数概念，再进入后续主题。",
+        "steps": [
+            {
+                "step_id": "path-functions-reinforce",
+                "position": 1,
+                "topic_id": "functions",
+                "title": "强化函数概念",
+                "status": "reinforce",
+                "estimated_hours": 2.0,
+                "reason": "最近学习记录显示函数概念仍需强化。",
+                "recommended_resource_types": ["quiz"],
             }
         ],
     }
@@ -163,6 +270,7 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         "web_research",
         "academic_parent_hydration",
         "resource_parent_hydration",
+        "learner_path_planner",
         "resource_evidence_planner",
         "retrieval_round_router",
         "local_rag_search_batch",
@@ -171,6 +279,8 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         "requirement_evidence_judge",
         "evidence_repair_planner",
         "resource_evidence_assignment",
+        "resource_bundle_aggregator",
+        "resource_recommendation_auto",
     }.issubset(candidate.nodes)
     assert {
         "rag_retrieve",
@@ -182,6 +292,22 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         ("local_rag_search_batch", "web_research_search_batch"),
         "retrieval_round_merge",
     ) in candidate.waiting_edges
+    assert ("learner_path_planner", "resource_evidence_planner") in candidate.edges
+    assert ("resource_worker", "resource_bundle_aggregator") in candidate.edges
+    assert (
+        "resource_bundle_aggregator",
+        "resource_recommendation_auto",
+    ) in candidate.edges
+    assert (
+        "resource_recommendation_auto",
+        "resource_bundle_output",
+    ) in candidate.edges
+    assert "learner_path_planner" not in legacy.nodes
+    assert "resource_bundle_aggregator" not in legacy.nodes
+    assert "resource_recommendation_auto" not in legacy.nodes
+    assert get_node_runtime_metadata("learner_path_planner") is not None
+    assert get_node_runtime_metadata("resource_bundle_aggregator") is not None
+    assert get_node_runtime_metadata("resource_recommendation_auto") is not None
     assert candidate.compile() is not None
 
 
@@ -191,6 +317,88 @@ def test_candidate_graph_has_no_superseded_generation_router_contract():
     assert "rag_generation_route" not in LearningState.__annotations__
     assert "rag_generation_route" not in initial_request_reset_transient_state()
     assert get_node_runtime_metadata("rag_generation_router") is None
+
+
+def test_guidance_runtime_fingerprint_changes_candidate_identity():
+    runtime = _runtime()
+    changed = replace(
+        runtime,
+        learning_guidance=replace(
+            runtime.learning_guidance,
+            runtime_fingerprint="4" * 64,
+        ),
+    )
+
+    assert runtime.orchestration_fingerprint != changed.orchestration_fingerprint
+
+
+def test_guidance_projection_policy_changes_candidate_identity():
+    runtime = _runtime()
+    changed_steps = replace(
+        runtime,
+        learning_guidance=replace(
+            runtime.learning_guidance,
+            provider_projection_max_steps=49,
+        ),
+    )
+    changed_chars = replace(
+        runtime,
+        learning_guidance=replace(
+            runtime.learning_guidance,
+            provider_projection_max_chars=65_535,
+        ),
+    )
+
+    fingerprints = {
+        runtime.orchestration_fingerprint,
+        changed_steps.orchestration_fingerprint,
+        changed_chars.orchestration_fingerprint,
+    }
+    assert len(fingerprints) == 3
+
+
+def test_web_timeout_changes_candidate_identity():
+    runtime = _runtime()
+    changed = replace(runtime, web_timeout_seconds=11.0)
+
+    assert runtime.orchestration_fingerprint != changed.orchestration_fingerprint
+
+
+def test_downstream_rejects_missing_or_changed_orchestration_fingerprint():
+    runtime = _runtime()
+    changed = replace(
+        runtime,
+        learning_guidance=replace(
+            runtime.learning_guidance,
+            runtime_fingerprint="4" * 64,
+        ),
+    )
+    router = orchestration.make_retrieval_round_router_node(changed)
+
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match="missing_evidence_orchestration_fingerprint",
+    ):
+        router({})
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match="evidence_orchestration_fingerprint_mismatch",
+    ):
+        router(
+            {"evidence_orchestration_fingerprint": (runtime.orchestration_fingerprint)}
+        )
+
+
+def test_candidate_node_metadata_matches_path_then_evidence_topology():
+    rewrite = get_node_runtime_metadata("search_query_rewriter")
+    learner_path = get_node_runtime_metadata("learner_path_planner")
+    evidence_plan = get_node_runtime_metadata("resource_evidence_planner")
+
+    assert rewrite is not None
+    assert learner_path is not None
+    assert evidence_plan is not None
+    assert rewrite.stage_rank < learner_path.stage_rank < evidence_plan.stage_rank
+    assert rewrite.order < learner_path.order < evidence_plan.order
 
 
 def test_candidate_query_route_requires_explicit_canonical_resources():
@@ -286,6 +494,83 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
         for item in planned["evidence_requirements"]
         if item["criticality"] == "required"
     )
+
+
+def test_evidence_planner_injects_only_provider_safe_learner_path(monkeypatch):
+    runtime = _runtime()
+    batch = _quiz_draft_batch(runtime)
+    captured: dict[str, object] = {}
+
+    async def fake_planner(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(parsed=batch)
+
+    state = {
+        **_planner_state(),
+        "user_id": "learner-math-1",
+        "learner_path_planner_output": _available_math_path_output(),
+        "learner_path_provider_projection": (
+            _available_math_path_provider_projection()
+        ),
+    }
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+
+    asyncio.run(orchestration.make_resource_evidence_planner_node(runtime)(state))
+
+    prompt = captured["messages"][1].content
+    assert '"step_id":"path-functions-reinforce"' in prompt
+    assert '"status":"available"' in prompt
+    assert '"schema_version":"learner_path_provider_projection_v1"' in prompt
+    for forbidden_field in (
+        "request_id",
+        "user_id",
+        "profile_signal_ids",
+        "history_ids",
+        "runtime_fingerprint",
+        "provider_projection_policy_fingerprint",
+    ):
+        assert f'"{forbidden_field}"' not in prompt
+    assert "request-evidence-1" not in prompt
+    assert "learner-math-1" not in prompt
+    assert "skill-functions" not in prompt
+    assert "history-functions-1" not in prompt
+
+
+def test_evidence_planner_rejects_stale_learner_path_before_llm(monkeypatch):
+    runtime = _runtime()
+    state = _planner_state()
+    state["learner_path_planner_output"] = {
+        **state["learner_path_planner_output"],
+        "request_id": "stale-request",
+    }
+
+    async def forbidden_planner(**_kwargs):
+        raise AssertionError("stale learner path must fail before provider dispatch")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", forbidden_planner)
+
+    with pytest.raises(RuntimeError, match="learner_path_request_mismatch"):
+        asyncio.run(orchestration.make_resource_evidence_planner_node(runtime)(state))
+
+
+def test_evidence_planner_rejects_path_from_changed_guidance_runtime(monkeypatch):
+    runtime = _runtime()
+    changed = replace(
+        runtime,
+        learning_guidance=replace(
+            runtime.learning_guidance,
+            runtime_fingerprint="4" * 64,
+        ),
+    )
+    state = _planner_state()
+
+    async def forbidden_planner(**_kwargs):
+        raise AssertionError("stale guidance output must fail before provider dispatch")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", forbidden_planner)
+
+    with pytest.raises(RuntimeError, match="learning_guidance_runtime_mismatch"):
+        asyncio.run(orchestration.make_resource_evidence_planner_node(changed)(state))
 
 
 def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypatch):
@@ -467,6 +752,7 @@ def test_repair_planner_skips_a_prior_source_signature_and_keeps_unseen_source()
 
     result = orchestration.make_evidence_repair_planner_node(runtime)(
         {
+            "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
             "evidence_current_round": 0,
             "evidence_requirements": [requirement.model_dump(mode="json")],
             "evidence_coverage": coverage.model_dump(mode="json"),

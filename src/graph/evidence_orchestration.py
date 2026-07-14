@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
+import math
 import time
 from typing import Literal, TypeVar
 
@@ -54,6 +55,9 @@ from src.config.evidence_orchestration_contracts import (
 from src.graph.academic import execute_validated_web_research_tasks
 from src.graph.academic import SearchQueryRewriteOutput
 from src.graph.evidence import EvidenceCandidate
+from src.graph.learning_guidance import (
+    learner_path_provider_projection_for_runtime_from_state,
+)
 from src.graph.parent_child_nodes import (
     ParentChildGraphContractError,
     ParentChildGraphRuntime,
@@ -66,6 +70,12 @@ from src.llm.structured_output import (
     get_max_raw_chars,
     invoke_structured_llm,
 )
+from src.learning_guidance.contracts import (
+    LearnerPathPlannerOutputV1,
+    LearnerPathProviderProjectionV1,
+    ResourceRecommendationOutputV1,
+)
+from src.learning_guidance.runtime import LearningGuidanceRuntime
 from src.observability.evidence_trace import (
     EVIDENCE_TRACE_SCHEMA_VERSION,
     emit_evidence_trace,
@@ -155,7 +165,9 @@ class EvidenceOrchestrationRuntime:
     parent_child: ParentChildGraphRuntime
     policy: EvidenceOrchestrationConfig
     profiles: ResourceEvidenceProfilesConfig
+    learning_guidance: LearningGuidanceRuntime
     web_timeout_seconds: float
+    _orchestration_fingerprint: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.parent_child, ParentChildGraphRuntime):
@@ -164,8 +176,20 @@ class EvidenceOrchestrationRuntime:
             raise TypeError("policy must be EvidenceOrchestrationConfig")
         if not isinstance(self.profiles, ResourceEvidenceProfilesConfig):
             raise TypeError("profiles must be ResourceEvidenceProfilesConfig")
-        if self.web_timeout_seconds <= 0:
+        if not isinstance(self.learning_guidance, LearningGuidanceRuntime):
+            raise TypeError("learning_guidance must be LearningGuidanceRuntime")
+        if (
+            isinstance(self.web_timeout_seconds, bool)
+            or not isinstance(self.web_timeout_seconds, (int, float))
+            or not math.isfinite(float(self.web_timeout_seconds))
+            or self.web_timeout_seconds <= 0
+        ):
             raise ValueError("web_timeout_seconds must be positive")
+        object.__setattr__(
+            self,
+            "_orchestration_fingerprint",
+            self._build_orchestration_fingerprint(),
+        )
 
     @property
     def profile_fingerprint(self) -> str:
@@ -173,6 +197,9 @@ class EvidenceOrchestrationRuntime:
 
     @property
     def orchestration_fingerprint(self) -> str:
+        return self._orchestration_fingerprint
+
+    def _build_orchestration_fingerprint(self) -> str:
         prompt_fingerprints = {
             name: _text_digest(load_prompt(name))
             for name in (
@@ -190,6 +217,14 @@ class EvidenceOrchestrationRuntime:
                 ),
                 "policy": self.policy.model_dump(mode="json"),
                 "profile_fingerprint": self.profile_fingerprint,
+                "web_timeout_seconds": self.web_timeout_seconds,
+                "learning_guidance_runtime_fingerprint": (
+                    self.learning_guidance.runtime_fingerprint
+                ),
+                "learner_path_provider_projection_policy": {
+                    "max_steps": (self.learning_guidance.provider_projection_max_steps),
+                    "max_chars": (self.learning_guidance.provider_projection_max_chars),
+                },
                 "prompt_fingerprints": prompt_fingerprints,
                 "structured_schemas": {
                     "query_rewrite": SearchQueryRewriteOutput.model_json_schema(),
@@ -200,6 +235,15 @@ class EvidenceOrchestrationRuntime:
                         RequirementCoverageBatch.model_json_schema()
                     ),
                     "web_source_summary": WebSourceSummaryBatch.model_json_schema(),
+                    "learner_path_output": (
+                        LearnerPathPlannerOutputV1.model_json_schema()
+                    ),
+                    "learner_path_provider_projection": (
+                        LearnerPathProviderProjectionV1.model_json_schema()
+                    ),
+                    "resource_recommendation_output": (
+                        ResourceRecommendationOutputV1.model_json_schema()
+                    ),
                 },
             }
         )
@@ -209,6 +253,25 @@ class EvidenceOrchestrationRuntime:
         """Fingerprint index, policies, profiles, prompts, and schemas together."""
 
         return self.orchestration_fingerprint
+
+
+def validate_evidence_orchestration_runtime_binding(
+    state: Mapping[str, object],
+    runtime: EvidenceOrchestrationRuntime,
+) -> None:
+    """Block checkpoint continuation under a changed candidate runtime."""
+
+    actual = state.get("evidence_orchestration_fingerprint")
+    if not isinstance(actual, str) or not actual.strip():
+        raise EvidenceOrchestrationRuntimeError(
+            code="missing_evidence_orchestration_fingerprint",
+            reason="candidate continuation requires its orchestration fingerprint",
+        )
+    if actual != runtime.orchestration_fingerprint:
+        raise EvidenceOrchestrationRuntimeError(
+            code="evidence_orchestration_fingerprint_mismatch",
+            reason="candidate orchestration runtime changed in-flight",
+        )
 
 
 class EvidenceCandidateRecord(BaseModel):
@@ -487,6 +550,12 @@ def make_resource_evidence_planner_node(
         resources = _requested_resources(state)
         subjects = _requested_subjects(state, runtime)
         question = _last_human_query(state)
+        learner_path_projection = (
+            learner_path_provider_projection_for_runtime_from_state(
+                state,
+                runtime=runtime.learning_guidance,
+            )
+        )
         profiles = tuple(
             runtime.profiles.profile_for(resource).model_dump(mode="json")
             for resource in resources
@@ -502,6 +571,12 @@ def make_resource_evidence_planner_node(
                 "subjects_json": json.dumps(subjects, ensure_ascii=False),
                 "retrieval_plan_json": json.dumps(
                     state.get("retrieval_plan") or [], ensure_ascii=False
+                ),
+                "learner_path_provider_projection_json": json.dumps(
+                    learner_path_projection.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
                 ),
                 "profiles_json": json.dumps(profiles, ensure_ascii=False),
                 "max_requirements": runtime.policy.max_requirements_per_request,
@@ -616,6 +691,7 @@ def make_retrieval_round_router_node(
     """Create a validator for one bounded round before static source fan-out."""
 
     def retrieval_round_router(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         round_index = _required_state_count(state, "evidence_current_round")
         tasks = tuple(
             RetrievalTask.model_validate(item)
@@ -812,6 +888,7 @@ def make_local_rag_search_batch_node(
     parent_rag_node = make_parent_child_rag_node(runtime.parent_child)
 
     async def local_rag_search_batch(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         started = time.perf_counter()
         round_index = _required_state_count(state, "evidence_current_round")
         tasks = tuple(
@@ -944,6 +1021,7 @@ def make_web_research_search_batch_node(
     """Create a direct-query Web batch node that never re-plans tasks."""
 
     async def web_research_search_batch(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         started = time.perf_counter()
         round_index = _required_state_count(state, "evidence_current_round")
         tasks = tuple(
@@ -1116,6 +1194,7 @@ def make_retrieval_round_merge_node(
     """Create the sole owner of cumulative candidate and round state."""
 
     def retrieval_round_merge(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         round_index = _required_state_count(state, "evidence_current_round")
         local_batch = state.get("evidence_local_batch") or {}
         web_batch = state.get("evidence_web_batch") or {}
@@ -1386,6 +1465,7 @@ def make_requirement_evidence_judge_node(
     """Create the per-requirement coverage judge and bounded route decision."""
 
     async def requirement_evidence_judge(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         round_index = _required_state_count(state, "evidence_current_round")
         requirements = tuple(
             EvidenceRequirement.model_validate(item)
@@ -1700,6 +1780,7 @@ def make_evidence_repair_planner_node(
     """Create a deterministic planner for Judge-authored targeted gap queries."""
 
     def evidence_repair_planner(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         current_round = _required_state_count(state, "evidence_current_round")
         next_round = current_round + 1
         if next_round > runtime.policy.max_supplement_rounds:
@@ -1889,6 +1970,7 @@ def make_terminal_parent_hydration_node(
     """Create the one-shot terminal parent hydration and approved context node."""
 
     async def parent_child_parent_hydration(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         if _required_state_count(state, "evidence_hydration_count") != 0:
             raise EvidenceOrchestrationRuntimeError(
                 code="parent_hydration_repeated",
@@ -2114,6 +2196,7 @@ def make_resource_evidence_assignment_node(
     """Create code-derived per-resource readiness and assignment output."""
 
     def resource_evidence_assignment(state: LearningState) -> dict:
+        validate_evidence_orchestration_runtime_binding(state, runtime)
         requirements = tuple(
             EvidenceRequirement.model_validate(item)
             for item in (state.get("evidence_requirements") or [])
@@ -2281,4 +2364,5 @@ __all__ = [
     "make_terminal_parent_hydration_node",
     "make_web_research_search_batch_node",
     "route_after_requirement_evidence_judge",
+    "validate_evidence_orchestration_runtime_binding",
 ]

@@ -23,13 +23,20 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.emotional import emotional_response
+from src.graph.learning_guidance import (
+    make_learner_path_planner_node,
+    make_resource_recommendation_node,
+)
 from src.graph.resource_contracts import (
     SUPPORTED_RESOURCE_TYPES,
     normalize_requested_resource_types,
 )
 from src.graph.resource_generation import (
     dispatch_resource_workers,
+    dispatch_resource_workers_to_recommendation_aggregator,
+    make_resource_bundle_output_with_recommendations_node,
     resource_preflight_router,
+    resource_bundle_aggregator,
     resource_bundle_output,
     resource_orchestrator,
     resource_worker,
@@ -236,6 +243,7 @@ def build_resource_evidence_parent_child_graph(
         make_terminal_parent_hydration_node,
         make_web_research_search_batch_node,
         route_after_requirement_evidence_judge,
+        validate_evidence_orchestration_runtime_binding,
     )
     from src.graph.parent_child_nodes import (
         make_parent_child_hydration_node,
@@ -253,6 +261,13 @@ def build_resource_evidence_parent_child_graph(
             node_name,
             wrap_context_influence_node(node_name, interruptible),
         )
+
+    def add_candidate_runtime_node(node_name: str, node_fn) -> None:
+        async def runtime_bound_node(state: LearningState) -> dict:
+            validate_evidence_orchestration_runtime_binding(state, runtime)
+            return await node_fn(state)
+
+        add_interruptible_node(node_name, runtime_bound_node)
 
     academic_parent_hydration = make_parent_child_hydration_node(runtime.parent_child)
     resource_parent_hydration = make_terminal_parent_hydration_node(runtime)
@@ -272,6 +287,10 @@ def build_resource_evidence_parent_child_graph(
     add_interruptible_node(
         "resource_evidence_planner",
         make_resource_evidence_planner_node(runtime),
+    )
+    add_interruptible_node(
+        "learner_path_planner",
+        make_learner_path_planner_node(runtime.learning_guidance),
     )
     add_interruptible_node(
         "retrieval_round_router",
@@ -315,14 +334,30 @@ def build_resource_evidence_parent_child_graph(
     add_interruptible_node("rewrite_query", rewrite_query)
     add_interruptible_node("emotional_response", emotional_response)
     add_interruptible_node("qa_agent", qa_agent)
-    add_interruptible_node("resource_preflight_router", resource_preflight_router)
-    add_interruptible_node(
+    add_candidate_runtime_node("resource_preflight_router", resource_preflight_router)
+    add_candidate_runtime_node(
         "study_plan_profile_gate_main",
         study_plan_profile_gate_main,
     )
-    add_interruptible_node("resource_orchestrator", resource_orchestrator)
-    add_interruptible_node("resource_worker", resource_worker)
-    add_interruptible_node("resource_bundle_output", resource_bundle_output)
+    add_candidate_runtime_node("resource_orchestrator", resource_orchestrator)
+    add_candidate_runtime_node("resource_worker", resource_worker)
+    add_candidate_runtime_node(
+        "resource_bundle_aggregator",
+        resource_bundle_aggregator,
+    )
+    add_candidate_runtime_node(
+        "resource_recommendation_auto",
+        make_resource_recommendation_node(
+            runtime.learning_guidance,
+            mode="automatic_after_generation",
+        ),
+    )
+    add_candidate_runtime_node(
+        "resource_bundle_output",
+        make_resource_bundle_output_with_recommendations_node(
+            runtime.learning_guidance,
+        ),
+    )
     add_interruptible_node("handle_unknown", handle_unknown)
 
     graph.set_entry_point("supervisor")
@@ -343,7 +378,7 @@ def build_resource_evidence_parent_child_graph(
         route_after_candidate_query_rewrite,
         {
             "academic": "academic_router",
-            "resource_evidence": "resource_evidence_planner",
+            "resource_evidence": "learner_path_planner",
         },
     )
 
@@ -365,6 +400,7 @@ def build_resource_evidence_parent_child_graph(
         },
     )
 
+    graph.add_edge("learner_path_planner", "resource_evidence_planner")
     graph.add_edge("resource_evidence_planner", "retrieval_round_router")
     graph.add_edge("retrieval_round_router", "local_rag_search_batch")
     graph.add_edge("retrieval_round_router", "web_research_search_batch")
@@ -393,8 +429,13 @@ def build_resource_evidence_parent_child_graph(
         },
     )
     graph.add_edge("study_plan_profile_gate_main", "resource_orchestrator")
-    graph.add_conditional_edges("resource_orchestrator", dispatch_resource_workers)
-    graph.add_edge("resource_worker", "resource_bundle_output")
+    graph.add_conditional_edges(
+        "resource_orchestrator",
+        dispatch_resource_workers_to_recommendation_aggregator,
+    )
+    graph.add_edge("resource_worker", "resource_bundle_aggregator")
+    graph.add_edge("resource_bundle_aggregator", "resource_recommendation_auto")
+    graph.add_edge("resource_recommendation_auto", "resource_bundle_output")
     graph.add_edge("resource_bundle_output", END)
 
     graph.add_edge("evidence_summary_output", END)
