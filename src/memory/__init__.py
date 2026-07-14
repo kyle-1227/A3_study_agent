@@ -20,7 +20,6 @@ Usage::
 
 from src.memory.schema import (
     EpisodicMemoryRecord,
-    MemoryContextInjection,
     MemoryRetrievalResult,
     SemanticMemorySummary,
     SemanticSummaryStrictOutput,
@@ -41,7 +40,6 @@ from src.memory.errors import MemoryEmbeddingConfigError, MemoryEmbeddingRuntime
 __all__ = [
     # Schema
     "EpisodicMemoryRecord",
-    "MemoryContextInjection",
     "MemoryRetrievalResult",
     "SemanticMemorySummary",
     "SemanticSummaryStrictOutput",

@@ -80,7 +80,7 @@ blocked resources、errors、validation、summary、terminal status、稳定 has
 
 ## 5. legacy memory prompt 候选
 
-### 5.1 替代链路已实现，旧层待独立删除
+### 5.1 替代链路与独立旧层清理已实现
 
 `generate_answer` 已停止动态导入 `src.context.context_builder.build_memory_context`，不再
 重复检索 memory，也不再把 memory 文本前置到原始 system prompt 或追加到用户可见正文。
@@ -93,8 +93,11 @@ blocked resources、errors、validation、summary、terminal status、稳定 has
 替换当前活跃版本，而不是让 Context Window V3 保留量持续累加。summary、episodic 与
 semantic 使用公平限额选择，避免某一桶挤掉其余记忆类型。
 
-当前仍待独立清理的是 `src/context/`、`src/memory/schema.py` 中仅供旧 builder 使用的
-`MemoryContextInjection`、旧 memory prompt 常量、`memory.token_budget` 及对应旧测试。
+替代快照 `ed953ac` 形成后，独立清理批次删除了整个 `src/context/`、仅供旧 builder
+使用的 `MemoryContextInjection` 与 public export、旧 memory prompt/footer 常量、
+`memory.token_budget`、`tests/test_context_builder.py` 和
+`tests/test_token_budget_strict_config.py`。有效的 `src.memory` public import smoke 已迁到
+独立测试，storage/retrieval/consolidation/embedding 均保留。
 
 ### 5.2 保留与替代
 
@@ -104,7 +107,7 @@ compaction、Context Window V3、完整 transcript/checkpoint、`LearningState.c
 `task_workspace`。`task_workspace` 被 input manifest、evidence/artifact providers、compaction
 和运行状态直接消费，不是待删 telemetry。
 
-只有以下等价门通过后，才删除 `src/context`、直接 footer、`memory.token_budget` 与旧测试：
+本次删除依据以下已满足的等价门执行：
 
 - 固定样本证明记忆、画像、消息、摘要、去重和 compact 后 retained token 均等价或更严格；
 - provider-bound manifest 证明记忆只由 CE 最终选中项注入；
@@ -116,13 +119,18 @@ compaction、Context Window V3、完整 transcript/checkpoint、`LearningState.c
 dispatch、无 memory 的 rules-only 调用、显式 ignore、跨 thread 拒绝、manifest descriptor、
 session ledger source stats、Influence Ledger 安全来源计数、稳定 logical ID、三类 memory
 公平选择、Model View CE block 去重，以及正式图
-`episodic_memory_retriever → memory_use_decider → search_query_rewriter` 顺序。删除提交必须在
-全量质量门通过并形成替代快照后执行。
+`episodic_memory_retriever → memory_use_decider → search_query_rewriter` 顺序。删除前已先
+形成并提交全量通过的替代快照 `ed953ac`。
 
 替代快照验证结果：相关回归 `397 passed`，全量后端
 `2297 passed, 5 skipped`，前端 69 项测试/typecheck/ESLint/build、compileall、触及文件
 Ruff、CE scoped mypy、security tests 和 diff check 均通过。全仓既有 Ruff/type debt 与
 缺失的可选安全/死代码工具已在 Streaming V3 状态报告中单独记录，不作为通过项。
+
+独立清理后的最终验证为 `161 passed` 聚焦回归与
+`2279 passed, 5 skipped` 全量后端；前端 69 项测试/typecheck/ESLint/build、compileall、
+触及文件 Ruff、retained memory scoped mypy、security tests、diff check 和活跃旧符号归零
+扫描均通过。首次全量捕获的两条旧 budget 阶段守卫已改为防回归断言，没有删除测试。
 
 ## 6. fallback 与假产物候选
 

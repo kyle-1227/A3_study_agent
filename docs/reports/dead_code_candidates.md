@@ -313,7 +313,19 @@ Replacement tests: `tests/test_generate_answer_context_engineering.py`,
 `tests/test_context_influence_ledger.py`, `tests/test_builder.py`,
 `tests/test_model_view_projection.py`, session ledger tests, and stream/app
 ledger update tests.
-Approved action: after the replacement snapshot passes all gates, delete only
-the listed legacy package/schema/constants/config/tests; retain
+Executed action: after replacement snapshot `ed953ac` passed all gates, the
+listed legacy package/schema/constants/config/tests were deleted in an
+independent cleanup diff. The retained `src.memory` public API smoke moved to
+`tests/test_memory_public_api.py`; a dedicated absence guard prevents the old
+package, symbols, and configuration from returning. Retain
 `src/context_engineering`, `src/memory` business storage/retrieval, complete
 transcript/checkpoints, compaction, Context Window V3, and same-provider retry.
+
+Post-deletion verification: 161 focused tests and the final full backend suite
+(`2279 passed, 5 skipped`) passed. Frontend Vitest/typecheck/lint/build,
+compileall, touched Ruff, retained-memory scoped mypy, security tests, diff
+check, and exact active-code/config/test scans passed. The first full run found
+two stale phase guards that still required the deleted 4096 budget; they were
+converted to absence regressions rather than deleted. Optional Semgrep,
+import-linter, Gitleaks, Bandit, and Vulture remain unavailable and were not
+reported as passing.

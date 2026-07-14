@@ -17,13 +17,13 @@ def test_phase2_providers_do_not_depend_on_context_packer_or_final_selection():
     assert offenders == []
 
 
-def test_phase2_keeps_model_window_and_memory_budget_config_unchanged():
+def test_model_window_is_preserved_and_legacy_memory_budget_is_removed():
     settings = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
 
     assert (
         settings["context_engineering"]["model_limits"]["deepseek-v4-pro"] == 1_000_000
     )
-    assert settings["memory"]["token_budget"]["total_budget"] == 4096
+    assert "token_budget" not in settings["memory"]
 
 
 def test_provider_collection_is_active_but_remains_non_strict():

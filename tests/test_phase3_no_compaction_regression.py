@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 
 def test_packing_module_has_no_forbidden_runtime_capabilities():
     root = Path("src/context_engineering/packing")
@@ -30,8 +32,10 @@ def test_packing_module_has_no_forbidden_runtime_capabilities():
         assert pattern not in text
 
 
-def test_phase3_does_not_modify_model_limits_or_memory_budget():
-    settings = Path("config/settings.yaml").read_text(encoding="utf-8")
+def test_model_limit_is_preserved_and_legacy_memory_budget_is_removed():
+    settings = yaml.safe_load(Path("config/settings.yaml").read_text(encoding="utf-8"))
 
-    assert "deepseek-v4-pro: 1000000" in settings
-    assert "total_budget: 4096" in settings
+    assert (
+        settings["context_engineering"]["model_limits"]["deepseek-v4-pro"] == 1_000_000
+    )
+    assert "token_budget" not in settings["memory"]

@@ -139,3 +139,7 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 - The user-visible legacy memory footer was removed. Safe source counts are
   exposed only as content-free Influence Ledger metadata and provider dispatch
   records; memory bodies are not written to those audit surfaces.
+- After the verified replacement snapshot, the now-unreferenced `src/context`
+  builder/token-budget/error package and its tests were deleted. No
+  compatibility import, original-message retry, deterministic memory text, or
+  legacy budget adapter remains; retained memory storage/retrieval is unchanged.

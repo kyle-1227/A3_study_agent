@@ -45,10 +45,14 @@ class EpisodicMemoryRecord(BaseModel):
 
     content: str = Field(..., description="Natural language description of the event")
     importance: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description="How important this memory is (0=trivial, 1=critical)",
     )
-    subject: str = Field(default="", description="Academic subject, e.g. 'python', 'math'")
+    subject: str = Field(
+        default="", description="Academic subject, e.g. 'python', 'math'"
+    )
 
     # Arbitrary metadata for extensibility
     metadata: dict[str, Any] = Field(
@@ -67,8 +71,12 @@ class EpisodicMemoryRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="ISO 8601 timestamp of record creation",
     )
-    last_accessed_at: str = Field(default="", description="Last time this memory was retrieved")
-    access_count: int = Field(default=0, ge=0, description="How many times this memory was retrieved")
+    last_accessed_at: str = Field(
+        default="", description="Last time this memory was retrieved"
+    )
+    access_count: int = Field(
+        default=0, ge=0, description="How many times this memory was retrieved"
+    )
 
     # Consolidation tracking
     consolidated: bool = Field(
@@ -131,11 +139,14 @@ class SemanticMemorySummary(BaseModel):
         description="ISO 8601 timestamp of summary creation",
     )
     confidence: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description="How confident the LLM is in this summary",
     )
     consolidation_version: int = Field(
-        default=1, ge=1,
+        default=1,
+        ge=1,
         description="How many times this summary has been re-consolidated",
     )
 
@@ -173,7 +184,9 @@ class SemanticSummaryStrictOutput(BaseModel):
         description="What skills improved or stayed flat across the summarized events",
     )
     confidence: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description="How confident the LLM is in this consolidation",
     )
 
@@ -194,7 +207,9 @@ class MemoryRetrievalResult(BaseModel):
         ..., description="Whether this is episodic or semantic memory"
     )
     score: float = Field(
-        default=0.0, ge=0.0, le=1.0,
+        default=0.0,
+        ge=0.0,
+        le=1.0,
         description="Combined relevance score (keyword + vector + importance boost)",
     )
     keyword_score: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -203,19 +218,3 @@ class MemoryRetrievalResult(BaseModel):
         default="",
         description="Why this memory matched, e.g. 'subject_match+keyword_overlap'",
     )
-
-
-# ── Memory Context Injection Result ───────────────────────────────────────
-
-
-class MemoryContextInjection(BaseModel):
-    """Result of building memory-augmented context for a single LLM call."""
-
-    context_text: str = Field(
-        default="",
-        description="The full memory-augmented context string for prompt injection",
-    )
-    episodic_results: list[MemoryRetrievalResult] = Field(default_factory=list)
-    semantic_results: list[MemoryRetrievalResult] = Field(default_factory=list)
-    total_estimated_tokens: int = Field(default=0, ge=0)
-    retrieval_time_ms: float = Field(default=0.0, ge=0.0)

@@ -1484,21 +1484,6 @@ memory:
   forgetting_importance_min: 0.2         # Only delete episodic below this importance
   forgetting_duplicate_similarity: 0.95  # Cosine similarity threshold for duplicate detection
 
-  # Legacy memory-only budget (approximate character counts).
-  # This is not a model context window, not an agent-wide context budget,
-  # and not DeepSeek's 1M context. Phase 1 should add explicit
-  # context_engineering.model_limits and node_policies.
-  token_budget:
-    system_prompt: 500
-    user_profile: 300
-    episodic_memories: 800
-    semantic_summary: 400
-    current_task: 500
-    rag_evidence: 1500
-    conversation_summary: 200
-    total_budget: 4096
-    buffer: 96
-
   # Development
   fail_fast_memory_write: false          # Non-fatal by default
   log_memory_retrieval: true             # Trace retrieval decisions

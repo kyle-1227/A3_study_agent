@@ -269,3 +269,31 @@ check/format、4 个 CE 文件 scoped mypy、8 项 security tests 与 `git diff 
 改动行。全仓 Ruff 仍为 60 项既有错误/66 个既有待格式化文件。Semgrep、import-linter、
 Gitleaks、Bandit、Vulture 均缺失，未运行且未记为通过。全量 warning 仍是既有
 `aiosqlite` event-loop、AsyncMock 与 pytest cache 权限债务。
+
+## 2026-07-14 legacy memory prompt 独立清理
+
+在替代快照 `ed953ac` 之后，已独立删除：
+
+- `src/context/__init__.py`、`context_builder.py`、`token_manager.py`、`errors.py`；
+- `MemoryContextInjection` 及其 `src.memory` public export；
+- `MEMORY_CONTEXT_*` 与 `MEMORY_INFLUENCE_EXPLANATION_TEMPLATE` 旧 prompt/footer 常量；
+- `memory.token_budget`；
+- `tests/test_context_builder.py` 与 `tests/test_token_budget_strict_config.py`。
+
+`src.memory` 的 Episodic/Semantic schema、storage、retrieval、embedding、consolidation 和
+public API 均保留；原 public import smoke 已迁到 `tests/test_memory_public_api.py`。新增
+absence guard 约束活跃 source/config/tests 不得重新出现旧 package、builder、schema、
+prompt 常量或 token budget。该清理不修改正式图、checkpoint、CE ledger、Context Window
+V3、compaction 或 provider retry，也不越过仍未满足的生产切换门。
+
+清理质量门：memory/CE/academic 聚焦回归 `161 passed`；首次全量发现 2 条仍要求旧
+`total_budget: 4096` 的阶段守卫，已改为验证“1M 模型窗口保留、旧 memory budget 不得
+回归”，未删除测试；最终全量后端 `2279 passed, 5 skipped, 7 warnings`。前端 23 个
+Vitest 文件/69 项测试、typecheck、完整 ESLint 与 Next production build 通过。compileall、
+8 个触及 Python 文件的 Ruff check/format、3 个 retained memory 文件 scoped mypy、8 项
+security tests、`git diff --check` 与活跃 source/config/tests 旧符号扫描均通过。
+
+全仓 Ruff 仍为 60 项既有 lint debt；由于本次触及并格式化 `src/memory/schema.py`，全仓
+待格式化文件由 66 降为 65。Semgrep、import-linter、Gitleaks、Bandit、Vulture 均缺失，
+未运行且未记为通过。warning 仍为既有 AsyncMock、pytest cache 权限及偶发
+`aiosqlite` event-loop shutdown 债务。
