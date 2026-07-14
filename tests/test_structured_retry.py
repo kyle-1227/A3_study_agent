@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -76,6 +77,45 @@ async def test_structured_llm_raises_after_retry_budget(monkeypatch):
     assert len(result.attempts) == 3
     assert mock_llm.ainvoke.await_count == 3
     assert result.attempts[-1].failure_phase == "validation_error"
+
+
+@pytest.mark.asyncio
+async def test_sensitive_trace_redacts_private_input_and_invalid_output(monkeypatch):
+    private_input = "private-input-answer-canary-413"
+    private_output = "private-output-answer-canary-729"
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(
+        return_value=AIMessage(content=f'{{"title": "{private_output}"}}')
+    )
+    trace_events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(so, "get_node_llm", lambda _node: mock_llm)
+    monkeypatch.setattr(so, "get_llm_call_max_retries", lambda _node: 0)
+    monkeypatch.setattr(
+        so,
+        "emit_a3_trace",
+        lambda _logger, stage, payload, **_kwargs: trace_events.append(
+            (stage, payload)
+        ),
+    )
+
+    with pytest.raises(so.StructuredOutputError):
+        await so.invoke_structured_llm(
+            node_name="unit_structured_retry",
+            llm_node="unit_structured_retry",
+            schema=DemoStructuredOutput,
+            messages=[HumanMessage(content=private_input)],
+            output_mode="prompt_json_pydantic",
+            sensitive_trace=True,
+        )
+
+    output_event = next(
+        payload for stage, payload in trace_events if stage == "structured_llm_output"
+    )
+    serialized = json.dumps(output_event, ensure_ascii=False)
+    assert private_input not in serialized
+    assert private_output not in serialized
+    assert output_event["sensitive_content_redacted"] is True
+    assert output_event["raw_output_chars"] > 0
 
 
 @pytest.mark.asyncio

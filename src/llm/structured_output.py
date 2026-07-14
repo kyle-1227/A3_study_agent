@@ -442,6 +442,65 @@ def _sanitize(value: Any, *, max_chars: int = 4000) -> str:
     return text[:max_chars] + ("..." if len(text) > max_chars else "")
 
 
+_SENSITIVE_STRUCTURED_TRACE_KEYS = frozenset(
+    {
+        "business_validation_error",
+        "error_message",
+        "parsing_error",
+        "previous_error_summary",
+        "provider_error_body",
+        "raw_output",
+        "schema_drift_report",
+        "schema_drift_report_error",
+        "validation_error",
+    }
+)
+
+
+def _redact_sensitive_structured_trace_payload(value: Any) -> Any:
+    """Remove provider-bound and provider-returned content from trace payloads."""
+
+    redacted = _redact_sensitive_structured_trace_value(value)
+    if isinstance(redacted, dict):
+        redacted["sensitive_content_redacted"] = True
+    return redacted
+
+
+def _redact_sensitive_structured_trace_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_redact_sensitive_structured_trace_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    redacted: dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = str(raw_key)
+        if key == "http_messages_preview":
+            redacted[key] = _redact_sensitive_message_previews(item)
+        elif key in _SENSITIVE_STRUCTURED_TRACE_KEYS:
+            redacted[key] = "[REDACTED_SENSITIVE_STRUCTURED_CONTENT]" if item else item
+        else:
+            redacted[key] = _redact_sensitive_structured_trace_value(item)
+    return redacted
+
+
+def _redact_sensitive_message_previews(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    previews: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        previews.append(
+            {
+                "index": item.get("index"),
+                "role": item.get("role"),
+                "content_chars": item.get("content_chars"),
+                "content_redacted": True,
+            }
+        )
+    return previews
+
+
 def _message_text(value: Any) -> str:
     if value is None:
         return ""
@@ -2671,6 +2730,7 @@ async def invoke_structured_llm(
     business_validator: Callable[[BaseModel], None | str | list[str]] | None = None,
     state: dict | None = None,
     max_raw_chars: int | None = None,
+    sensitive_trace: bool = False,
 ) -> StructuredLLMResult:
     """Invoke a structured-output LLM.
 
@@ -2710,10 +2770,13 @@ async def invoke_structured_llm(
         result: StructuredLLMResult, *, exc: Exception | None = None
     ) -> None:
         result.retry_count = _semantic_retry_count(attempts)
+        trace_payload = result.to_debug_payload(max_raw_chars=raw_limit)
+        if sensitive_trace:
+            trace_payload = _redact_sensitive_structured_trace_payload(trace_payload)
         emit_a3_trace(
             logger,
             "structured_llm_output",
-            result.to_debug_payload(max_raw_chars=raw_limit),
+            trace_payload,
             state=state,
             env_flag="LOG_STRUCTURED_LLM_OUTPUT",
             max_chars=raw_limit,
@@ -2755,6 +2818,8 @@ async def invoke_structured_llm(
                     "previous_error_summary": "",
                 }
             )
+            if sensitive_trace:
+                reask_debug = _redact_sensitive_structured_trace_payload(reask_debug)
             if reask_context is not None:
                 pending_reasks[result.output_mode] = reask_context
                 emit_a3_trace(
@@ -2769,8 +2834,10 @@ async def invoke_structured_llm(
                         "output_mode": result.output_mode,
                         "failure_phase": result.failure_phase,
                         "error_type": result.error_type,
-                        "error_message": _sanitize(
-                            result.error_message, max_chars=1200
+                        "error_message": (
+                            "[REDACTED_SENSITIVE_STRUCTURED_CONTENT]"
+                            if sensitive_trace and result.error_message
+                            else _sanitize(result.error_message, max_chars=1200)
                         ),
                         "max_retries": max_retries,
                         "next_attempt": attempts_for_mode + 1,
@@ -2792,7 +2859,11 @@ async def invoke_structured_llm(
                     "output_mode": result.output_mode,
                     "failure_phase": result.failure_phase,
                     "error_type": result.error_type,
-                    "error_message": _sanitize(result.error_message, max_chars=1200),
+                    "error_message": (
+                        "[REDACTED_SENSITIVE_STRUCTURED_CONTENT]"
+                        if sensitive_trace and result.error_message
+                        else _sanitize(result.error_message, max_chars=1200)
+                    ),
                     "retry_count": attempts_for_mode,
                     "max_retries": max_retries,
                     "next_attempt": attempts_for_mode + 1,

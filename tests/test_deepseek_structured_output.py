@@ -817,6 +817,7 @@ class TestDeepSeekConfigScope:
             "business_validator",
             "state",
             "max_raw_chars",
+            "sensitive_trace",
         )
         allowed_output_config_keys = {
             "output_mode",
