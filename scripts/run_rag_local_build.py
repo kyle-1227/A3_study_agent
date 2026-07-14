@@ -163,6 +163,7 @@ class PreflightReport(_StrictModel):
     catalog_data_root: str
     storage_index_root: str
     registry_path: str
+    embedding_cache_path: str | None
     dependencies: DependencyReport
     secrets: SecretPresenceReport
     experimental_only: Literal[True]
@@ -378,6 +379,8 @@ class BuildInputs:
     mode: BuildMode
     run_id: str
     private_smoke_output: Path | None
+    embedding_cache: Path | None
+    embedding_cache_busy_timeout_seconds: float
     llm_provider: str | None
     llm_protocol: str | None
     llm_model: str | None
@@ -395,6 +398,7 @@ class BuildContext:
     gold_dataset_path: Path
     benchmark_config_path: Path
     source_groups_path: Path
+    embedding_cache_path: Path | None
     report_directory: Path
     config: RagIndexConfig
     head_revision: str
@@ -420,6 +424,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-revision", required=True)
     parser.add_argument("--run-id")
     parser.add_argument("--private-smoke-output", type=Path)
+    cache = parser.add_mutually_exclusive_group(required=True)
+    cache.add_argument("--embedding-cache", type=Path)
+    cache.add_argument("--no-embedding-cache", action="store_true")
+    parser.add_argument(
+        "--embedding-cache-busy-timeout-seconds",
+        type=float,
+        required=True,
+    )
     parser.add_argument("--llm-provider")
     parser.add_argument("--llm-protocol")
     parser.add_argument("--llm-model")
@@ -459,6 +471,8 @@ def _build_inputs(args: argparse.Namespace) -> BuildInputs:
         or _REVISION_PATTERN.fullmatch(args.code_revision) is None
     ):
         raise ValueError("code_revision must be a lowercase Git SHA prefix or SHA")
+    if args.embedding_cache_busy_timeout_seconds <= 0:
+        raise ValueError("embedding cache busy timeout must be positive")
     return BuildInputs(
         project_root=args.project_root,
         index_config=args.index_config,
@@ -470,6 +484,10 @@ def _build_inputs(args: argparse.Namespace) -> BuildInputs:
         mode=mode,
         run_id=run_id,
         private_smoke_output=args.private_smoke_output,
+        embedding_cache=args.embedding_cache,
+        embedding_cache_busy_timeout_seconds=(
+            args.embedding_cache_busy_timeout_seconds
+        ),
         llm_provider=args.llm_provider,
         llm_protocol=args.llm_protocol,
         llm_model=args.llm_model,
@@ -572,6 +590,11 @@ def _prepare_context(inputs: BuildInputs) -> BuildContext:
     config = resolve_rag_index_config_paths(
         load_rag_index_config(index_config_path), project_root=root
     )
+    embedding_cache_path = (
+        None
+        if inputs.embedding_cache is None
+        else require_project_file(root, inputs.embedding_cache)
+    )
     report_directory = resolve_project_path(
         root,
         Path("reports") / "rag_build" / inputs.run_id,
@@ -584,6 +607,7 @@ def _prepare_context(inputs: BuildInputs) -> BuildContext:
         gold_dataset_path=gold_dataset_path,
         benchmark_config_path=benchmark_config_path,
         source_groups_path=source_groups_path,
+        embedding_cache_path=embedding_cache_path,
         report_directory=report_directory,
         config=config,
         head_revision=_current_head(root),
@@ -727,6 +751,11 @@ def _preflight_report(context: BuildContext) -> PreflightReport:
         catalog_data_root=_relative(context.root, config.catalog.data_root),
         storage_index_root=_relative(context.root, config.storage.index_root),
         registry_path=_relative(context.root, config.storage.resolved_registry_path()),
+        embedding_cache_path=(
+            None
+            if context.embedding_cache_path is None
+            else _relative(context.root, context.embedding_cache_path)
+        ),
         dependencies=_dependency_report(),
         secrets=_secret_presence(
             config, llm_api_key_env=context.inputs.llm_api_key_env
@@ -1632,6 +1661,10 @@ def _build_parent_child_generation(context: BuildContext) -> str:
         generation_id=context.inputs.generation_id,
         code_revision=context.inputs.code_revision,
         registry_mode=registry_mode,
+        embedding_cache_path=context.embedding_cache_path,
+        embedding_cache_busy_timeout_seconds=(
+            context.inputs.embedding_cache_busy_timeout_seconds
+        ),
     )
 
 

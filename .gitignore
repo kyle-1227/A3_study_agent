@@ -20,6 +20,7 @@ artifacts/
 # generated local RAG runtime state; strict source templates stay tracked
 /config/rag/index.runtime.yaml
 /indexes/parent_child/
+/.runtime_chroma/
 
 # reports
 reports/*

@@ -42,6 +42,8 @@ python scripts/run_rag_local_build.py `
   --generation-id <parent-child-generation-id> `
   --code-revision <current-git-sha> `
   --run-id <unique-run-id> `
+  --no-embedding-cache `
+  --embedding-cache-busy-timeout-seconds 10 `
   --offline-dry-run
 ```
 
@@ -60,6 +62,8 @@ python scripts/run_rag_local_build.py `
   --generation-id <parent-child-generation-id> `
   --code-revision <current-git-sha> `
   --run-id <unique-run-id> `
+  --embedding-cache artifacts/rag/embedding_cache/<fingerprint>.sqlite `
+  --embedding-cache-busy-timeout-seconds 10 `
   --llm-provider <provider> `
   --llm-protocol <explicit-chat-protocol> `
   --llm-model <model> `
@@ -219,14 +223,35 @@ python scripts/build_flat_baseline.py `
 
 只有 readiness gate 不再 blocked 且已具备可用 provider 配置时，才可构建一个显式 generation：
 
+长时间本地构建建议先从 embedding 身份完全一致的 Flat artifact 建立
+exact-content cache。缓存只保存文本 SHA-256/长度和向量，不保存正文；历史同文
+本但向量不一致的条目会标记为 ambiguous，并在 Candidate 构建时重新请求当前
+provider：
+
+```powershell
+python scripts/seed_rag_embedding_cache.py `
+  --project-root . --index-config config/rag/index.local.yaml `
+  --flat-persist-dir artifacts/rag/<flat-build-id>/chroma `
+  --flat-manifest artifacts/rag/<flat-build-id>/manifest.json `
+  --cache-path artifacts/rag/embedding_cache/<fingerprint>.sqlite `
+  --output reports/rag_build/<run-id>/embedding_cache_seed.json `
+  --read-page-size 128 --busy-timeout-seconds 10
+```
+
 ```powershell
 python scripts/build_parent_child_generation.py `
   --project-root . --pipeline parent-child `
   --index-config config/rag/index.local.yaml `
   --generation-id <immutable-generation-id> `
   --code-revision <git-commit> `
-  --registry-mode existing
+  --registry-mode existing `
+  --embedding-cache artifacts/rag/embedding_cache/<fingerprint>.sqlite `
+  --embedding-cache-busy-timeout-seconds 10
 ```
+
+不使用 cache 时也必须显式传 `--no-embedding-cache`，不能由异常触发 cache 或
+其他 provider。cache miss 只调用 index config 中同一个 provider/model；provider
+失败仍使 generation 失败，成功批次留在 cache 供全新 generation 重跑。
 
 ### Sealed Chroma safety
 

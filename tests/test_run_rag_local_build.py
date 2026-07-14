@@ -76,6 +76,9 @@ def _arguments(tmp_path: Path, *mode: str) -> list[str]:
         "a" * 40,
         "--run-id",
         "rag_test_run",
+        "--no-embedding-cache",
+        "--embedding-cache-busy-timeout-seconds",
+        "2",
         *mode,
     ]
 

@@ -16,9 +16,16 @@ from src.config.rag_index_config import (  # noqa: E402
     resolve_rag_index_config_paths,
 )
 from src.rag.parent_child.builder import (  # noqa: E402
+    compute_embedding_fingerprint,
     GenerationBuildRequest,
     GenerationBuilder,
 )
+from src.rag.parent_child.embedding_cache import (  # noqa: E402
+    CachingDocumentEmbeddingProvider,
+    EMBEDDING_CACHE_SCHEMA_VERSION,
+    SqliteEmbeddingCache,
+)
+from src.rag.parent_child.project_paths import require_project_file  # noqa: E402
 from src.rag.parent_child.provider_clients import StrictEmbeddingClient  # noqa: E402
 from src.rag.parent_child.registry import (  # noqa: E402
     GenerationRegistry,
@@ -37,6 +44,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--registry-mode",
         choices=("create", "existing"),
+        required=True,
+    )
+    cache = parser.add_mutually_exclusive_group(required=True)
+    cache.add_argument("--embedding-cache", type=Path)
+    cache.add_argument("--no-embedding-cache", action="store_true")
+    parser.add_argument(
+        "--embedding-cache-busy-timeout-seconds",
+        type=float,
         required=True,
     )
     return parser
@@ -59,6 +74,8 @@ def run_build(
     generation_id: str,
     code_revision: str,
     registry_mode: str,
+    embedding_cache_path: Path | None,
+    embedding_cache_busy_timeout_seconds: float,
 ) -> str:
     """Run one explicit build and return its manifest digest."""
 
@@ -81,8 +98,27 @@ def run_build(
     else:
         raise ValueError("registry_mode must be 'create' or 'existing'")
 
+    if embedding_cache_busy_timeout_seconds <= 0:
+        raise ValueError("embedding cache busy timeout must be positive")
     embedding = StrictEmbeddingClient.production(config=config.embedding)
+    cache: SqliteEmbeddingCache | None = None
     try:
+        embedding_provider = embedding
+        if embedding_cache_path is not None:
+            contained_cache = require_project_file(root, embedding_cache_path)
+            cache = SqliteEmbeddingCache.open(
+                project_root=root,
+                cache_path=contained_cache,
+                expected_schema_version=EMBEDDING_CACHE_SCHEMA_VERSION,
+                expected_embedding_fingerprint=compute_embedding_fingerprint(config),
+                expected_dimension=config.embedding.expected_dimension,
+                busy_timeout_seconds=embedding_cache_busy_timeout_seconds,
+            )
+            cache.verify_integrity()
+            embedding_provider = CachingDocumentEmbeddingProvider(
+                cache=cache,
+                upstream=embedding,
+            )
         tokenizer = ConfiguredJiebaTokenizer(config=config.bm25)
         with GenerationRegistry.open(
             registry_path,
@@ -94,7 +130,7 @@ def run_build(
             result = GenerationBuilder(
                 config=config,
                 registry=registry,
-                embedding_provider=embedding,
+                embedding_provider=embedding_provider,
                 bm25_tokenizer=tokenizer,
                 build_clock=lambda: datetime.now(UTC),
             ).build(
@@ -105,7 +141,11 @@ def run_build(
                 )
             )
     finally:
-        embedding.close()
+        try:
+            if cache is not None:
+                cache.close()
+        finally:
+            embedding.close()
     return result.sealed.manifest_sha256
 
 
@@ -117,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
         generation_id=args.generation_id,
         code_revision=args.code_revision,
         registry_mode=args.registry_mode,
+        embedding_cache_path=args.embedding_cache,
+        embedding_cache_busy_timeout_seconds=(
+            args.embedding_cache_busy_timeout_seconds
+        ),
     )
     print(
         "Parent-child generation is READY and not activated: "
