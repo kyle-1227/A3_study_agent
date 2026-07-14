@@ -67,7 +67,6 @@ export type ResourceGenerationState =
   | "partial_success"
   | "controlled_stop"
   | "completed_with_resource"
-  | "completed_without_resource"
   | "error"
   | "failed"
   | "waiting_review"
@@ -97,7 +96,7 @@ export interface ResourceGenerationStatus {
   error?: string
   waitingForReview?: boolean
   hasReceivedResourceFinal?: boolean
-  completionKind?: "with_resource" | "partial_resource" | "without_resource" | "controlled_stop"
+  completionKind?: "with_resource" | "partial_resource" | "controlled_stop"
   lastResourceType?: string
 }
 
@@ -1079,7 +1078,6 @@ function isCompletedResourceState(state: ResourceGenerationState): boolean {
     state === "partial_success" ||
     state === "controlled_stop" ||
     state === "completed_with_resource" ||
-    state === "completed_without_resource" ||
     state === "failed"
   )
 }
@@ -1122,8 +1120,7 @@ function StatusIcon({ state }: { state: ResourceGenerationState }) {
   }
   if (
     state === "partial_success" ||
-    state === "controlled_stop" ||
-    state === "completed_without_resource"
+    state === "controlled_stop"
   ) {
     return <CircleAlert className={cn(className, "text-[var(--warning)]")} />
   }

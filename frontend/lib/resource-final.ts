@@ -238,10 +238,6 @@ export function resourceMessageIdFromDedupeKey(dedupeKey: string): string {
   return `assistant-resource-${safeKey || "unknown"}`
 }
 
-export function isCompletedWithoutResourceDiagnostic(event: ResourcePayload): boolean {
-  return event.type === "resource_final_diagnostic" && event.status === "completed_without_resource"
-}
-
 export function resourceFinalOutcome(event: ResourceFinalEvent): ResourceFinalOutcome | null {
   const summary = event.summary
   if (event.terminal_status === "success") {

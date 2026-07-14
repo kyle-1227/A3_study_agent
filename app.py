@@ -64,7 +64,6 @@ from src.database.checkpointer import (
     make_thread_config,
 )
 from src.config import get_setting
-from src.graph.exercises import _render_exercise_markdown
 from src.graph.builder import get_compiled_graph
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
@@ -80,9 +79,9 @@ from src.graph.state import (
     WORKSPACE_EVENTS_CLEAR,
     initial_request_reset_transient_state,
 )
-from src.graph.resource_final import (
-    completed_without_resource_payload,
-    normalize_resource_final_payload,
+from src.graph.resource_final_runtime import (
+    requested_resource_kinds_from_state,
+    resource_final_v3_required,
 )
 from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.graph.qa import qa_final_payload, qa_final_trace_payload
@@ -1794,317 +1793,20 @@ async def _prepare_full_compaction_for_new_request(
     return updated_values, result.model_dump(mode="json")
 
 
-def _last_ai_message_content(final_state: dict) -> str:
-    for msg in reversed(final_state.get("messages") or []):
-        content = getattr(msg, "content", "")
-        if content:
-            return str(content)
-    return ""
-
-
-# Structured resource types require at least one of these state artifact keys
-# before _legacy_resource_final_payload can emit a resource_final for that type.
-# Interrupted runs leave resource_type set but produce no artifact; the guard
-# below prevents a misleading answer-only resource_final from being emitted.
-STRUCTURED_RESOURCE_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
-    "mindmap": ("mindmap_artifact", "mindmap_tree"),
-    "quiz": ("exercise_artifact", "exercise_items"),
-    "review_doc": ("review_doc_artifact", "review_doc_artifacts"),
-    "code_practice": ("code_practice_artifact",),
-    "video_script": ("video_script_artifact",),
-    "video_animation": ("video_animation_artifact",),
-    "study_plan": (
-        "study_plan_artifact",
-        "study_plan_document_artifact",
-        "study_plan_markdown",
-    ),
-}
-
-
-def _legacy_resource_final_payload(final_state: dict) -> dict | None:
-    has_generated_resource_artifact = any(
-        bool(final_state.get(key))
-        for key in (
-            "mindmap_artifact",
-            "mindmap_tree",
-            "exercise_artifact",
-            "exercise_items",
-            "review_doc_artifact",
-            "review_doc_artifacts",
-            "code_practice_artifact",
-            "video_script_artifact",
-            "video_animation_artifact",
-            "study_plan_artifact",
-            "study_plan_document_artifact",
-            "resource_bundle_artifact",
-        )
-    )
-    if (
-        final_state.get("final_response_type") == "evidence_summary"
-        and not has_generated_resource_artifact
-    ):
-        answer = _last_ai_message_content(final_state) or str(
-            final_state.get("plan") or ""
-        )
-        return {
-            "type": "resource_final",
-            "resource_type": "evidence_summary",
-            "controlled_stop": True,
-            "controlled_stop_reason": final_state.get(
-                "evidence_controlled_stop_reason", ""
-            ),
-            "answer": answer,
-        }
-
-    bundle_artifact = final_state.get("resource_bundle_artifact") or {}
-    requested_resource_types = list(final_state.get("requested_resource_types") or [])
-    bundle_resources = list(bundle_artifact.get("resources") or [])
-    bundle_errors = list(bundle_artifact.get("errors") or [])
-    is_resource_bundle_payload = bool(bundle_artifact) and (
-        len(requested_resource_types) > 1
-        or len(bundle_resources) > 1
-        or bundle_artifact.get("status") in {"partial_success", "failed"}
-    )
-    mindmap_artifact = final_state.get("mindmap_artifact") or {}
-    mindmap_tree = final_state.get("mindmap_tree") or {}
-    exercise_items = final_state.get("exercise_items") or []
-    exercise_artifact = final_state.get("exercise_artifact") or {}
-    review_doc_artifact = final_state.get("review_doc_artifact") or {}
-    review_doc_artifacts = final_state.get("review_doc_artifacts") or []
-    code_practice_artifact = final_state.get("code_practice_artifact") or {}
-    video_script_artifact = final_state.get("video_script_artifact") or {}
-    video_animation_artifact = final_state.get("video_animation_artifact") or {}
-    study_plan_artifact = final_state.get("study_plan_artifact") or {}
-    study_plan_document = final_state.get("study_plan_document_artifact") or {}
-
-    if is_resource_bundle_payload:
-        answer = _last_ai_message_content(final_state) or str(
-            bundle_artifact.get("message") or ""
-        )
-        payload: dict = {
-            "type": "resource_final",
-            "resource_type": "bundle",
-            "answer": answer,
-            "resource_generation_status": final_state.get(
-                "resource_generation_status", ""
-            ),
-            "resource_bundle": bundle_artifact,
-            "resources": bundle_resources,
-            "errors": bundle_errors,
-        }
-
-        if mindmap_artifact or mindmap_tree:
-            payload["mindmap"] = {
-                "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
-                "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
-                "xmind_url": mindmap_artifact.get("xmind_url", ""),
-            }
-
-        if exercise_items or exercise_artifact:
-            if not answer and exercise_items:
-                title = str(exercise_artifact.get("title") or "Leveled exercises")
-                answer = _render_exercise_markdown(
-                    title,
-                    exercise_items,
-                )
-                payload["answer"] = answer
-            payload["exercise_items"] = exercise_items
-            payload["exercise_artifact"] = exercise_artifact
-
-        if review_doc_artifact:
-            payload["review_doc"] = {
-                "subject": review_doc_artifact.get("subject", ""),
-                "title": review_doc_artifact.get("title", "Markdown Review Document"),
-                "filename": review_doc_artifact.get("filename", ""),
-                "docx_filename": review_doc_artifact.get("docx_filename", ""),
-                "markdown_url": review_doc_artifact.get("markdown_url", ""),
-                "docx_url": review_doc_artifact.get("docx_url", ""),
-                "markdown": review_doc_artifact.get("markdown", ""),
-            }
-        if review_doc_artifacts:
-            payload["review_doc_artifacts"] = [
-                {
-                    "subject": artifact.get("subject", ""),
-                    "title": artifact.get("title", "Markdown复习文档"),
-                    "filename": artifact.get("filename", ""),
-                    "docx_filename": artifact.get("docx_filename", ""),
-                    "markdown_url": artifact.get("markdown_url", ""),
-                    "docx_url": artifact.get("docx_url", ""),
-                    "markdown": artifact.get("markdown", ""),
-                }
-                for artifact in review_doc_artifacts
-            ]
-
-        if code_practice_artifact:
-            payload["code_practice_artifact"] = code_practice_artifact
-        if video_script_artifact:
-            payload["video_script_artifact"] = video_script_artifact
-        if video_animation_artifact:
-            payload["video_animation_artifact"] = video_animation_artifact
-
-        if study_plan_artifact or study_plan_document:
-            payload["study_plan"] = {
-                "title": study_plan_artifact.get("title")
-                or study_plan_document.get("title", "Personalized Study Plan"),
-                "filename": study_plan_document.get("filename", ""),
-                "docx_filename": study_plan_document.get("docx_filename", ""),
-                "markdown_url": study_plan_document.get("markdown_url", ""),
-                "docx_url": study_plan_document.get("docx_url", ""),
-                "markdown": (
-                    final_state.get("study_plan_markdown", "")
-                    or study_plan_document.get("markdown", "")
-                ),
-            }
-
-        return payload
-
-    resource_type = str(final_state.get("requested_resource_type") or "")
-
-    if resource_type not in {
-        "mindmap",
-        "quiz",
-        "review_doc",
-        "code_practice",
-        "video_script",
-        "video_animation",
-        "study_plan",
-        "bundle",
-    }:
-        if mindmap_artifact or mindmap_tree:
-            resource_type = "mindmap"
-        elif exercise_items or exercise_artifact:
-            resource_type = "quiz"
-        elif review_doc_artifact or review_doc_artifacts:
-            resource_type = "review_doc"
-        elif code_practice_artifact:
-            resource_type = "code_practice"
-        elif video_script_artifact:
-            resource_type = "video_script"
-        elif video_animation_artifact:
-            resource_type = "video_animation"
-        elif study_plan_artifact or study_plan_document:
-            resource_type = "study_plan"
-        else:
-            return None
-
-    # Require at least one renderable artifact for structured resource types.
-    # Interrupted runs (e.g. GraphInterrupt from study_plan_profile_gate) leave
-    # resource_type set but produce no artifact; return None to prevent a
-    # misleading answer-only resource_final from being emitted.
-    required_keys = STRUCTURED_RESOURCE_ARTIFACT_KEYS.get(resource_type)
-    if required_keys is not None and not any(
-        final_state.get(key) for key in required_keys
-    ):
-        return None
-
-    answer = _last_ai_message_content(final_state)
-    payload = {
-        "type": "resource_final",
-        "resource_type": resource_type,
-        "answer": answer,
-    }
-
-    include_mindmap = resource_type == "mindmap" and (mindmap_artifact or mindmap_tree)
-    include_quiz = resource_type == "quiz" and (exercise_items or exercise_artifact)
-    include_review_doc = resource_type == "review_doc" and review_doc_artifact
-    include_review_doc_artifacts = (
-        resource_type == "review_doc" and review_doc_artifacts
-    )
-    include_code_practice = resource_type == "code_practice" and code_practice_artifact
-    include_video_script = resource_type == "video_script" and video_script_artifact
-    include_video_animation = (
-        resource_type == "video_animation" and video_animation_artifact
-    )
-
-    if include_mindmap:
-        payload["mindmap"] = {
-            "title": mindmap_artifact.get("title", "Knowledge Mindmap"),
-            "tree": (mindmap_artifact.get("tree") or mindmap_tree or {}),
-            "xmind_url": mindmap_artifact.get("xmind_url", ""),
-        }
-        payload["mindmap_artifact"] = mindmap_artifact
-        payload["mindmap_tree"] = mindmap_artifact.get("tree") or mindmap_tree or {}
-
-    if include_quiz:
-        if (
-            not answer or (resource_type == "quiz" and len(answer.strip()) < 40)
-        ) and exercise_items:
-            title = str(exercise_artifact.get("title") or "Leveled exercises")
-            answer = _render_exercise_markdown(
-                title,
-                exercise_items,
-            )
-            payload["answer"] = answer
-        payload["exercise_items"] = exercise_items
-        payload["exercise_artifact"] = exercise_artifact
-
-    if include_review_doc:
-        payload["review_doc"] = {
-            "subject": review_doc_artifact.get("subject", ""),
-            "title": review_doc_artifact.get("title", "Markdown Review Document"),
-            "filename": review_doc_artifact.get("filename", ""),
-            "docx_filename": review_doc_artifact.get("docx_filename", ""),
-            "markdown_url": review_doc_artifact.get("markdown_url", ""),
-            "docx_url": review_doc_artifact.get("docx_url", ""),
-            "markdown": review_doc_artifact.get("markdown", ""),
-        }
-        payload["review_doc_artifact"] = review_doc_artifact
-    if include_review_doc_artifacts:
-        payload["review_doc_artifacts"] = [
-            {
-                "subject": artifact.get("subject", ""),
-                "title": artifact.get("title", "Markdown复习文档"),
-                "filename": artifact.get("filename", ""),
-                "docx_filename": artifact.get("docx_filename", ""),
-                "markdown_url": artifact.get("markdown_url", ""),
-                "docx_url": artifact.get("docx_url", ""),
-                "markdown": artifact.get("markdown", ""),
-            }
-            for artifact in review_doc_artifacts
-        ]
-
-    if include_code_practice:
-        payload["code_practice_artifact"] = code_practice_artifact
-    if include_video_script:
-        payload["video_script_artifact"] = video_script_artifact
-    if include_video_animation:
-        payload["video_animation_artifact"] = video_animation_artifact
-
-    if resource_type == "study_plan" and (study_plan_artifact or study_plan_document):
-        payload["study_plan"] = {
-            "title": study_plan_artifact.get("title")
-            or study_plan_document.get("title", "Personalized Study Plan"),
-            "filename": study_plan_document.get("filename", ""),
-            "docx_filename": study_plan_document.get("docx_filename", ""),
-            "markdown_url": study_plan_document.get("markdown_url", ""),
-            "docx_url": study_plan_document.get("docx_url", ""),
-            "markdown": (
-                final_state.get("study_plan_markdown", "")
-                or study_plan_document.get("markdown", "")
-            ),
-        }
-
-    return payload
-
-
 def _resource_final_payload(final_state: dict) -> dict | None:
-    """Return authoritative V3 state, or the migration-only legacy projection."""
+    """Return the authoritative Resource Final V3 state, if present."""
 
     raw_v3 = final_state.get("resource_final_v3")
-    if "resource_final_v3" in final_state and raw_v3 != {}:
-        resource_final = validate_resource_final_v3(raw_v3)
-        thread_id = str(final_state.get("thread_id") or "").strip()
-        request_id = str(final_state.get("request_id") or "").strip()
-        if thread_id and resource_final.thread_id != thread_id:
-            raise ValueError("Resource Final V3 thread_id does not match runtime state")
-        if request_id and resource_final.request_id != request_id:
-            raise ValueError(
-                "Resource Final V3 request_id does not match runtime state"
-            )
-        return resource_final.model_dump(mode="json")
-
-    legacy_payload = _legacy_resource_final_payload(final_state)
-    return normalize_resource_final_payload(legacy_payload, final_state)
+    if "resource_final_v3" not in final_state or raw_v3 == {}:
+        return None
+    resource_final = validate_resource_final_v3(raw_v3)
+    thread_id = str(final_state.get("thread_id") or "").strip()
+    request_id = str(final_state.get("request_id") or "").strip()
+    if thread_id and resource_final.thread_id != thread_id:
+        raise ValueError("Resource Final V3 thread_id does not match runtime state")
+    if request_id and resource_final.request_id != request_id:
+        raise ValueError("Resource Final V3 request_id does not match runtime state")
+    return resource_final.model_dump(mode="json")
 
 
 def _dev_memory_clear_enabled() -> bool:
@@ -3480,18 +3182,8 @@ async def _stream_graph_event_drafts(
                         if (
                             node_name == "resource_bundle_output"
                             and isinstance(output, dict)
-                            and (
-                                (
-                                    isinstance(output.get("resource_final_v3"), dict)
-                                    and bool(output.get("resource_final_v3"))
-                                )
-                                or (
-                                    isinstance(
-                                        output.get("resource_bundle_artifact"), dict
-                                    )
-                                    and bool(output.get("resource_bundle_artifact"))
-                                )
-                            )
+                            and isinstance(output.get("resource_final_v3"), dict)
+                            and bool(output.get("resource_final_v3"))
                         ):
                             terminal_resource_output = output
 
@@ -4121,33 +3813,76 @@ async def _stream_graph_event_drafts(
         if terminal_resource_payload:
             resource_payload = terminal_resource_payload
     diagnostic_state = terminal_resource_state
-    resource_diagnostic_payload = (
-        completed_without_resource_payload(diagnostic_state)
-        if not resource_payload
-        else None
-    )
+    if not resource_payload and resource_final_v3_required(diagnostic_state):
+        failed_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Resource finalization failed",
+            summary="Resource workflow ended without Resource Final V3",
+        )
+        error_values = {
+            "run_status": RUN_STATUS_ERROR,
+            "resume_available": False,
+            "pending_interrupt_type": "",
+            "profile_completion_request": {},
+            "current_node": "",
+            "stop_requested": False,
+            "request_context_window": final_request_context_window,
+            "activity_timeline": activity_timeline,
+        }
+        error_update_ok = await _try_update_run_state(
+            graph,
+            config,
+            error_values,
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        run_control_registry.clear_stop_signal(thread_id)
+        if failed_activity_payload:
+            yield failed_activity_payload
+        requested_resource_types = list(
+            requested_resource_kinds_from_state(diagnostic_state)
+        )
+        emit_a3_trace(
+            logger,
+            "sse_resource_final_missing",
+            {
+                "error_type": "resource_final_v3_missing",
+                "requested_resource_types": requested_resource_types,
+                "resource_generation_status": str(
+                    diagnostic_state.get("resource_generation_status") or ""
+                ),
+            },
+            state=runtime_final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "resource_final_v3_missing",
+                "message": "Resource workflow ended without Resource Final V3",
+                "recoverable": False,
+                "terminal_non_completed": True,
+                "requested_resource_types": requested_resource_types,
+            },
+        )
+        if error_update_ok:
+            finish_active_run(
+                thread_id,
+                {
+                    "run_status": RUN_STATUS_ERROR,
+                    "error_type": "resource_final_v3_missing",
+                },
+            )
+        return
     final_activity_payloads: list[AgentStreamEventDraftV2] = []
     if activity_enabled and resource_payload:
-        resource_terminal_status = str(
-            resource_payload.get("terminal_status") or "unknown"
-        )
-        resource_final_identity = str(
-            resource_payload.get("resource_final_id")
-            or resource_payload.get("resource_id")
-            or ""
-        )
+        resource_terminal_status = str(resource_payload["terminal_status"])
+        resource_final_identity = str(resource_payload["resource_final_id"])
         v3_resources = [
             item
             for item in (resource_payload.get("resources") or [])
             if isinstance(item, dict)
         ]
-        resource_types = [
-            str(item.get("kind") or "")
-            for item in v3_resources
-            if str(item.get("kind") or "").strip()
-        ]
-        if not resource_types and resource_payload.get("resource_type"):
-            resource_types = [str(resource_payload.get("resource_type"))]
         artifact_activity = build_activity_event(
             thread_id=thread_id,
             request_id=request_id,
@@ -4160,7 +3895,7 @@ async def _stream_graph_event_drafts(
             node="resource_bundle_output",
             safe_details={
                 "resource_final_id": resource_final_identity,
-                "resource_types": resource_types,
+                "resource_count": len(v3_resources),
                 "terminal_status": resource_terminal_status,
             },
         )
@@ -4277,9 +4012,7 @@ async def _stream_graph_event_drafts(
                     "resource_final_id",
                     "",
                 ),
-                "resource_id": resource_payload.get("resource_id", ""),
                 "payload_hash": resource_payload.get("payload_hash", ""),
-                "resource_type": resource_payload.get("resource_type", ""),
                 "resource_types": [
                     item.get("kind", "")
                     for item in (resource_payload.get("resources") or [])
@@ -4291,32 +4024,6 @@ async def _stream_graph_event_drafts(
                 "terminal_status": resource_payload.get("terminal_status", ""),
                 "validation": resource_payload.get("validation", {}),
                 "summary_chars": len(str(resource_payload.get("summary") or "")),
-                "answer_chars": len(str(resource_payload.get("answer") or "")),
-                "has_mindmap": bool(resource_payload.get("mindmap")),
-                "has_review_doc": bool(resource_payload.get("review_doc")),
-                "has_exercise": bool(resource_payload.get("exercise_artifact")),
-                "has_code_practice": bool(
-                    resource_payload.get("code_practice_artifact")
-                ),
-                "has_video_script": bool(resource_payload.get("video_script_artifact")),
-                "has_video_animation": bool(
-                    resource_payload.get("video_animation_artifact")
-                ),
-                "video_animation_render_success": bool(
-                    (resource_payload.get("video_animation_artifact") or {}).get(
-                        "render_success"
-                    )
-                ),
-                "review_doc_artifacts_count": len(
-                    resource_payload.get("review_doc_artifacts") or []
-                ),
-                "has_review_doc_artifacts": bool(
-                    resource_payload.get("review_doc_artifacts")
-                ),
-                "exercise_items_count": len(
-                    resource_payload.get("exercise_items") or []
-                ),
-                "controlled_stop": bool(resource_payload.get("controlled_stop")),
             },
             state=runtime_final_state,
             env_flag="LOG_A3_TRACE",
@@ -4324,35 +4031,6 @@ async def _stream_graph_event_drafts(
         yield _stream_draft(
             "resource_final",
             {key: value for key, value in resource_payload.items() if key != "type"},
-        )
-    elif resource_diagnostic_payload:
-        emit_a3_trace(
-            logger,
-            "sse_resource_final",
-            {
-                "sent": False,
-                "status": "completed_without_resource",
-                "resource_generation_status": resource_diagnostic_payload.get(
-                    "resource_generation_status", ""
-                ),
-                "requested_resource_types": resource_diagnostic_payload.get(
-                    "requested_resource_types", []
-                ),
-            },
-            state=runtime_final_state,
-            env_flag="LOG_A3_TRACE",
-        )
-        yield _stream_draft(
-            "stream_error",
-            {
-                **{
-                    key: value
-                    for key, value in resource_diagnostic_payload.items()
-                    if key != "type"
-                },
-                "error_type": "completed_without_resource",
-                "message": "Run completed without an authoritative resource payload",
-            },
         )
     if completed_update_ok:
         finish_active_run(thread_id, {"run_status": RUN_STATUS_COMPLETED})

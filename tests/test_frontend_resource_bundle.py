@@ -70,8 +70,6 @@ def test_page_uses_resource_final_helper_and_restores_persisted_payload():
     assert "attachResourceFinalToAssistant" in page_source
     assert "resourceFinalDedupeRef" in page_source
     assert "status.last_resource_final_payload?.type" in page_source
-    assert "resource_final_diagnostic" in helper_source
-    assert 'state: "completed_without_resource"' in page_source
     assert "parseResourceFinalEvent(data)" in page_source
     assert "resourceFinalOutcome(event)" in page_source
     assert 'state: "completed_with_resource"' in helper_source
@@ -94,4 +92,3 @@ def test_frontend_profile_interrupt_and_stream_finalization_states_exist():
     assert "setIsLoading(false)" in page_source
     assert '"waiting_for_profile_completion"' in chat_source
     assert '"completed_with_resource"' in chat_source
-    assert '"completed_without_resource"' in chat_source

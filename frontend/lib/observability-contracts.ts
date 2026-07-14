@@ -249,12 +249,15 @@ const SAFE_ACTIVITY_DETAIL_KEYS = new Set([
   "max_retries",
   "output_mode",
   "report_id",
+  "resource_count",
+  "resource_final_id",
   "resource_id",
   "resource_type",
   "retry_count",
   "status_code",
   "trace_call_id",
   "trace_seq",
+  "terminal_status",
   "warning_level",
 ])
 

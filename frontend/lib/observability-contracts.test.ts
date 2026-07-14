@@ -44,7 +44,9 @@ describe("observability contracts", () => {
     const activity = parseActivityEvent(
       activityPayload({
         safe_details: {
-          resource_id: "resource:v1:fixture",
+          resource_final_id: `resource-final:v3:${"a".repeat(64)}`,
+          resource_count: 1,
+          terminal_status: "success",
           status_code: 200,
           raw_prompt: "must not cross the contract",
           api_key: "secret",
@@ -52,8 +54,10 @@ describe("observability contracts", () => {
       }),
     )
     expect(activity.safeDetails).toEqual({
-      resource_id: "resource:v1:fixture",
+      resource_count: 1,
+      resource_final_id: `resource-final:v3:${"a".repeat(64)}`,
       status_code: 200,
+      terminal_status: "success",
     })
   })
 

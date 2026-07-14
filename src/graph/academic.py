@@ -36,6 +36,7 @@ from src.graph.evidence import (
     EvidenceSufficiencyOutput,
 )
 from src.graph.llm import invoke_plain_llm_fail_fast
+from src.graph.qa import QAResponse, build_qa_final_payload, validate_qa_response
 from src.graph.state import CONTEXT_CLEAR, LearningState
 from src.graph.web_research import (
     WebCuratedSource,
@@ -6184,11 +6185,52 @@ async def evidence_summary_output(state: LearningState) -> dict:
     with metadata marking it as a controlled stop.
     """
     markdown = _render_evidence_summary_output(state)
+    evidence_candidates = state.get("evidence_candidates") or []
+    kept_evidence_count = sum(
+        1
+        for candidate in evidence_candidates
+        if isinstance(candidate, dict) and candidate.get("keep") is True
+    )
+    response = QAResponse.model_validate(
+        {
+            "answer": markdown,
+            "uncertainty_note": (
+                "Evidence coverage is insufficient for a complete answer."
+            ),
+            "grounding_status": (
+                "judged_evidence"
+                if kept_evidence_count > 0
+                else "insufficient_evidence"
+            ),
+            "suggestions": [],
+        }
+    )
+    business_error = validate_qa_response(
+        response,
+        qa_scope="academic",
+        kept_evidence_count=kept_evidence_count,
+        requires_live_verification=False,
+    )
+    if business_error:
+        raise ValueError(
+            f"evidence summary QA business validation failed: {business_error}"
+        )
+    thread_id = str(state.get("thread_id") or state.get("session_id") or "").strip()
+    request_id = str(state.get("request_id") or "").strip()
+    if not thread_id or not request_id:
+        raise ValueError("evidence summary qa_final requires thread_id and request_id")
+    final_payload = build_qa_final_payload(
+        response=response,
+        qa_scope="academic",
+        thread_id=thread_id,
+        request_id=request_id,
+    )
     return {
         "plan": markdown,
         "messages": [AIMessage(content=markdown)],
+        "last_qa_response": final_payload,
         "evidence_controlled_stop": True,
-        "final_response_type": "evidence_summary",
+        "final_response_type": "qa",
         "evidence_controlled_stop_reason": state.get(
             "evidence_controlled_stop_reason", "evidence_insufficient"
         ),
@@ -6272,9 +6314,9 @@ async def memory_use_decider(state: LearningState) -> dict:
             "semantic_memories": semantic_for_prompt,
             "requested_resource_type": requested_resource_type,
             "subject": subject,
-                    "selected_memory_count": selected_memory_count,
-                    "task_continuity_resolved": task_continuity_resolved,
-                }
+            "selected_memory_count": selected_memory_count,
+            "task_continuity_resolved": task_continuity_resolved,
+        }
         messages = [
             SystemMessage(
                 content=(

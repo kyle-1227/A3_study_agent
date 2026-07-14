@@ -13,7 +13,6 @@ import {
 } from "@/components/chat-area"
 import { PlanReview } from "@/components/plan-review"
 import {
-  isCompletedWithoutResourceDiagnostic,
   mergeResourceFinalIntoMessage,
   parseResourceFinalEvent,
   resourceFinalDedupeKey,
@@ -1280,67 +1279,6 @@ export default function Home() {
       return
     }
 
-    if (data.type === "mindmap_result") {
-      const xmindUrl =
-        typeof data.xmind_url === "string" && data.xmind_url.startsWith("/")
-          ? `${API_BASE_URL}${data.xmind_url}`
-          : data.xmind_url
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === asstId
-            ? {
-                ...msg,
-                mindmap: {
-                  title: data.title || "Knowledge Mindmap",
-                  tree: data.tree,
-                  xmindUrl,
-                },
-              }
-            : msg
-        )
-      )
-      return
-    }
-
-    if (data.type === "review_doc_result") {
-      const markdownUrl =
-        typeof data.markdown_url === "string" && data.markdown_url.startsWith("/")
-          ? `${API_BASE_URL}${data.markdown_url}`
-          : data.markdown_url
-      const docxUrl =
-        typeof data.docx_url === "string" && data.docx_url.startsWith("/")
-          ? `${API_BASE_URL}${data.docx_url}`
-          : data.docx_url
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === asstId
-            ? {
-                ...msg,
-                reviewDoc: {
-                  title: data.title || "Review Document",
-                  filename: data.filename || "",
-                  markdownUrl: markdownUrl || "",
-                  docxFilename: data.docx_filename || "",
-                  docxUrl: docxUrl || "",
-                },
-              }
-            : msg
-        )
-      )
-      return
-    }
-
-    if (isCompletedWithoutResourceDiagnostic(data)) {
-      ensureAssistantResourceStatus(asstId, (status) => ({
-        ...status,
-        state: "completed_without_resource",
-        summary: "资源流程已完成，但没有收到可渲染的资源 payload。",
-        waitingForReview: false,
-        completionKind: "without_resource",
-      }))
-      return
-    }
-
     if (data.type === "resource_final") {
       let event: ResourceFinalEvent
       try {
@@ -1399,8 +1337,7 @@ export default function Home() {
           status.state === "controlled_stop" ||
           status.state === "stopped" ||
           status.state === "stopping" ||
-          status.state === "completed_with_resource" ||
-          status.state === "completed_without_resource"
+          status.state === "completed_with_resource"
             ? status.state
             : "done",
         summary: status.summary,

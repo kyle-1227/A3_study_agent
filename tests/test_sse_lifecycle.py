@@ -755,110 +755,6 @@ class TestNonStreamingContentBlocks:
         assert "resource_bundle_output" in content_events[0]["block_id"]
 
     @pytest.mark.anyio
-    async def test_resource_bundle_final_uses_terminal_output_when_snapshot_is_stale(
-        self,
-    ):
-        """A stale checkpoint must not drop current successful resource downloads."""
-        from langchain_core.messages import AIMessage
-        from app import generate_stream_drafts
-
-        resource_output = {
-            "resource_generation_status": "partial_success",
-            "resource_bundle_artifact": {
-                "type": "resource_bundle",
-                "status": "partial_success",
-                "message": "# 已生成多类学习资源",
-                "resources": [
-                    {"resource_type": "mindmap", "status": "success"},
-                    {"resource_type": "quiz", "status": "success"},
-                    {"resource_type": "video_script", "status": "success"},
-                ],
-                "errors": [
-                    {
-                        "resource_type": "review_doc",
-                        "status": "failed",
-                        "error_type": "TimeoutError",
-                    }
-                ],
-            },
-            "mindmap_artifact": {
-                "title": "机器学习复习思维导图",
-                "tree": {"title": "机器学习", "children": []},
-                "xmind_url": "/artifacts/mindmaps/m1/map.xmind",
-            },
-            "mindmap_tree": {"title": "机器学习", "children": []},
-            "exercise_items": [{"question": "Q1"}],
-            "exercise_artifact": {
-                "title": "机器学习练习题",
-                "markdown_url": "/artifacts/exercises/e1/quiz.md",
-                "docx_url": "/artifacts/exercises/e1/quiz.docx",
-            },
-            "video_script_artifact": {
-                "title": "10分钟理解 Python 类与对象",
-                "markdown_url": "/artifacts/video-scripts/v1/script.md",
-                "docx_url": "/artifacts/video-scripts/v1/script.docx",
-                "srt_url": "/artifacts/video-scripts/v1/script.srt",
-            },
-            "messages": [AIMessage(content="# 已生成多类学习资源")],
-        }
-        end_event = {
-            "event": "on_chain_end",
-            "name": "resource_bundle_output",
-            "metadata": {"langgraph_node": "resource_bundle_output"},
-            "data": {"output": resource_output},
-        }
-        mock_graph = _make_mock_graph(
-            [_node_start("resource_bundle_output"), end_event]
-        )
-        mock_graph.aget_state = AsyncMock(
-            return_value=SimpleNamespace(
-                next=(),
-                tasks=[],
-                values={
-                    "requested_resource_type": "code_practice",
-                    "code_practice_artifact": {
-                        "title": "stale code practice",
-                        "markdown_url": "/artifacts/code-practice/old.md",
-                    },
-                    "messages": [AIMessage(content="stale checkpoint")],
-                },
-            ),
-        )
-
-        collected = []
-        async for sse in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
-            collected.append(sse)
-
-        all_payloads = draft_payloads(collected)
-        resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
-
-        assert len(resource_events) == 1
-        assert all_payloads[-1] is resource_events[0]
-        payload = resource_events[0]
-        assert payload["resource_type"] == "bundle"
-        assert payload["resource_id"].startswith("resource:v1:")
-        assert payload["payload_hash"].startswith("payload:v1:")
-        assert payload["schema_version"] == 2
-        assert payload["thread_id"] == "t-1"
-        assert payload["request_id"]
-        assert payload["terminal_status"] == "partial_success"
-        assert payload["resource"]["kind"] == "bundle"
-        assert payload["resource_generation_status"] == "partial_success"
-        assert payload["answer"] == "# 已生成多类学习资源"
-        assert payload["mindmap"]["xmind_url"] == "/artifacts/mindmaps/m1/map.xmind"
-        assert (
-            payload["exercise_artifact"]["markdown_url"]
-            == "/artifacts/exercises/e1/quiz.md"
-        )
-        assert (
-            payload["video_script_artifact"]["srt_url"]
-            == "/artifacts/video-scripts/v1/script.srt"
-        )
-        assert payload["errors"][0]["resource_type"] == "review_doc"
-        assert "review_doc" not in payload
-        assert "code_practice_artifact" not in payload
-
-    @pytest.mark.anyio
     async def test_no_content_block_for_non_emit_node(self):
         """A non-configured chain-end message does not create a content block."""
         from langchain_core.messages import AIMessage
@@ -885,20 +781,34 @@ class TestNonStreamingContentBlocks:
         assert content_events == []
 
 
-class TestSSEEvidenceSummaryResourceFinal:
-    """Evidence controlled stop should emit a normal resource_final event."""
+class TestSSEEvidenceSummaryQAFinal:
+    """A non-resource evidence stop must use the authoritative QA contract."""
 
     @pytest.mark.anyio
-    async def test_evidence_summary_resource_final_emitted(self):
-        from app import generate_stream_drafts
+    async def test_evidence_summary_qa_final_emitted(self, monkeypatch):
+        from uuid import UUID
 
+        from app import generate_stream_drafts
+        from src.graph.academic import evidence_summary_output
+
+        request_id = "00000000-0000-4000-8000-000000000003"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        final_state = await evidence_summary_output(
+            {
+                "thread_id": "t-1",
+                "request_id": request_id,
+                "evidence_candidates": [],
+                "evidence_coverage_gaps": [],
+                "proposed_followup_search_queries": [],
+                "evidence_judge_decision": "insufficient",
+                "evidence_controlled_stop_reason": "evidence_insufficient",
+            }
+        )
         final_state = {
-            "evidence_controlled_stop": True,
-            "final_response_type": "evidence_summary",
-            "requested_resource_type": "study_plan",
+            **final_state,
+            "thread_id": "t-1",
+            "request_id": request_id,
             "evidence_controlled_stop_reason": "evidence_insufficient",
-            "plan": "## Evidence summary\nEvidence is insufficient for a full resource.",
-            "study_plan_artifact": {},
         }
         mock_graph = _make_mock_graph([])
         mock_graph.aget_state = AsyncMock(
@@ -910,14 +820,18 @@ class TestSSEEvidenceSummaryResourceFinal:
             collected.append(sse)
 
         all_payloads = draft_payloads(collected)
-        resource_events = [p for p in all_payloads if p.get("type") == "resource_final"]
-        assert len(resource_events) == 1
-        assert all_payloads[-1] is resource_events[0]
-        assert resource_events[0]["resource_type"] == "evidence_summary"
-        assert resource_events[0]["resource_id"].startswith("resource:v1:")
-        assert resource_events[0]["controlled_stop"] is True
-        assert "study_plan" not in resource_events[0]
-        assert all_payloads[-1]["type"] == "resource_final"
+        qa_events = [p for p in all_payloads if p.get("type") == "qa_final"]
+        assert len(qa_events) == 1
+        assert all_payloads[-1] is qa_events[0]
+        assert qa_events[0]["request_id"] == request_id
+        assert qa_events[0]["qa_scope"] == "academic"
+        assert qa_events[0]["response"]["grounding_status"] == ("insufficient_evidence")
+        assert qa_events[0]["response"]["uncertainty_note"]
+        assert not [
+            payload
+            for payload in all_payloads
+            if payload.get("type") == "resource_final"
+        ]
 
 
 class TestSSEResourceFinalV3:
@@ -1142,11 +1056,7 @@ class TestSSEQAFinal:
         qa_events = [item for item in payloads if item.get("type") == "qa_final"]
         assert len(qa_events) == 1
         assert payloads[-1] is qa_events[0]
-        assert not [
-            item
-            for item in payloads
-            if item.get("type") in {"resource_final", "resource_final_diagnostic"}
-        ]
+        assert not [item for item in payloads if item.get("type") == "resource_final"]
 
 
 class TestSSEResourceFinalDiagnostics:
@@ -1173,16 +1083,56 @@ class TestSSEResourceFinalDiagnostics:
         assert not [
             payload
             for payload in all_payloads
-            if payload.get("type") == "resource_final_diagnostic"
-        ]
-        assert not [
-            payload
-            for payload in all_payloads
             if payload.get("type") == "resource_final"
         ]
         assert not [
             payload for payload in all_payloads if payload.get("type") == "stream_done"
         ]
+
+    @pytest.mark.anyio
+    async def test_resource_run_without_v3_fails_closed(self):
+        from app import generate_stream_drafts
+
+        final_state = {
+            "requested_resource_type": "mindmap",
+            "requested_resource_types": ["mindmap"],
+            "resource_generation_status": "success",
+            "resource_generation_plan": {"tasks": [{"resource_type": "mindmap"}]},
+        }
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(next=(), tasks=[], values=final_state),
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+            collected.append(draft)
+
+        payloads = draft_payloads(collected)
+        errors = [
+            payload
+            for payload in payloads
+            if payload.get("type") == "stream_error"
+            and payload.get("error_type") == "resource_final_v3_missing"
+        ]
+        assert len(errors) == 1
+        assert errors[0]["terminal_non_completed"] is True
+        assert errors[0]["requested_resource_types"] == ["mindmap"]
+        assert not [
+            payload for payload in payloads if payload.get("type") == "resource_final"
+        ]
+        assert not [
+            payload
+            for payload in payloads
+            if payload.get("type") == "run_status"
+            and payload.get("run_status") == "completed"
+        ]
+        updates = [
+            call.args[1]
+            for call in mock_graph.aupdate_state.await_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        assert any(update.get("run_status") == "failed" for update in updates)
 
 
 class TestSSEProviderRetryEvents:
@@ -1688,9 +1638,8 @@ class TestSSEInterruptWithEmptyNext:
         assert done_events == []
 
     @pytest.mark.anyio
-    async def test_interrupt_prevents_completed_without_resource(self):
-        """When an interrupt is pending, completed_without_resource diagnostic
-        must NOT be emitted even if resource was requested."""
+    async def test_interrupt_prevents_missing_resource_final_error(self):
+        """A pending interrupt must not be treated as a missing V3 terminal."""
         from app import generate_stream_drafts
 
         mock_graph = MagicMock()
@@ -1730,12 +1679,12 @@ class TestSSEInterruptWithEmptyNext:
             collected.append(sse)
 
         all_payloads = draft_payloads(collected)
-        diagnostic_events = [
-            p for p in all_payloads if p.get("type") == "resource_final_diagnostic"
+        missing_final_errors = [
+            p
+            for p in all_payloads
+            if p.get("error_type") == "resource_final_v3_missing"
         ]
-        assert diagnostic_events == [], (
-            "completed_without_resource must not be emitted when interrupt is pending"
-        )
+        assert missing_final_errors == []
         interrupt_events = [p for p in all_payloads if p.get("type") == "interrupt"]
         assert len(interrupt_events) == 1
 
@@ -1781,8 +1730,7 @@ class TestSSEInterruptWithEmptyNext:
         assert [
             p
             for p in all_payloads
-            if p.get("type") == "resource_final_diagnostic"
-            and p.get("status") == "completed_without_resource"
+            if p.get("error_type") == "resource_final_v3_missing"
         ] == []
         assert [
             p
@@ -1852,8 +1800,7 @@ class TestSSEInterruptWithEmptyNext:
         assert [
             p
             for p in all_payloads
-            if p.get("type") == "resource_final_diagnostic"
-            and p.get("status") == "completed_without_resource"
+            if p.get("error_type") == "resource_final_v3_missing"
         ] == []
         assert [
             p
@@ -1980,8 +1927,7 @@ class TestSSEInterruptWithEmptyNext:
         assert [
             p
             for p in all_payloads
-            if p.get("type") == "resource_final_diagnostic"
-            and p.get("status") == "completed_without_resource"
+            if p.get("error_type") == "resource_final_v3_missing"
         ] == []
         assert [
             p

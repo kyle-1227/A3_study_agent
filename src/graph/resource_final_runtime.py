@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import urlsplit, urlunsplit
 
 from src.context_engineering.workspace import sanitize_workspace_text
@@ -42,6 +42,7 @@ _RESOURCE_ORDER: tuple[ResourceFinalV3ResourceKind, ...] = (
     "study_plan",
 )
 _RESOURCE_ORDER_INDEX = {value: index for index, value in enumerate(_RESOURCE_ORDER)}
+_RESOURCE_KINDS = frozenset(_RESOURCE_ORDER)
 _MAX_MAPPING_ITEMS = 80
 _MAX_SEQUENCE_ITEMS = 80
 _MAX_PAYLOAD_DEPTH = 8
@@ -75,6 +76,63 @@ class _DropValue:
 
 
 _DROP = _DropValue()
+
+
+def _is_resource_kind(value: object) -> TypeGuard[ResourceFinalV3ResourceKind]:
+    return value in _RESOURCE_KINDS
+
+
+def requested_resource_kinds_from_state(
+    state: Mapping[str, Any] | None,
+) -> tuple[ResourceFinalV3ResourceKind, ...]:
+    """Return explicit V3 resource kinds without alias or fuzzy normalization."""
+
+    if not isinstance(state, Mapping):
+        return ()
+    values: list[ResourceFinalV3ResourceKind] = []
+
+    def add(value: object) -> None:
+        if _is_resource_kind(value) and value not in values:
+            values.append(value)
+
+    raw_types = state.get("requested_resource_types")
+    if isinstance(raw_types, Sequence) and not isinstance(raw_types, (str, bytes)):
+        for item in raw_types:
+            add(item)
+    add(state.get("requested_resource_type"))
+    return tuple(values)
+
+
+def resource_final_v3_required(state: Mapping[str, Any] | None) -> bool:
+    """Return whether a completed graph run must provide Resource Final V3."""
+
+    if not isinstance(state, Mapping):
+        return False
+    if requested_resource_kinds_from_state(state):
+        return True
+    status = state.get("resource_generation_status")
+    if status in {
+        "running",
+        "success",
+        "partial_success",
+        "failed",
+        "error",
+        "blocked_insufficient_evidence",
+        "controlled_stop",
+    }:
+        return True
+    plan = state.get("resource_generation_plan")
+    if isinstance(plan, Mapping) and plan.get("tasks"):
+        return True
+    branch_results = state.get("resource_branch_results")
+    if isinstance(branch_results, Sequence) and not isinstance(
+        branch_results,
+        (str, bytes),
+    ):
+        if branch_results:
+            return True
+    bundle = state.get("resource_bundle_artifact")
+    return isinstance(bundle, Mapping) and bool(bundle)
 
 
 def build_resource_final_v3_from_bundle(
@@ -636,4 +694,6 @@ def _safe_relative_or_app_path(value: str) -> str:
 __all__ = [
     "ResourceFinalRuntimeError",
     "build_resource_final_v3_from_bundle",
+    "requested_resource_kinds_from_state",
+    "resource_final_v3_required",
 ]

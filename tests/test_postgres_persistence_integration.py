@@ -33,11 +33,70 @@ from src.context_engineering.workspace import (
 from src.database.checkpointer import make_thread_config
 from src.graph.builder import get_compiled_graph
 from src.graph.qa import QAResponse, QASuggestion, build_qa_final_payload
-from src.graph.resource_final import normalize_resource_final_payload
+from src.graph.resource_final_v3 import (
+    ResourceFinalV3ResourceKind,
+    ResourceFinalV3ResourceValidation,
+    ResourceFinalV3Validation,
+    build_resource_final_v3,
+    build_resource_final_v3_resource,
+)
 from src.observability.activity import build_activity_event
 from src.observability.llm_input import build_llm_input_observation
 
 _POSTGRES_URI_ENV = "A3_TEST_POSTGRES_URI"
+
+
+def _single_resource_final_v3(
+    *,
+    thread_id: str,
+    request_id: str,
+    kind: ResourceFinalV3ResourceKind,
+    title: str,
+    payload: dict,
+) -> dict:
+    validation = ResourceFinalV3ResourceValidation(
+        schema_version="resource_validation_v1",
+        resource_type=kind,
+        valid=True,
+        terminal_status="success",
+        renderable_count=1,
+        downloadable_count=0,
+        verified_local_count=0,
+        remote_unverified_count=0,
+        failure_reason="",
+        warnings=(),
+    )
+    resource = build_resource_final_v3_resource(
+        thread_id=thread_id,
+        request_id=request_id,
+        kind=kind,
+        status="success",
+        title=title,
+        summary=f"{title} ready",
+        payload=payload,
+        artifact_refs={},
+        validation=validation,
+    )
+    return build_resource_final_v3(
+        thread_id=thread_id,
+        request_id=request_id,
+        terminal_status="success",
+        resources=(resource,),
+        recommendations=(),
+        blocked_resources=(),
+        errors=(),
+        validation=ResourceFinalV3Validation(
+            schema_version="resource_final_validation_v3",
+            resource_count=1,
+            success_count=1,
+            partial_success_count=0,
+            failed_count=0,
+            blocked_count=0,
+            renderable_count=1,
+            downloadable_count=0,
+        ),
+        summary=f"{title} ready",
+    ).model_dump(mode="json")
 
 
 def _required_postgres_uri() -> str:
@@ -163,19 +222,18 @@ def _durable_state(thread_id: str) -> tuple[dict, dict]:
         safe_details={"resource_type": "mindmap"},
         now="2026-07-11T00:00:00+00:00",
     ).model_dump(mode="json")
-    mindmap_final = normalize_resource_final_payload(
-        {
-            "type": "resource_final",
-            "resource_type": "mindmap",
-            "thread_id": thread_id,
-            "request_id": request_id,
+    mindmap_final = _single_resource_final_v3(
+        thread_id=thread_id,
+        request_id=request_id,
+        kind="mindmap",
+        title="Machine Learning Map",
+        payload={
             "mindmap": {
                 "title": "Machine Learning Map",
                 "tree": {"title": "Machine Learning", "children": []},
             },
-        }
+        },
     )
-    assert mindmap_final is not None
     qa_final = build_qa_final_payload(
         response=QAResponse(
             answer="The capability registry is available.",
@@ -227,19 +285,18 @@ def _durable_state(thread_id: str) -> tuple[dict, dict]:
         "last_resource_final_payload": mindmap_final,
         "last_qa_response": qa_final,
     }
-    study_plan_final = normalize_resource_final_payload(
-        {
-            "type": "resource_final",
-            "resource_type": "study_plan",
-            "thread_id": thread_id,
-            "request_id": "phase7-request-2",
+    study_plan_final = _single_resource_final_v3(
+        thread_id=thread_id,
+        request_id="phase7-request-2",
+        kind="study_plan",
+        title="Machine Learning Study Plan",
+        payload={
             "study_plan": {
                 "title": "Machine Learning Study Plan",
                 "phases": [{"title": "Foundations"}],
             },
-        }
+        },
     )
-    assert study_plan_final is not None
     return durable, study_plan_final
 
 
@@ -291,16 +348,25 @@ async def _assert_postgres_reconstruction() -> None:
         assert len(values["evidence_summary_memory"]) == 1
         assert len(values["evidence_gap_memory"]) == 1
         assert values["last_qa_response"]["type"] == "qa_final"
-        assert values["last_resource_final_payload"]["resource_type"] == "study_plan"
-        assert "mindmap" not in values["last_resource_final_payload"]
-        assert set(values["last_resource_final_payload"]["resource"]["payload"]) == {
+        assert values["last_resource_final_payload"]["schema_version"] == (
+            "resource_final_v3"
+        )
+        assert values["last_resource_final_payload"]["resources"][0]["kind"] == (
             "study_plan"
-        }
+        )
+        assert set(
+            values["last_resource_final_payload"]["resources"][0]["payload"]
+        ) == {"study_plan"}
         assert status.context_usage_report_count == 1
         assert status.llm_input_manifest_count == 1
         assert status.activity_timeline_count == 1
         assert status.background_context_window["workspace_present"] is True
-        assert status.last_resource_final_payload["resource_type"] == "study_plan"
+        assert status.last_resource_final_payload["schema_version"] == (
+            "resource_final_v3"
+        )
+        assert status.last_resource_final_payload["resources"][0]["kind"] == (
+            "study_plan"
+        )
         assert status.last_qa_response["type"] == "qa_final"
     finally:
         async with AsyncPostgresSaver.from_conn_string(uri) as cleanup_saver:

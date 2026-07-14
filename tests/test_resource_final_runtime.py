@@ -8,6 +8,8 @@ from src.assessment.identity import stable_exercise_question_id
 from src.graph.resource_final_runtime import (
     ResourceFinalRuntimeError,
     build_resource_final_v3_from_bundle,
+    requested_resource_kinds_from_state,
+    resource_final_v3_required,
 )
 from src.graph.resource_final_v3 import (
     ResourceFinalV3ResourceValidation,
@@ -41,7 +43,7 @@ def _validation(
     }
 
 
-def _mindmap_result(*, status: str = "success") -> dict:
+def _mindmap_branch_result(*, status: str = "success") -> dict:
     return {
         "resource_type": "mindmap",
         "status": status,
@@ -104,12 +106,12 @@ def test_runtime_builds_stable_success_and_validates_persisted_json_shape():
     first = _build(
         terminal_status="success",
         requested=["mindmap"],
-        results=[_mindmap_result()],
+        results=[_mindmap_branch_result()],
     )
     second = _build(
         terminal_status="success",
         requested=["mindmap"],
-        results=[_mindmap_result()],
+        results=[_mindmap_branch_result()],
     )
 
     assert first.payload_hash == second.payload_hash
@@ -124,7 +126,7 @@ def test_runtime_preserves_real_partial_success_and_typed_failure():
     result = _build(
         terminal_status="partial_success",
         requested=["mindmap", "quiz"],
-        results=[_mindmap_result(), _failed_result("quiz")],
+        results=[_mindmap_branch_result(), _failed_result("quiz")],
     )
 
     assert result.terminal_status == "partial_success"
@@ -175,12 +177,12 @@ def test_runtime_requires_exact_requested_result_partition():
         _build(
             terminal_status="success",
             requested=["mindmap", "quiz"],
-            results=[_mindmap_result()],
+            results=[_mindmap_branch_result()],
         )
 
 
 def test_runtime_rejects_success_without_strict_validation():
-    result = _mindmap_result()
+    result = _mindmap_branch_result()
     result["validation"] = None
     with pytest.raises(ResourceFinalRuntimeError, match="requires validation"):
         _build(
@@ -191,7 +193,7 @@ def test_runtime_rejects_success_without_strict_validation():
 
 
 def test_runtime_drops_unsafe_references_before_public_hashing():
-    result = _mindmap_result()
+    result = _mindmap_branch_result()
     result["artifact"]["source_url"] = (
         "https://provider.invalid/resource?token=secret-value"
     )
@@ -273,3 +275,17 @@ def test_runtime_reuses_bound_public_quiz_resource_without_answers():
 
     assert final.resources == (quiz,)
     assert "answer" not in final.model_dump_json()
+
+
+def test_resource_final_v3_requirement_uses_explicit_runtime_state() -> None:
+    state = {
+        "requested_resource_types": ["mindmap", "mindmap", "unsupported"],
+        "requested_resource_type": "study_plan",
+    }
+
+    assert requested_resource_kinds_from_state(state) == ("mindmap", "study_plan")
+    assert resource_final_v3_required(state) is True
+    assert resource_final_v3_required(
+        {"resource_generation_plan": {"tasks": [{"resource_type": "quiz"}]}}
+    )
+    assert resource_final_v3_required({"messages": ["plain answer"]}) is False

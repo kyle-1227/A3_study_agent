@@ -174,3 +174,79 @@ failing test solely to obtain green status.
   provide the deletion evidence for this scoped cleanup.
 
 Review output manually and update this report. Do not automatically apply deletions.
+
+## 2026-07-14 Resource Final V3 legacy cleanup evidence
+
+This cleanup is explicitly authorized by the approved volunteer/Agent-node
+zero-legacy plan. It is limited to Resource Final contracts and diagnostic
+code already replaced by `resource_final_v3` and `agent_stream_v2`; the current
+formal graph and checkpoint migration readers remain outside this deletion.
+
+Candidate: Resource Final V1/V2 compatibility projection
+Files: `src/graph/resource_final.py`, `app.py`,
+`tests/test_resource_final_contract.py`, `tests/test_app.py`,
+`tests/test_sse_lifecycle.py`
+Symbols: `normalize_resource_final_payload`,
+`completed_without_resource_payload`, `_legacy_resource_final_payload`,
+`STRUCTURED_RESOURCE_ARTIFACT_KEYS`, `resource:v1`, `payload:v1`, and
+`completed_without_resource`
+Evidence: `resource_bundle_output` now constructs a validated
+`ResourceFinalV3` directly. The stream reads only `resource_final_v3`, checks
+thread/request identity, and emits a typed `resource_final_v3_missing`
+`stream_error` when resource execution reaches a terminal state without the
+authoritative contract. Non-resource evidence summaries now construct and
+business-validate `QAResponse` and terminate through `qa_final`.
+Confidence: High.
+Dynamic reference checks: tracked import, FastAPI route, LangGraph node,
+configuration, prompt, frontend consumer, fixture, and test scans found no
+remaining runtime import of `src.graph.resource_final` after this diff.
+Replacement tests: `tests/test_resource_final_v3_contract.py`,
+`tests/test_resource_final_runtime.py`, `tests/test_sse_lifecycle.py`,
+`tests/test_postgres_persistence_integration.py`, and frontend Resource Final
+V3 parser/reducer tests.
+Approved action: delete the compatibility module and V1/V2-only tests; retain
+strict V3 schema, runtime builder, checkpoint payload, identity checks, and
+typed failure tests.
+
+Candidate: obsolete SSE bubble comparison utility
+File: `scripts/compare_sse_bubble_output.py`
+Symbols/events: `_simulate_frontend_bubble`, `_event_summary`, `token`, `text`,
+`mindmap_result`, and legacy unversioned `resource_final`
+Evidence: the file is not imported, registered as a CLI entry point, referenced
+by tests, or referenced by documentation. It implements a second hand-written
+SSE parser and simulates the deleted browser event branches, so running it can
+only assess a contract the application no longer exposes.
+Confidence: High.
+Dynamic reference checks: tracked filename, report-path, import, FastAPI,
+prompt/config, and test scans found no references outside the file itself.
+Replacement tests: `frontend/lib/sse-parser.test.ts`,
+`frontend/lib/agent-stream-client.test.ts`, `frontend/lib/live-turn.test.ts`,
+`tests/test_agent_stream_v2.py`, and `tests/test_stream_session.py`.
+Approved action: delete the unreferenced utility in this isolated legacy
+cleanup; do not replace it with another private SSE implementation.
+
+Deletion boundary: `src/graph/resource_final_v3.py`,
+`src/graph/resource_final_runtime.py`, Resource Final V3 frontend rendering,
+`task_workspace`, complete checkpoints, run control, activity timeline, and
+all production-switch migration readers are explicitly retained.
+
+Verification after deletion:
+
+- Active-code scans across `app.py`, `src`, `frontend`, `scripts`, `tests`, and
+  `config` have no matches for `_legacy_resource_final_payload`,
+  `normalize_resource_final_payload`, `completed_without_resource`,
+  `resource_final_diagnostic`, `mindmap_result`, `review_doc_result`,
+  `resource:v1`, `payload:v1`, or imports of the deleted module.
+- Focused Resource Final/stream/checkpoint regression: `287 passed, 1 skipped`.
+- Full backend regression after migrating the final Phase-0 fixture:
+  `2280 passed, 5 skipped`.
+- Frontend: 23 Vitest files / 69 tests, source ESLint, full `npm run lint`,
+  typecheck, and production build passed. The build manifest contains no
+  `/volunteer` route.
+- `python -m compileall -q src tests app.py`, touched-file Ruff check/format,
+  three-file Resource Final V3 scoped mypy, eight security tests, and
+  `git diff --check` passed.
+- Full-repository Ruff remains outside this cleanup: `ruff check .` reports
+  60 pre-existing findings and `ruff format --check .` reports 66 pre-existing
+  files. The optional Semgrep, import-linter, Gitleaks, Bandit, and Vulture
+  executables are missing and were not reported as passing.

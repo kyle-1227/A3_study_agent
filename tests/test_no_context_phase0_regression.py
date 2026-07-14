@@ -89,14 +89,79 @@ def _public_exercise_card() -> dict:
 
 
 @pytest.mark.anyio
-async def test_stream_keeps_node_usage_resource_final_events():
+async def test_stream_keeps_node_usage_resource_final_events(monkeypatch):
+    from uuid import UUID
+
     from app import generate_stream_drafts
+    from src.graph.resource_final_v3 import (
+        ResourceFinalV3ResourceValidation,
+        ResourceFinalV3Validation,
+        build_resource_final_v3,
+        build_resource_final_v3_resource,
+    )
+
+    request_id = "00000000-0000-4000-8000-000000000001"
+    monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+    public_card = _public_exercise_card()
+    resource_validation = ResourceFinalV3ResourceValidation(
+        schema_version="resource_validation_v1",
+        resource_type="quiz",
+        valid=True,
+        terminal_status="success",
+        renderable_count=1,
+        downloadable_count=0,
+        verified_local_count=0,
+        remote_unverified_count=0,
+        failure_reason="",
+        warnings=(),
+    )
+    quiz_resource = build_resource_final_v3_resource(
+        thread_id="thread-1",
+        request_id=request_id,
+        kind="quiz",
+        status="success",
+        title="Python quiz",
+        summary="Python quiz ready",
+        payload={
+            "exercise_artifact": {
+                "schema_version": "exercise_public_artifact_v1",
+                "title": "Python quiz",
+                "items": [public_card],
+            },
+            "exercise_items": [public_card],
+        },
+        artifact_refs={},
+        validation=resource_validation,
+    )
+    resource_final = build_resource_final_v3(
+        thread_id="thread-1",
+        request_id=request_id,
+        terminal_status="success",
+        resources=(quiz_resource,),
+        recommendations=(),
+        blocked_resources=(),
+        errors=(),
+        validation=ResourceFinalV3Validation(
+            schema_version="resource_final_validation_v3",
+            resource_count=1,
+            success_count=1,
+            partial_success_count=0,
+            failed_count=0,
+            blocked_count=0,
+            renderable_count=1,
+            downloadable_count=0,
+        ),
+        summary="Python quiz ready",
+    )
 
     final_state = {
+        "thread_id": "thread-1",
+        "request_id": request_id,
         "requested_resource_type": "quiz",
         "messages": [SimpleNamespace(content="quiz ready")],
-        "exercise_items": [_public_exercise_card()],
+        "exercise_items": [public_card],
         "exercise_artifact": {"title": "Python quiz"},
+        "resource_final_v3": resource_final.model_dump(mode="json"),
     }
     graph = MagicMock()
     graph._a3_activity_events_enabled = True
@@ -128,7 +193,9 @@ async def test_stream_keeps_node_usage_resource_final_events():
     resource_events = [
         payload for payload in payloads if payload.get("type") == "resource_final"
     ]
-    assert resource_events and resource_events[0]["resource_type"] == "quiz"
+    assert resource_events
+    assert resource_events[0]["schema_version"] == "resource_final_v3"
+    assert resource_events[0]["resources"][0]["kind"] == "quiz"
     assert payloads[-1]["type"] == "resource_final"
 
 
