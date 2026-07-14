@@ -718,23 +718,6 @@ def test_settings_agent_required_sources_are_node_specific():
     assert study_plan.injection_policy.required_sources == ()
     assert "profile" in study_plan.injection_policy.optional_sources
 
-    adaptive = resolve_context_policy(
-        node_name="adaptive_practice_responder",
-        llm_node="adaptive_practice",
-        state={},
-    )
-    recommendation = resolve_context_policy(
-        node_name="recommendation_provider",
-        llm_node="recommendation",
-        state={},
-    )
-    assert adaptive.injection_policy.required_sources == ("rules",)
-    assert recommendation.injection_policy.required_sources == ("rules",)
-    assert "profile" in adaptive.injection_policy.optional_sources
-    assert "trajectory" in adaptive.injection_policy.optional_sources
-    assert "profile" in recommendation.injection_policy.optional_sources
-    assert "trajectory" in recommendation.injection_policy.optional_sources
-
 
 def test_agent_injectable_sources_are_node_specific():
     from src.config import clear_cache
@@ -811,12 +794,6 @@ def test_agent_injectable_sources_are_node_specific():
             ),
             "excluded": ("evidence",),
         },
-        "adaptive_practice_responder": {
-            "required": ("rules",),
-            "optional": ("profile", "trajectory", "memory"),
-            "injectable": ("rules", "profile", "trajectory", "memory"),
-            "excluded": ("evidence", "artifact", "curriculum"),
-        },
         "error_classifier": {
             "required": ("rules",),
             "optional": (),
@@ -842,12 +819,6 @@ def test_agent_injectable_sources_are_node_specific():
                 "profile",
                 "trajectory",
             ),
-        },
-        "recommendation_provider": {
-            "required": ("rules",),
-            "optional": ("profile", "trajectory", "curriculum"),
-            "injectable": ("rules", "profile", "trajectory", "curriculum"),
-            "excluded": ("evidence", "artifact", "memory"),
         },
     }
 

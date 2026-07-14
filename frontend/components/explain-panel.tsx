@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ChevronDown, ChevronRight, Brain, Route, Search, FileText, GitBranch } from "lucide-react";
+import { ChevronDown, ChevronRight, Brain, Search, FileText } from "lucide-react";
 
 interface DecisionTrace {
   trace_id: string;
@@ -29,8 +29,6 @@ const NODE_ICONS: Record<string, React.ReactNode> = {
   memory_use_decider: <Search className="w-4 h-4" />,
   evidence_judge: <FileText className="w-4 h-4" />,
   generate_answer: <FileText className="w-4 h-4" />,
-  curriculum_planner: <Route className="w-4 h-4" />,
-  recommendation_provider: <GitBranch className="w-4 h-4" />,
 };
 
 const NODE_LABELS: Record<string, string> = {
@@ -38,8 +36,6 @@ const NODE_LABELS: Record<string, string> = {
   memory_use_decider: "记忆使用决策",
   evidence_judge: "证据判断",
   generate_answer: "答案生成",
-  curriculum_planner: "课程规划",
-  recommendation_provider: "推荐引擎",
 };
 
 export default function ExplainPanel({ userId, limit = 20 }: { userId: string; limit?: number }) {

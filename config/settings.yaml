@@ -461,7 +461,6 @@ context_engineering:
             - video_script_planner
             - video_animation_planner
             - study_plan_planner
-            - curriculum_planner
           max_injected_context_tokens: 1500
           max_items_total: 5
           injectable_sources:
@@ -490,8 +489,6 @@ context_engineering:
             - video_script_agent
             - video_animation_agent
             - study_plan_agent
-            - adaptive_practice_responder
-            - recommendation_provider
           max_injected_context_tokens: 3000
           max_items_total: 8
           injectable_sources:
@@ -844,32 +841,6 @@ context_engineering:
           optional_sources: []
           injectable_sources:
             - rules
-        adaptive_practice_responder:
-          inherit: agent_nodes
-          required_sources:
-            - rules
-          optional_sources:
-            - profile
-            - trajectory
-            - memory
-          injectable_sources:
-            - rules
-            - profile
-            - trajectory
-            - memory
-        recommendation_provider:
-          inherit: agent_nodes
-          required_sources:
-            - rules
-          optional_sources:
-            - profile
-            - trajectory
-            - curriculum
-          injectable_sources:
-            - rules
-            - profile
-            - trajectory
-            - curriculum
         study_plan_reviewer_academic:
           inherit: reviewer_nodes
           injectable_sources:

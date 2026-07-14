@@ -234,8 +234,6 @@ def test_provider_supply_collects_only_policy_requested_sources(monkeypatch):
 def test_agent_provider_supply_does_not_request_excluded_sources():
     expected_absent = {
         "study_plan_agent": {"evidence"},
-        "adaptive_practice_responder": {"evidence", "artifact", "curriculum"},
-        "recommendation_provider": {"evidence", "artifact", "memory"},
         "review_doc_agent": {"trajectory"},
     }
 
@@ -250,18 +248,6 @@ def test_agent_provider_supply_does_not_request_excluded_sources():
         "memory",
         "curriculum",
         "artifact",
-    }
-    assert set(_requested_sources_for_node("adaptive_practice_responder")) == {
-        "rules",
-        "profile",
-        "trajectory",
-        "memory",
-    }
-    assert set(_requested_sources_for_node("recommendation_provider")) == {
-        "rules",
-        "profile",
-        "trajectory",
-        "curriculum",
     }
     assert set(_requested_sources_for_node("review_doc_agent")) == {
         "evidence",

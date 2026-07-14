@@ -380,3 +380,79 @@ three-file scoped mypy, diff check, and active-symbol scans passed. Full
 backend (`2274 passed, 6 skipped`) and frontend Vitest (69 tests), typecheck,
 ESLint, and production build passed. Vulture was unavailable and was not
 reported as passing.
+
+## 2026-07-15 unreachable learning-node wrapper cleanup evidence
+
+Candidates: `curriculum_planner`, `assessment_result_handler`,
+`adaptive_practice_responder`, and `recommendation_provider`.
+
+Evidence: neither the served graph nor the resource-evidence candidate graph
+registered any of these node IDs. Exact runtime references were limited to the
+four functions at the end of `src/graph/academic.py`, Context Engineering node
+policy entries for three retired IDs, and two explainability UI mappings.
+FastAPI routes, graph builders, node metadata, package exports, prompts, CLI
+entry points, `importlib`, and dynamic `getattr` scans found no caller. The old
+assessment wrapper marked generated questions correct without a learner
+attempt; the recommendation and curriculum wrappers swallowed exceptions into
+empty business results. They were not valid fallback paths to preserve.
+
+Approved action: the user selected cleanup decision D9-A on 2026-07-15. The
+four wrappers, their node-policy entries, policy-only assertions, and stale UI
+mappings were deleted in an isolated cleanup worktree. Replacement behavior
+remains in the strict assessment attempt service, `learner_path_planner`, and
+`resource_recommendation_auto`; the underlying `src.assessment`,
+`src.curriculum`, `src.recommendation`, profile, and memory packages were
+retained for production adapters.
+
+Regression protection: `tests/test_retired_learning_nodes.py` asserts callable,
+served-graph, configuration, and UI absence. Existing Context Engineering
+tests continue to validate every active node policy. The first focused graph,
+Supervisor, policy, provider-supply, and builder run passed `128` tests.
+
+Deferred boundary: this cleanup does not delete `curriculum_context` from
+durable state, the served legacy graph, `rag_retrieve`, `web_search`, the P0
+runtime factory, or checkpoint migration readers. Those remain gated by the
+new RAG graph-version decision and checkpoint convergence.
+
+Vulture report: Vulture 2.16 ran in report-only mode over `src tests` at 80%
+confidence after this deletion. It reported 27 pre-existing findings: unused
+context-manager exception parameters in Parent-Child storage/runtime helpers,
+one tracing timeout argument, several mock-test fixture parameters, and five
+test-only conditions it considered unsatisfiable. None referenced the four
+retired nodes or a file changed for their replacement. These findings are not
+approved for deletion in this batch; each still requires dynamic/interface and
+test-intent review.
+
+### Batch quality and security closure
+
+- `compileall` passed. Focused graph/Supervisor/Context Engineering tests passed
+  `128`; structured-output regressions passed `45`; security tests passed `8`;
+  the final full backend run passed `2396` with `7` skips. The first full run
+  exposed one test that required the checkout directory to be named exactly
+  `A3_study_agent`; the test now verifies the actual launcher module root and
+  its `pyproject.toml`, so it also works in an isolated Git worktree.
+- Frontend Vitest passed all `27` files and `118` tests; ESLint and TypeScript
+  typecheck passed. The default Turbopack build could not traverse the
+  worktree's external `node_modules` junction. An explicit Next.js webpack
+  production build completed successfully. No `.env` was created; the public
+  local API URL was supplied only to the build process.
+- The pinned import-linter analyzed `326` files and `1962` dependencies; all
+  three contracts passed. The external-SDK contract permits indirect imports
+  through the existing `src.graph.llm` boundary while still forbidding direct
+  SDK imports from business packages.
+- Ruff check and format passed for every touched Python file. Repository-wide
+  Ruff still reports `54` lint findings and `62` files requiring formatting;
+  those are pre-existing and include the unrelated `tmp_debug_gold.py`.
+  Supervisor mypy passed. `academic.py` retains `28` pre-existing errors before
+  the deleted wrapper region; they were not suppressed or expanded here.
+- Semgrep 1.127.0 scanned the seven changed/added Python surfaces and found no
+  issue. Its whole-repository rule run still reports `279` broad legacy/noise
+  findings and is not recorded as passing. Gitleaks 8.24.2 found no secret in
+  the Git diff plus the new test. A raw working-directory scan also saw `14`
+  generated `.pytest_tmp`/`.next` fingerprints and preview keys, so that raw
+  scan is not recorded as passing. No real secret value was written to output.
+- Bandit 1.9.4 scanned `85,091` source lines and reported `41` existing issues:
+  `21` low, `5` medium, and `15` high. They remain security debt, not a pass.
+  Vulture remains report-only with the `27` candidates above. Docker Compose
+  configuration, import-linter, touched-file static checks, and
+  `git diff --check` passed.
