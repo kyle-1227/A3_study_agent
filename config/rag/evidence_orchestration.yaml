@@ -8,6 +8,7 @@ max_requirements_per_request: 12
 max_ledger_entries: 54
 max_evidence_per_requirement: 4
 max_consecutive_no_progress_rounds: 1
+web_timeout_seconds: 120.0
 required_task_priority: high
 supporting_task_priority: medium
 retrieval_priority_weights:

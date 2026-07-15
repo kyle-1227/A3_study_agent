@@ -118,7 +118,11 @@ class TestAppLifespanCheckpointer:
         monkeypatch.setattr(app_module, "checkpointer_type", lambda: "postgres")
         monkeypatch.setattr(app_module, "get_db_uri", lambda: None)
         get_graph = MagicMock()
-        monkeypatch.setattr(app_module, "get_compiled_graph", get_graph)
+        monkeypatch.setattr(
+            app_module,
+            "get_compiled_resource_evidence_parent_child_graph",
+            get_graph,
+        )
 
         with pytest.raises(RuntimeError, match="requires DB_URI"):
             async with app_module.lifespan(fake_app):
@@ -162,7 +166,11 @@ class TestAppLifespanCheckpointer:
             FailingPostgresSaver,
         )
         get_graph = MagicMock()
-        monkeypatch.setattr(app_module, "get_compiled_graph", get_graph)
+        monkeypatch.setattr(
+            app_module,
+            "get_compiled_resource_evidence_parent_child_graph",
+            get_graph,
+        )
 
         with pytest.raises(RuntimeError, match="setup failed"):
             async with app_module.lifespan(fake_app):

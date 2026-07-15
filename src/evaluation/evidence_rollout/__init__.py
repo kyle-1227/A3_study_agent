@@ -35,6 +35,12 @@ from src.evaluation.evidence_rollout.runner import (
     SealedAttemptVariantExecutor,
     run_evidence_rollout_evaluation,
 )
+from src.evaluation.evidence_rollout.live_adapters import (
+    EvidenceVariantServedComposition,
+    LiveEvidenceAdapterError,
+    ServedEvidenceLiveVariantAdapter,
+    build_served_evidence_live_adapters,
+)
 
 __all__ = [
     "EvidenceCaseBindingIdentityV2",
@@ -60,6 +66,10 @@ __all__ = [
     "HumanSemanticReviewV2",
     "LiveEvidenceVariantAdapter",
     "LiveEvidenceVariantExecutor",
+    "EvidenceVariantServedComposition",
+    "LiveEvidenceAdapterError",
+    "ServedEvidenceLiveVariantAdapter",
+    "build_served_evidence_live_adapters",
     "SealedAttemptVariantExecutor",
     "case_binding_identity",
     "case_binding_inventory_fingerprint",

@@ -98,7 +98,8 @@ from src.database.checkpointer import (
 )
 from src.database.assessment_lock import PostgresAssessmentExecutionLock
 from src.config import get_setting
-from src.graph.builder import get_compiled_graph
+from src.graph.builder import get_compiled_resource_evidence_parent_child_graph
+from src.graph.served_candidate import load_served_candidate_runtime
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
     CONTEXT_CLEAR,
@@ -723,9 +724,42 @@ async def lifespan(app: FastAPI):
             memory_db_path=memory_db_path,
             clock=lambda: datetime.now(timezone.utc),
         )
-        graph = get_compiled_graph(
-            learning_guidance_runtime,
+        candidate_generation_id = os.environ["PARENT_CHILD_GENERATION_ID"]
+        if (
+            not candidate_generation_id
+            or candidate_generation_id != candidate_generation_id.strip()
+        ):
+            raise RuntimeError(
+                "PARENT_CHILD_GENERATION_ID must be a non-blank stripped identifier"
+            )
+        served_candidate = load_served_candidate_runtime(
+            project_root=project_root,
+            generation_id=candidate_generation_id,
+            learning_guidance=learning_guidance_runtime,
+            index_config_path=(
+                project_root
+                / "config"
+                / "rag"
+                / "index.production-candidate.inactive.yaml"
+            ),
+            index_root=project_root / "indexes" / "parent_child",
+            policy_config_path=(
+                project_root / "config" / "rag" / "evidence_orchestration.yaml"
+            ),
+            profiles_config_path=(
+                project_root / "config" / "rag" / "resource_evidence_profiles.yaml"
+            ),
+            rollout_config_path=(project_root / "config" / "rag" / "rollout.yaml"),
+        )
+        stack.callback(served_candidate.close)
+        graph = get_compiled_resource_evidence_parent_child_graph(
+            served_candidate.orchestration,
             checkpointer=graph_checkpointer,
+        )
+        app.state.served_candidate_runtime = served_candidate.orchestration
+        app.state.parent_child_generation_id = candidate_generation_id
+        app.state.parent_child_generation_manifest_fingerprint = (
+            served_candidate.generation_manifest_fingerprint
         )
         app.state.learning_guidance_runtime = learning_guidance_runtime
         app.state.learning_guidance_history_writer = LearningGuidanceHistoryWriterV1(

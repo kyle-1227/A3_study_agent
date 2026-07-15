@@ -16,6 +16,7 @@ from src.resource_contracts import RESOURCE_TYPE_ORDER, ResourceType
 
 
 PositiveInt = Annotated[int, Field(gt=0)]
+PositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 UnitFloat = Annotated[float, Field(gt=0.0, le=1.0)]
 
@@ -84,6 +85,7 @@ class EvidenceOrchestrationConfig(StrictRagConfigModel):
     max_ledger_entries: PositiveInt
     max_evidence_per_requirement: PositiveInt
     max_consecutive_no_progress_rounds: PositiveInt
+    web_timeout_seconds: PositiveFloat
     required_task_priority: RetrievalPriority
     supporting_task_priority: RetrievalPriority
     retrieval_priority_weights: RetrievalPriorityWeights
