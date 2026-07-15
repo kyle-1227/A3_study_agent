@@ -311,6 +311,41 @@ def test_paired_benchmark_projects_explicit_empty_section_paths_as_none() -> Non
     assert execution.candidate_input.results[0].hits[0].section_path is None
 
 
+def test_candidate_projection_keeps_only_ranked_parent_supporting_children() -> None:
+    dataset = _dataset()
+    baseline, candidate = _bindings()
+    original = _candidate_result()
+    extra_hit_payload = original.ranked_children[0].model_dump(mode="python")
+    extra_hit_payload["final_rank"] = 2
+    extra_document = extra_hit_payload["document"]
+    extra_document["metadata"]["child_id"] = "child_" + "7" * 40
+    extra_document["metadata"]["parent_id"] = "parent_" + "8" * 40
+    extra_hit = ChildEvidenceHit.model_validate(extra_hit_payload)
+    result_payload = original.model_dump(mode="python")
+    result_payload["ranked_children"] = (
+        original.ranked_children[0],
+        extra_hit,
+    )
+    result = HybridRetrievalResult.model_validate(result_payload)
+
+    execution = run_paired_benchmark(
+        dataset=dataset,
+        baseline_binding=baseline,
+        candidate_binding=candidate,
+        baseline_retrieve=lambda query: _flat_result(),
+        candidate_retrieve=lambda query: result,
+        token_counter=len,
+    )
+
+    candidate_hits = execution.candidate_input.results[0].hits
+    assert len(candidate_hits) == 1
+    assert (
+        candidate_hits[0].hit_id
+        == original.ranked_children[0].document.metadata.child_id
+    )
+    assert candidate_hits[0].rank == 1
+
+
 def test_candidate_failure_never_returns_baseline_success() -> None:
     dataset = _dataset()
     baseline, candidate = _bindings()

@@ -307,13 +307,37 @@ def _project_candidate(
     token_counter: Callable[[str], int],
 ) -> _ArmObservation:
     parent_ranks = {parent.parent_id: parent.rank for parent in result.ranked_parents}
+    child_parent_ids: dict[str, str] = {}
+    for parent in result.ranked_parents:
+        for child_id in parent.supporting_child_ids:
+            existing_parent_id = child_parent_ids.get(child_id)
+            if (
+                existing_parent_id is not None
+                and existing_parent_id != parent.parent_id
+            ):
+                raise BenchmarkExecutionError(
+                    "candidate child is assigned to multiple ranked parents"
+                )
+            child_parent_ids[child_id] = parent.parent_id
+    ranked_child_ids = {
+        hit.document.metadata.child_id for hit in result.ranked_children
+    }
+    if set(child_parent_ids) - ranked_child_ids:
+        raise BenchmarkExecutionError(
+            "candidate ranked parent references an unknown supporting child"
+        )
+    selected_children = tuple(
+        hit
+        for hit in result.ranked_children
+        if hit.document.metadata.child_id in child_parent_ids
+    )
     hits = tuple(
         RetrievedEvidenceHit(
             schema_version="retrieved_evidence_hit_v1",
             hit_id=hit.document.metadata.child_id,
-            rank=hit.final_rank,
+            rank=projected_rank,
             parent_id=hit.document.metadata.parent_id,
-            parent_rank=parent_ranks[hit.document.metadata.parent_id],
+            parent_rank=parent_ranks[child_parent_ids[hit.document.metadata.child_id]],
             doc_id=hit.document.metadata.doc_id,
             source_relpath=hit.document.metadata.source_relpath,
             pagination_kind=hit.document.metadata.pagination_kind,
@@ -323,8 +347,16 @@ def _project_candidate(
             end_char=hit.document.metadata.end_char,
             section_path=_project_section_path(hit.document.metadata.section_path),
         )
-        for hit in result.ranked_children
+        for projected_rank, hit in enumerate(selected_children, start=1)
     )
+    if any(
+        hit.document.metadata.parent_id
+        != child_parent_ids[hit.document.metadata.child_id]
+        for hit in selected_children
+    ):
+        raise BenchmarkExecutionError(
+            "candidate supporting child parent differs from ranked parent"
+        )
     if result.status == "ok" and len(parent_ranks) != len(result.hydrated_parents):
         raise BenchmarkExecutionError("candidate parent hydration cardinality mismatch")
     context_tokens = 0
