@@ -467,16 +467,28 @@ def test_candidate_graph_judges_child_then_replaces_it_with_parent_context() -> 
     assert hydration_output["graded_evidence"] == final_context
 
 
-def test_candidate_graph_factory_adds_hydration_without_changing_legacy_graph() -> None:
+def test_candidate_graph_factory_adds_hydration_without_changing_legacy_graph(
+    learning_guidance_runtime,
+) -> None:
     runtime, _retriever, _parent = _runtime()
 
-    assert "parent_child_parent_hydration" not in build_graph().nodes
-    candidate_graph = build_parent_child_graph(runtime)
+    assert (
+        "parent_child_parent_hydration"
+        not in build_graph(learning_guidance_runtime).nodes
+    )
+    candidate_graph = build_parent_child_graph(
+        runtime,
+        learning_guidance_runtime=learning_guidance_runtime,
+    )
     assert "parent_child_parent_hydration" in candidate_graph.nodes
     assert candidate_graph.compile() is not None
 
     assert "runtime" in get_type_hints(build_parent_child_graph)
+    assert "learning_guidance_runtime" in get_type_hints(build_parent_child_graph)
     assert "runtime" in get_type_hints(get_compiled_parent_child_graph)
+    assert "learning_guidance_runtime" in get_type_hints(
+        get_compiled_parent_child_graph
+    )
 
 
 def test_candidate_graph_rejects_legacy_defaulted_priority() -> None:

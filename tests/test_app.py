@@ -196,6 +196,7 @@ class TestDevMemoryClear:
         )
 
         graph = AsyncMock()
+        graph._a3_node_ids = frozenset({"supervisor"})
         monkeypatch.delenv("APP_ENV", raising=False)
         monkeypatch.delenv("A3_ENV", raising=False)
 
@@ -218,6 +219,8 @@ class TestDevMemoryClear:
         assert values["resource_artifacts_by_type"] is DICT_CLEAR
         assert values["last_generated_artifacts"] is GENERATED_ARTIFACTS_CLEAR
         assert values["last_resource_final_payload"] is DICT_CLEAR
+        assert values["recommendation_final_v1"] is DICT_CLEAR
+        assert values["last_recommendation_final_payload"] is DICT_CLEAR
         assert values["last_qa_response"] == {}
         assert values["llm_input_manifest"] == {}
         assert values["llm_input_manifests"] is LLM_INPUT_MANIFESTS_CLEAR
@@ -251,6 +254,8 @@ class TestDevMemoryClear:
                 "resource_artifacts_by_type",
                 "last_generated_artifacts",
                 "last_resource_final_payload",
+                "recommendation_final_v1",
+                "last_recommendation_final_payload",
                 "last_qa_response",
                 "llm_input_manifest",
                 "llm_input_manifests",
@@ -407,6 +412,10 @@ def test_new_request_status_values_preserve_thread_workspace_counts():
                 "last_event_count": 12,
             },
             "context_usage_history": [{"node_name": "mindmap_agent"}],
+            "last_recommendation_final_payload": {
+                "schema_version": "recommendation_final_v1",
+                "type": "recommendation_final",
+            },
             "task_workspace": {
                 "schema_version": 1,
                 "workspace_id": "workspace:v1:ml",
@@ -440,6 +449,9 @@ def test_new_request_status_values_preserve_thread_workspace_counts():
     assert thread_window["workspace_active_subject"] == "machine_learning"
     assert thread_window["workspace_evidence_summary_count"] == 1
     assert thread_window["workspace_artifact_count"] == 1
+    assert values["last_recommendation_final_payload"]["type"] == (
+        "recommendation_final"
+    )
 
 
 class TestMindmapArtifacts:

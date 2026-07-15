@@ -1,4 +1,4 @@
-﻿"""Unit tests for parallel retrieval (fan-out / fan-in) pattern.
+"""Unit tests for parallel retrieval (fan-out / fan-in) pattern.
 
 Tests cover: operator.add context reducer, academic_router pass-through,
 rag_retrieve + web_search writing evidence candidates,
@@ -21,11 +21,18 @@ from src.graph.academic import (
     web_search,
 )
 from src.graph.builder import build_graph, get_compiled_graph
-from src.graph.web_research import WebResearchPlan, WebResearchTask, WebSourceSummary, WebSourceSummaryBatch
+from src.graph.web_research import (
+    WebResearchPlan,
+    WebResearchTask,
+    WebSourceSummary,
+    WebSourceSummaryBatch,
+)
 from src.llm.structured_output import StructuredLLMResult
 
 
-def _web_research_structured_result(parsed, *, node_name: str, schema_name: str) -> StructuredLLMResult:
+def _web_research_structured_result(
+    parsed, *, node_name: str, schema_name: str
+) -> StructuredLLMResult:
     return StructuredLLMResult(
         success=True,
         parsed=parsed,
@@ -45,40 +52,48 @@ async def _fake_web_research_v2_llm(**kwargs):
         subject_matches = re.findall(r'"subject":\s*"([^"]*)"', planner_prompt)
         seed_matches = re.findall(r'"seed_search_query":\s*"([^"]*)"', planner_prompt)
         subject = (subject_matches[-1] if subject_matches else "other") or "other"
-        seed_query = (seed_matches[-1] if seed_matches else "web tutorial") or "web tutorial"
-        plan = WebResearchPlan(tasks=[
-            WebResearchTask(
-                task_id=f"task-{subject}-0",
-                subject=subject,
-                role="supporting_context",
-                purpose=f"Find web material for {subject}.",
-                search_query=seed_query,
-                reason="Need web evidence for the current retrieval request.",
-                priority=0.8,
-            )
-        ])
+        seed_query = (
+            seed_matches[-1] if seed_matches else "web tutorial"
+        ) or "web tutorial"
+        plan = WebResearchPlan(
+            tasks=[
+                WebResearchTask(
+                    task_id=f"task-{subject}-0",
+                    subject=subject,
+                    role="supporting_context",
+                    purpose=f"Find web material for {subject}.",
+                    search_query=seed_query,
+                    reason="Need web evidence for the current retrieval request.",
+                    priority=0.8,
+                )
+            ]
+        )
         return _web_research_structured_result(
             plan,
             node_name=WEB_RESEARCH_V2_PLANNER_NODE,
             schema_name="WebResearchPlan",
         )
 
-    source_ids = re.findall(r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"]))
-    batch = WebSourceSummaryBatch(summaries=[
-        WebSourceSummary(
-            source_id=source_id,
-            keep=True,
-            summary="result",
-            coverage_points=["result"],
-            reason="Relevant web result.",
-            evidence_type="unknown",
-            use_case="background_context",
-            relevance="medium",
-            usefulness="medium",
-            risk="low",
-        )
-        for source_id in source_ids
-    ])
+    source_ids = re.findall(
+        r'"source_id":\s*"([^"]+)"', str(kwargs["messages"][-1]["content"])
+    )
+    batch = WebSourceSummaryBatch(
+        summaries=[
+            WebSourceSummary(
+                source_id=source_id,
+                keep=True,
+                summary="result",
+                coverage_points=["result"],
+                reason="Relevant web result.",
+                evidence_type="unknown",
+                use_case="background_context",
+                relevance="medium",
+                usefulness="medium",
+                risk="low",
+            )
+            for source_id in source_ids
+        ]
+    )
     return _web_research_structured_result(
         batch,
         node_name=kwargs["node_name"],
@@ -90,6 +105,7 @@ async def _fake_web_research_v2_llm(**kwargs):
 # TestContextReducer -- operator.add merges context from parallel branches
 # ===========================================================================
 
+
 class TestContextReducer:
     """Verify that context_reducer correctly merges and clears context."""
 
@@ -97,7 +113,9 @@ class TestContextReducer:
         """Simulates LangGraph fan-in: merge rag + web context lists."""
         from src.graph.state import context_reducer
 
-        branch_a = [{"type": "rag", "content": "doc1", "source": "f.pdf", "rerank_score": 0.9}]
+        branch_a = [
+            {"type": "rag", "content": "doc1", "source": "f.pdf", "rerank_score": 0.9}
+        ]
         branch_b = [{"type": "web", "content": "web1", "title": "T", "url": "http://x"}]
 
         merged = context_reducer(branch_a, branch_b)
@@ -145,6 +163,7 @@ class TestContextReducer:
 # TestAcademicRouterNode -- pass-through for fan-out
 # ===========================================================================
 
+
 class TestAcademicRouterNode:
     """academic_router is a no-op node that enables fan-out."""
 
@@ -171,6 +190,7 @@ class TestAcademicRouterNode:
 # TestRagRetrieveParallelOutput -- writes local evidence candidates
 # ===========================================================================
 
+
 class TestRagRetrieveParallelOutput:
     """rag_retrieve returns local evidence only; context is written by evidence_judge."""
 
@@ -192,7 +212,10 @@ class TestRagRetrieveParallelOutput:
         candidate = result["local_evidence_candidates"][0]
         assert candidate["source_type"] == "local_rag"
         assert candidate["content_preview"] == "判别式"
-        assert result["local_evidence_originals"][candidate["evidence_id"]]["source"] == "math.pdf"
+        assert (
+            result["local_evidence_originals"][candidate["evidence_id"]]["source"]
+            == "math.pdf"
+        )
 
     @patch("src.graph.academic.retrieve")
     async def test_empty_retrieval_returns_empty_context(self, mock_retrieve):
@@ -224,12 +247,15 @@ class TestRagRetrieveParallelOutput:
         }
         await rag_retrieve(state)
 
-        mock_retrieve.assert_called_once_with(query="original question", subject="math", top_k=3)
+        mock_retrieve.assert_called_once_with(
+            query="original question", subject="math", top_k=3
+        )
 
 
 # ===========================================================================
 # TestWebSearchParallelOutput -- writes web evidence candidates
 # ===========================================================================
+
 
 class TestWebSearchParallelOutput:
     """web_search returns web evidence only; context is written by evidence_judge."""
@@ -239,7 +265,9 @@ class TestWebSearchParallelOutput:
         mock_search.return_value = [
             {"content": "result", "title": "Title", "url": "http://x"},
         ]
-        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
+        monkeypatch.setattr(
+            "src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm
+        )
 
         state = {"messages": [HumanMessage(content="量子力学")]}
         result = await web_search(state)
@@ -249,11 +277,16 @@ class TestWebSearchParallelOutput:
         candidate = result["web_evidence_candidates"][0]
         assert candidate["source_type"] == "web"
         assert candidate["content_preview"] == "result"
-        assert result["web_evidence_originals"][candidate["evidence_id"]]["title"] == "Title"
+        assert (
+            result["web_evidence_originals"][candidate["evidence_id"]]["title"]
+            == "Title"
+        )
 
     @patch("src.graph.academic.web_search_fn", side_effect=Exception("network"))
     async def test_returns_empty_context_on_exception(self, mock_search, monkeypatch):
-        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
+        monkeypatch.setattr(
+            "src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm
+        )
 
         state = {"messages": [HumanMessage(content="test")]}
         with pytest.raises(RuntimeError, match="fallback is disabled") as exc_info:
@@ -266,8 +299,12 @@ class TestWebSearchParallelOutput:
     @patch("src.graph.academic.web_search_fn")
     async def test_uses_last_human_message_for_query(self, mock_search, monkeypatch):
         """During retry, web_search must find the original question."""
-        mock_search.return_value = [{"content": "result", "title": "Title", "url": "http://x"}]
-        monkeypatch.setattr("src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm)
+        mock_search.return_value = [
+            {"content": "result", "title": "Title", "url": "http://x"}
+        ]
+        monkeypatch.setattr(
+            "src.graph.academic.invoke_structured_llm", _fake_web_research_v2_llm
+        )
 
         state = {
             "messages": [
@@ -285,19 +322,27 @@ class TestWebSearchParallelOutput:
 # TestGenerateAnswerFromMergedContext -- reads unified context
 # ===========================================================================
 
+
 class TestGenerateAnswerFromMergedContext:
     """generate_answer splits merged context by type for formatting."""
 
     @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_uses_both_rag_and_web_context(
-        self, mock_invoke_plain, mock_llm_response,
+        self,
+        mock_invoke_plain,
+        mock_llm_response,
     ):
         mock_invoke_plain.return_value = "combined answer"
 
         state = {
             "messages": [HumanMessage(content="判别式")],
             "context": [
-                {"type": "rag", "content": "delta=b^2-4ac", "source": "math.pdf", "rerank_score": 0.9},
+                {
+                    "type": "rag",
+                    "content": "delta=b^2-4ac",
+                    "source": "math.pdf",
+                    "rerank_score": 0.9,
+                },
                 {
                     "type": "web_evidence",
                     "source_type": "web",
@@ -322,7 +367,9 @@ class TestGenerateAnswerFromMergedContext:
 
     @patch("src.graph.academic.invoke_plain_llm_fail_fast")
     async def test_handles_empty_context(
-        self, mock_invoke_plain, mock_llm_response,
+        self,
+        mock_invoke_plain,
+        mock_llm_response,
     ):
         mock_invoke_plain.return_value = "answer without context"
 
@@ -342,26 +389,27 @@ class TestGenerateAnswerFromMergedContext:
 # TestGraphFanOutStructure -- verify graph topology
 # ===========================================================================
 
+
 class TestGraphFanOutStructure:
     """Verify the graph has correct fan-out/fan-in wiring."""
 
-    def test_academic_router_node_exists(self):
-        graph = build_graph()
+    def test_academic_router_node_exists(self, learning_guidance_runtime):
+        graph = build_graph(learning_guidance_runtime)
         assert "academic_router" in graph.nodes
 
-    def test_evaluate_hallucination_node_exists(self):
-        graph = build_graph()
+    def test_evaluate_hallucination_node_exists(self, learning_guidance_runtime):
+        graph = build_graph(learning_guidance_runtime)
         assert "evaluate_hallucination" in graph.nodes
 
-    def test_graph_compiles_with_fan_out(self):
+    def test_graph_compiles_with_fan_out(self, learning_guidance_runtime):
         """Fan-out/fan-in graph must compile without error."""
-        compiled = get_compiled_graph()
+        compiled = get_compiled_graph(learning_guidance_runtime)
         assert compiled is not None
         assert hasattr(compiled, "invoke")
 
-    def test_should_web_search_not_in_graph(self):
+    def test_should_web_search_not_in_graph(self, learning_guidance_runtime):
         """Sequential should_web_search replaced by parallel fan-out."""
-        graph = build_graph()
+        graph = build_graph(learning_guidance_runtime)
         assert "rag_retrieve" in graph.nodes
         assert "web_search" in graph.nodes
 
@@ -370,16 +418,17 @@ class TestGraphFanOutStructure:
 # TestRetryRoutesToAcademicRouter -- retry re-runs both retrievals
 # ===========================================================================
 
+
 class TestRewriteQueryNodeInGraph:
     """Verify rewrite_query node exists in graph and is wired in retry path."""
 
-    def test_rewrite_query_node_exists(self):
-        graph = build_graph()
+    def test_rewrite_query_node_exists(self, learning_guidance_runtime):
+        graph = build_graph(learning_guidance_runtime)
         assert "rewrite_query" in graph.nodes
 
-    def test_retry_routes_to_rewrite_query(self):
+    def test_retry_routes_to_rewrite_query(self, learning_guidance_runtime):
         """On retry, evaluate_hallucination should route to rewrite_query, not academic_router."""
-        graph = build_graph()
+        graph = build_graph(learning_guidance_runtime)
         # The retry path should go through rewrite_query
         assert "rewrite_query" in graph.nodes
 

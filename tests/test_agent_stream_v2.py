@@ -182,6 +182,40 @@ def test_journal_replays_assessment_final_as_the_only_terminal() -> None:
         sequencer.emit("qa_final", {"payload_hash": "late"})
 
 
+def test_journal_replays_recommendation_final_as_the_only_terminal() -> None:
+    sequencer = _sequencer()
+    journal = StreamJournal(
+        stream_id="stream-1",
+        max_events=8,
+        max_bytes=10000,
+        ttl_seconds=60,
+    )
+    start = sequencer.emit("stream_start")
+    final_id = f"recommendation-final:v1:{'a' * 64}"
+    payload_hash = f"recommendation-final-payload:v1:{'b' * 64}"
+    terminal = sequencer.emit(
+        "recommendation_final",
+        {
+            "schema_version": "recommendation_final_v1",
+            "type": "recommendation_final",
+            "recommendation_final_id": final_id,
+            "payload_hash": payload_hash,
+        },
+    )
+    done = sequencer.emit("stream_done")
+    for event in (start, terminal, done):
+        journal.append(event)
+
+    replayed = journal.after(start.sequence)
+    assert [event.type for event in replayed] == [
+        "recommendation_final",
+        "stream_done",
+    ]
+    assert replayed[0].data["recommendation_final_id"] == final_id
+    assert replayed[0].data["payload_hash"] == payload_hash
+    assert sequencer.terminal == "recommendation_final"
+
+
 def test_journal_expiry_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     journal = StreamJournal(
         stream_id="stream-1",

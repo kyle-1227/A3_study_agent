@@ -14,6 +14,7 @@ _AUTHORITATIVE_TERMINALS = frozenset(
     {
         "qa_final",
         "resource_final",
+        "recommendation_final",
         "assessment_final",
         "interrupt",
         "stopped",

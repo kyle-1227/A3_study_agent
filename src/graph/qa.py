@@ -8,7 +8,7 @@ import logging
 from typing import Any, Literal, Mapping, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import load_prompt
 from src.context_engineering.policy_mode import resolve_context_runtime_policy
@@ -235,6 +235,10 @@ def build_qa_final_payload(
     request_id: str,
 ) -> dict[str, Any]:
     """Build a bounded, deterministic payload for SSE and checkpoint restore."""
+    normalized_thread_id = sanitize_workspace_text(thread_id, max_chars=120)
+    normalized_request_id = sanitize_workspace_text(request_id, max_chars=120)
+    if not normalized_thread_id or not normalized_request_id:
+        raise ValueError("qa_final requires explicit thread_id and request_id")
     safe_response = {
         "answer": sanitize_workspace_text(
             response.answer,
@@ -258,27 +262,23 @@ def build_qa_final_payload(
             for suggestion in response.suggestions[:3]
         ],
     }
-    payload_hash = hashlib.sha256(
-        json.dumps(
-            safe_response,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    stable_input = "\x1f".join(
-        ("qa:v1", str(thread_id), str(request_id), qa_scope, payload_hash)
+    validated_response = QAResponse.model_validate(safe_response)
+    payload_hash = _stable_qa_payload_hash(validated_response)
+    qa_id = _stable_qa_id(
+        thread_id=normalized_thread_id,
+        request_id=normalized_request_id,
+        qa_scope=qa_scope,
+        payload_hash=payload_hash,
     )
-    qa_id = "qa:v1:" + hashlib.sha256(stable_input.encode("utf-8")).hexdigest()
     return QAFinalEvent(
         type="qa_final",
         schema_version=1,
         qa_id=qa_id,
         payload_hash=payload_hash,
         qa_scope=qa_scope,
-        response=QAResponse.model_validate(safe_response),
-        thread_id=sanitize_workspace_text(thread_id, max_chars=120),
-        request_id=sanitize_workspace_text(request_id, max_chars=120),
+        response=validated_response,
+        thread_id=normalized_thread_id,
+        request_id=normalized_request_id,
         created_at=utc_now_iso(),
     ).model_dump(mode="json")
 
@@ -325,17 +325,118 @@ def build_general_qa_node_output(
 
 
 def qa_final_payload(state: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the current request's validated QA final event, if present."""
+    """Return the current request's strictly bound QA final event, if present."""
+
     payload = state.get("last_qa_response")
-    if not isinstance(payload, dict):
+    if payload in ({}, None):
         return None
-    try:
-        validated = QAFinalEvent.model_validate(payload)
-    except ValidationError:
+    if not isinstance(payload, Mapping):
+        raise TypeError("qa_final payload must be an object")
+
+    runtime_request_id = str(state.get("request_id") or "").strip()
+    if not runtime_request_id:
+        raise ValueError("qa_final requires runtime request_id")
+    payload_request_id = payload.get("request_id")
+    if isinstance(payload_request_id, str) and payload_request_id != runtime_request_id:
+        # A durable final from an earlier request is history, not this request's
+        # authoritative terminal. Malformed current-request payloads still fail closed.
         return None
-    if validated.request_id != str(state.get("request_id") or ""):
-        return None
+
+    validated = validate_qa_final_event(payload)
+    runtime_thread_id = str(state.get("thread_id") or "").strip()
+    if not runtime_thread_id:
+        raise ValueError("qa_final requires runtime thread_id")
+    if validated.thread_id != runtime_thread_id:
+        raise ValueError("qa_final thread_id does not match runtime state")
+    if validated.request_id != runtime_request_id:
+        raise ValueError("qa_final request_id does not match runtime state")
+
+    runtime_scope = str(state.get("qa_scope") or "").strip()
+    if runtime_scope and validated.qa_scope != runtime_scope:
+        raise ValueError("qa_final qa_scope does not match runtime state")
+    kept_evidence_count = sum(
+        1 for item in (state.get("graded_evidence") or []) if isinstance(item, Mapping)
+    )
+    business_error = validate_qa_response(
+        validated.response,
+        qa_scope=validated.qa_scope,
+        kept_evidence_count=kept_evidence_count,
+        requires_live_verification=state.get("requires_live_verification") is True,
+    )
+    if business_error:
+        raise ValueError(f"qa_final business validation failed: {business_error}")
     return validated.model_dump(mode="json")
+
+
+def validate_qa_final_event(value: object) -> QAFinalEvent:
+    """Validate QA Final identity and content hashes without accepting drift."""
+
+    if isinstance(value, QAFinalEvent):
+        payload = value.model_dump(mode="json")
+    elif isinstance(value, Mapping):
+        _reject_non_json_qa_sequences(value)
+        payload = dict(value)
+    else:
+        raise TypeError("qa_final payload must be an object")
+    validated = QAFinalEvent.model_validate_json(
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        strict=True,
+    )
+    expected_hash = _stable_qa_payload_hash(validated.response)
+    if validated.payload_hash != expected_hash:
+        raise ValueError("qa_final payload_hash mismatch")
+    expected_id = _stable_qa_id(
+        thread_id=validated.thread_id,
+        request_id=validated.request_id,
+        qa_scope=validated.qa_scope,
+        payload_hash=expected_hash,
+    )
+    if validated.qa_id != expected_id:
+        raise ValueError("qa_final qa_id mismatch")
+    return validated
+
+
+def _stable_qa_payload_hash(response: QAResponse) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            response.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _stable_qa_id(
+    *,
+    thread_id: str,
+    request_id: str,
+    qa_scope: QAScope,
+    payload_hash: str,
+) -> str:
+    stable_input = "\x1f".join(("qa:v1", thread_id, request_id, qa_scope, payload_hash))
+    return "qa:v1:" + hashlib.sha256(stable_input.encode("utf-8")).hexdigest()
+
+
+def _reject_non_json_qa_sequences(value: object, *, path: str = "root") -> None:
+    if isinstance(value, tuple):
+        raise TypeError(f"{path} must use a JSON array, not a Python tuple")
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_non_json_qa_sequences(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} object keys must be strings")
+            _reject_non_json_qa_sequences(item, path=f"{path}.{key}")
 
 
 def qa_final_trace_payload(payload: Mapping[str, Any]) -> dict[str, Any]:

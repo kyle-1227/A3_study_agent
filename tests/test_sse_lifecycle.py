@@ -78,6 +78,64 @@ def _parse_all_payloads(collected):
     return draft_payloads(collected)
 
 
+def _unavailable_recommendation_final(*, thread_id: str, request_id: str) -> dict:
+    from src.learning_guidance.recommendation_final import (
+        RecommendationFinalV1,
+        RecommendationFinalV1Content,
+        stable_recommendation_final_v1_hash,
+        stable_recommendation_final_v1_id,
+    )
+
+    content = RecommendationFinalV1Content(
+        schema_version="recommendation_final_v1",
+        type="recommendation_final",
+        thread_id=thread_id,
+        request_id=request_id,
+        terminal_status="unavailable",
+        mode="explicit_request",
+        user_id=None,
+        subject="python",
+        learning_guidance_runtime_fingerprint="a" * 64,
+        generated_at=None,
+        recommendations=(),
+        candidate_snapshot=None,
+        unavailable_reason="missing_user_id",
+        summary="Personalized recommendations require learner identity.",
+    )
+    payload_hash = stable_recommendation_final_v1_hash(content)
+    return RecommendationFinalV1(
+        **content.model_dump(),
+        recommendation_final_id=stable_recommendation_final_v1_id(
+            thread_id=thread_id,
+            request_id=request_id,
+            payload_hash=payload_hash,
+        ),
+        payload_hash=payload_hash,
+    ).model_dump(mode="json")
+
+
+def _controlled_stop_resource_final(*, thread_id: str, request_id: str) -> dict:
+    from src.graph.resource_final_runtime import build_resource_final_v3_from_bundle
+
+    return build_resource_final_v3_from_bundle(
+        thread_id=thread_id,
+        request_id=request_id,
+        requested_resource_types=("study_plan",),
+        terminal_status="controlled_stop",
+        branch_results=(),
+        blocked_resources=(
+            {
+                "resource_type": "study_plan",
+                "status": "blocked_insufficient_evidence",
+                "reason_code": "evidence.insufficient",
+                "blocked_requirement_ids": ["requirement-study-plan"],
+            },
+        ),
+        recommendations=(),
+        summary="Evidence is insufficient for a study plan",
+    ).model_dump(mode="json")
+
+
 async def _trace_only_events(stage: str, payload: dict | None = None):
     emit_a3_trace(
         logging.getLogger(__name__),
@@ -1057,6 +1115,322 @@ class TestSSEQAFinal:
         assert len(qa_events) == 1
         assert payloads[-1] is qa_events[0]
         assert not [item for item in payloads if item.get("type") == "resource_final"]
+
+
+class TestSSERecommendationFinal:
+    @pytest.mark.anyio
+    async def test_recommendation_final_is_the_only_authoritative_producer_terminal(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from app import generate_stream_drafts
+
+        request_id = "00000000-0000-4000-8000-000000000401"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        final = _unavailable_recommendation_final(
+            thread_id="t-1",
+            request_id=request_id,
+        )
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "thread_id": "t-1",
+                    "request_id": request_id,
+                    "response_mode": "recommendation",
+                    "recommendation_final_v1": final,
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+            collected.append(draft)
+
+        payloads = _parse_all_payloads(collected)
+        recommendation_events = [
+            item for item in payloads if item.get("type") == "recommendation_final"
+        ]
+        assert recommendation_events == [final]
+        assert not [item for item in payloads if item.get("type") == "qa_final"]
+        assert not [item for item in payloads if item.get("type") == "resource_final"]
+        updates = [
+            call.args[1]
+            for call in mock_graph.aupdate_state.await_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        assert any(
+            update.get("last_recommendation_final_payload") == final
+            and update.get("run_status") == "completed"
+            for update in updates
+        )
+
+    @pytest.mark.anyio
+    async def test_tampered_recommendation_final_fails_without_completion(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from app import generate_stream_drafts
+
+        request_id = "00000000-0000-4000-8000-000000000402"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        final = _unavailable_recommendation_final(
+            thread_id="t-1",
+            request_id=request_id,
+        )
+        final["payload_hash"] = f"recommendation-final-payload:v1:{'0' * 64}"
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "thread_id": "t-1",
+                    "request_id": request_id,
+                    "response_mode": "recommendation",
+                    "recommendation_final_v1": final,
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+            collected.append(draft)
+
+        payloads = _parse_all_payloads(collected)
+        errors = [
+            item
+            for item in payloads
+            if item.get("type") == "stream_error"
+            and item.get("error_type") == "authoritative_terminal_invalid"
+        ]
+        assert len(errors) == 1
+        assert errors[0]["terminal_non_completed"] is True
+        assert not [
+            item for item in payloads if item.get("type") == "recommendation_final"
+        ]
+        assert not [
+            item
+            for item in payloads
+            if item.get("type") == "run_status"
+            and item.get("run_status") == "completed"
+        ]
+
+    @pytest.mark.anyio
+    async def test_recommendation_and_qa_terminal_conflict_fails_closed(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from app import generate_stream_drafts
+        from src.graph.qa import QAResponse, build_qa_final_payload
+
+        request_id = "00000000-0000-4000-8000-000000000403"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        recommendation = _unavailable_recommendation_final(
+            thread_id="t-1",
+            request_id=request_id,
+        )
+        qa = build_qa_final_payload(
+            response=QAResponse(
+                answer="Conflicting answer.",
+                uncertainty_note="",
+                grounding_status="general_knowledge",
+                suggestions=[],
+            ),
+            qa_scope="general",
+            thread_id="t-1",
+            request_id=request_id,
+        )
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "thread_id": "t-1",
+                    "request_id": request_id,
+                    "last_qa_response": qa,
+                    "recommendation_final_v1": recommendation,
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+            collected.append(draft)
+
+        payloads = _parse_all_payloads(collected)
+        errors = [
+            item
+            for item in payloads
+            if item.get("type") == "stream_error"
+            and item.get("error_type") == "authoritative_terminal_conflict"
+        ]
+        assert len(errors) == 1
+        assert not [item for item in payloads if item.get("type") == "qa_final"]
+        assert not [
+            item for item in payloads if item.get("type") == "recommendation_final"
+        ]
+
+    @pytest.mark.anyio
+    async def test_malformed_current_qa_cannot_hide_behind_valid_recommendation(
+        self,
+        monkeypatch,
+    ):
+        from uuid import UUID
+
+        from app import generate_stream_drafts
+
+        request_id = "00000000-0000-4000-8000-000000000404"
+        monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+        recommendation = _unavailable_recommendation_final(
+            thread_id="t-1",
+            request_id=request_id,
+        )
+        mock_graph = _make_mock_graph([])
+        mock_graph.aget_state = AsyncMock(
+            return_value=SimpleNamespace(
+                next=(),
+                tasks=[],
+                values={
+                    "thread_id": "t-1",
+                    "request_id": request_id,
+                    "last_qa_response": {
+                        "type": "qa_final",
+                        "request_id": request_id,
+                    },
+                    "recommendation_final_v1": recommendation,
+                },
+            )
+        )
+
+        collected = []
+        async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+            collected.append(draft)
+
+        payloads = _parse_all_payloads(collected)
+        assert (
+            len(
+                [
+                    item
+                    for item in payloads
+                    if item.get("type") == "stream_error"
+                    and item.get("error_type") == "authoritative_terminal_invalid"
+                ]
+            )
+            == 1
+        )
+        assert not [
+            item
+            for item in payloads
+            if item.get("type") in {"qa_final", "recommendation_final"}
+        ]
+
+
+@pytest.mark.parametrize(
+    ("terminal_kind", "request_id"),
+    [
+        ("qa", "00000000-0000-4000-8000-000000000411"),
+        ("resource", "00000000-0000-4000-8000-000000000412"),
+        ("recommendation", "00000000-0000-4000-8000-000000000413"),
+    ],
+)
+@pytest.mark.anyio
+async def test_terminal_checkpoint_failure_blocks_every_authoritative_final(
+    terminal_kind,
+    request_id,
+    monkeypatch,
+):
+    from uuid import UUID
+
+    from app import generate_stream_drafts
+    from src.graph.qa import QAResponse, build_qa_final_payload
+    from src.run_control import get_active_run
+
+    monkeypatch.setattr("app.uuid.uuid4", lambda: UUID(request_id))
+    state = {"thread_id": "t-1", "request_id": request_id}
+    if terminal_kind == "qa":
+        state.update(
+            {
+                "response_mode": "qa",
+                "qa_scope": "general",
+                "requires_live_verification": False,
+                "last_qa_response": build_qa_final_payload(
+                    response=QAResponse(
+                        answer="Strict QA terminal.",
+                        uncertainty_note="",
+                        grounding_status="general_knowledge",
+                        suggestions=[],
+                    ),
+                    qa_scope="general",
+                    thread_id="t-1",
+                    request_id=request_id,
+                ),
+            }
+        )
+    elif terminal_kind == "resource":
+        state.update(
+            {
+                "response_mode": "resource",
+                "resource_final_v3": _controlled_stop_resource_final(
+                    thread_id="t-1",
+                    request_id=request_id,
+                ),
+            }
+        )
+    else:
+        state.update(
+            {
+                "response_mode": "recommendation",
+                "recommendation_final_v1": _unavailable_recommendation_final(
+                    thread_id="t-1",
+                    request_id=request_id,
+                ),
+            }
+        )
+
+    async def fail_completed_checkpoint(_config, values, **_kwargs):
+        if values.get("run_status") == "completed":
+            raise RuntimeError("checkpoint write failed")
+
+    mock_graph = _make_mock_graph([])
+    mock_graph.aupdate_state = AsyncMock(side_effect=fail_completed_checkpoint)
+    mock_graph.aget_state = AsyncMock(
+        return_value=SimpleNamespace(next=(), tasks=[], values=state)
+    )
+
+    collected = []
+    async for draft in generate_stream_drafts("q", mock_graph, thread_id="t-1"):
+        collected.append(draft)
+
+    payloads = _parse_all_payloads(collected)
+    errors = [
+        item
+        for item in payloads
+        if item.get("type") == "stream_error"
+        and item.get("error_type") == "terminal_checkpoint_persist_failed"
+    ]
+    assert len(errors) == 1
+    assert errors[0]["terminal_non_completed"] is True
+    assert not [
+        item
+        for item in payloads
+        if item.get("type")
+        in {
+            "qa_final",
+            "resource_final",
+            "recommendation_final",
+        }
+    ]
+    assert get_active_run("t-1") is None
 
 
 class TestSSEResourceFinalDiagnostics:

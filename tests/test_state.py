@@ -37,6 +37,7 @@ class TestLearningState:
             "response_mode",
             "qa_scope",
             "last_qa_response",
+            "recommendation_final_v1",
             "subject",
             "keypoints",
             "context",
@@ -159,6 +160,7 @@ class TestTaskWorkspaceReducers:
         assert "assessment_checkpoint_resources" not in reset
         assert "assessment_attempt_journal" not in reset
         assert reset["exercise_resource_v3"] == {}
+        assert reset["recommendation_final_v1"] == {}
         assert reset["response_mode"] == ""
         assert reset["qa_scope"] == ""
         assert reset["requires_live_verification"] is False

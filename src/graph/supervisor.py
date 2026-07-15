@@ -43,7 +43,7 @@ class SupervisorOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: Literal["academic", "emotional", "unknown"]
-    response_mode: Literal["qa", "resource", "emotional"]
+    response_mode: Literal["qa", "resource", "recommendation", "emotional"]
     qa_scope: Literal["academic", "general", "a3_agent", ""]
     requires_live_verification: bool
     keywords: list[str]
@@ -194,6 +194,15 @@ def validate_supervisor_output(parsed: BaseModel) -> str:
             return "resource response_mode requires requested_resource_types"
         if parsed.qa_scope:
             return "resource response_mode requires empty qa_scope"
+    elif parsed.response_mode == "recommendation":
+        if parsed.intent != "academic":
+            return "recommendation response_mode requires academic intent"
+        if resource_types:
+            return "recommendation response_mode may not carry requested_resource_types"
+        if parsed.qa_scope:
+            return "recommendation response_mode requires empty qa_scope"
+        if parsed.requires_live_verification:
+            return "recommendation response_mode may not require live verification"
     elif parsed.response_mode == "emotional":
         if parsed.intent != "emotional":
             return "emotional response_mode requires emotional intent"
@@ -282,7 +291,13 @@ async def supervisor_node(state: LearningState) -> dict:
         result.subject_candidates,
         available_subject_set,
     )
-    subject = subject_candidates[0] if subject_candidates else "other"
+    subject = (
+        subject_candidates[0]
+        if subject_candidates
+        else ""
+        if response_mode == "recommendation"
+        else "other"
+    )
 
     requested_resource_types = normalize_requested_resource_types(
         result.requested_resource_types,
@@ -297,6 +312,7 @@ async def supervisor_node(state: LearningState) -> dict:
     )
     continuation_state = {
         **state,
+        "response_mode": response_mode,
         "subject": subject,
         "subject_candidates": subject_candidates,
         "requested_resource_type": requested_resource_type,
@@ -435,6 +451,8 @@ def route_after_supervisor(state: LearningState) -> str:
         return "emotional"
     if response_mode == "resource" and intent == "academic":
         return "academic"
+    if response_mode == "recommendation" and intent == "academic":
+        return "recommendation"
     if response_mode == "qa" and qa_scope == "academic" and intent == "academic":
         return "academic"
     if response_mode == "qa" and qa_scope in {"general", "a3_agent"}:

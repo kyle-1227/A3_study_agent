@@ -10,11 +10,13 @@ from pydantic import ValidationError
 from src.graph.learning_guidance import (
     LEARNER_PATH_OUTPUT_STATE_KEY,
     LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY,
+    RECOMMENDATION_FINAL_OUTPUT_FIELD,
     RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY,
     RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY,
     learner_path_provider_projection_for_runtime_from_state,
     learner_path_provider_projection_from_state,
     make_learner_path_planner_node,
+    make_recommendation_final_output_node,
     make_resource_recommendation_node,
     resource_recommendation_output_for_runtime_from_state,
     resource_recommendation_output_from_state,
@@ -348,6 +350,9 @@ def _state(**updates):
         "thread_id": "thread-must-not-be-used-as-user",
         "user_id": "learner-1",
         "subject": "python",
+        "subject_candidates": ["python"],
+        "workspace_continuation": {},
+        "workspace_continuation_applied": False,
         "evidence_requested_subjects": ["python"],
         "retrieval_plan": _retrieval_plan("python"),
         "requested_resource_type": "quiz",
@@ -397,6 +402,7 @@ def test_new_request_reset_has_explicit_empty_user_id() -> None:
     reset = initial_request_reset_transient_state()
     assert reset["user_id"] == ""
     assert reset[LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY] == {}
+    assert reset[RECOMMENDATION_FINAL_OUTPUT_FIELD] == {}
 
 
 def test_learning_guidance_runtime_requires_explicit_stable_fingerprint() -> None:
@@ -700,7 +706,7 @@ async def test_learner_path_checkpoint_rejects_changed_guidance_runtime() -> Non
 @pytest.mark.parametrize(
     ("state_updates", "missing_dependency", "expected_reason"),
     [
-        ({"subject": ""}, None, "missing_subject"),
+        ({"subject": "", "subject_candidates": []}, None, "missing_subject"),
         ({}, "profile", "profile_unavailable"),
         ({}, "history", "history_unavailable"),
     ],
@@ -860,7 +866,7 @@ async def test_automatic_recommendation_rejects_multi_subject_scope_explicitly()
 @pytest.mark.parametrize(
     ("state_updates", "missing_dependency", "expected_reason"),
     [
-        ({"subject": ""}, None, "missing_subject"),
+        ({"subject": "", "subject_candidates": []}, None, "missing_subject"),
         ({}, "profile", "profile_unavailable"),
         ({}, "history", "history_unavailable"),
     ],
@@ -886,6 +892,118 @@ async def test_resource_recommendation_returns_explicit_unavailable_status(
     assert output["status"] == "unavailable"
     assert output["unavailable_reason"] == expected_reason
     assert stub.recommendation_requests == []
+
+
+@pytest.mark.anyio
+async def test_explicit_recommendation_rejects_multi_subject_scope_before_io() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+
+    update = await node(_state(subject="python", subject_candidates=["python", "math"]))
+
+    output = update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]
+    assert output["status"] == "unavailable"
+    assert output["unavailable_reason"] == "unsupported_subject_scope"
+    assert stub.profile_calls == []
+    assert stub.history_calls == []
+    assert stub.recommendation_requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scope_updates",
+    [
+        {"subject": "", "subject_candidates": []},
+        {"subject": "python", "subject_candidates": ["python", "math"]},
+    ],
+)
+async def test_explicit_recommendation_missing_user_precedes_subject_scope(
+    scope_updates,
+) -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+
+    update = await node(_state(user_id="", **scope_updates))
+
+    output = update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]
+    assert output["status"] == "unavailable"
+    assert output["unavailable_reason"] == "missing_user_id"
+    assert output["user_id"] is None
+    assert stub.profile_calls == []
+
+
+@pytest.mark.anyio
+async def test_explicit_recommendation_accepts_bound_workspace_subject_scope() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+    state = _state(
+        subject="python",
+        subject_candidates=[],
+        workspace_continuation_applied=True,
+        workspace_continuation={
+            "normalized_subject": "python",
+            "continuation_applied": True,
+        },
+    )
+
+    update = await node(state)
+
+    output = update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]
+    assert output["status"] == "available"
+    assert output["subject"] == "python"
+    assert stub.profile_calls == ["learner-1"]
+    assert stub.recommendation_requests[0].subject == "python"
+
+
+@pytest.mark.anyio
+async def test_explicit_recommendation_rejects_unbound_workspace_subject() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_subject_scope_mismatch",
+    ):
+        await node(
+            _state(
+                subject="python",
+                subject_candidates=[],
+                workspace_continuation_applied=True,
+                workspace_continuation={
+                    "normalized_subject": "math",
+                    "continuation_applied": True,
+                },
+            )
+        )
+
+
+@pytest.mark.anyio
+async def test_explicit_recommendation_requires_strict_subject_candidate_state() -> (
+    None
+):
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="explicit_request",
+    )
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="invalid_recommendation_subject_candidates",
+    ):
+        await node(_state(subject_candidates=None))
 
 
 @pytest.mark.anyio
@@ -1133,3 +1251,136 @@ async def test_explicit_recommendation_replay_rejects_catalog_title_tamper() -> 
             expected_mode="explicit_request",
             runtime=runtime,
         )
+
+
+@pytest.mark.anyio
+async def test_recommendation_finalizer_builds_bound_available_terminal() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    recommendation = make_resource_recommendation_node(
+        runtime,
+        mode="explicit_request",
+    )
+    finalizer = make_recommendation_final_output_node(runtime)
+    state = _state(
+        request_id="00000000-0000-4000-8000-000000000111",
+        response_mode="recommendation",
+        requested_resource_type="",
+        requested_resource_types=[],
+    )
+    update = await recommendation(state)
+
+    final_update = finalizer({**state, **update})
+
+    final = final_update[RECOMMENDATION_FINAL_OUTPUT_FIELD]
+    assert final["schema_version"] == "recommendation_final_v1"
+    assert final["type"] == "recommendation_final"
+    assert final["thread_id"] == "thread-must-not-be-used-as-user"
+    assert final["request_id"] == state["request_id"]
+    assert final["terminal_status"] == "available"
+    assert final["recommendations"][0]["resource_id"] == "python-basics-quiz"
+    assert final["payload_hash"].startswith("recommendation-final-payload:v1:")
+    assert final_update["final_response_type"] == "recommendation_final"
+
+
+@pytest.mark.anyio
+async def test_recommendation_finalizer_preserves_missing_subject_terminal() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    recommendation = make_resource_recommendation_node(
+        runtime,
+        mode="explicit_request",
+    )
+    finalizer = make_recommendation_final_output_node(runtime)
+    state = _state(
+        request_id="00000000-0000-4000-8000-000000000112",
+        response_mode="recommendation",
+        subject="",
+        subject_candidates=[],
+        requested_resource_type="",
+        requested_resource_types=[],
+    )
+    update = await recommendation(state)
+
+    final_update = finalizer({**state, **update})
+    final = final_update[RECOMMENDATION_FINAL_OUTPUT_FIELD]
+
+    assert final["terminal_status"] == "unavailable"
+    assert final["unavailable_reason"] == "missing_subject"
+    assert final["subject"] is None
+    assert final_update["final_response_type"] == "recommendation_final"
+
+
+@pytest.mark.anyio
+async def test_recommendation_finalizer_preserves_missing_user_priority() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    recommendation = make_resource_recommendation_node(
+        runtime,
+        mode="explicit_request",
+    )
+    finalizer = make_recommendation_final_output_node(runtime)
+    state = _state(
+        request_id="00000000-0000-4000-8000-000000000115",
+        response_mode="recommendation",
+        user_id="",
+        subject="",
+        subject_candidates=[],
+        requested_resource_type="",
+        requested_resource_types=[],
+    )
+    update = await recommendation(state)
+
+    final = finalizer({**state, **update})[RECOMMENDATION_FINAL_OUTPUT_FIELD]
+
+    assert final["terminal_status"] == "unavailable"
+    assert final["unavailable_reason"] == "missing_user_id"
+    assert final["user_id"] is None
+
+
+@pytest.mark.anyio
+async def test_recommendation_finalizer_preserves_multi_subject_terminal() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    recommendation = make_resource_recommendation_node(
+        runtime,
+        mode="explicit_request",
+    )
+    finalizer = make_recommendation_final_output_node(runtime)
+    state = _state(
+        request_id="00000000-0000-4000-8000-000000000114",
+        response_mode="recommendation",
+        subject="python",
+        subject_candidates=["python", "math"],
+        requested_resource_type="",
+        requested_resource_types=[],
+    )
+    update = await recommendation(state)
+
+    final = finalizer({**state, **update})[RECOMMENDATION_FINAL_OUTPUT_FIELD]
+
+    assert final["terminal_status"] == "unavailable"
+    assert final["unavailable_reason"] == "unsupported_subject_scope"
+    assert final["subject"] == "python"
+    assert stub.profile_calls == []
+
+
+@pytest.mark.anyio
+async def test_recommendation_finalizer_rejects_wrong_response_mode() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    recommendation = make_resource_recommendation_node(
+        runtime,
+        mode="explicit_request",
+    )
+    state = _state(
+        request_id="00000000-0000-4000-8000-000000000113",
+        response_mode="resource",
+    )
+    update = await recommendation(state)
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_final_response_mode_mismatch",
+    ):
+        make_recommendation_final_output_node(runtime)({**state, **update})

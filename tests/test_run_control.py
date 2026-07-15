@@ -9,12 +9,18 @@ from uuid import UUID
 
 import pytest
 
-from tests.stream_draft_helpers import draft_payloads
+from src.learning_guidance.recommendation_final import (
+    RecommendationFinalV1,
+    RecommendationFinalV1Content,
+    stable_recommendation_final_v1_hash,
+    stable_recommendation_final_v1_id,
+)
 from src.observability.a3_trace import (
     emit_a3_trace,
     reset_trace_event_sink,
     set_trace_event_sink,
 )
+from tests.stream_draft_helpers import draft_payloads
 
 
 class AsyncIteratorMock:
@@ -42,6 +48,39 @@ def _snapshot(
     if interrupt_value is not None:
         tasks = [SimpleNamespace(interrupts=[SimpleNamespace(value=interrupt_value)])]
     return SimpleNamespace(next=next_nodes, tasks=tasks, values=values or {})
+
+
+def _unavailable_recommendation_final(
+    *,
+    thread_id: str,
+    summary: str,
+) -> dict:
+    content = RecommendationFinalV1Content(
+        schema_version="recommendation_final_v1",
+        type="recommendation_final",
+        thread_id=thread_id,
+        request_id="00000000-0000-4000-8000-000000000301",
+        terminal_status="unavailable",
+        mode="explicit_request",
+        user_id=None,
+        subject="python",
+        learning_guidance_runtime_fingerprint="a" * 64,
+        generated_at=None,
+        recommendations=(),
+        candidate_snapshot=None,
+        unavailable_reason="missing_user_id",
+        summary=summary,
+    )
+    payload_hash = stable_recommendation_final_v1_hash(content)
+    return RecommendationFinalV1(
+        **content.model_dump(),
+        recommendation_final_id=stable_recommendation_final_v1_id(
+            thread_id=thread_id,
+            request_id=content.request_id,
+            payload_hash=payload_hash,
+        ),
+        payload_hash=payload_hash,
+    ).model_dump(mode="json")
 
 
 @pytest.mark.anyio
@@ -262,6 +301,73 @@ async def test_status_prefers_active_run_without_checkpoint_read():
     assert status.current_node == "review_doc_agent"
     assert status.request_context_window["last_event_count"] == 2
     graph.aget_state.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_active_status_preserves_strict_recommendation_final_without_truncation():
+    from app import get_thread_status_payload
+    from src.run_control import finish_active_run, get_active_run, start_active_run
+
+    summary = "Strict recommendation unavailable. " + "x" * 900
+    final = _unavailable_recommendation_final(
+        thread_id="recommendation-thread",
+        summary=summary,
+    )
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(side_effect=AssertionError("checkpoint not needed"))
+    start_active_run(
+        "recommendation-thread",
+        {
+            "schema_version": "run_control_v1",
+            "run_status": "running",
+            "last_recommendation_final_payload": final,
+        },
+    )
+
+    try:
+        active = get_active_run("recommendation-thread")
+        status = await get_thread_status_payload(graph, "recommendation-thread")
+    finally:
+        finish_active_run("recommendation-thread")
+
+    assert active is not None
+    assert active["last_recommendation_final_payload"]["summary"] == summary
+    assert status.last_recommendation_final_payload is not None
+    assert status.last_recommendation_final_payload.summary == summary
+    assert (
+        status.last_recommendation_final_payload.payload_hash == final["payload_hash"]
+    )
+
+
+def test_active_run_rejects_recommendation_final_thread_or_hash_drift():
+    from src.run_control import start_active_run
+
+    final = _unavailable_recommendation_final(
+        thread_id="recommendation-thread",
+        summary="Strict unavailable recommendation.",
+    )
+    with pytest.raises(ValueError, match="thread_id"):
+        start_active_run(
+            "other-thread",
+            {"last_recommendation_final_payload": final},
+        )
+
+    tampered = {**final, "payload_hash": f"recommendation-final-payload:v1:{'0' * 64}"}
+    with pytest.raises(ValueError, match="payload_hash"):
+        start_active_run(
+            "recommendation-thread",
+            {"last_recommendation_final_payload": tampered},
+        )
+
+
+def test_status_rejects_non_object_recommendation_history():
+    from app import _last_recommendation_final_payload
+
+    with pytest.raises(TypeError, match="must be an object"):
+        _last_recommendation_final_payload(
+            {"last_recommendation_final_payload": ["corrupt"]},
+            thread_id="recommendation-thread",
+        )
 
 
 @pytest.mark.anyio
@@ -505,10 +611,14 @@ async def test_dev_memory_clear_uses_registered_supervisor_writer(monkeypatch):
         clear_values["context_usage_reports"] == app_module.CONTEXT_USAGE_REPORTS_CLEAR
     )
     assert clear_values["activity_timeline"] == app_module.ACTIVITY_TIMELINE_CLEAR
+    assert clear_values["recommendation_final_v1"] == app_module.DICT_CLEAR
+    assert clear_values["last_recommendation_final_payload"] == app_module.DICT_CLEAR
     assert {
         "context_usage_report",
         "context_usage_reports",
         "activity_timeline",
+        "recommendation_final_v1",
+        "last_recommendation_final_payload",
     } <= set(result["cleared_fields"])
 
 

@@ -27,28 +27,34 @@ from src.graph.builder import get_compiled_graph
 class TestGetCompiledGraphWithCheckpointer:
     """Tests that get_compiled_graph correctly accepts a checkpointer."""
 
-    def test_compiles_without_checkpointer(self):
+    def test_compiles_without_checkpointer(self, learning_guidance_runtime):
         """Default behavior: compile without checkpointer (backward-compatible)."""
-        compiled = get_compiled_graph()
+        compiled = get_compiled_graph(learning_guidance_runtime)
         assert compiled is not None
         assert hasattr(compiled, "ainvoke")
 
-    def test_compiles_with_checkpointer(self):
+    def test_compiles_with_checkpointer(self, learning_guidance_runtime):
         """When a checkpointer is provided, it should be wired into the graph."""
         saver = MemorySaver()
-        compiled = get_compiled_graph(checkpointer=saver)
+        compiled = get_compiled_graph(
+            learning_guidance_runtime,
+            checkpointer=saver,
+        )
         assert compiled is not None
         assert hasattr(compiled, "ainvoke")
 
-    def test_compiled_graph_has_checkpointer(self):
+    def test_compiled_graph_has_checkpointer(self, learning_guidance_runtime):
         """The compiled graph should reference the checkpointer."""
         saver = MemorySaver()
-        compiled = get_compiled_graph(checkpointer=saver)
+        compiled = get_compiled_graph(
+            learning_guidance_runtime,
+            checkpointer=saver,
+        )
         assert compiled.checkpointer is saver
 
-    def test_compiled_graph_none_checkpointer(self):
+    def test_compiled_graph_none_checkpointer(self, learning_guidance_runtime):
         """When checkpointer=None (default), graph.checkpointer should be None."""
-        compiled = get_compiled_graph()
+        compiled = get_compiled_graph(learning_guidance_runtime)
         assert compiled.checkpointer is None
 
 

@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage
 from src.context_engineering.influence import (
     INFLUENCE_ENTRY_LIMIT,
     INFLUENCE_ID_PREFIX,
+    INFLUENCE_KINDS,
     build_influence_entry,
     build_influence_update,
     influence_status_payload,
@@ -21,6 +22,10 @@ from src.context_engineering.influence_runtime import (
 )
 from src.graph.state import initial_request_reset_transient_state
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+from src.observability.node_registry import (
+    get_node_runtime_metadata,
+    get_registered_node_metadata,
+)
 
 
 def _state(**overrides):
@@ -148,6 +153,23 @@ def test_normal_request_reset_preserves_context_influence_ledger():
     reset = initial_request_reset_transient_state()
 
     assert "context_influence_ledger" not in reset
+
+
+def test_guidance_capture_metadata_uses_supported_influence_kinds():
+    for metadata in get_registered_node_metadata():
+        assert all(rule.kind in INFLUENCE_KINDS for rule in metadata.capture_rules)
+
+    learner_path = get_node_runtime_metadata("learner_path_planner")
+    recommendation_auto = get_node_runtime_metadata("resource_recommendation_auto")
+    recommendation_explicit = get_node_runtime_metadata(
+        "resource_recommendation_explicit"
+    )
+    assert learner_path is not None
+    assert recommendation_auto is not None
+    assert recommendation_explicit is not None
+    assert learner_path.capture_rules[0].kind == "planner_output"
+    assert recommendation_auto.capture_rules[0].kind == "agent_output"
+    assert recommendation_explicit.capture_rules[0].kind == "agent_output"
 
 
 async def test_graph_node_wrapper_captures_query_and_emits_safe_trace():

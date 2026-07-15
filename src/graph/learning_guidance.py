@@ -27,6 +27,7 @@ from src.learning_guidance.contracts import (
     ResourceRecommendationEngineResultV1,
     ResourceRecommendationOutputV1,
 )
+from src.learning_guidance.recommendation_final import build_recommendation_final_v1
 from src.learning_guidance.runtime import (
     LearningGuidanceContractError,
     LearningGuidanceRuntime,
@@ -38,6 +39,7 @@ LEARNER_PATH_OUTPUT_STATE_KEY = "learner_path_planner_output"
 LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY = "learner_path_provider_projection"
 RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY = "resource_recommendation_output"
 RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY = "recommendation_resource_context"
+RECOMMENDATION_FINAL_OUTPUT_FIELD = "recommendation_final_v1"
 
 _StrictStateModelT = TypeVar(
     "_StrictStateModelT",
@@ -507,6 +509,82 @@ def automatic_recommendation_scope_reason(
     return None
 
 
+def explicit_recommendation_scope_reason(
+    state: Mapping[str, object],
+    *,
+    subject: str | None,
+) -> RecommendationUnavailableReason | None:
+    """Validate the current-message subject scope for explicit recommendations."""
+
+    raw = state.get("subject_candidates")
+    if not isinstance(raw, (list, tuple)):
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_subject_candidates",
+            reason="explicit recommendation requires an explicit subject candidate list",
+        )
+    subjects: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip() or item != item.strip():
+            raise LearningGuidanceContractError(
+                code="invalid_recommendation_subject_candidates",
+                reason="recommendation subjects must be normalized non-blank strings",
+            )
+        if item in subjects:
+            raise LearningGuidanceContractError(
+                code="invalid_recommendation_subject_candidates",
+                reason="recommendation subjects must be unique",
+            )
+        subjects.append(item)
+    continuation_applied = state.get("workspace_continuation_applied")
+    if not isinstance(continuation_applied, bool):
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_workspace_continuation",
+            reason="workspace_continuation_applied must be an explicit boolean",
+        )
+    if not subjects:
+        if continuation_applied:
+            continuation = state.get("workspace_continuation")
+            if not isinstance(continuation, Mapping):
+                raise LearningGuidanceContractError(
+                    code="invalid_recommendation_workspace_continuation",
+                    reason="applied workspace continuation requires strict context",
+                )
+            continuation_subject = continuation.get("normalized_subject")
+            if (
+                continuation.get("continuation_applied") is not True
+                or not isinstance(continuation_subject, str)
+                or not continuation_subject.strip()
+                or continuation_subject != continuation_subject.strip()
+                or subject != continuation_subject
+            ):
+                raise LearningGuidanceContractError(
+                    code="recommendation_subject_scope_mismatch",
+                    reason=(
+                        "selected subject must match the applied workspace continuation"
+                    ),
+                )
+            return None
+        if subject is not None:
+            raise LearningGuidanceContractError(
+                code="recommendation_subject_scope_mismatch",
+                reason="a missing explicit subject scope cannot carry a selected subject",
+            )
+        return "missing_subject"
+    if continuation_applied:
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_workspace_continuation",
+            reason="explicit subject candidates may not also inherit workspace scope",
+        )
+    if subject != subjects[0]:
+        raise LearningGuidanceContractError(
+            code="recommendation_subject_scope_mismatch",
+            reason="selected subject must match the first explicit subject candidate",
+        )
+    if len(subjects) != 1:
+        return "unsupported_subject_scope"
+    return None
+
+
 def _validate_explicit_recommendation_catalog(
     batch: ResourceRecommendationBatchV1,
     *,
@@ -880,6 +958,42 @@ def resource_recommendation_output_from_state(
             code="recommendation_subject_mismatch",
             reason="recommendation output subject differs from graph state",
         )
+    if expected_mode == "explicit_request":
+        if expected_user_id is None:
+            if not (
+                parsed.status == "unavailable"
+                and parsed.unavailable_reason == "missing_user_id"
+            ):
+                raise LearningGuidanceContractError(
+                    code="recommendation_user_mismatch",
+                    reason="recommendation output must reflect the missing user_id",
+                )
+            return parsed
+        scope_reason = explicit_recommendation_scope_reason(
+            state,
+            subject=expected_subject,
+        )
+        if scope_reason is not None:
+            if not (
+                parsed.status == "unavailable"
+                and parsed.unavailable_reason == scope_reason
+            ):
+                raise LearningGuidanceContractError(
+                    code="recommendation_subject_scope_mismatch",
+                    reason=(
+                        "explicit recommendation output does not reflect the current "
+                        "subject scope"
+                    ),
+                )
+            return parsed
+        if parsed.unavailable_reason in {
+            "missing_subject",
+            "unsupported_subject_scope",
+        }:
+            raise LearningGuidanceContractError(
+                code="recommendation_subject_scope_mismatch",
+                reason="recommendation output reports a subject scope not in graph state",
+            )
     if parsed.status == "available" and parsed.mode == "automatic_after_generation":
         if parsed.batch is None:
             raise AssertionError("available recommendation output requires a batch")
@@ -1179,6 +1293,20 @@ def make_resource_recommendation_node(
                 user_id=None,
                 subject=subject,
             )
+        if mode == "explicit_request":
+            scope_reason = explicit_recommendation_scope_reason(
+                state,
+                subject=subject,
+            )
+            if scope_reason is not None:
+                return _recommendation_unavailable(
+                    runtime=runtime,
+                    request_id=request_id,
+                    mode=mode,
+                    reason=scope_reason,
+                    user_id=user_id,
+                    subject=subject,
+                )
         if subject is None:
             return _recommendation_unavailable(
                 runtime=runtime,
@@ -1309,16 +1437,57 @@ def make_resource_recommendation_node(
     return resource_recommendation
 
 
+def make_recommendation_final_output_node(
+    runtime: LearningGuidanceRuntime,
+) -> Callable[[LearningState], dict[str, object]]:
+    """Create the strict recommendation-only terminal projection node."""
+
+    if not isinstance(runtime, LearningGuidanceRuntime):
+        raise TypeError("runtime must be LearningGuidanceRuntime")
+
+    def recommendation_final_output(state: LearningState) -> dict[str, object]:
+        if _required_state_text(state, "response_mode") != "recommendation":
+            raise LearningGuidanceContractError(
+                code="recommendation_final_response_mode_mismatch",
+                reason="recommendation final requires response_mode=recommendation",
+            )
+        request_id = _required_state_text(state, "request_id")
+        thread_id = _required_state_text(state, "thread_id")
+        user_id = _optional_state_text(state, "user_id")
+        output = resource_recommendation_output_for_runtime_from_state(
+            state,
+            expected_mode="explicit_request",
+            runtime=runtime,
+        )
+        final = build_recommendation_final_v1(
+            thread_id=thread_id,
+            request_id=request_id,
+            output=output,
+            knowledge_graph=runtime.knowledge_graph,
+            expected_user_id=user_id,
+            expected_runtime_fingerprint=runtime.runtime_fingerprint,
+        )
+        return {
+            RECOMMENDATION_FINAL_OUTPUT_FIELD: final.model_dump(mode="json"),
+            "final_response_type": "recommendation_final",
+        }
+
+    return recommendation_final_output
+
+
 __all__ = [
     "LEARNER_PATH_OUTPUT_STATE_KEY",
     "LEARNER_PATH_PROVIDER_PROJECTION_STATE_KEY",
     "RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY",
+    "RECOMMENDATION_FINAL_OUTPUT_FIELD",
     "RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY",
     "automatic_recommendation_scope_reason",
+    "explicit_recommendation_scope_reason",
     "learner_path_output_from_state",
     "learner_path_provider_projection_for_runtime_from_state",
     "learner_path_provider_projection_from_state",
     "make_learner_path_planner_node",
+    "make_recommendation_final_output_node",
     "make_resource_recommendation_node",
     "recommendation_public_status_message",
     "resource_final_recommendations",

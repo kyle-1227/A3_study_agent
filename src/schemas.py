@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from src.context_engineering.thread_window_v3 import ThreadContextWindowV3
+from src.learning_guidance.recommendation_final import RecommendationFinalV1
 
 
 class ChatRequest(BaseModel):
@@ -80,6 +81,7 @@ class ThreadStatusResponse(BaseModel):
     thread_context_window_v3: ThreadContextWindowV3
     context_influence_ledger: dict[str, Any] = Field(default_factory=dict)
     last_resource_final_payload: dict[str, Any] = Field(default_factory=dict)
+    last_recommendation_final_payload: RecommendationFinalV1 | None = None
     last_qa_response: dict[str, Any] = Field(default_factory=dict)
     profile_completion_request: dict[str, Any] = Field(default_factory=dict)
     missing_run_control_fields: list[str] = Field(default_factory=list)

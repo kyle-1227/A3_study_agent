@@ -11,6 +11,7 @@ Analyze only the learner's current message and return schema-valid JSON.
 ## Response Mode
 - qa: answer a question. requested_resource_types must be empty.
 - resource: run one or more available learning-resource workflows. intent must be academic.
+- recommendation: select existing curated learning resources for the learner. intent must be academic, requested_resource_types must be empty, and requires_live_verification must be false.
 - emotional: provide emotional support. intent must be emotional.
 
 ## QA Scope
@@ -18,7 +19,7 @@ For response_mode=qa, choose exactly one:
 - academic: needs course/retrieval grounding.
 - general: may be answered from stable general knowledge.
 - a3_agent: asks about A3 Study Agent capabilities, workflows, state, or supported actions.
-For resource or emotional mode, qa_scope must be an empty string.
+For resource, recommendation, or emotional mode, qa_scope must be an empty string.
 
 Set requires_live_verification=true only when a correct answer depends on current or rapidly changing external facts. This flag does not itself enable web access.
 
@@ -34,6 +35,8 @@ For bilingual academic terms, keep the 英文原词 alongside a localized term w
 ## Contract Rules
 - requested_resource_type is the first requested_resource_types item for backward compatibility, otherwise an empty string.
 - Resource requests use response_mode=resource and intent=academic.
+- Requests to recommend or select existing curated resources use response_mode=recommendation and intent=academic. Do not turn them into resource generation requests.
+- Recommendation requests use requested_resource_type="", requested_resource_types=[], qa_scope="", and requires_live_verification=false.
 - Emotional requests use response_mode=emotional, qa_scope="", and no resources.
 - Explanatory questions about a resource concept remain response_mode=qa unless the user explicitly requests generation.
 - General and A3 capability questions are valid QA, not technical classification failures.

@@ -272,6 +272,26 @@ class TestSupervisorNode:
         assert result["subject_candidates"] == []
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_recommendation_without_subject_keeps_missing_scope(
+        self, mock_invoke
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["recommendation"],
+            subject_candidates=[],
+            response_mode="recommendation",
+            qa_scope="",
+        )
+
+        result = await supervisor_node(
+            {"messages": [HumanMessage(content="Recommend a learning resource")]}
+        )
+
+        assert result["response_mode"] == "recommendation"
+        assert result["subject"] == ""
+        assert result["subject_candidates"] == []
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_study_plan_request_sets_resource_type(self, mock_invoke):
         mock_invoke.return_value = _result(
             intent="academic",
@@ -441,6 +461,46 @@ class TestSupervisorNode:
         )
 
     @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
+    async def test_recommendation_inherits_workspace_subject_without_candidates(
+        self,
+        mock_invoke,
+    ):
+        mock_invoke.return_value = _result(
+            intent="academic",
+            keywords=["recommendation"],
+            response_mode="recommendation",
+            qa_scope="",
+            subject_candidates=[],
+        )
+        state = {
+            "messages": [HumanMessage(content="Recommend something for this topic")],
+            "thread_id": "thread-1",
+            "session_id": "thread-1",
+            "request_id": "request-3",
+            "task_workspace": {
+                "schema_version": 1,
+                "workspace_id": "workspace:v1:ml",
+                "thread_id": "thread-1",
+                "active_subject": "Machine Learning",
+                "normalized_subject": "machine_learning",
+                "active_learning_goal": "Review machine learning concepts",
+            },
+        }
+
+        with patch(
+            "src.graph.supervisor.get_available_subjects_from_data",
+            return_value=["machine_learning"],
+        ):
+            result = await supervisor_node(state)
+
+        assert result["response_mode"] == "recommendation"
+        assert result["subject"] == "machine_learning"
+        assert result["subject_candidates"] == []
+        assert result["requested_resource_types"] == []
+        assert result["workspace_continuation_applied"] is True
+        assert route_after_supervisor(result) == "recommendation"
+
+    @patch("src.graph.supervisor.invoke_structured_llm", new_callable=AsyncMock)
     async def test_explicit_subject_does_not_inherit_workspace_subject(
         self, mock_invoke
     ):
@@ -559,6 +619,18 @@ class TestRouteAfterSupervisor:
             )
             == "academic"
         )
+
+    def test_routes_explicit_recommendation_directly(self):
+        assert (
+            route_after_supervisor(
+                {
+                    "intent": "academic",
+                    "response_mode": "recommendation",
+                    "qa_scope": "",
+                }
+            )
+            == "recommendation"
+        )
         assert (
             route_after_supervisor(
                 {"intent": "academic", "response_mode": "resource", "qa_scope": ""}
@@ -665,3 +737,54 @@ class TestSupervisorBusinessValidation:
             requested_resource_types=["mindmap"],
         )
         assert "may not carry" in validate_supervisor_output(parsed)
+
+    def test_accepts_strict_explicit_recommendation(self):
+        parsed = SupervisorOutput(
+            intent="academic",
+            response_mode="recommendation",
+            qa_scope="",
+            requires_live_verification=False,
+            keywords=["python", "practice"],
+            confidence=0.9,
+            subject_candidates=["python"],
+        )
+
+        assert validate_supervisor_output(parsed) == ""
+
+    @pytest.mark.parametrize(
+        ("overrides", "error_text"),
+        [
+            ({"intent": "unknown"}, "requires academic intent"),
+            (
+                {
+                    "requested_resource_type": "quiz",
+                    "requested_resource_types": ["quiz"],
+                },
+                "may not carry requested_resource_types",
+            ),
+            ({"qa_scope": "academic"}, "requires empty qa_scope"),
+            (
+                {"requires_live_verification": True},
+                "may not require live verification",
+            ),
+        ],
+    )
+    def test_rejects_invalid_explicit_recommendation_contract(
+        self,
+        overrides,
+        error_text,
+    ):
+        values = {
+            "intent": "academic",
+            "response_mode": "recommendation",
+            "qa_scope": "",
+            "requires_live_verification": False,
+            "keywords": ["python"],
+            "confidence": 0.9,
+            "subject_candidates": ["python"],
+        }
+        values.update(overrides)
+
+        parsed = SupervisorOutput(**values)
+
+        assert error_text in validate_supervisor_output(parsed)

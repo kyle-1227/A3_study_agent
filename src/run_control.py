@@ -19,6 +19,9 @@ from src.context_engineering.compaction import (
 )
 from src.context_engineering.session_memory import SessionContextMemoryLedgerV1
 from src.context_engineering.thread_window_v3 import ThreadContextWindowV3
+from src.learning_guidance.recommendation_final import (
+    validate_recommendation_final_v1,
+)
 from src.observability.context_usage_report import merge_context_usage_report_history
 from src.observability.contracts import ContextUsageReport
 
@@ -165,6 +168,7 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
         "resource_artifacts_by_type",
         "last_generated_artifacts",
         "last_resource_final_payload",
+        "last_recommendation_final_payload",
         "last_qa_response",
         "missing_run_control_fields",
         "message",
@@ -216,6 +220,17 @@ def _safe_active_run_payload(thread_id: str, payload: dict[str, Any]) -> dict[st
             result[key] = CompactionResultV1.model_validate(value).model_dump(
                 mode="json"
             )
+            continue
+        if key == "last_recommendation_final_payload":
+            if value in ({}, None):
+                result[key] = None
+                continue
+            final = validate_recommendation_final_v1(value)
+            if final.thread_id != thread_id:
+                raise ValueError(
+                    "recommendation final thread_id does not match active run"
+                )
+            result[key] = final.model_dump(mode="json")
             continue
         result[key] = _safe_active_value(value)
     return result

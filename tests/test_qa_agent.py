@@ -408,11 +408,64 @@ def test_qa_final_is_stable_bounded_and_current_request_only():
     assert first["qa_id"] == second["qa_id"]
     assert first["payload_hash"] == second["payload_hash"]
     assert len(first["response"]["answer"]) == 6000
-    assert qa_final_payload({"request_id": "request-1", "last_qa_response": first})
+    assert qa_final_payload(
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "qa_scope": "general",
+            "last_qa_response": first,
+        }
+    )
     assert (
-        qa_final_payload({"request_id": "request-2", "last_qa_response": first}) is None
+        qa_final_payload(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-2",
+                "last_qa_response": first,
+            }
+        )
+        is None
     )
     assert qa_final_payload({"request_id": "request-1", "last_qa_response": {}}) is None
+
+    tampered = {**first, "response": {**first["response"], "answer": "tampered"}}
+    with pytest.raises(ValueError, match="payload_hash mismatch"):
+        qa_final_payload(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-1",
+                "qa_scope": "general",
+                "last_qa_response": tampered,
+            }
+        )
+
+    wrong_thread = build_qa_final_payload(
+        response=response,
+        qa_scope="general",
+        thread_id="thread-2",
+        request_id="request-1",
+    )
+    with pytest.raises(ValueError, match="thread_id does not match"):
+        qa_final_payload(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-1",
+                "qa_scope": "general",
+                "last_qa_response": wrong_thread,
+            }
+        )
+
+    with pytest.raises(ValueError, match="qa_final"):
+        qa_final_payload(
+            {
+                "thread_id": "thread-1",
+                "request_id": "request-1",
+                "last_qa_response": {
+                    "type": "qa_final",
+                    "request_id": "request-1",
+                },
+            }
+        )
 
 
 def test_manifest_identifies_capability_context_without_storing_content():

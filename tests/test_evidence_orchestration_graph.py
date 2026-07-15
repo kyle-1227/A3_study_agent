@@ -314,7 +314,7 @@ def _missing_coverage(requirements, *, round_index: int, suffix: str):
 
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():
     runtime = _runtime()
-    legacy = build_graph()
+    legacy = build_graph(runtime.learning_guidance)
     candidate = build_resource_evidence_parent_child_graph(runtime)
 
     assert "resource_evidence_planner" not in legacy.nodes
@@ -334,6 +334,8 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         "resource_evidence_assignment",
         "resource_bundle_aggregator",
         "resource_recommendation_auto",
+        "resource_recommendation_explicit",
+        "recommendation_final_output",
     }.issubset(candidate.nodes)
     assert {
         "rag_retrieve",
@@ -355,12 +357,19 @@ def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged(
         "resource_recommendation_auto",
         "resource_bundle_output",
     ) in candidate.edges
+    assert (
+        "resource_recommendation_explicit",
+        "recommendation_final_output",
+    ) in candidate.edges
+    assert ("recommendation_final_output", "__end__") in candidate.edges
     assert "learner_path_planner" not in legacy.nodes
     assert "resource_bundle_aggregator" not in legacy.nodes
     assert "resource_recommendation_auto" not in legacy.nodes
     assert get_node_runtime_metadata("learner_path_planner") is not None
     assert get_node_runtime_metadata("resource_bundle_aggregator") is not None
     assert get_node_runtime_metadata("resource_recommendation_auto") is not None
+    assert get_node_runtime_metadata("resource_recommendation_explicit") is not None
+    assert get_node_runtime_metadata("recommendation_final_output") is not None
     assert candidate.compile() is not None
 
 

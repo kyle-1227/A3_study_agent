@@ -972,6 +972,7 @@ def workspace_continuation_context(
         fallback="",
     )
     resource_types = _requested_resource_types_from_state(state)
+    is_recommendation_request = state.get("response_mode") == "recommendation"
     workspace = _coerce_workspace(
         state.get("task_workspace")
         if isinstance(state.get("task_workspace"), dict)
@@ -1032,7 +1033,7 @@ def workspace_continuation_context(
         return _continuation_skip(context, "thread_missing")
     if current_thread != workspace_thread:
         return _continuation_skip(context, "thread_mismatch")
-    if not resource_types:
+    if not resource_types and not is_recommendation_request:
         return _continuation_skip(context, "no_resource_request")
     if _has_explicit_current_subject(state):
         return _continuation_skip(context, "current_subject_present")

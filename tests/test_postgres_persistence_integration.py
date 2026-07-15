@@ -300,7 +300,7 @@ def _durable_state(thread_id: str) -> tuple[dict, dict]:
     return durable, study_plan_final
 
 
-async def _assert_postgres_reconstruction() -> None:
+async def _assert_postgres_reconstruction(learning_guidance_runtime) -> None:
     uri = _required_postgres_uri()
     thread_id = f"phase7-{uuid4()}"
     config = make_thread_config(thread_id)
@@ -309,7 +309,10 @@ async def _assert_postgres_reconstruction() -> None:
     try:
         async with AsyncPostgresSaver.from_conn_string(uri) as saver:
             await saver.setup()
-            graph = get_compiled_graph(checkpointer=saver)
+            graph = get_compiled_graph(
+                learning_guidance_runtime,
+                checkpointer=saver,
+            )
             await graph.aupdate_state(config, durable)
             await graph.aupdate_state(
                 config,
@@ -318,7 +321,10 @@ async def _assert_postgres_reconstruction() -> None:
             )
 
         async with AsyncPostgresSaver.from_conn_string(uri) as restored_saver:
-            restored_graph = get_compiled_graph(checkpointer=restored_saver)
+            restored_graph = get_compiled_graph(
+                learning_guidance_runtime,
+                checkpointer=restored_saver,
+            )
             restored_snapshot = await restored_graph.aget_state(config)
             values = restored_snapshot.values
             status = _thread_status_from_snapshot(thread_id, restored_snapshot)
@@ -373,9 +379,13 @@ async def _assert_postgres_reconstruction() -> None:
             await cleanup_saver.adelete_thread(thread_id)
 
 
-def test_postgres_rebuild_restores_durable_context_without_resource_leakage():
+def test_postgres_rebuild_restores_durable_context_without_resource_leakage(
+    learning_guidance_runtime,
+):
     loop = asyncio.SelectorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
     try:
-        loop.run_until_complete(_assert_postgres_reconstruction())
+        loop.run_until_complete(
+            _assert_postgres_reconstruction(learning_guidance_runtime)
+        )
     finally:
         loop.close()

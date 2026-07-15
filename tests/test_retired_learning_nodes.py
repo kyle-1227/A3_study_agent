@@ -20,8 +20,10 @@ def test_retired_learning_node_callables_are_removed() -> None:
         assert not hasattr(academic, node_name), node_name
 
 
-def test_retired_learning_nodes_are_absent_from_served_graph() -> None:
-    node_ids = set(build_graph().nodes)
+def test_retired_learning_nodes_are_absent_from_served_graph(
+    learning_guidance_runtime,
+) -> None:
+    node_ids = set(build_graph(learning_guidance_runtime).nodes)
     assert node_ids.isdisjoint(RETIRED_NODE_NAMES)
 
 

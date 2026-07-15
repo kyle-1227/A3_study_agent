@@ -70,6 +70,18 @@ async def _assessment_source():
     )
 
 
+async def _recommendation_source():
+    yield AgentStreamEventDraftV2(
+        type="recommendation_final",
+        data={
+            "schema_version": "recommendation_final_v1",
+            "type": "recommendation_final",
+            "recommendation_final_id": f"recommendation-final:v1:{'a' * 64}",
+            "payload_hash": f"recommendation-final-payload:v1:{'b' * 64}",
+        },
+    )
+
+
 async def _blocking_source(release: asyncio.Event):
     await release.wait()
     async for frame in _source():
@@ -152,6 +164,31 @@ async def test_assessment_final_is_replayable_with_one_authoritative_terminal() 
         "stream_done",
     ]
     assert _payload(first[-1])["data"]["terminal_type"] == "assessment_final"
+
+
+@pytest.mark.anyio
+async def test_recommendation_final_is_replayable_with_one_authoritative_terminal() -> (
+    None
+):
+    manager = StreamSessionManager(_config(max_events=4))
+    session = await _create(
+        manager,
+        stream_id="stream-recommendation-1",
+        source=_recommendation_source(),
+    )
+    first = [frame async for frame in session.subscribe(after_sequence=0)]
+    replay = [frame async for frame in session.subscribe(after_sequence=1)]
+
+    assert [payload["type"] for payload in map(_payload, first)] == [
+        "stream_start",
+        "recommendation_final",
+        "stream_done",
+    ]
+    assert [payload["type"] for payload in map(_payload, replay)] == [
+        "recommendation_final",
+        "stream_done",
+    ]
+    assert _payload(first[-1])["data"]["terminal_type"] == "recommendation_final"
 
 
 @pytest.mark.anyio
@@ -238,6 +275,29 @@ async def test_failure_after_authoritative_terminal_only_appends_done() -> None:
         "stream_done",
     ]
     assert payloads[-1]["data"]["terminal_type"] == "qa_final"
+
+
+@pytest.mark.anyio
+async def test_failure_after_recommendation_final_only_appends_done() -> None:
+    async def terminal_then_fail():
+        async for draft in _recommendation_source():
+            yield draft
+        raise RuntimeError("failure after recommendation final")
+
+    manager = StreamSessionManager(_config())
+    session = await _create(
+        manager,
+        stream_id="stream-recommendation-failure",
+        source=terminal_then_fail(),
+    )
+    payloads = [_payload(frame) async for frame in session.subscribe(after_sequence=0)]
+
+    assert [payload["type"] for payload in payloads] == [
+        "stream_start",
+        "recommendation_final",
+        "stream_done",
+    ]
+    assert payloads[-1]["data"]["terminal_type"] == "recommendation_final"
 
 
 @pytest.mark.anyio

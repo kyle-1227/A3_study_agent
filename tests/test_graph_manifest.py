@@ -18,18 +18,20 @@ from src.observability.graph_manifest import (
 from src.observability.node_registry import get_resource_workflow_nodes
 
 
-def _build_manifest():
+def _build_manifest(learning_guidance_runtime):
     return build_graph_manifest(
-        get_compiled_graph(),
+        get_compiled_graph(learning_guidance_runtime),
         context_policy_mode="strict",
         checkpointer_enabled=True,
         checkpointer_type="postgres",
     )
 
 
-def test_compiled_graph_manifest_is_deterministic_and_complete():
-    first = _build_manifest()
-    second = _build_manifest()
+def test_compiled_graph_manifest_is_deterministic_and_complete(
+    learning_guidance_runtime,
+):
+    first = _build_manifest(learning_guidance_runtime)
+    second = _build_manifest(learning_guidance_runtime)
 
     assert first.schema_version == "graph_manifest_v1"
     assert first.graph_version == second.graph_version
@@ -37,7 +39,7 @@ def test_compiled_graph_manifest_is_deterministic_and_complete():
     node_ids = {node.node_id for node in first.nodes}
     physical_ids = {
         str(node_id)
-        for node_id in get_compiled_graph().get_graph().nodes
+        for node_id in get_compiled_graph(learning_guidance_runtime).get_graph().nodes
         if not (str(node_id).startswith("__") and str(node_id).endswith("__"))
     }
     assert {node.node_id for node in first.nodes if not node.logical} == physical_ids
@@ -46,8 +48,10 @@ def test_compiled_graph_manifest_is_deterministic_and_complete():
     )
 
 
-def test_manifest_logical_nodes_come_from_workflow_registry():
-    manifest = _build_manifest()
+def test_manifest_logical_nodes_come_from_workflow_registry(
+    learning_guidance_runtime,
+):
+    manifest = _build_manifest(learning_guidance_runtime)
     workflows = get_resource_workflow_nodes()
     logical_ids = {node.node_id for node in manifest.nodes if node.logical}
 
@@ -60,8 +64,10 @@ def test_manifest_logical_nodes_come_from_workflow_registry():
             assert node.workflow in workflows
 
 
-def test_manifest_does_not_expose_runtime_connection_metadata():
-    manifest = _build_manifest()
+def test_manifest_does_not_expose_runtime_connection_metadata(
+    learning_guidance_runtime,
+):
+    manifest = _build_manifest(learning_guidance_runtime)
     serialized = manifest.model_dump_json()
 
     assert "postgresql://" not in serialized
@@ -99,8 +105,10 @@ def test_manifest_unavailable_contract_is_safe_and_typed():
     }
 
 
-def test_manifest_status_payload_records_nonempty_visible_topology_only():
-    manifest = _build_manifest()
+def test_manifest_status_payload_records_nonempty_visible_topology_only(
+    learning_guidance_runtime,
+):
+    manifest = _build_manifest(learning_guidance_runtime)
     payload = graph_manifest_status_payload(manifest)
 
     assert payload["graph_version"] == manifest.graph_version
@@ -113,10 +121,13 @@ def test_manifest_status_payload_records_nonempty_visible_topology_only():
 
 
 @pytest.mark.anyio
-async def test_graph_manifest_endpoint_returns_nonempty_cached_topology(monkeypatch):
+async def test_graph_manifest_endpoint_returns_nonempty_cached_topology(
+    monkeypatch,
+    learning_guidance_runtime,
+):
     import app as app_module
 
-    manifest = _build_manifest()
+    manifest = _build_manifest(learning_guidance_runtime)
     trace_events: list[tuple[str, dict]] = []
 
     def capture_trace(_logger, stage, payload, **_kwargs):
@@ -145,8 +156,8 @@ async def test_graph_manifest_endpoint_returns_nonempty_cached_topology(monkeypa
     )
 
 
-def test_graph_manifest_forbids_schema_drift():
-    valid = _build_manifest().model_dump(mode="json")
+def test_graph_manifest_forbids_schema_drift(learning_guidance_runtime):
+    valid = _build_manifest(learning_guidance_runtime).model_dump(mode="json")
     valid["unexpected"] = True
 
     with pytest.raises(ValidationError):

@@ -15,7 +15,7 @@ from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import unquote
 
 from dotenv import load_dotenv
@@ -115,6 +115,11 @@ from src.graph.resource_final_runtime import (
 )
 from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.graph.qa import qa_final_payload, qa_final_trace_payload
+from src.learning_guidance.factory import load_learning_guidance_runtime
+from src.learning_guidance.recommendation_final import (
+    RecommendationFinalV1,
+    validate_recommendation_final_v1,
+)
 from src.llm.compaction import invoke_conversation_compaction
 from src.profile import get_profile_manager
 from src.run_control import (
@@ -680,7 +685,19 @@ async def lifespan(app: FastAPI):
         graph_checkpointer = observe_checkpointer(checkpointer)
         app.state.checkpointer_enabled = bool(checkpointer)
         app.state.checkpointer_type = ckp_type
-        graph = get_compiled_graph(checkpointer=graph_checkpointer)
+        project_root = Path(__file__).resolve().parent
+        learning_guidance_runtime = load_learning_guidance_runtime(
+            config_path=project_root / "config" / "learning_guidance.yaml",
+            project_root=project_root,
+            profile_db_path=project_root / "data" / "profile.db",
+            memory_db_path=project_root / "data" / "memory.db",
+            clock=lambda: datetime.now(timezone.utc),
+        )
+        graph = get_compiled_graph(
+            learning_guidance_runtime,
+            checkpointer=graph_checkpointer,
+        )
+        app.state.learning_guidance_runtime = learning_guidance_runtime
         runtime_node_ids = frozenset(get_physical_graph_node_ids(graph))
         setattr(graph, "_a3_node_ids", runtime_node_ids)
         setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
@@ -746,6 +763,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="A3 Study Agent API", lifespan=lifespan)
+
+
+class AgentEventStreamResponse(StreamingResponse):
+    """Document and deliver the public agent_stream_v2 media type."""
+
+    media_type = "text/event-stream"
+
+
+_SSE_OPENAPI_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "agent_stream_v2 server-sent events",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }
+}
 
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
@@ -1012,6 +1043,20 @@ def _last_context_usage_report(values: dict) -> dict:
     return {}
 
 
+def _last_recommendation_final_payload(
+    values: dict,
+    *,
+    thread_id: str,
+) -> RecommendationFinalV1 | None:
+    raw = values.get("last_recommendation_final_payload")
+    if raw in ({}, None):
+        return None
+    final = validate_recommendation_final_v1(raw)
+    if final.thread_id != thread_id:
+        raise ValueError("recommendation final thread_id does not match thread status")
+    return final
+
+
 def _activity_timeline(values: dict) -> list[dict]:
     timeline = values.get("activity_timeline")
     return merge_activity_timeline([], timeline if isinstance(timeline, list) else [])
@@ -1076,6 +1121,7 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
     previous_ledger = values.get("thread_context_ledger")
     previous_background = values.get("background_context_window")
     previous_resource_payload = values.get("last_resource_final_payload")
+    previous_recommendation_payload = values.get("last_recommendation_final_payload")
     previous_usage_report = values.get("context_usage_report")
     previous_usage_reports = values.get("context_usage_reports")
     previous_activity_timeline = values.get("activity_timeline")
@@ -1094,6 +1140,8 @@ def _new_request_status_values(snapshot_values: dict, initial_run_values: dict) 
         values["background_context_window"] = previous_background
     if isinstance(previous_resource_payload, dict):
         values["last_resource_final_payload"] = previous_resource_payload
+    if isinstance(previous_recommendation_payload, dict):
+        values["last_recommendation_final_payload"] = previous_recommendation_payload
     if isinstance(previous_usage_report, dict):
         values["context_usage_report"] = previous_usage_report
     if isinstance(previous_usage_reports, list):
@@ -1158,6 +1206,10 @@ def _thread_status_from_snapshot(
             last_resource_final_payload=values.get("last_resource_final_payload")
             if isinstance(values.get("last_resource_final_payload"), dict)
             else {},
+            last_recommendation_final_payload=_last_recommendation_final_payload(
+                values,
+                thread_id=thread_id,
+            ),
             last_qa_response=values.get("last_qa_response")
             if isinstance(values.get("last_qa_response"), dict)
             else {},
@@ -1217,6 +1269,10 @@ def _thread_status_from_snapshot(
         last_resource_final_payload=values.get("last_resource_final_payload")
         if isinstance(values.get("last_resource_final_payload"), dict)
         else {},
+        last_recommendation_final_payload=_last_recommendation_final_payload(
+            values,
+            thread_id=thread_id,
+        ),
         last_qa_response=values.get("last_qa_response")
         if isinstance(values.get("last_qa_response"), dict)
         else {},
@@ -1286,6 +1342,10 @@ def _thread_status_from_active_run(
         last_resource_final_payload=active_run.get("last_resource_final_payload")
         if isinstance(active_run.get("last_resource_final_payload"), dict)
         else {},
+        last_recommendation_final_payload=_last_recommendation_final_payload(
+            active_run,
+            thread_id=thread_id,
+        ),
         request_context_window=request_context_window
         if isinstance(request_context_window, dict)
         else {"current_request_id": "", "current_node": "", "last_event_count": 0},
@@ -1390,6 +1450,7 @@ async def _try_update_run_state(
     *,
     state: dict | None = None,
     persist_checkpoint: bool = True,
+    update_active_on_failure: bool = True,
 ) -> bool:
     thread_id = _thread_id_from_update(config=config, values=values, state=state)
     if not persist_checkpoint:
@@ -1402,7 +1463,11 @@ async def _try_update_run_state(
             update_active_run(thread_id, values)
         return True
     except Exception as exc:
-        if thread_id and get_active_run(thread_id) is not None:
+        if (
+            update_active_on_failure
+            and thread_id
+            and get_active_run(thread_id) is not None
+        ):
             update_active_run(thread_id, values)
         emit_a3_trace(
             logger,
@@ -1410,7 +1475,6 @@ async def _try_update_run_state(
             {
                 "keys": sorted(values.keys()),
                 "error_type": type(exc).__name__,
-                "error_message": str(exc),
             },
             state=state or {},
             env_flag="LOG_A3_TRACE",
@@ -1860,6 +1924,30 @@ def _resource_final_payload(final_state: dict) -> dict | None:
     return resource_final.model_dump(mode="json")
 
 
+def _recommendation_final_payload(final_state: dict) -> dict | None:
+    """Return the current request's authoritative Recommendation Final V1."""
+
+    raw = final_state.get("recommendation_final_v1")
+    if "recommendation_final_v1" not in final_state or raw == {}:
+        return None
+    recommendation_final = validate_recommendation_final_v1(raw)
+    thread_id = str(final_state.get("thread_id") or "").strip()
+    request_id = str(final_state.get("request_id") or "").strip()
+    if not thread_id or not request_id:
+        raise ValueError(
+            "Recommendation Final V1 requires runtime thread_id and request_id"
+        )
+    if recommendation_final.thread_id != thread_id:
+        raise ValueError(
+            "Recommendation Final V1 thread_id does not match runtime state"
+        )
+    if recommendation_final.request_id != request_id:
+        raise ValueError(
+            "Recommendation Final V1 request_id does not match runtime state"
+        )
+    return recommendation_final.model_dump(mode="json")
+
+
 def _dev_memory_clear_enabled() -> bool:
     """Return whether the dev-only persistent-memory clear endpoint is enabled."""
     env_values = {
@@ -1892,6 +1980,8 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "resource_artifacts_by_type",
         "last_generated_artifacts",
         "last_resource_final_payload",
+        "recommendation_final_v1",
+        "last_recommendation_final_payload",
         "last_qa_response",
         "llm_input_manifest",
         "llm_input_manifests",
@@ -1920,6 +2010,8 @@ async def clear_persistent_memory_for_thread(graph, thread_id: str) -> dict:
         "resource_artifacts_by_type": DICT_CLEAR,
         "last_generated_artifacts": GENERATED_ARTIFACTS_CLEAR,
         "last_resource_final_payload": DICT_CLEAR,
+        "recommendation_final_v1": DICT_CLEAR,
+        "last_recommendation_final_payload": DICT_CLEAR,
         "last_qa_response": {},
         "llm_input_manifest": {},
         "llm_input_manifests": LLM_INPUT_MANIFESTS_CLEAR,
@@ -3872,19 +3964,117 @@ async def _stream_graph_event_drafts(
         "thread_id": thread_id,
         "request_id": request_id,
     }
-    qa_payload = qa_final_payload(final_state)
-    resource_payload = _resource_final_payload(runtime_final_state)
-    terminal_resource_state = runtime_final_state
-    if terminal_resource_output:
-        terminal_resource_state = {
-            **terminal_resource_output,
-            "thread_id": thread_id,
-            "request_id": request_id,
-        }
-        terminal_resource_payload = _resource_final_payload(terminal_resource_state)
-        if terminal_resource_payload:
-            resource_payload = terminal_resource_payload
+    try:
+        qa_payload = qa_final_payload(final_state)
+        resource_payload = _resource_final_payload(runtime_final_state)
+        recommendation_payload = _recommendation_final_payload(runtime_final_state)
+        terminal_resource_state = runtime_final_state
+        if terminal_resource_output:
+            terminal_resource_state = {
+                **terminal_resource_output,
+                "thread_id": thread_id,
+                "request_id": request_id,
+            }
+            terminal_resource_payload = _resource_final_payload(terminal_resource_state)
+            if terminal_resource_payload:
+                resource_payload = terminal_resource_payload
+    except Exception as exc:
+        failed_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Authoritative terminal validation failed",
+            summary="Graph terminal payload did not pass strict validation",
+            error_type=type(exc).__name__,
+        )
+        error_update_ok = await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "current_node": "",
+                "stop_requested": False,
+                "request_context_window": final_request_context_window,
+                "activity_timeline": activity_timeline,
+            },
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        run_control_registry.clear_stop_signal(thread_id)
+        emit_a3_trace(
+            logger,
+            "sse_authoritative_terminal_invalid",
+            {"error_type": type(exc).__name__},
+            state=runtime_final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        if failed_activity_payload:
+            yield failed_activity_payload
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "authoritative_terminal_invalid",
+                "message": "Graph terminal payload failed strict validation",
+                "recoverable": False,
+                "terminal_non_completed": True,
+            },
+        )
+        if error_update_ok:
+            finish_active_run(
+                thread_id,
+                {
+                    "run_status": RUN_STATUS_ERROR,
+                    "error_type": "authoritative_terminal_invalid",
+                },
+            )
+        return
     diagnostic_state = terminal_resource_state
+    terminal_payload_count = sum(
+        payload is not None
+        for payload in (qa_payload, resource_payload, recommendation_payload)
+    )
+    if terminal_payload_count > 1:
+        failed_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Authoritative terminal conflict",
+            summary="Graph execution produced multiple authoritative finals",
+        )
+        error_update_ok = await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "current_node": "",
+                "stop_requested": False,
+                "request_context_window": final_request_context_window,
+                "activity_timeline": activity_timeline,
+            },
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        run_control_registry.clear_stop_signal(thread_id)
+        if failed_activity_payload:
+            yield failed_activity_payload
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "authoritative_terminal_conflict",
+                "message": "Graph execution produced multiple authoritative finals",
+                "recoverable": False,
+                "terminal_non_completed": True,
+            },
+        )
+        if error_update_ok:
+            finish_active_run(
+                thread_id,
+                {
+                    "run_status": RUN_STATUS_ERROR,
+                    "error_type": "authoritative_terminal_conflict",
+                },
+            )
+        return
     if not resource_payload and resource_final_v3_required(diagnostic_state):
         failed_activity_payload = await _finalize_stream_activity(
             status="failed",
@@ -3998,6 +4188,8 @@ async def _stream_graph_event_drafts(
     }
     if resource_payload:
         completed_values["last_resource_final_payload"] = resource_payload
+    if recommendation_payload:
+        completed_values["last_recommendation_final_payload"] = recommendation_payload
     if qa_payload:
         completed_values["last_qa_response"] = qa_payload
     if context_usage_history:
@@ -4057,7 +4249,51 @@ async def _stream_graph_event_drafts(
         config,
         completed_values,
         state=final_state,
+        update_active_on_failure=False,
     )
+    if not completed_update_ok:
+        failed_activity_payload = await _finalize_stream_activity(
+            status="failed",
+            title="Terminal checkpoint persistence failed",
+            summary="Authoritative final was not committed to the thread checkpoint",
+            error_type="terminal_checkpoint_persist_failed",
+        )
+        await _try_update_run_state(
+            graph,
+            config,
+            {
+                "run_status": RUN_STATUS_ERROR,
+                "resume_available": False,
+                "pending_interrupt_type": "",
+                "current_node": "",
+                "stop_requested": False,
+                "request_context_window": final_request_context_window,
+                "activity_timeline": activity_timeline,
+            },
+            state=final_state,
+            persist_checkpoint=True,
+        )
+        run_control_registry.clear_stop_signal(thread_id)
+        emit_a3_trace(
+            logger,
+            "sse_terminal_checkpoint_persist_failed",
+            {"terminal_non_completed": True},
+            state=runtime_final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        if failed_activity_payload:
+            yield failed_activity_payload
+        yield _stream_draft(
+            "stream_error",
+            {
+                "error_type": "terminal_checkpoint_persist_failed",
+                "message": "Authoritative final could not be persisted",
+                "recoverable": False,
+                "terminal_non_completed": True,
+            },
+        )
+        finish_active_run(thread_id, {"run_status": RUN_STATUS_ERROR})
+        return
     run_control_registry.clear_stop_signal(thread_id)
     for activity_payload in final_activity_payloads:
         yield activity_payload
@@ -4104,6 +4340,31 @@ async def _stream_graph_event_drafts(
             "resource_final",
             {key: value for key, value in resource_payload.items() if key != "type"},
         )
+    elif recommendation_payload:
+        emit_a3_trace(
+            logger,
+            "sse_recommendation_final",
+            {
+                "sent": True,
+                "schema_version": recommendation_payload.get("schema_version"),
+                "recommendation_final_id": recommendation_payload.get(
+                    "recommendation_final_id",
+                    "",
+                ),
+                "payload_hash": recommendation_payload.get("payload_hash", ""),
+                "terminal_status": recommendation_payload.get(
+                    "terminal_status",
+                    "",
+                ),
+                "recommendation_count": len(
+                    recommendation_payload.get("recommendations") or []
+                ),
+                "unavailable_reason": recommendation_payload.get("unavailable_reason"),
+            },
+            state=runtime_final_state,
+            env_flag="LOG_A3_TRACE",
+        )
+        yield _stream_draft("recommendation_final", recommendation_payload)
     if completed_update_ok:
         finish_active_run(thread_id, {"run_status": RUN_STATUS_COMPLETED})
 
@@ -4331,6 +4592,10 @@ async def _generate_stream_drafts_impl(
             )
             if isinstance(status_values.get("last_resource_final_payload"), dict)
             else {},
+            "last_recommendation_final_payload": _last_recommendation_final_payload(
+                status_values,
+                thread_id=thread_id,
+            ),
             "last_provider_dispatch": status_values.get("last_provider_dispatch")
             if isinstance(status_values.get("last_provider_dispatch"), dict)
             else {},
@@ -4804,6 +5069,10 @@ async def _generate_resume_stream_drafts_impl(
             )
             if isinstance(status_values.get("last_resource_final_payload"), dict)
             else {},
+            "last_recommendation_final_payload": _last_recommendation_final_payload(
+                status_values,
+                thread_id=thread_id,
+            ),
         },
     )
 
@@ -5050,6 +5319,10 @@ async def _generate_continue_stream_drafts_impl(
             )
             if isinstance(status_values.get("last_resource_final_payload"), dict)
             else {},
+            "last_recommendation_final_payload": _last_recommendation_final_payload(
+                status_values,
+                thread_id=thread_id,
+            ),
         },
     )
     await _update_run_state(
@@ -5272,7 +5545,11 @@ async def frontend_performance_endpoint(request: Request):
     return Response(status_code=204)
 
 
-@app.post("/stream")
+@app.post(
+    "/stream",
+    response_class=AgentEventStreamResponse,
+    responses=_SSE_OPENAPI_RESPONSES,
+)
 async def stream_endpoint(chat: ChatRequest, request: Request):
     graph_version = _app_graph_version(request.app)
     request_id = str(chat.request_id)
@@ -5308,14 +5585,18 @@ async def stream_endpoint(chat: ChatRequest, request: Request):
         raise HTTPException(status_code=410, detail="stream_request_expired") from exc
     except StreamSessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return StreamingResponse(
+    return AgentEventStreamResponse(
         response_body,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-@app.post("/resume")
+@app.post(
+    "/resume",
+    response_class=AgentEventStreamResponse,
+    responses=_SSE_OPENAPI_RESPONSES,
+)
 async def resume_endpoint(req: ResumeRequest, request: Request):
     graph_version = _app_graph_version(request.app)
     if not req.thread_id.strip():
@@ -5360,7 +5641,7 @@ async def resume_endpoint(req: ResumeRequest, request: Request):
         raise HTTPException(status_code=410, detail="stream_request_expired") from exc
     except StreamSessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return StreamingResponse(
+    return AgentEventStreamResponse(
         response_body,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -5372,7 +5653,11 @@ async def stop_thread_endpoint(thread_id: str, req: StopRequest, request: Reques
     return await request_thread_stop(request.app.state.graph, thread_id, req.reason)
 
 
-@app.post("/threads/{thread_id}/assessment-attempts")
+@app.post(
+    "/threads/{thread_id}/assessment-attempts",
+    response_class=AgentEventStreamResponse,
+    responses=_SSE_OPENAPI_RESPONSES,
+)
 async def assessment_attempt_endpoint(
     thread_id: str,
     attempt: AssessmentAttemptV1,
@@ -5416,7 +5701,7 @@ async def assessment_attempt_endpoint(
         raise HTTPException(status_code=410, detail="stream_request_expired") from exc
     except StreamSessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return StreamingResponse(
+    return AgentEventStreamResponse(
         response_body,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -5428,7 +5713,11 @@ async def thread_status_endpoint(thread_id: str, request: Request):
     return await get_thread_status_payload(request.app.state.graph, thread_id)
 
 
-@app.post("/threads/{thread_id}/continue")
+@app.post(
+    "/threads/{thread_id}/continue",
+    response_class=AgentEventStreamResponse,
+    responses=_SSE_OPENAPI_RESPONSES,
+)
 async def continue_thread_endpoint(
     thread_id: str,
     req: ContinueRequest,
@@ -5460,14 +5749,18 @@ async def continue_thread_endpoint(
         raise HTTPException(status_code=410, detail="stream_request_expired") from exc
     except StreamSessionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return StreamingResponse(
+    return AgentEventStreamResponse(
         response_body,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-@app.get("/streams/{stream_id}")
+@app.get(
+    "/streams/{stream_id}",
+    response_class=AgentEventStreamResponse,
+    responses=_SSE_OPENAPI_RESPONSES,
+)
 async def reconnect_stream_endpoint(stream_id: str, request: Request):
     try:
         session = await stream_session_manager.get(stream_id)
@@ -5482,7 +5775,7 @@ async def reconnect_stream_endpoint(stream_id: str, request: Request):
         raise HTTPException(status_code=404, detail="stream_session_not_found") from exc
     except StreamContractError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return StreamingResponse(
+    return AgentEventStreamResponse(
         response_body,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

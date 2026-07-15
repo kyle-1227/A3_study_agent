@@ -520,6 +520,7 @@ def initial_request_reset_transient_state() -> dict:
         "resource_branch_results": RESOURCE_RESULTS_CLEAR,
         "resource_bundle_artifact": {},
         "resource_final_v3": {},
+        "recommendation_final_v1": {},
         "resource_generation_debug": {},
         "resource_generation_status": "",
         "resource_evidence_readiness": [],
@@ -727,6 +728,9 @@ class LearningState(TypedDict):
     last_resource_final_payload: Annotated[
         dict, latest_dict_reducer
     ]  # Last sanitized renderable resource_final payload
+    last_recommendation_final_payload: Annotated[
+        dict, latest_dict_reducer
+    ]  # Last strict personalized recommendation_final payload
     assessment_checkpoint_resources: Annotated[
         dict, assessment_checkpoint_resources_reducer
     ]  # Durable server-only quiz cards and private answer keys for this thread
@@ -737,7 +741,7 @@ class LearningState(TypedDict):
         dict, latest_dict_reducer
     ]  # Last bounded renderable qa_final payload
     intent: Literal["academic", "emotional", "unknown"]  # User intent
-    response_mode: Literal["qa", "resource", "emotional", ""]
+    response_mode: Literal["qa", "resource", "recommendation", "emotional", ""]
     qa_scope: Literal["academic", "general", "a3_agent", ""]
     requires_live_verification: bool
     final_response_type: str
@@ -925,6 +929,7 @@ class LearningState(TypedDict):
     resource_task: dict  # Dynamic Send payload owned by one resource worker
     resource_bundle_artifact: dict  # Aggregated multi-resource artifact metadata
     resource_final_v3: dict  # Strict authoritative Resource Final V3 payload
+    recommendation_final_v1: dict  # Strict current-turn Recommendation Final V1
     resource_generation_debug: (
         dict  # Resource generation execution status/debug summary
     )

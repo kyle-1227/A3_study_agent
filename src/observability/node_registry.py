@@ -166,7 +166,7 @@ for item in (
         stage_rank=31,
         order=31,
         capture_rules=(
-            _rule("curriculum", "learner_path_planner_output", priority=80),
+            _rule("planner_output", "learner_path_planner_output", priority=80),
         ),
     ),
     _metadata(
@@ -504,6 +504,22 @@ for item in (
         order=88,
     ),
     _metadata(
+        "resource_recommendation_explicit",
+        label="Curated resource recommendation",
+        description="Rank existing curated resources from strictly bound learner evidence.",
+        role="agent",
+        group="resources",
+        stage_rank=60,
+        order=60,
+        capture_rules=(
+            _rule(
+                "agent_output",
+                "resource_recommendation_output",
+                priority=80,
+            ),
+        ),
+    ),
+    _metadata(
         "resource_recommendation_auto",
         label="Automatic resource recommendation",
         description="Rank generated resources from strictly bound learner evidence.",
@@ -513,11 +529,20 @@ for item in (
         order=90,
         capture_rules=(
             _rule(
-                "curriculum",
+                "agent_output",
                 "resource_recommendation_output",
                 priority=80,
             ),
         ),
+    ),
+    _metadata(
+        "recommendation_final_output",
+        label="Recommendation final",
+        description="Build the authoritative recommendation-only terminal payload.",
+        role="output",
+        group="resources",
+        stage_rank=95,
+        order=95,
     ),
     _metadata(
         "resource_bundle_output",

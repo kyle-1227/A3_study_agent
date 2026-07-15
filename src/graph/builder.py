@@ -25,6 +25,7 @@ from src.graph.academic import (
 from src.graph.emotional import emotional_response
 from src.graph.learning_guidance import (
     make_learner_path_planner_node,
+    make_recommendation_final_output_node,
     make_resource_recommendation_node,
 )
 from src.graph.resource_contracts import (
@@ -46,6 +47,7 @@ from src.graph.qa import qa_agent
 from src.graph.state import LearningState
 from src.graph.study_plan import study_plan_profile_gate_main
 from src.graph.supervisor import handle_unknown, route_after_supervisor, supervisor_node
+from src.learning_guidance.runtime import LearningGuidanceRuntime
 from src.run_control import wrap_interruptible_node
 
 if TYPE_CHECKING:
@@ -60,8 +62,12 @@ def _build_graph_with_academic_nodes(
     *,
     rag_node,
     post_evidence_node,
+    learning_guidance_runtime: LearningGuidanceRuntime,
 ) -> StateGraph:
     """Construct one graph with explicitly supplied local retrieval boundaries."""
+
+    if not isinstance(learning_guidance_runtime, LearningGuidanceRuntime):
+        raise TypeError("learning_guidance_runtime must be LearningGuidanceRuntime")
 
     # Build graph
     graph = StateGraph(LearningState)
@@ -98,6 +104,19 @@ def _build_graph_with_academic_nodes(
     # First-class structured question answering
     add_interruptible_node("qa_agent", qa_agent)
 
+    # Explicit recommendation-only terminal; this does not generate resources.
+    add_interruptible_node(
+        "resource_recommendation_explicit",
+        make_resource_recommendation_node(
+            learning_guidance_runtime,
+            mode="explicit_request",
+        ),
+    )
+    add_interruptible_node(
+        "recommendation_final_output",
+        make_recommendation_final_output_node(learning_guidance_runtime),
+    )
+
     # Unified resource generation
     add_interruptible_node("resource_preflight_router", resource_preflight_router)
     add_interruptible_node(
@@ -122,6 +141,7 @@ def _build_graph_with_academic_nodes(
             "academic": "episodic_memory_retriever",
             "emotional": "emotional_response",
             "qa": "qa_agent",
+            "recommendation": "resource_recommendation_explicit",
             "invalid": "handle_unknown",
         },
     )
@@ -193,6 +213,8 @@ def _build_graph_with_academic_nodes(
     # Emotional support ends after the response node.
     graph.add_edge("emotional_response", END)
     graph.add_edge("qa_agent", END)
+    graph.add_edge("resource_recommendation_explicit", "recommendation_final_output")
+    graph.add_edge("recommendation_final_output", END)
 
     # Unknown: legacy handler remains available for compatibility.
     graph.add_edge("handle_unknown", END)
@@ -200,16 +222,21 @@ def _build_graph_with_academic_nodes(
     return graph
 
 
-def build_graph() -> StateGraph:
+def build_graph(learning_guidance_runtime: LearningGuidanceRuntime) -> StateGraph:
     """Construct the legacy-served graph without enabling the candidate route."""
 
     return _build_graph_with_academic_nodes(
         rag_node=rag_retrieve,
         post_evidence_node=None,
+        learning_guidance_runtime=learning_guidance_runtime,
     )
 
 
-def build_parent_child_graph(runtime: ParentChildGraphRuntime) -> StateGraph:
+def build_parent_child_graph(
+    runtime: ParentChildGraphRuntime,
+    *,
+    learning_guidance_runtime: LearningGuidanceRuntime,
+) -> StateGraph:
     """Construct the explicit candidate graph pinned to one generation runtime."""
 
     from src.graph.parent_child_nodes import (
@@ -223,6 +250,7 @@ def build_parent_child_graph(runtime: ParentChildGraphRuntime) -> StateGraph:
     return _build_graph_with_academic_nodes(
         rag_node=make_parent_child_rag_node(runtime),
         post_evidence_node=make_parent_child_hydration_node(runtime),
+        learning_guidance_runtime=learning_guidance_runtime,
     )
 
 
@@ -334,6 +362,17 @@ def build_resource_evidence_parent_child_graph(
     add_interruptible_node("rewrite_query", rewrite_query)
     add_interruptible_node("emotional_response", emotional_response)
     add_interruptible_node("qa_agent", qa_agent)
+    add_interruptible_node(
+        "resource_recommendation_explicit",
+        make_resource_recommendation_node(
+            runtime.learning_guidance,
+            mode="explicit_request",
+        ),
+    )
+    add_interruptible_node(
+        "recommendation_final_output",
+        make_recommendation_final_output_node(runtime.learning_guidance),
+    )
     add_candidate_runtime_node("resource_preflight_router", resource_preflight_router)
     add_candidate_runtime_node(
         "study_plan_profile_gate_main",
@@ -368,6 +407,7 @@ def build_resource_evidence_parent_child_graph(
             "academic": "episodic_memory_retriever",
             "emotional": "emotional_response",
             "qa": "qa_agent",
+            "recommendation": "resource_recommendation_explicit",
             "invalid": "handle_unknown",
         },
     )
@@ -449,6 +489,8 @@ def build_resource_evidence_parent_child_graph(
     graph.add_edge("rewrite_query", "academic_router")
     graph.add_edge("emotional_response", END)
     graph.add_edge("qa_agent", END)
+    graph.add_edge("resource_recommendation_explicit", "recommendation_final_output")
+    graph.add_edge("recommendation_final_output", END)
     graph.add_edge("handle_unknown", END)
     return graph
 
@@ -508,24 +550,34 @@ def route_after_candidate_query_rewrite(state: LearningState) -> str:
     raise ValueError("candidate query rewrite received an invalid response_mode")
 
 
-def get_compiled_graph(checkpointer=None):
+def get_compiled_graph(
+    learning_guidance_runtime: LearningGuidanceRuntime,
+    *,
+    checkpointer=None,
+):
     """Build and compile the graph, ready for invocation.
 
     Args:
+        learning_guidance_runtime: Required strict profile/history/path/recommendation
+            dependency bundle.
         checkpointer: Optional LangGraph checkpointer for persistent state.
                       When provided, the graph saves/restores state per thread_id.
     """
-    return build_graph().compile(checkpointer=checkpointer)
+    return build_graph(learning_guidance_runtime).compile(checkpointer=checkpointer)
 
 
 def get_compiled_parent_child_graph(
     runtime: ParentChildGraphRuntime,
     *,
+    learning_guidance_runtime: LearningGuidanceRuntime,
     checkpointer,
 ):
     """Compile the explicit candidate graph; callers must supply all dependencies."""
 
-    return build_parent_child_graph(runtime).compile(checkpointer=checkpointer)
+    return build_parent_child_graph(
+        runtime,
+        learning_guidance_runtime=learning_guidance_runtime,
+    ).compile(checkpointer=checkpointer)
 
 
 def get_compiled_resource_evidence_parent_child_graph(

@@ -16,14 +16,14 @@ from src.graph.builder import (
 
 
 class TestBuildGraph:
-    def test_returns_state_graph(self):
+    def test_returns_state_graph(self, learning_guidance_runtime):
         from langgraph.graph import StateGraph
 
-        graph = build_graph()
+        graph = build_graph(learning_guidance_runtime)
         assert isinstance(graph, StateGraph)
 
-    def test_graph_has_all_nodes(self):
-        graph = build_graph()
+    def test_graph_has_all_nodes(self, learning_guidance_runtime):
+        graph = build_graph(learning_guidance_runtime)
         node_names = set(graph.nodes.keys())
         expected = {
             "supervisor",
@@ -41,6 +41,8 @@ class TestBuildGraph:
             "resource_orchestrator",
             "resource_worker",
             "resource_bundle_output",
+            "resource_recommendation_explicit",
+            "recommendation_final_output",
             "qa_agent",
             "emotional_response",
             "handle_unknown",
@@ -77,15 +79,19 @@ class TestBuildGraph:
         }
         assert removed_direct_nodes.isdisjoint(node_names)
 
-    def test_graph_compiles_without_error(self):
-        graph = build_graph()
+    def test_graph_compiles_without_error(self, learning_guidance_runtime):
+        graph = build_graph(learning_guidance_runtime)
         compiled = graph.compile()
         assert compiled is not None
 
-    def test_get_compiled_graph_returns_compiled(self):
-        compiled = get_compiled_graph()
+    def test_get_compiled_graph_returns_compiled(self, learning_guidance_runtime):
+        compiled = get_compiled_graph(learning_guidance_runtime)
         assert hasattr(compiled, "invoke")
         assert hasattr(compiled, "stream")
+
+    def test_graph_requires_explicit_learning_guidance_runtime(self):
+        with pytest.raises(TypeError, match="LearningGuidanceRuntime"):
+            build_graph(object())
 
     @pytest.mark.parametrize(
         "resource_type",
@@ -144,14 +150,20 @@ class TestBuildGraph:
         assert route_after_query_rewrite({"intent": "academic"}) == "academic"
         assert route_after_query_rewrite({}) == "academic"
 
-    def test_academic_router_no_longer_points_to_query_rewriter(self):
-        graph = build_graph()
+    def test_academic_router_no_longer_points_to_query_rewriter(
+        self,
+        learning_guidance_runtime,
+    ):
+        graph = build_graph(learning_guidance_runtime)
         assert ("academic_router", "search_query_rewriter") not in graph.edges
         assert ("academic_router", "rag_retrieve") in graph.edges
         assert ("academic_router", "web_search") in graph.edges
 
-    def test_academic_retrieval_uses_evidence_judge_barrier(self):
-        graph = build_graph()
+    def test_academic_retrieval_uses_evidence_judge_barrier(
+        self,
+        learning_guidance_runtime,
+    ):
+        graph = build_graph(learning_guidance_runtime)
         assert "evidence_judge" in graph.nodes
         assert (("rag_retrieve", "web_search"), "evidence_judge") in graph.waiting_edges
         old_direct_edges = {
@@ -180,16 +192,22 @@ class TestBuildGraph:
         assert "multi_resource_runner" not in graph.nodes
         assert ("multi_resource_runner", "__end__") not in graph.edges
 
-    def test_search_query_rewriter_is_shared_after_supervisor(self):
-        graph = build_graph()
+    def test_search_query_rewriter_is_shared_after_supervisor(
+        self,
+        learning_guidance_runtime,
+    ):
+        graph = build_graph(learning_guidance_runtime)
         assert ("episodic_memory_retriever", "memory_use_decider") in graph.edges
         assert ("memory_use_decider", "search_query_rewriter") in graph.edges
         assert "memory_use_decider" in graph.nodes
         assert "search_query_rewriter" in graph.branches
         assert "route_after_query_rewrite" in graph.branches["search_query_rewriter"]
 
-    def test_unified_resource_chain_has_no_legacy_resource_nodes(self):
-        graph = build_graph()
+    def test_unified_resource_chain_has_no_legacy_resource_nodes(
+        self,
+        learning_guidance_runtime,
+    ):
+        graph = build_graph(learning_guidance_runtime)
         assert "resource_orchestrator" in graph.nodes
         assert "resource_preflight_router" in graph.nodes
         assert "study_plan_profile_gate_main" in graph.nodes
@@ -200,7 +218,10 @@ class TestBuildGraph:
         assert "mindmap_output" not in graph.nodes
 
     @pytest.mark.anyio
-    async def test_evidence_judge_runs_once_after_local_and_web_candidates(self):
+    async def test_evidence_judge_runs_once_after_local_and_web_candidates(
+        self,
+        learning_guidance_runtime,
+    ):
         calls = []
 
         async def fake_supervisor(state):
@@ -262,7 +283,7 @@ class TestBuildGraph:
             patch("src.graph.builder.evidence_judge", fake_evidence_judge),
             patch("src.graph.builder.qa_agent", fake_qa_agent),
         ):
-            compiled = build_graph().compile()
+            compiled = build_graph(learning_guidance_runtime).compile()
             result = await compiled.ainvoke(
                 {"messages": [HumanMessage(content="test")]}
             )
@@ -275,7 +296,10 @@ class TestBuildGraph:
         assert result["context"] == [{"type": "rag", "content": "judged"}]
 
     @pytest.mark.anyio
-    async def test_evidence_judge_failure_blocks_generation(self):
+    async def test_evidence_judge_failure_blocks_generation(
+        self,
+        learning_guidance_runtime,
+    ):
         qa_called = False
 
         async def fake_supervisor(state):
@@ -331,8 +355,48 @@ class TestBuildGraph:
             patch("src.graph.builder.evidence_judge", fake_evidence_judge),
             patch("src.graph.builder.qa_agent", fake_qa_agent),
         ):
-            compiled = build_graph().compile()
+            compiled = build_graph(learning_guidance_runtime).compile()
             with pytest.raises(RuntimeError, match="judge failed"):
                 await compiled.ainvoke({"messages": [HumanMessage(content="test")]})
 
         assert qa_called is False
+
+    @pytest.mark.anyio
+    async def test_explicit_recommendation_reaches_authoritative_terminal(
+        self,
+        learning_guidance_runtime,
+    ):
+        request_id = "00000000-0000-4000-8000-000000000101"
+
+        async def fake_supervisor(_state):
+            return {
+                "intent": "academic",
+                "response_mode": "recommendation",
+                "qa_scope": "",
+                "requires_live_verification": False,
+                "subject": "python",
+                "subject_candidates": ["python"],
+                "workspace_continuation": {},
+                "workspace_continuation_applied": False,
+                "requested_resource_type": "",
+                "requested_resource_types": [],
+            }
+
+        with patch("src.graph.builder.supervisor_node", fake_supervisor):
+            compiled = build_graph(learning_guidance_runtime).compile()
+            result = await compiled.ainvoke(
+                {
+                    "messages": [HumanMessage(content="Recommend Python resources")],
+                    "thread_id": "thread-recommendation-1",
+                    "request_id": request_id,
+                    "user_id": "learner-1",
+                }
+            )
+
+        final = result["recommendation_final_v1"]
+        assert final["type"] == "recommendation_final"
+        assert final["thread_id"] == "thread-recommendation-1"
+        assert final["request_id"] == request_id
+        assert final["terminal_status"] == "unavailable"
+        assert final["unavailable_reason"] == "profile_unavailable"
+        assert result["final_response_type"] == "recommendation_final"

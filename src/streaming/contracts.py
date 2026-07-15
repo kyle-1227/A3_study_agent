@@ -24,6 +24,7 @@ AgentStreamEventType: TypeAlias = Literal[
     "artifact_progress",
     "qa_final",
     "resource_final",
+    "recommendation_final",
     "assessment_final",
     "interrupt",
     "stopped",
@@ -40,6 +41,7 @@ AgentStreamDraftType: TypeAlias = Literal[
     "artifact_progress",
     "qa_final",
     "resource_final",
+    "recommendation_final",
     "assessment_final",
     "interrupt",
     "stopped",
@@ -48,6 +50,7 @@ AgentStreamDraftType: TypeAlias = Literal[
 AuthoritativeTerminal: TypeAlias = Literal[
     "qa_final",
     "resource_final",
+    "recommendation_final",
     "assessment_final",
     "interrupt",
     "stopped",
@@ -59,6 +62,7 @@ _TERMINAL_EVENTS: frozenset[str] = frozenset(
     {
         "qa_final",
         "resource_final",
+        "recommendation_final",
         "assessment_final",
         "interrupt",
         "stopped",

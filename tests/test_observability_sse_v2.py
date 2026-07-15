@@ -381,13 +381,15 @@ def test_missing_cached_manifest_returns_typed_503():
 
 
 @pytest.mark.anyio
-async def test_manifest_endpoint_returns_cached_contract_and_typed_cache_error():
+async def test_manifest_endpoint_returns_cached_contract_and_typed_cache_error(
+    learning_guidance_runtime,
+):
     from app import graph_manifest_endpoint
     from src.observability.graph_manifest import build_graph_manifest
     from src.graph.builder import get_compiled_graph
 
     manifest = build_graph_manifest(
-        get_compiled_graph(),
+        get_compiled_graph(learning_guidance_runtime),
         context_policy_mode="strict",
         checkpointer_enabled=False,
         checkpointer_type="disabled",

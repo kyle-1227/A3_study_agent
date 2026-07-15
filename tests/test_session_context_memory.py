@@ -213,6 +213,7 @@ async def test_dispatch_trace_persists_ledger_and_v3_together() -> None:
     from app import _update_session_context_memory_from_trace
 
     graph = AsyncMock()
+    graph._a3_node_ids = frozenset({"supervisor"})
     state_context = {"thread_id": "thread-1"}
     record = _record(_item("memory:a", "same"), record_id="record-1")
     event = {
