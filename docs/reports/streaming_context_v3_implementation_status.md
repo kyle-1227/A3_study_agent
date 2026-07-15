@@ -528,3 +528,43 @@ PostgreSQL/DeepSeek/Tavily/RAG reranker 凭据。`continuation_pc51` 仍标记
 `relevant_above_irrelevant=false`。真实 Provider E2E、真实 PostgreSQL restart、
 P0/PG/PR/PGR 生产证据和零旧 checkpoint 扫描均未完成，因此正式旧图、迁移 reader、
 alias 与旧节点实现继续保留，本批没有越过删除门。
+
+## 2026-07-15 D8-A 显式推荐 served graph 与 Recommendation Final V1
+
+显式推荐现已完成代码级端到端接入，不再复用 Resource Final V3 或伪装成资源生成：
+
+`supervisor -> resource_recommendation_explicit -> recommendation_final_output -> END`
+
+Supervisor 只接受 `academic/recommendation` 的严格组合，资源类型、`qa_scope` 必须为空，
+且不得要求 live verification。当前 served graph、Parent-Child 候选图和资源证据候选图
+都注册同一显式分支；`LearningGuidanceRuntime` 成为 served/P0 graph factory 的必填依赖，
+没有默认 runtime 或 fallback。缺 `user_id` 优先返回 `missing_user_id`；零/多科目分别返回
+`missing_subject`/`unsupported_subject_scope`；只有同 thread 且已严格绑定单科目的 workspace
+continuation 才能补充当前空科目。
+
+`recommendation_final` 已进入 `agent_stream_v2` 的单权威终态、容量预留、journal、断线重放、
+active-run、checkpoint status、OpenAPI 与前端 LiveTurn/恢复链路。前端严格重算 final ID、
+payload hash 与 catalog snapshot，最终只提交已验证推荐卡。五个 SSE 路由的 HTTP 200
+OpenAPI content 现在只包含 `text/event-stream`。
+
+提交前审查同时修复了两个与新 RAG 无关的旧终态漏洞：
+
+- QA Final 现在重新验证 JSON schema、业务规则、runtime thread/request、payload hash 与 QA ID；
+  malformed/tampered/wrong-thread QA 不能被忽略，也不能让另一个终态获胜。
+- QA、Resource、Recommendation 任一完成态若 checkpoint 写入失败，均只发送
+  `terminal_checkpoint_persist_failed`，不再发送 completed activity 或权威 final，也不会把
+  未落盘 final 投影到 active-run。
+
+实现提交为 `9d6d69f`，前端独立提交为 `225b084`，生产 KG artifact 提交为 `c8e20f8`。
+验证：D8 聚焦 `654 passed`；全量后端 `2590 passed, 7 skipped`；前端 `31 files / 142 tests`、
+typecheck、ESLint、Next build 通过；compileall、36 个触及 Python 文件 Ruff check/format、
+12 个源文件 scoped mypy、import-linter（333 files / 2,051 dependencies，3 kept）、
+Gitleaks staged scan 与 diff check 通过。全仓仍有 45 个既有 Ruff lint 与 57 个既有 format
+文件；Bandit 的 2 个 scoped finding 和 Semgrep 的 55 个词法 finding 均来自既有代码，因此
+未记为 clean pass。
+
+当前仍不能宣称真实用户稳定获得 `available` 推荐：D5 adapters 已是严格 readers，但缺少
+`profile.extra.learning_guidance_v1` 和 episodic `metadata.learning_guidance_v1` 的正式 writers，
+且旧 episodic writer 仍优先用 `thread_id`。这部分可不等待新 RAG 并行修复。生产图整体切换、
+checkpoint 清除和旧 served graph/节点删除仍受 `config/rag/index.yaml`、四变体 gold、真实 RAG
+Provider E2E 与 rollout activation 门约束；当前 `activation_enabled=false`，本批没有越门。
