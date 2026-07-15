@@ -185,9 +185,11 @@ def test_validate_stream_events_rejects_invalid_terminal_contract(events) -> Non
 
 def test_safe_terminal_projection_validates_v3_and_drops_generated_body() -> None:
     payload = _resource_final()
+    terminal_data = {key: value for key, value in payload.items() if key != "type"}
 
     result = _safe_terminal_projection(
-        payload,
+        terminal_data,
+        terminal_type="resource_final",
         expected_resource_types=("review_doc",),
         expected_request_id=REQUEST_ID,
         expected_thread_id=THREAD_ID,
@@ -209,20 +211,46 @@ def test_safe_terminal_projection_validates_v3_and_drops_generated_body() -> Non
 
 def test_safe_terminal_projection_rejects_schema_drift_and_identity_drift() -> None:
     invalid_status = _resource_final()
+    invalid_status.pop("type")
     invalid_status["terminal_status"] = "all_resources_ready"
 
     with pytest.raises(ProductionCanaryError, match="resource_final_v3"):
         _safe_terminal_projection(
             invalid_status,
+            terminal_type="resource_final",
             expected_resource_types=("review_doc",),
             expected_request_id=REQUEST_ID,
             expected_thread_id=THREAD_ID,
         )
     with pytest.raises(ProductionCanaryError, match="identity"):
         _safe_terminal_projection(
-            _resource_final(),
+            {key: value for key, value in _resource_final().items() if key != "type"},
+            terminal_type="resource_final",
             expected_resource_types=("review_doc",),
             expected_request_id=RESUME_REQUEST_ID,
+            expected_thread_id=THREAD_ID,
+        )
+
+
+def test_safe_terminal_projection_rejects_transport_type_drift() -> None:
+    terminal_data = {
+        key: value for key, value in _resource_final().items() if key != "type"
+    }
+
+    with pytest.raises(ProductionCanaryError, match="terminal type"):
+        _safe_terminal_projection(
+            terminal_data,
+            terminal_type="qa_final",
+            expected_resource_types=("review_doc",),
+            expected_request_id=REQUEST_ID,
+            expected_thread_id=THREAD_ID,
+        )
+    with pytest.raises(ProductionCanaryError, match="must not duplicate"):
+        _safe_terminal_projection(
+            _resource_final(),
+            terminal_type="resource_final",
+            expected_resource_types=("review_doc",),
+            expected_request_id=REQUEST_ID,
             expected_thread_id=THREAD_ID,
         )
 

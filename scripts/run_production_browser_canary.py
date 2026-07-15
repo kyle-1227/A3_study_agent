@@ -226,12 +226,23 @@ def _validate_stream_events(events: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def _safe_terminal_projection(
     terminal_data: dict[str, Any],
     *,
+    terminal_type: str,
     expected_resource_types: Sequence[str],
     expected_request_id: str,
     expected_thread_id: str,
 ) -> dict[str, Any]:
+    if terminal_type != "resource_final":
+        raise ProductionCanaryError(
+            "resource canary terminal type must be resource_final"
+        )
+    if "type" in terminal_data:
+        raise ProductionCanaryError(
+            "resource_final data must not duplicate its SSE envelope type"
+        )
     try:
-        resource_final = validate_resource_final_v3(terminal_data)
+        resource_final = validate_resource_final_v3(
+            {"type": terminal_type, **terminal_data}
+        )
     except (TypeError, ValueError, ValidationError) as exc:
         raise ProductionCanaryError(
             "resource_final payload violates resource_final_v3"
@@ -636,6 +647,7 @@ async def _run_case(
     terminal_data = stream_summary.pop("terminal_data")
     terminal = _safe_terminal_projection(
         terminal_data,
+        terminal_type=stream_summary["terminal_type"],
         expected_resource_types=case.resource_types,
         expected_request_id=stream_summary["request_id"],
         expected_thread_id=stream_summary["thread_id"],
