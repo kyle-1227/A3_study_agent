@@ -40,3 +40,14 @@ def test_next_build_does_not_ignore_typescript_errors() -> None:
     config = (ROOT / "frontend" / "next.config.mjs").read_text(encoding="utf-8")
 
     assert "ignoreBuildErrors" not in config
+
+
+def test_environment_example_uses_dedicated_rag_secret_names() -> None:
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "RAG_EMBEDDING_API_KEY=replace_with_rag_embedding_api_key" in env_example
+    assert "RAG_RERANKER_API_KEY=replace_with_rag_reranker_api_key" in env_example
+    assert "EMBEDDING_API_KEY_ENV=RAG_EMBEDDING_API_KEY" in env_example
+    assert "RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY" in env_example
+    assert env_example.count("CHROMA_PERSIST_DIR=") == 1
+    assert "CONTEXT_POLICY_MODE=strict" in env_example
