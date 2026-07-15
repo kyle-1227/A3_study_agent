@@ -70,8 +70,14 @@ async def write_episodic_memory(
     """
     store = store or _get_store()
 
-    # Extract user_id from state
-    user_id = state.get("thread_id", "") or state.get("user_id", "") or "unknown"
+    raw_thread_id = state.get("thread_id")
+    if (
+        not isinstance(raw_thread_id, str)
+        or not raw_thread_id.strip()
+        or raw_thread_id != raw_thread_id.strip()
+    ):
+        raise ValueError("episodic memory requires a normalized thread_id")
+    user_id = raw_thread_id
 
     # Extract subject from state if not provided
     if not subject:

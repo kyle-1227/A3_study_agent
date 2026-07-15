@@ -16,6 +16,9 @@ from src.learning_guidance.adapters.profile import (
     profile_goal_fingerprint,
 )
 from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
+from src.learning_guidance.history_contract import (
+    LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
+)
 from src.memory.schema import EpisodicMemoryRecord
 from src.memory.storage import MemoryStorageReadError, SQLiteMemoryStore
 from src.profile.schema import Goal, SkillEntry, UserProfile
@@ -256,6 +259,11 @@ def _history_marker(**changes: object) -> dict[str, object]:
     return marker
 
 
+TAGGED_HISTORY_ID = f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'a' * 64}"
+NULL_HISTORY_ID = f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'b' * 64}"
+INVALID_HISTORY_ID = f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'c' * 64}"
+
+
 async def _save_memory(
     store: SQLiteMemoryStore,
     *,
@@ -283,7 +291,7 @@ async def test_history_adapter_projects_only_strict_tagged_metadata(
     store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
     await _save_memory(
         store,
-        memory_id="memory-tagged",
+        memory_id=TAGGED_HISTORY_ID,
         metadata={"learning_guidance_v1": _history_marker()},
     )
     await _save_memory(
@@ -301,7 +309,9 @@ async def test_history_adapter_projects_only_strict_tagged_metadata(
     snapshot = await adapter.load("user-1", "math")
 
     assert snapshot is not None
-    assert tuple(event.history_id for event in snapshot.events) == ("memory-tagged",)
+    assert tuple(event.history_id for event in snapshot.events) == (
+        TAGGED_HISTORY_ID,
+    )
     assert snapshot.events[0].outcome_score == 0.4
 
 
@@ -327,7 +337,7 @@ async def test_history_adapter_rejects_explicit_null_v1_marker(
     store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
     await _save_memory(
         store,
-        memory_id="memory-null",
+        memory_id=NULL_HISTORY_ID,
         metadata={"learning_guidance_v1": None},
     )
     adapter = HistorySnapshotAdapterV1(
@@ -368,7 +378,7 @@ async def test_history_adapter_fails_fast_on_declared_invalid_marker(
     store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
     await _save_memory(
         store,
-        memory_id="memory-invalid",
+        memory_id=INVALID_HISTORY_ID,
         metadata={"learning_guidance_v1": marker},
     )
     adapter = HistorySnapshotAdapterV1(

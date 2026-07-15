@@ -27,6 +27,7 @@ from src.memory.schema import (
     SemanticMemorySummary,
     SemanticSummaryStrictOutput,
 )
+from src.memory.retention import PROTECTED_EPISODIC_MEMORY_ID_PREFIXES
 from src.memory.storage import MemoryStore, create_memory_store
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,11 @@ async def consolidate_episodic_to_semantic(
         ))
 
     # Fetch oldest unconsolidated episodic memories
-    unconsolidated = await store.get_unconsolidated(user_id, limit=max_episodic)
+    unconsolidated = await store.get_unconsolidated(
+        user_id,
+        limit=max_episodic,
+        excluded_memory_id_prefixes=PROTECTED_EPISODIC_MEMORY_ID_PREFIXES,
+    )
 
     if len(unconsolidated) < 2:
         logger.debug(
@@ -92,7 +97,7 @@ async def consolidate_episodic_to_semantic(
             state={"thread_id": user_id},
             max_raw_chars=get_max_raw_chars(_LLM_NODE),
         )
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "LLM call failed for memory consolidation user=%s", user_id,
         )
@@ -146,7 +151,7 @@ async def consolidate_episodic_to_semantic(
             "Consolidated %d episodic → semantic summary id=%s for user=%s (confidence=%.2f)",
             len(unconsolidated), summary.summary_id, user_id, summary.confidence,
         )
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "Failed to persist semantic summary for user=%s", user_id,
         )

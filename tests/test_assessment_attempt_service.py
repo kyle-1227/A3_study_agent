@@ -13,11 +13,11 @@ from src.assessment.attempt_contracts import (
     AdaptivePracticeBatchV1,
     AdaptivePracticeTaskV1,
     AssessmentAttemptV1,
-    AssessmentCheckpointResourcesV1,
+    AssessmentCheckpointResourcesV2,
     AssessmentErrorClassificationV1,
     AssessmentFinalV1,
     AssessmentQuestionRecordV1,
-    AssessmentResourceRecordV1,
+    AssessmentResourceRecordV2,
     PrivateExerciseAnswerKeyV1,
     PublicExerciseCardV1,
     answer_matches,
@@ -113,14 +113,15 @@ def _answer_key(
     )
 
 
-def _checkpoint() -> AssessmentCheckpointResourcesV1:
-    return AssessmentCheckpointResourcesV1(
-        schema_version="assessment_checkpoint_resources_v1",
+def _checkpoint() -> AssessmentCheckpointResourcesV2:
+    return AssessmentCheckpointResourcesV2(
+        schema_version="assessment_checkpoint_resources_v2",
         thread_id=THREAD_ID,
         resources=(
-            AssessmentResourceRecordV1(
-                schema_version="assessment_resource_record_v1",
+            AssessmentResourceRecordV2(
+                schema_version="assessment_resource_record_v2",
                 resource_id=RESOURCE_ID,
+                learning_guidance_binding=None,
                 questions=(
                     AssessmentQuestionRecordV1(
                         schema_version="assessment_question_record_v1",

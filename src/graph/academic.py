@@ -7796,15 +7796,14 @@ async def episodic_memory_writer(state: LearningState) -> dict:
     """
     thread_id = state.get("thread_id", "")
 
-    if not thread_id:
-        return {}
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise ValueError("episodic memory writer requires thread_id")
 
     try:
         from src.memory.episodic import (
             compute_importance_from_state,
             write_episodic_memory,
         )
-
         importance, mem_type, content = compute_importance_from_state(state)
 
         record = await write_episodic_memory(

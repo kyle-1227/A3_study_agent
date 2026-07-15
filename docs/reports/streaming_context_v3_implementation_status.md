@@ -568,3 +568,56 @@ Gitleaks staged scan 与 diff check 通过。全仓仍有 45 个既有 Ruff lint
 且旧 episodic writer 仍优先用 `thread_id`。这部分可不等待新 RAG 并行修复。生产图整体切换、
 checkpoint 清除和旧 served graph/节点删除仍受 `config/rag/index.yaml`、四变体 gold、真实 RAG
 Provider E2E 与 rollout activation 门约束；当前 `activation_enabled=false`，本批没有越门。
+
+## 2026-07-15 Profile/History Writers 与 Onboarding V2 生产收口
+
+本批建立了可持久化的 profile/history 写链路，并把 onboarding 改为只消费生产
+Learning Guidance catalog。公开请求保持 strict JSON `list`；Python tuple、set、generator、
+字符串及被篡改的既有模型实例均拒绝。通过显式 compiler 后才投影为 frozen tuple 内部合同，
+没有 `BeforeValidator`、alias normalization、schema repair 或 silent default。
+
+- Profile writer 将完整命令 source hash、request receipt 与 topic binding 原子写入 SQLite。
+  identical replay 不改时间戳；request/source/top-level drift 明确冲突。既有但未绑定的 profile
+  只在 `onboard_v2` 来源下原子覆盖 nickname、grade、dislikes，同时保留原 skills、goals、
+  learning style、behavior、observations、tags、created_at 与非保留 extra。
+- History writer 只接受 journal 已完成的真实 assessment；普通聊天、资源生成与一般 behavior
+  不会伪装成学习成效。提交答案、answer key、adaptive answer 与 request hash 不进入长期 history。
+  history ID namespace 改为 insert-once protected fact；普通 upsert、consolidation、forgetting 与
+  direct delete 均不能覆盖或删除。
+- strict episodic insert 在同一 `BEGIN IMMEDIATE` 内完成 row decode、类型敏感 canonical JSON
+  比较和 commit；任何验证失败先 rollback。`True/1/1.0`、`0.0/-0.0`、坏 JSON、重复 key、
+  NaN/Infinity 与 `1e400` 均 fail-closed，内容派生异常不保留原始 JSON cause。
+- Growth 查询先在 SQL 层以 case-sensitive protected prefix 过滤，再执行 500 条 limit；501 条
+  更晚的普通记录与大小写近似 prefix 都不能挤掉权威 assessment。
+- Assessment checkpoint 升为显式 `assessment_checkpoint_resources_v2` / resource V2；只对带
+  V1 schema tag 的旧快照执行严格、可审计迁移并显式写入 `learning_guidance_binding=None`，
+  不用缺字段默认值。history 持久化瞬态失败标记为 recoverable；同一 request 可在同进程新建
+  recovery stream，assessment journal 只 replay，不重复分类或生成工作，成功后才发送
+  `assessment_final`。
+- generic episodic memory 的 user/hashed-thread owner 切换因缺少存量归属迁移而从本批撤回；
+  继续使用既有 raw-thread key，并把缺失 thread 的旧 `unknown` sentinel 改为显式错误。该 owner
+  cutover 必须另立 migration mini-spec，不能双读猜归属。
+
+前端 onboarding 页的大差异是必要的数据模型替换：删除静态 subjects、`/subjects`、localhost
+fallback 和自定义科目，改为 subject→KG topic catalog；每个 topic 显式填写 level、confidence、
+goal、importance、progress，并持久化冻结 per-user request ID/payload 供安全重试。没有夹带视觉
+redesign、组件体系迁移或无关页面重排。`useUser` 只把 404 判为 missing；5xx/transport 显示
+unavailable，不再误重定向。`tsconfig.tsbuildinfo` 从版本库删除并由 `.gitignore` 排除；
+`next-env.d.ts` 已恢复基线。
+
+本批最终 focused 门：
+
+- 后端 writers/onboarding/storage/assessment/stream 聚焦：`264 passed`；security：`8 passed`；
+- 前端 onboarding/use-user：`5 files / 41 tests`；typecheck 与完整 ESLint 通过；本批代码状态的
+  Next production build 已通过，路由仍为 `/`、`/analytics`、`/onboarding`、
+  `/print/review-doc`；
+- `python -m compileall -q src tests app.py`、changed-path Ruff check、`git diff --check`：通过；
+- 23 个新合同/核心触及文件 scoped Ruff format-check：通过；为遵守 diff-risk 门，本批没有对
+  既有未格式化的大型 `app.py`/graph 文件做全文件机械格式化；
+- 两组 scoped mypy（contracts/writers/storage 9 files；assessment/stream 5 files）：通过；
+- import-linter：338 files / 2,098 dependencies，3 kept / 0 broken；targeted Bandit：通过；
+- diff-only secret-shaped additions 与 forbidden structured-output pattern 扫描：无命中；
+- Semgrep、Gitleaks 未安装，明确记为未运行；未用其他扫描冒充通过。
+
+rollout 继续保持 disabled。本批没有修改 Parent-Child RAG build/gold artifact，没有调用或输出
+Provider secret/DB URI，也没有清空或迁移现有 PostgreSQL checkpoint。

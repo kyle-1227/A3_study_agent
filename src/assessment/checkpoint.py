@@ -9,7 +9,8 @@ from pydantic import ValidationError
 
 from src.assessment.attempt_contracts import (
     AssessmentCheckpointResourcesV1,
-    AssessmentResourceRecordV1,
+    AssessmentCheckpointResourcesV2,
+    AssessmentResourceRecordV2,
     PublicExerciseCardV1,
 )
 from src.assessment.identity import stable_exercise_question_id
@@ -72,21 +73,51 @@ def validate_public_exercise_cards_v1(
     return tuple(cards)
 
 
-def validate_assessment_checkpoint_resources_v1(
-    value: AssessmentCheckpointResourcesV1 | Mapping[str, object],
-) -> AssessmentCheckpointResourcesV1:
-    """Validate a live or JSON-restored private checkpoint snapshot."""
+def validate_assessment_checkpoint_resources_v2(
+    value: (
+        AssessmentCheckpointResourcesV1
+        | AssessmentCheckpointResourcesV2
+        | Mapping[str, object]
+    ),
+) -> AssessmentCheckpointResourcesV2:
+    """Validate V2 or explicitly migrate one tagged legacy V1 snapshot."""
 
     try:
         payload: object = (
             value.model_dump(mode="json")
-            if isinstance(value, AssessmentCheckpointResourcesV1)
+            if isinstance(
+                value,
+                AssessmentCheckpointResourcesV1 | AssessmentCheckpointResourcesV2,
+            )
             else value
         )
-        return AssessmentCheckpointResourcesV1.model_validate_json(
-            _mapping_json(payload),
-            strict=True,
-        )
+        if not isinstance(payload, Mapping):
+            raise TypeError("assessment checkpoint must be an object")
+        schema_version = payload.get("schema_version")
+        if schema_version == "assessment_checkpoint_resources_v2":
+            return AssessmentCheckpointResourcesV2.model_validate_json(
+                _mapping_json(payload),
+                strict=True,
+            )
+        if schema_version == "assessment_checkpoint_resources_v1":
+            legacy = AssessmentCheckpointResourcesV1.model_validate_json(
+                _mapping_json(payload),
+                strict=True,
+            )
+            return AssessmentCheckpointResourcesV2(
+                schema_version="assessment_checkpoint_resources_v2",
+                thread_id=legacy.thread_id,
+                resources=tuple(
+                    AssessmentResourceRecordV2(
+                        schema_version="assessment_resource_record_v2",
+                        resource_id=resource.resource_id,
+                        learning_guidance_binding=None,
+                        questions=resource.questions,
+                    )
+                    for resource in legacy.resources
+                ),
+            )
+        raise ValueError("assessment checkpoint schema_version is unsupported")
     except (TypeError, ValueError) as exc:
         raise AssessmentCheckpointError(
             code="assessment_checkpoint_invalid",
@@ -94,12 +125,17 @@ def validate_assessment_checkpoint_resources_v1(
         ) from exc
 
 
-def merge_assessment_checkpoint_resource_v1(
+def merge_assessment_checkpoint_resource_v2(
     *,
     thread_id: str,
-    existing: AssessmentCheckpointResourcesV1 | Mapping[str, object] | None,
-    resource: AssessmentResourceRecordV1,
-) -> AssessmentCheckpointResourcesV1:
+    existing: (
+        AssessmentCheckpointResourcesV1
+        | AssessmentCheckpointResourcesV2
+        | Mapping[str, object]
+        | None
+    ),
+    resource: AssessmentResourceRecordV2,
+) -> AssessmentCheckpointResourcesV2:
     """Append one private resource idempotently and reject identity conflicts."""
 
     if not isinstance(thread_id, str) or not thread_id.strip():
@@ -108,13 +144,13 @@ def merge_assessment_checkpoint_resource_v1(
             message="thread_id must not be blank",
         )
     current = (
-        AssessmentCheckpointResourcesV1(
-            schema_version="assessment_checkpoint_resources_v1",
+        AssessmentCheckpointResourcesV2(
+            schema_version="assessment_checkpoint_resources_v2",
             thread_id=thread_id,
             resources=(),
         )
         if existing is None or existing == {}
-        else validate_assessment_checkpoint_resources_v1(existing)
+        else validate_assessment_checkpoint_resources_v2(existing)
     )
     return _merge_resource_models(current, resource, thread_id=thread_id)
 
@@ -127,10 +163,10 @@ def assessment_checkpoint_resources_reducer(
 
     if not update:
         return dict(existing or {})
-    incoming = validate_assessment_checkpoint_resources_v1(update)
+    incoming = validate_assessment_checkpoint_resources_v2(update)
     if not existing:
         return incoming.model_dump(mode="json")
-    current = validate_assessment_checkpoint_resources_v1(existing)
+    current = validate_assessment_checkpoint_resources_v2(existing)
     merged = current
     for resource in incoming.resources:
         merged = _merge_resource_models(
@@ -142,17 +178,17 @@ def assessment_checkpoint_resources_reducer(
 
 
 def _merge_resource_models(
-    current: AssessmentCheckpointResourcesV1,
-    resource: AssessmentResourceRecordV1,
+    current: AssessmentCheckpointResourcesV2,
+    resource: AssessmentResourceRecordV2,
     *,
     thread_id: str,
-) -> AssessmentCheckpointResourcesV1:
+) -> AssessmentCheckpointResourcesV2:
     if current.thread_id != thread_id:
         raise AssessmentCheckpointError(
             code="assessment_checkpoint_thread_mismatch",
             message="assessment checkpoint belongs to another thread",
         )
-    retained: list[AssessmentResourceRecordV1] = []
+    retained: list[AssessmentResourceRecordV2] = []
     for item in current.resources:
         if item.resource_id != resource.resource_id:
             retained.append(item)
@@ -165,8 +201,8 @@ def _merge_resource_models(
         return current
     retained.append(resource)
     try:
-        return AssessmentCheckpointResourcesV1(
-            schema_version="assessment_checkpoint_resources_v1",
+        return AssessmentCheckpointResourcesV2(
+            schema_version="assessment_checkpoint_resources_v2",
             thread_id=thread_id,
             resources=tuple(retained),
         )
@@ -192,7 +228,7 @@ def _mapping_json(value: object) -> str:
 __all__ = [
     "AssessmentCheckpointError",
     "assessment_checkpoint_resources_reducer",
-    "merge_assessment_checkpoint_resource_v1",
-    "validate_assessment_checkpoint_resources_v1",
+    "merge_assessment_checkpoint_resource_v2",
+    "validate_assessment_checkpoint_resources_v2",
     "validate_public_exercise_cards_v1",
 ]

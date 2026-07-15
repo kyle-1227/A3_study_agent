@@ -18,8 +18,10 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from src.learning_guidance.profile_writer import LearningGuidanceProfileWriterV1
 from src.profile.extractor import ProfileExtractor, extractor_from_env
 from src.profile.schema import (
     ExtractedProfileInfo,
@@ -29,6 +31,7 @@ from src.profile.schema import (
 )
 from src.profile.storage import ProfileStore, SQLiteProfileStore
 from src.profile.updater import update_profile
+from src.user_identity import validate_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ class ProfileManager:
         extractor: ProfileExtractor | None = None,
         llm=None,
         injection_budget: int = _DEFAULT_INJECTION_BUDGET,
+        guidance_writer: LearningGuidanceProfileWriterV1 | None = None,
     ):
         """Initialize the profile manager.
 
@@ -69,6 +73,7 @@ class ProfileManager:
         else:
             self._extractor = extractor_from_env()
         self._injection_budget = injection_budget
+        self._guidance_writer = guidance_writer
 
     @property
     def store(self) -> ProfileStore:
@@ -100,6 +105,7 @@ class ProfileManager:
         Returns:
             ProfileUpdateResult with the updated profile and change summary.
         """
+        validate_user_id(user_id)
         # 1. Load or create
         profile = await self.load_or_create(user_id)
 
@@ -115,16 +121,27 @@ class ProfileManager:
             logger.debug("No new profile signals extracted for user=%s", user_id)
             return ProfileUpdateResult(profile=profile, changes=[], new_observations=0)
 
-        # 3. Update
-        result = update_profile(profile, extracted)
-
-        # 4. Persist
-        await self._store.save(result.profile)
+        # 3-4. Update and persist.  Existing guidance bindings must evolve
+        # atomically so goal fingerprints and preference strengths cannot drift.
+        if self._has_guidance_metadata(profile):
+            if self._guidance_writer is None:
+                raise RuntimeError(
+                    "bound profile evolution requires LearningGuidanceProfileWriterV1"
+                )
+            result = await self._guidance_writer.evolve_existing_binding(
+                user_id=user_id,
+                extracted=extracted,
+            )
+        else:
+            result = update_profile(profile, extracted)
+            await self._store.save(result.profile)
 
         if result.changes:
             logger.info(
                 "Profile updated for user=%s: %d changes, %d new observations",
-                user_id, len(result.changes), result.new_observations,
+                user_id,
+                len(result.changes),
+                result.new_observations,
             )
             for change in result.changes:
                 logger.debug("  %s", change)
@@ -133,6 +150,7 @@ class ProfileManager:
 
     async def load_or_create(self, user_id: str) -> UserProfile:
         """Load an existing profile or create a fresh one."""
+        validate_user_id(user_id)
         profile = await self._store.load(user_id)
         if profile is None:
             profile = UserProfile(user_id=user_id)
@@ -143,10 +161,12 @@ class ProfileManager:
 
     async def get_profile(self, user_id: str) -> UserProfile | None:
         """Get the current profile, or None."""
+        validate_user_id(user_id)
         return await self._store.load(user_id)
 
     async def delete_profile(self, user_id: str) -> bool:
         """Delete a user profile completely."""
+        validate_user_id(user_id)
         return await self._store.delete(user_id)
 
     # ── Prompt injection ──────────────────────────────────────────────────
@@ -161,6 +181,7 @@ class ProfileManager:
             ctx = await manager.build_profile_context(user_id)
             system_prompt = f"{base_prompt}\n\n{ctx}" if ctx else base_prompt
         """
+        validate_user_id(user_id)
         profile = await self._store.load(user_id)
         if profile is None:
             return ""
@@ -171,7 +192,7 @@ class ProfileManager:
 
         # Truncate to budget
         if len(summary) > self._injection_budget:
-            summary = summary[:self._injection_budget - 3] + "..."
+            summary = summary[: self._injection_budget - 3] + "..."
 
         return f"[用户画像]\n{summary}\n\n请根据以上用户画像调整你的回答策略。"
 
@@ -186,7 +207,7 @@ class ProfileManager:
         if summary == "（暂无用户画像数据）":
             return ""
         if len(summary) > self._injection_budget:
-            summary = summary[:self._injection_budget - 3] + "..."
+            summary = summary[: self._injection_budget - 3] + "..."
         return f"[用户画像]\n{summary}\n\n请根据以上用户画像调整你的回答策略。"
 
     # ── Batch operations ──────────────────────────────────────────────────
@@ -200,15 +221,13 @@ class ProfileManager:
 
         Each turn should be: {"user": "...", "assistant": "..."}
         """
+        validate_user_id(user_id)
         profile = await self.load_or_create(user_id)
         total_changes: list[str] = []
         total_obs = 0
 
         for i, turn in enumerate(turns):
-            history = [
-                {"role": "user", "content": t["user"]}
-                for t in turns[:i]
-            ]
+            history = [{"role": "user", "content": t["user"]} for t in turns[:i]]
             extracted = await self._extractor.extract(
                 user_message=turn["user"],
                 assistant_response=turn["assistant"],
@@ -217,15 +236,29 @@ class ProfileManager:
             )
             if self._is_empty_extraction(extracted):
                 continue
-            result = update_profile(profile, extracted)
+            if self._has_guidance_metadata(profile):
+                if self._guidance_writer is None:
+                    raise RuntimeError(
+                        "bound profile evolution requires "
+                        "LearningGuidanceProfileWriterV1"
+                    )
+                result = await self._guidance_writer.evolve_existing_binding(
+                    user_id=user_id,
+                    extracted=extracted,
+                )
+                profile = result.profile
+            else:
+                result = update_profile(profile, extracted)
             total_changes.extend(result.changes)
             total_obs += result.new_observations
 
-        if total_changes:
+        if total_changes and not self._has_guidance_metadata(profile):
             await self._store.save(profile)
             logger.info(
                 "Batch profile update for user=%s: %d changes across %d turns",
-                user_id, len(total_changes), len(turns),
+                user_id,
+                len(total_changes),
+                len(turns),
             )
 
         return ProfileUpdateResult(
@@ -248,6 +281,21 @@ class ProfileManager:
             and not extracted.dislikes_observed
         )
 
+    @staticmethod
+    def _has_guidance_metadata(profile: UserProfile) -> bool:
+        # Keep the runtime import below src.profile package initialization.  The
+        # writer itself depends on profile schemas and storage, so importing it
+        # at module load time would create a package cycle.
+        from src.learning_guidance.profile_writer import (
+            PROFILE_BINDING_EXTRA_KEY,
+            PROFILE_WRITE_RECEIPT_EXTRA_KEY,
+        )
+
+        return (
+            PROFILE_BINDING_EXTRA_KEY in profile.extra
+            or PROFILE_WRITE_RECEIPT_EXTRA_KEY in profile.extra
+        )
+
 
 # ── Singleton factory ──────────────────────────────────────────────────────
 
@@ -258,6 +306,7 @@ _profile_manager: ProfileManager | None = None
 def get_profile_manager(
     store: ProfileStore | None = None,
     extractor: ProfileExtractor | None = None,
+    guidance_writer: LearningGuidanceProfileWriterV1 | None = None,
 ) -> ProfileManager:
     """Get or create a singleton ProfileManager.
 
@@ -266,7 +315,11 @@ def get_profile_manager(
     """
     global _profile_manager
     if _profile_manager is None:
-        _profile_manager = ProfileManager(store=store, extractor=extractor)
+        _profile_manager = ProfileManager(
+            store=store,
+            extractor=extractor,
+            guidance_writer=guidance_writer,
+        )
     return _profile_manager
 
 

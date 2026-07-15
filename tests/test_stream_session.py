@@ -120,6 +120,7 @@ async def _create(
     operation: str = OPERATION,
     request_fingerprint: str = FINGERPRINT,
     source=None,
+    allow_recoverable_retry: bool = False,
 ):
     return await manager.create(
         stream_id=stream_id,
@@ -128,6 +129,18 @@ async def _create(
         operation=operation,
         request_fingerprint=request_fingerprint,
         source=_source() if source is None else source,
+        allow_recoverable_retry=allow_recoverable_retry,
+    )
+
+
+async def _recoverable_error_source():
+    yield AgentStreamEventDraftV2(
+        type="stream_error",
+        data={
+            "error_type": "learning_guidance_history_persist_failed",
+            "message": "Assessment history persistence failed",
+            "recoverable": True,
+        },
     )
 
 
@@ -197,6 +210,34 @@ async def test_duplicate_request_id_attaches_existing_session() -> None:
     first = await _create(manager, stream_id="stream-1")
     second = await _create(manager, stream_id="stream-2")
     assert second is first
+
+
+@pytest.mark.anyio
+async def test_explicit_recoverable_retry_replaces_only_a_completed_error_session() -> (
+    None
+):
+    manager = StreamSessionManager(_config())
+    first = await _create(
+        manager,
+        stream_id="stream-recoverable-1",
+        operation="assessment_attempt",
+        source=_recoverable_error_source(),
+        allow_recoverable_retry=True,
+    )
+    first_frames = [frame async for frame in first.subscribe(after_sequence=0)]
+
+    second = await _create(
+        manager,
+        stream_id="stream-recoverable-2",
+        operation="assessment_attempt",
+        source=_assessment_source(),
+        allow_recoverable_retry=True,
+    )
+    second_frames = [frame async for frame in second.subscribe(after_sequence=0)]
+
+    assert second is not first
+    assert _payload(first_frames[-1])["data"]["terminal_type"] == "stream_error"
+    assert _payload(second_frames[-1])["data"]["terminal_type"] == "assessment_final"
 
 
 @pytest.mark.anyio

@@ -3,13 +3,22 @@
 import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 
+import { ONBOARDING_ATTEMPT_STORAGE_PREFIX } from "@/lib/onboarding-client"
+import { requirePublicApiBaseUrl } from "@/lib/public-config"
+
 const USER_ID_KEY = "a3_user_id"
 const NICKNAME_KEY = "a3_nickname"
+const ONBOARDING_COMPLETED_KEY = "a3_onboarding_completed"
+const API_BASE_URL = requirePublicApiBaseUrl()
+
+export type ProfileAvailability =
+  | "loading"
+  | "available"
+  | "missing"
+  | "unavailable"
 
 function generateUserId(): string {
-  const t = Date.now().toString(36)
-  const r = Math.random().toString(36).slice(2, 10)
-  return `u_${t}_${r}`
+  return `u_${crypto.randomUUID()}`
 }
 
 function getStoredUserId(): string | null {
@@ -26,14 +35,15 @@ export function useUser(): {
   userId: string | null
   nickname: string | null
   hasProfile: boolean
+  profileAvailability: ProfileAvailability
   isLoading: boolean
   startOnboarding: () => void
   clearUser: () => void
 } {
   const [userId, setUserId] = useState<string | null>(null)
   const [nickname, setNickname] = useState<string | null>(null)
-  const [hasProfile, setHasProfile] = useState(false)
-  const [isLoading, setIsLoading] = useState(true)
+  const [profileAvailability, setProfileAvailability] =
+    useState<ProfileAvailability>("loading")
   const router = useRouter()
 
   // Check for existing user on mount
@@ -43,34 +53,22 @@ export function useUser(): {
       setUserId(stored)
       setNickname(getStoredNickname())
 
-      // Optimistic: if onboarding was just completed, the profile definitely
-      // exists — skip the backend fetch to avoid a race where the fetch
-      // overrides hasProfile=false and bounces the user back to /onboarding.
-      if (typeof window !== "undefined" && localStorage.getItem("a3_onboarding_completed")) {
-        setHasProfile(true)
-        setIsLoading(false)
-        return
-      }
-
       // Verify the profile exists on the backend
-      fetch(`http://localhost:8000/profile/${stored}`)
+      fetch(`${API_BASE_URL}/profile/${encodeURIComponent(stored)}`, {
+        headers: { Accept: "application/json" },
+      })
         .then((res) => {
-          setHasProfile(res.ok)
           if (res.ok) {
-            return res.json()
-          }
-          return null
-        })
-        .then((data) => {
-          if (data?.nickname) {
-            localStorage.setItem(NICKNAME_KEY, data.nickname)
-            setNickname(data.nickname)
+            setProfileAvailability("available")
+          } else if (res.status === 404) {
+            setProfileAvailability("missing")
+          } else {
+            setProfileAvailability("unavailable")
           }
         })
-        .catch(() => setHasProfile(false))
-        .finally(() => setIsLoading(false))
+        .catch(() => setProfileAvailability("unavailable"))
     } else {
-      setIsLoading(false)
+      setProfileAvailability("missing")
     }
   }, [])
 
@@ -78,16 +76,28 @@ export function useUser(): {
     const uid = generateUserId()
     localStorage.setItem(USER_ID_KEY, uid)
     setUserId(uid)
+    setProfileAvailability("missing")
     router.push("/onboarding")
   }, [router])
 
   const clearUser = useCallback(() => {
+    const stored = getStoredUserId()
+    if (stored) localStorage.removeItem(`${ONBOARDING_ATTEMPT_STORAGE_PREFIX}${stored}`)
     localStorage.removeItem(USER_ID_KEY)
     localStorage.removeItem(NICKNAME_KEY)
+    localStorage.removeItem(ONBOARDING_COMPLETED_KEY)
     setUserId(null)
     setNickname(null)
-    setHasProfile(false)
+    setProfileAvailability("missing")
   }, [])
 
-  return { userId, nickname, hasProfile, isLoading, startOnboarding, clearUser }
+  return {
+    userId,
+    nickname,
+    hasProfile: profileAvailability === "available",
+    profileAvailability,
+    isLoading: profileAvailability === "loading",
+    startOnboarding,
+    clearUser,
+  }
 }

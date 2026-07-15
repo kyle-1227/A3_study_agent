@@ -100,6 +100,7 @@ async def test_profile_load_strict_returns_none_only_for_absent_user(
         "{malformed-sensitive-marker",
         '{"user_id":"user-1","user_id":"duplicate-sensitive-marker"}',
         '{"value":NaN,"marker":"non-finite-sensitive-marker"}',
+        '{"value":1e400,"marker":"overflow-sensitive-marker"}',
     ),
 )
 async def test_profile_load_strict_rejects_invalid_json_without_leaking_content(
@@ -173,7 +174,10 @@ async def test_profile_load_strict_rejects_payload_identity_mismatch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("user_id", ("", " user-1", "user-1 "))
+@pytest.mark.parametrize(
+    "user_id",
+    ("", " user-1", "user-1 ", "unknown", "anonymous-thread:v1:forged"),
+)
 async def test_profile_load_strict_validates_identity_before_file_access(
     tmp_path: Path,
     user_id: str,
@@ -184,3 +188,53 @@ async def test_profile_load_strict_validates_identity_before_file_access(
         await SQLiteProfileStore(database).load_strict(user_id)
 
     assert not database.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_kind", ["tuple_list_field", "tuple_in_extra"])
+async def test_profile_mutation_rejects_non_json_native_python_shapes(
+    tmp_path: Path,
+    mutation_kind: str,
+) -> None:
+    database = tmp_path / "profiles.sqlite"
+    store = SQLiteProfileStore(database)
+    await store.save(UserProfile(user_id="user-1"))
+    before = await store.load_strict("user-1")
+
+    def mutate(current: UserProfile | None) -> UserProfile:
+        assert current is not None
+        if mutation_kind == "tuple_list_field":
+            object.__setattr__(current, "goals", ())
+        else:
+            current.extra["invalid"] = ("not", "json")
+        return current
+
+    with pytest.raises(ValueError):
+        await store.mutate_strict("user-1", mutate)
+
+    assert await SQLiteProfileStore(database).load_strict("user-1") == before
+
+
+@pytest.mark.asyncio
+async def test_profile_mutation_returns_the_canonical_persisted_instance(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "profiles.sqlite"
+    store = SQLiteProfileStore(database)
+    await store.save(UserProfile(user_id="user-1"))
+    candidate: UserProfile | None = None
+
+    def mutate(current: UserProfile | None) -> UserProfile:
+        nonlocal candidate
+        assert current is not None
+        candidate = current.model_copy(deep=True)
+        candidate.tags.append("verified")
+        return candidate
+
+    persisted = await store.mutate_strict("user-1", mutate)
+    reopened = await SQLiteProfileStore(database).load_strict("user-1")
+
+    assert candidate is not None
+    assert persisted is not candidate
+    assert persisted == reopened
+    assert persisted.tags == ["verified"]

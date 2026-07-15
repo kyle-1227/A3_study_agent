@@ -189,6 +189,7 @@ def _quiz_binding(*, thread_id: str, request_id: str) -> dict:
             failure_reason="",
             warnings=(),
         ),
+        learning_guidance_binding=None,
     )
     return {
         "exercise_items": [public],
@@ -201,7 +202,7 @@ def _quiz_binding(*, thread_id: str, request_id: str) -> dict:
         },
         "exercise_resource_v3": projection.public_resource.model_dump(mode="json"),
         "assessment_checkpoint_resources": {
-            "schema_version": "assessment_checkpoint_resources_v1",
+            "schema_version": "assessment_checkpoint_resources_v2",
             "thread_id": thread_id,
             "resources": [projection.checkpoint_resource.model_dump(mode="json")],
         },

@@ -63,6 +63,7 @@ yarn-error.log*
 pnpm-debug.log*
 frontend/dist/
 frontend/%TEMP%/
+frontend/*.tsbuildinfo
 
 # pip editable install
 *.egg-info/

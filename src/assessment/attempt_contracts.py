@@ -7,12 +7,13 @@ import json
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.assessment.identity import (
     stable_adaptive_practice_question_id,
     stable_exercise_question_id,
 )
+from src.user_identity import USER_ID_PATTERN, UserIdentityError, validate_user_id
 
 ASSESSMENT_ATTEMPT_SCHEMA_VERSION = "assessment_attempt_v1"
 ASSESSMENT_FINAL_SCHEMA_VERSION = "assessment_final_v1"
@@ -125,8 +126,34 @@ class AssessmentQuestionRecordV1(BaseModel):
         return self
 
 
+class AssessmentLearningGuidanceBindingV1(BaseModel):
+    """Immutable learner/topic authority captured when a quiz is generated."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["assessment_learning_guidance_binding_v1"]
+    user_id: str = Field(pattern=USER_ID_PATTERN, max_length=160)
+    subject: str = Field(pattern=r"^[a-z0-9][a-z0-9._:-]{0,119}$")
+    topic_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._:-]{0,159}$")
+    resource_type: Literal["quiz"]
+    generation_request_id: str = Field(
+        pattern=_REQUEST_ID_PATTERN,
+        max_length=160,
+    )
+    assignment_contract_version: Literal["resource_evidence_assignment_v1"]
+    assignment_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_durable_user_id(cls, value: str) -> str:
+        try:
+            return validate_user_id(value)
+        except UserIdentityError as exc:
+            raise ValueError(exc.code) from None
+
+
 class AssessmentResourceRecordV1(BaseModel):
-    """Assessment-capable resource as stored in checkpoint data."""
+    """Legacy assessment resource persisted before guidance binding existed."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -145,8 +172,29 @@ class AssessmentResourceRecordV1(BaseModel):
         return self
 
 
+class AssessmentResourceRecordV2(BaseModel):
+    """Current assessment resource with an explicit nullable guidance binding."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["assessment_resource_record_v2"]
+    resource_id: str = Field(pattern=_RESOURCE_ID_PATTERN)
+    learning_guidance_binding: AssessmentLearningGuidanceBindingV1 | None
+    questions: tuple[AssessmentQuestionRecordV1, ...] = Field(
+        min_length=1,
+        max_length=1_000,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_questions(self) -> AssessmentResourceRecordV2:
+        question_ids = [item.card.question_id for item in self.questions]
+        if len(set(question_ids)) != len(question_ids):
+            raise ValueError("resource question_id values must be unique")
+        return self
+
+
 class AssessmentCheckpointResourcesV1(BaseModel):
-    """Narrow, injected view of assessment resources in a thread checkpoint."""
+    """Legacy checkpoint inventory persisted before resource schema V2."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -156,6 +204,23 @@ class AssessmentCheckpointResourcesV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_unique_resources(self) -> AssessmentCheckpointResourcesV1:
+        resource_ids = [item.resource_id for item in self.resources]
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("checkpoint resource_id values must be unique")
+        return self
+
+
+class AssessmentCheckpointResourcesV2(BaseModel):
+    """Current checkpoint inventory containing resource schema V2 records."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["assessment_checkpoint_resources_v2"]
+    thread_id: str = Field(pattern=_THREAD_ID_PATTERN, max_length=160)
+    resources: tuple[AssessmentResourceRecordV2, ...] = Field(max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_unique_resources(self) -> AssessmentCheckpointResourcesV2:
         resource_ids = [item.resource_id for item in self.resources]
         if len(set(resource_ids)) != len(resource_ids):
             raise ValueError("checkpoint resource_id values must be unique")
@@ -527,12 +592,15 @@ __all__ = [
     "AdaptivePracticeTaskV1",
     "AssessmentAttemptV1",
     "AssessmentCheckpointResourcesV1",
+    "AssessmentCheckpointResourcesV2",
     "AssessmentErrorClassificationV1",
     "AssessmentEvaluationInputV1",
     "AssessmentFinalV1",
+    "AssessmentLearningGuidanceBindingV1",
     "AssessmentQuestionRecordV1",
     "AssessmentQuizSourceItemV1",
     "AssessmentResourceRecordV1",
+    "AssessmentResourceRecordV2",
     "PrivateExerciseAnswerKeyV1",
     "PublicExerciseCardV1",
     "answer_matches",

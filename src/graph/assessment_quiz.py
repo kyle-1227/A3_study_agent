@@ -7,15 +7,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from src.assessment.attempt_contracts import (
+    AssessmentLearningGuidanceBindingV1,
     AssessmentQuestionRecordV1,
     AssessmentQuizSourceItemV1,
-    AssessmentResourceRecordV1,
+    AssessmentResourceRecordV2,
     PrivateExerciseAnswerKeyV1,
     PublicExerciseCardV1,
 )
 from src.assessment.checkpoint import (
     AssessmentCheckpointError,
-    validate_assessment_checkpoint_resources_v1,
+    validate_assessment_checkpoint_resources_v2,
     validate_public_exercise_cards_v1,
 )
 from src.graph.resource_final_v3 import (
@@ -31,7 +32,7 @@ class AssessmentQuizProjectionV1:
     """One public quiz resource paired with its checkpoint-only answer keys."""
 
     public_resource: ResourceFinalV3Quiz
-    checkpoint_resource: AssessmentResourceRecordV1
+    checkpoint_resource: AssessmentResourceRecordV2
 
 
 class AssessmentQuizProjectionError(ValueError):
@@ -60,6 +61,7 @@ def build_assessment_quiz_projection_v1(
     source_items: Sequence[AssessmentQuizSourceItemV1 | Mapping[str, object]],
     artifact_refs: Mapping[str, str],
     validation: ResourceFinalV3ResourceValidation,
+    learning_guidance_binding: AssessmentLearningGuidanceBindingV1 | None,
 ) -> AssessmentQuizProjectionV1:
     """Build public cards and private keys without serializing answers publicly."""
 
@@ -107,9 +109,10 @@ def build_assessment_quiz_projection_v1(
             message="Resource Final V3 builder did not return a quiz resource",
         )
 
-    checkpoint_resource = AssessmentResourceRecordV1(
-        schema_version="assessment_resource_record_v1",
+    checkpoint_resource = AssessmentResourceRecordV2(
+        schema_version="assessment_resource_record_v2",
         resource_id=resource.resource_id,
+        learning_guidance_binding=learning_guidance_binding,
         questions=tuple(
             AssessmentQuestionRecordV1(
                 schema_version="assessment_question_record_v1",
@@ -183,7 +186,7 @@ def validate_assessment_quiz_runtime_binding_v1(
             message="successful quiz requires a strict private checkpoint resource",
         )
     try:
-        checkpoint = validate_assessment_checkpoint_resources_v1(
+        checkpoint = validate_assessment_checkpoint_resources_v2(
             assessment_checkpoint_resources
         )
     except AssessmentCheckpointError as exc:

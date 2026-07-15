@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from src.context_engineering.thread_window_v3 import ThreadContextWindowV3
 from src.learning_guidance.recommendation_final import RecommendationFinalV1
+from src.learning_guidance.profile_writer import (
+    CompiledLearningGuidanceProfileWriteV1,
+    LearningGuidanceProfileWriteSourceV1,
+    LearningGuidanceProfileWriteRequestV1,
+    build_profile_write_source_v1,
+    compile_profile_write_request_v1,
+)
+from src.user_identity import UserIdentityError, validate_user_id
 
 
 class ChatRequest(BaseModel):
@@ -18,6 +34,16 @@ class ChatRequest(BaseModel):
     request_id: UUID
     thread_id: str | None = None
     user_id: str | None = None
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_optional_user_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return validate_user_id(value)
+        except UserIdentityError as exc:
+            raise ValueError(exc.code) from None
 
 
 class ResumeRequest(BaseModel):
@@ -89,22 +115,140 @@ class ThreadStatusResponse(BaseModel):
 
 
 class OnboardRequest(BaseModel):
-    """Onboarding wizard data submitted on first login.
+    """Strict V2 onboarding payload with explicit KG topic ownership."""
 
-    All values are explicit self-reports from the user, so they
-    carry high confidence (0.9) when stored in the profile.
-    """
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        frozen=True,
+        revalidate_instances="always",
+    )
 
-    user_id: str
-    nickname: str = Field(default="")
-    subjects: list[str] = Field(default_factory=list)
-    skill_levels: dict[str, float] = Field(
-        default_factory=dict
-    )  # subject → 0.25|0.5|0.75
-    goals: list[str] = Field(default_factory=list)
-    learning_style: dict[str, float] = Field(default_factory=dict)  # dim → 0.2|0.5|0.8
-    grade: str | None = None
-    dislikes: list[str] | None = None
+    schema_version: Literal["onboard_v2"]
+    profile: LearningGuidanceProfileWriteRequestV1
+    nickname: str = Field(max_length=120)
+    grade: str = Field(min_length=1, max_length=120)
+    dislikes: list[Annotated[str, Field(max_length=500)]] = Field(
+        strict=True,
+        max_length=50,
+    )
+
+    @field_validator("nickname", "grade")
+    @classmethod
+    def validate_direct_text(cls, value: str, info: ValidationInfo) -> str:
+        if value != value.strip() or (info.field_name == "grade" and not value):
+            raise ValueError("onboarding text fields must be normalized")
+        return value
+
+    @field_validator("dislikes")
+    @classmethod
+    def validate_dislikes(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or value != value.strip() for value in values):
+            raise ValueError("dislikes must contain normalized non-blank strings")
+        if len(values) != len(set(values)):
+            raise ValueError("dislikes must be unique")
+        return values
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledOnboardRequestV2:
+    """Deeply immutable internal projection of a validated onboarding request."""
+
+    schema_version: Literal["onboard_v2"]
+    profile: CompiledLearningGuidanceProfileWriteV1
+    profile_write_source: LearningGuidanceProfileWriteSourceV1
+    nickname: str
+    grade: str
+    dislikes: tuple[str, ...]
+
+
+def compile_onboard_request_v2(request: OnboardRequest) -> CompiledOnboardRequestV2:
+    """Strictly revalidate the Python boundary before freezing its collections."""
+
+    if not isinstance(request, OnboardRequest):
+        raise TypeError("request must be OnboardRequest")
+    validated = OnboardRequest.model_validate(
+        dict(vars(request)),
+        strict=True,
+    )
+    return CompiledOnboardRequestV2(
+        schema_version=validated.schema_version,
+        profile=compile_profile_write_request_v1(validated.profile),
+        profile_write_source=build_profile_write_source_v1(
+            source_kind="onboard_v2",
+            payload=validated.model_dump(mode="json"),
+        ),
+        nickname=validated.nickname,
+        grade=validated.grade,
+        dislikes=tuple(validated.dislikes),
+    )
+
+
+class _StrictApiModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    @field_validator("*", mode="before", check_fields=False)
+    @classmethod
+    def reject_unnormalized_text(cls, value: object) -> object:
+        if isinstance(value, str) and (not value.strip() or value != value.strip()):
+            raise ValueError("API text fields must be normalized and non-blank")
+        return value
+
+
+class LearningGuidanceCatalogTopicV1(_StrictApiModel):
+    topic_id: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=240)
+
+
+class LearningGuidanceCatalogSubjectV1(_StrictApiModel):
+    subject_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=240)
+    topics: list[LearningGuidanceCatalogTopicV1] = Field(
+        strict=True,
+        min_length=1,
+        max_length=500,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_topics(self) -> "LearningGuidanceCatalogSubjectV1":
+        topic_ids = tuple(topic.topic_id for topic in self.topics)
+        if len(topic_ids) != len(set(topic_ids)):
+            raise ValueError("catalog topic IDs must be unique within one subject")
+        return self
+
+
+class LearningGuidanceCatalogV1(_StrictApiModel):
+    schema_version: Literal["learning_guidance_catalog_v1"]
+    data_version: str = Field(min_length=1, max_length=160)
+    artifact_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    subjects: list[LearningGuidanceCatalogSubjectV1] = Field(
+        strict=True,
+        min_length=1,
+        max_length=200,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_subjects_and_topics(self) -> "LearningGuidanceCatalogV1":
+        subject_ids = tuple(subject.subject_id for subject in self.subjects)
+        if len(subject_ids) != len(set(subject_ids)):
+            raise ValueError("catalog subject IDs must be globally unique")
+        topic_ids = tuple(
+            topic.topic_id for subject in self.subjects for topic in subject.topics
+        )
+        if len(topic_ids) != len(set(topic_ids)):
+            raise ValueError("catalog topic IDs must be globally unique")
+        return self
+
+
+class OnboardResultV2(_StrictApiModel):
+    schema_version: Literal["onboard_result_v2"]
+    status: Literal["created", "replayed"]
+    request_id: str = Field(min_length=1, max_length=160)
+    user_id: str = Field(min_length=1, max_length=160)
+    summary: str = Field(min_length=1, max_length=65_536)
+    skills_count: int = Field(ge=1, le=200)
+    goals_count: int = Field(ge=1, le=50)
+    preferences_count: int = Field(ge=0, le=200)
 
 
 class ProfileResponse(BaseModel):

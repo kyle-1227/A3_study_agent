@@ -9,14 +9,14 @@ from pydantic import ValidationError
 from src.assessment.attempt_contracts import (
     AssessmentQuestionRecordV1,
     AssessmentQuizSourceItemV1,
-    AssessmentResourceRecordV1,
+    AssessmentResourceRecordV2,
     PrivateExerciseAnswerKeyV1,
 )
 from src.assessment.checkpoint import (
     AssessmentCheckpointError,
     assessment_checkpoint_resources_reducer,
-    merge_assessment_checkpoint_resource_v1,
-    validate_assessment_checkpoint_resources_v1,
+    merge_assessment_checkpoint_resource_v2,
+    validate_assessment_checkpoint_resources_v2,
 )
 from src.assessment.identity import stable_exercise_question_id
 from src.graph.assessment_quiz import (
@@ -98,6 +98,7 @@ def _projection():
         source_items=(_free_text_item(), _single_choice_item()),
         artifact_refs={"markdown_url": "/artifacts/exercises/a/public.md"},
         validation=_validation(),
+        learning_guidance_binding=None,
     )
 
 
@@ -146,6 +147,7 @@ def test_projection_rejects_duplicate_question_ids():
             source_items=(_free_text_item(), duplicated),
             artifact_refs={},
             validation=_validation(0),
+            learning_guidance_binding=None,
         )
 
     assert exc_info.value.code == "quiz_projection_duplicate_question_id"
@@ -179,6 +181,7 @@ def test_projection_rejects_untyped_source_mapping_without_inference():
             source_items=(raw,),
             artifact_refs={},
             validation=_validation(0),
+            learning_guidance_binding=None,
         )
 
     assert exc_info.value.code == "quiz_projection_source_item_invalid"
@@ -234,19 +237,20 @@ def test_checkpoint_merge_preserves_prior_quizzes_and_is_idempotent():
         source_items=(_free_text_item(),),
         artifact_refs={"markdown_url": "/artifacts/exercises/b/public.md"},
         validation=_validation(),
+        learning_guidance_binding=None,
     )
 
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=first.checkpoint_resource,
     )
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=checkpoint,
         resource=second.checkpoint_resource,
     )
-    repeated = merge_assessment_checkpoint_resource_v1(
+    repeated = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=checkpoint,
         resource=second.checkpoint_resource,
@@ -261,14 +265,14 @@ def test_checkpoint_merge_preserves_prior_quizzes_and_is_idempotent():
 
 def test_checkpoint_merge_rejects_thread_mismatch():
     projection = _projection()
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=projection.checkpoint_resource,
     )
 
     with pytest.raises(AssessmentCheckpointError) as exc_info:
-        merge_assessment_checkpoint_resource_v1(
+        merge_assessment_checkpoint_resource_v2(
             thread_id="thread-2",
             existing=checkpoint,
             resource=projection.checkpoint_resource,
@@ -293,19 +297,20 @@ def test_checkpoint_merge_rejects_private_key_conflict_for_same_resource_id():
         card=first_question.card,
         answer_key=conflicting_key,
     )
-    conflicting_resource = AssessmentResourceRecordV1(
-        schema_version="assessment_resource_record_v1",
+    conflicting_resource = AssessmentResourceRecordV2(
+        schema_version="assessment_resource_record_v2",
         resource_id=original.resource_id,
+        learning_guidance_binding=original.learning_guidance_binding,
         questions=(conflicting_question, *original.questions[1:]),
     )
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=original,
     )
 
     with pytest.raises(AssessmentCheckpointError) as exc_info:
-        merge_assessment_checkpoint_resource_v1(
+        merge_assessment_checkpoint_resource_v2(
             thread_id="thread-1",
             existing=checkpoint,
             resource=conflicting_resource,
@@ -316,7 +321,7 @@ def test_checkpoint_merge_rejects_private_key_conflict_for_same_resource_id():
 
 def test_checkpoint_merge_accepts_real_jsonplus_round_trip_shape():
     projection = _projection()
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=projection.checkpoint_resource,
@@ -327,7 +332,7 @@ def test_checkpoint_merge_accepts_real_jsonplus_round_trip_shape():
 
     assert isinstance(restored["resources"], list)
     assert isinstance(restored["resources"][0]["questions"], list)
-    merged = merge_assessment_checkpoint_resource_v1(
+    merged = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=restored,
         resource=projection.checkpoint_resource,
@@ -346,13 +351,14 @@ def test_checkpoint_reducer_merges_parallel_resource_snapshots_without_conflict(
         source_items=(_single_choice_item(),),
         artifact_refs={"markdown_url": "/artifacts/exercises/b/public.md"},
         validation=_validation(),
+        learning_guidance_binding=None,
     )
-    first_snapshot = merge_assessment_checkpoint_resource_v1(
+    first_snapshot = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=first.checkpoint_resource,
     ).model_dump(mode="json")
-    second_snapshot = merge_assessment_checkpoint_resource_v1(
+    second_snapshot = merge_assessment_checkpoint_resource_v2(
         thread_id="thread-1",
         existing=None,
         resource=second.checkpoint_resource,
@@ -362,9 +368,32 @@ def test_checkpoint_reducer_merges_parallel_resource_snapshots_without_conflict(
         first_snapshot,
         second_snapshot,
     )
-    merged = validate_assessment_checkpoint_resources_v1(merged_json)
+    merged = validate_assessment_checkpoint_resources_v2(merged_json)
 
     assert {item.resource_id for item in merged.resources} == {
         first.public_resource.resource_id,
         second.public_resource.resource_id,
     }
+
+
+def test_tagged_legacy_checkpoint_is_explicitly_migrated_to_v2() -> None:
+    current = _projection().checkpoint_resource
+    legacy = {
+        "schema_version": "assessment_checkpoint_resources_v1",
+        "thread_id": "thread-1",
+        "resources": [
+            {
+                "schema_version": "assessment_resource_record_v1",
+                "resource_id": current.resource_id,
+                "questions": [
+                    question.model_dump(mode="json") for question in current.questions
+                ],
+            }
+        ],
+    }
+
+    migrated = validate_assessment_checkpoint_resources_v2(legacy)
+
+    assert migrated.schema_version == "assessment_checkpoint_resources_v2"
+    assert migrated.resources[0].schema_version == "assessment_resource_record_v2"
+    assert migrated.resources[0].learning_guidance_binding is None

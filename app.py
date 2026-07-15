@@ -28,14 +28,18 @@ from pydantic import ValidationError
 
 from src.assessment.attempt_contracts import (
     AssessmentAttemptV1,
-    AssessmentCheckpointResourcesV1,
+    AssessmentCheckpointResourcesV2,
     stable_assessment_attempt_hash,
 )
 from src.assessment.attempt_journal import (
+    AssessmentAttemptJournalError,
     AssessmentAttemptJournalV1,
+    AssessmentAttemptRecordV1,
     AssessmentCheckpointIdempotencyExecutor,
     AssessmentExecutionLock,
     LocalAssessmentExecutionLock,
+    find_assessment_attempt_record_v1,
+    validate_assessment_attempt_journal_v1,
 )
 from src.assessment.attempt_service import (
     AssessmentAttemptService,
@@ -48,7 +52,7 @@ from src.assessment.attempt_service import (
 )
 from src.assessment.checkpoint import (
     AssessmentCheckpointError,
-    validate_assessment_checkpoint_resources_v1,
+    validate_assessment_checkpoint_resources_v2,
 )
 from src.assessment.runtime import (
     classify_assessment_error_v1,
@@ -116,12 +120,30 @@ from src.graph.resource_final_runtime import (
 from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.graph.qa import qa_final_payload, qa_final_trace_payload
 from src.learning_guidance.factory import load_learning_guidance_runtime
+from src.learning_guidance.history_writer import (
+    LearningGuidanceHistoryWriterError,
+    LearningGuidanceHistoryWriterV1,
+)
+from src.learning_guidance.profile_writer import (
+    LearningGuidanceProfileWriterV1,
+    ProfileWriterError,
+)
 from src.learning_guidance.recommendation_final import (
     RecommendationFinalV1,
     validate_recommendation_final_v1,
 )
 from src.llm.compaction import invoke_conversation_compaction
-from src.profile import get_profile_manager
+from src.memory.storage import SQLiteMemoryStore
+from src.profile import get_profile_manager, reset_profile_manager
+from src.profile.schema import (
+    AgentObservation,
+    Goal,
+    LearningStyle,
+    SkillEntry,
+    UserProfile,
+)
+from src.learning_guidance.runtime import LearningGuidanceRuntime
+from src.profile.storage import SQLiteProfileStore
 from src.run_control import (
     RUN_CONTROL_FIELDS,
     RUN_CONTROL_SCHEMA_VERSION,
@@ -144,11 +166,15 @@ from src.run_control import (
 )
 from src.schemas import (
     ChatRequest,
+    CompiledOnboardRequestV2,
     ContinueRequest,
+    LearningGuidanceCatalogV1,
     OnboardRequest,
+    OnboardResultV2,
     ResumeRequest,
     StopRequest,
     ThreadStatusResponse,
+    compile_onboard_request_v2,
 )
 from src.observability.a3_trace import (
     emit_a3_trace,
@@ -686,11 +712,15 @@ async def lifespan(app: FastAPI):
         app.state.checkpointer_enabled = bool(checkpointer)
         app.state.checkpointer_type = ckp_type
         project_root = Path(__file__).resolve().parent
+        profile_db_path = project_root / "data" / "profile.db"
+        memory_db_path = project_root / "data" / "memory.db"
+        memory_store = SQLiteMemoryStore(memory_db_path)
+        await memory_store.initialize()
         learning_guidance_runtime = load_learning_guidance_runtime(
             config_path=project_root / "config" / "learning_guidance.yaml",
             project_root=project_root,
-            profile_db_path=project_root / "data" / "profile.db",
-            memory_db_path=project_root / "data" / "memory.db",
+            profile_db_path=profile_db_path,
+            memory_db_path=memory_db_path,
             clock=lambda: datetime.now(timezone.utc),
         )
         graph = get_compiled_graph(
@@ -698,6 +728,21 @@ async def lifespan(app: FastAPI):
             checkpointer=graph_checkpointer,
         )
         app.state.learning_guidance_runtime = learning_guidance_runtime
+        app.state.learning_guidance_history_writer = LearningGuidanceHistoryWriterV1(
+            store=memory_store,
+            knowledge_graph=learning_guidance_runtime.knowledge_graph,
+        )
+        profile_store = SQLiteProfileStore(profile_db_path)
+        profile_writer = LearningGuidanceProfileWriterV1(
+            store=profile_store,
+            knowledge_graph=learning_guidance_runtime.knowledge_graph,
+        )
+        app.state.learning_guidance_profile_writer = profile_writer
+        reset_profile_manager()
+        app.state.profile_manager = get_profile_manager(
+            store=profile_store,
+            guidance_writer=profile_writer,
+        )
         runtime_node_ids = frozenset(get_physical_graph_node_ids(graph))
         setattr(graph, "_a3_node_ids", runtime_node_ids)
         setattr(graph, "_a3_checkpointer_enabled", bool(checkpointer))
@@ -4668,7 +4713,7 @@ async def _generate_stream_drafts_impl(
                 resource_types=None,
             )
             await write_episodic_memory(
-                {"thread_id": thread_id},
+                {"user_id": user_id, "thread_id": thread_id},
                 memory_type=mem_type,
                 content=content,
                 importance=importance,
@@ -4767,7 +4812,7 @@ async def _load_assessment_checkpoint_resources(
     graph,
     *,
     thread_id: str,
-) -> AssessmentCheckpointResourcesV1:
+) -> AssessmentCheckpointResourcesV2:
     config = make_thread_config(thread_id)
     state_snapshot = await graph.aget_state(config)
     if not _has_checkpoint_state(state_snapshot):
@@ -4780,7 +4825,7 @@ async def _load_assessment_checkpoint_resources(
             detail="assessment_resources_not_found",
         )
     try:
-        checkpoint = validate_assessment_checkpoint_resources_v1(raw)
+        checkpoint = validate_assessment_checkpoint_resources_v2(raw)
     except AssessmentCheckpointError as exc:
         raise HTTPException(status_code=409, detail=exc.code) from exc
     if checkpoint.thread_id != thread_id:
@@ -4828,6 +4873,56 @@ def _build_assessment_attempt_service(
         error_classifier=classify_assessment_error_v1,
         adaptive_generator=generate_adaptive_practice_v1,
     )
+
+
+class AssessmentHistoryProjectionError(RuntimeError):
+    """Content-safe failure between durable assessment and history terminals."""
+
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: assessment history projection failed")
+
+
+async def _load_completed_assessment_record(
+    graph,
+    *,
+    thread_id: str,
+    request_id: str,
+    expected_final,
+) -> AssessmentAttemptRecordV1:
+    """Reload the durable journal receipt used as history observed_at authority."""
+
+    state_snapshot = await graph.aget_state(make_thread_config(thread_id))
+    if not _has_checkpoint_state(state_snapshot):
+        raise AssessmentHistoryProjectionError(
+            code="assessment_history_checkpoint_unavailable"
+        )
+    raw_journal = _state_values(state_snapshot).get("assessment_attempt_journal")
+    try:
+        journal = validate_assessment_attempt_journal_v1(
+            raw_journal,
+            thread_id=thread_id,
+        )
+    except AssessmentAttemptJournalError as exc:
+        raise AssessmentHistoryProjectionError(
+            code="assessment_history_journal_invalid"
+        ) from exc
+    record = find_assessment_attempt_record_v1(
+        journal,
+        request_id=request_id,
+    )
+    if (
+        record is None
+        or record.status != "completed"
+        or record.final is None
+        or record.committed_at is None
+    ):
+        raise AssessmentHistoryProjectionError(
+            code="assessment_history_completed_record_missing"
+        )
+    if record.final != expected_final:
+        raise AssessmentHistoryProjectionError(code="assessment_history_final_mismatch")
+    return record
 
 
 def _assessment_stream_error_data(exc: Exception) -> dict:
@@ -4882,6 +4977,18 @@ def _assessment_stream_error_data(exc: Exception) -> dict:
             "message": "Assessment attempt failed",
             "recoverable": False,
         }
+    if isinstance(exc, LearningGuidanceHistoryWriterError):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment history persistence failed",
+            "recoverable": exc.code == "learning_guidance_history_persist_failed",
+        }
+    if isinstance(exc, AssessmentHistoryProjectionError):
+        return {
+            "error_type": exc.code,
+            "message": "Assessment history projection failed",
+            "recoverable": False,
+        }
     return {
         "error_type": "assessment_attempt_failed",
         "message": "Assessment attempt failed",
@@ -4894,7 +5001,9 @@ async def _assessment_attempt_stream_source(
     service: AssessmentAttemptService,
     thread_id: str,
     attempt: AssessmentAttemptV1,
-    checkpoint: AssessmentCheckpointResourcesV1,
+    checkpoint: AssessmentCheckpointResourcesV2,
+    graph,
+    history_writer: LearningGuidanceHistoryWriterV1 | None,
 ) -> AsyncGenerator[AgentStreamEventDraftV2, None]:
     try:
         final = await service.submit(
@@ -4902,6 +5011,55 @@ async def _assessment_attempt_stream_source(
             attempt=attempt,
             checkpoint=checkpoint,
         )
+        resource = next(
+            (
+                item
+                for item in checkpoint.resources
+                if item.resource_id == final.resource_id
+            ),
+            None,
+        )
+        if resource is None:
+            raise AssessmentHistoryProjectionError(
+                code="assessment_history_resource_missing"
+            )
+        binding = resource.learning_guidance_binding
+        if binding is None:
+            yield _activity_update_draft(
+                "assessment_history",
+                {
+                    "status": "unavailable",
+                    "reason": "assessment_topic_binding_unavailable",
+                    "request_id": final.request_id,
+                    "resource_id": final.resource_id,
+                    "question_id": final.question_id,
+                },
+            )
+        else:
+            if not isinstance(history_writer, LearningGuidanceHistoryWriterV1):
+                raise AssessmentHistoryProjectionError(
+                    code="assessment_history_writer_unavailable"
+                )
+            completed_record = await _load_completed_assessment_record(
+                graph,
+                thread_id=thread_id,
+                request_id=attempt.request_id,
+                expected_final=final,
+            )
+            write_result = await history_writer.write_assessment_once(
+                binding=binding,
+                record=completed_record,
+            )
+            yield _activity_update_draft(
+                "assessment_history",
+                {
+                    "status": write_result.status,
+                    "history_id": write_result.history_id,
+                    "request_id": final.request_id,
+                    "resource_id": final.resource_id,
+                    "question_id": final.question_id,
+                },
+            )
     except Exception as exc:
         yield _stream_draft("stream_error", _assessment_stream_error_data(exc))
         return
@@ -5694,7 +5852,14 @@ async def assessment_attempt_endpoint(
                 thread_id=thread_id,
                 attempt=attempt,
                 checkpoint=checkpoint,
+                graph=request.app.state.graph,
+                history_writer=getattr(
+                    request.app.state,
+                    "learning_guidance_history_writer",
+                    None,
+                ),
             ),
+            allow_recoverable_retry=True,
         )
         response_body = session.subscribe(after_sequence=0)
     except (StreamSessionExpiredError, StreamJournalExpiredError) as exc:
@@ -5946,75 +6111,59 @@ async def download_video_animation_artifact(artifact_id: str, filename: str):
 # User profile and onboarding
 
 
-@app.post("/onboard")
-async def onboard_endpoint(req: OnboardRequest):
-    """Create an initial user profile from the onboarding wizard.
+def _onboarding_base_profile(
+    req: CompiledOnboardRequestV2,
+    *,
+    now: str,
+) -> UserProfile:
+    """Build ordinary profile data from the same explicit topic self-report."""
 
-    All values are explicit self-reports -> stored with confidence=0.9.
-    """
-    from src.profile.schema import (
-        AgentObservation,
-        Goal,
-        LearningStyle,
-        SkillEntry,
-        UserProfile,
-    )
-
-    manager = get_profile_manager()
-    now = datetime.now(timezone.utc).isoformat()
-
-    # Build skills from self-assessed levels
-    skills: dict[str, SkillEntry] = {}
-    for subject in req.subjects:
-        level = req.skill_levels.get(subject, 0.25)
-        skills[subject] = SkillEntry(
-            level=level,
-            confidence=0.9,
+    skills = {
+        item.topic_id: SkillEntry(
+            level=item.level,
+            confidence=item.confidence,
             last_observed=now,
             evidence_count=1,
         )
-
-    # Build learning style from self-report
-    learning_style = LearningStyle()
-    for dim, val in req.learning_style.items():
-        if hasattr(learning_style, dim):
-            setattr(learning_style, dim, val)
-
-    # Build goals
+        for item in req.profile.skills
+    }
     goals = [
-        Goal(goal=g.strip(), importance=0.9, progress=0.0, created_at=now)
-        for g in req.goals
-        if g.strip()
+        Goal(
+            goal=item.goal,
+            importance=item.importance,
+            progress=item.progress,
+            created_at=now,
+        )
+        for item in req.profile.goals
     ]
-
-    # Record observations about the onboarding
-    obs_list: list[AgentObservation] = []
-    if req.grade:
-        obs_list.append(
-            AgentObservation(
-                content=f"用户自述年级: {req.grade}",
-                category="general",
-                importance=0.8,
-                created_at=now,
-            )
-        )
-    if req.subjects:
-        obs_list.append(
-            AgentObservation(
-                content=f"用户首次选择 {len(req.subjects)} 个学习方向: {', '.join(req.subjects)}",
-                category="general",
-                importance=0.8,
-                created_at=now,
-            )
-        )
-
-    profile = UserProfile(
-        user_id=req.user_id,
+    learning_style = LearningStyle()
+    for item in req.profile.preferences:
+        setattr(learning_style, item.dimension, item.strength)
+    subjects = tuple(dict.fromkeys(item.subject for item in req.profile.skills))
+    observations = [
+        AgentObservation(
+            content=f"用户自述年级: {req.grade}",
+            category="general",
+            importance=0.8,
+            created_at=now,
+        ),
+        AgentObservation(
+            content=(
+                f"用户显式选择 {len(req.profile.skills)} 个 KG 学习主题，"
+                f"科目: {', '.join(subjects)}"
+            ),
+            category="goal",
+            importance=0.9,
+            created_at=now,
+        ),
+    ]
+    return UserProfile(
+        user_id=req.profile.user_id,
         skills=skills,
         learning_style=learning_style,
         goals=goals,
-        dislikes=req.dislikes or [],
-        agent_observations=obs_list,
+        dislikes=list(req.dislikes),
+        agent_observations=observations,
         extra={
             "nickname": req.nickname,
             "grade": req.grade,
@@ -6024,21 +6173,85 @@ async def onboard_endpoint(req: OnboardRequest):
         updated_at=now,
     )
 
-    await manager.store.save(profile)
+
+@app.post("/onboard", response_model=OnboardResultV2)
+async def onboard_endpoint(req: OnboardRequest, request: Request):
+    """Create or replay one strict topic-bound onboarding profile."""
+
+    compiled = compile_onboard_request_v2(req)
+    writer = getattr(
+        request.app.state,
+        "learning_guidance_profile_writer",
+        None,
+    )
+    if not isinstance(writer, LearningGuidanceProfileWriterV1):
+        raise HTTPException(
+            status_code=503,
+            detail="learning_guidance_profile_writer_unavailable",
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        result = await writer.create_once(
+            req.profile,
+            base_profile=_onboarding_base_profile(compiled, now=now),
+            source=compiled.profile_write_source,
+        )
+    except ProfileWriterError as exc:
+        status_code = 409 if exc.code == "profile_write_request_conflict" else 422
+        raise HTTPException(status_code=status_code, detail=exc.code) from exc
+
     logger.info(
-        "Onboarding 用户画像已创建 user=%s nickname=%s subjects=%d goals=%d",
-        req.user_id,
-        req.nickname,
-        len(skills),
-        len(goals),
+        "Topic-bound onboarding profile %s user=%s skills=%d goals=%d",
+        result.status,
+        compiled.profile.user_id,
+        len(result.binding.skills),
+        len(result.binding.goals),
+    )
+    return OnboardResultV2(
+        schema_version="onboard_result_v2",
+        status=result.status,
+        request_id=result.request_id,
+        user_id=compiled.profile.user_id,
+        summary=result.profile.to_summary(),
+        skills_count=len(result.binding.skills),
+        goals_count=len(result.binding.goals),
+        preferences_count=len(result.binding.preferences),
     )
 
-    return {
-        "user_id": req.user_id,
-        "summary": profile.to_summary(),
-        "skills_count": len(skills),
-        "goals_count": len(goals),
-    }
+
+@app.get("/learning-guidance/catalog", response_model=LearningGuidanceCatalogV1)
+async def learning_guidance_catalog_endpoint(request: Request):
+    """Expose the exact curated subject/topic identities accepted by onboarding."""
+
+    runtime = getattr(request.app.state, "learning_guidance_runtime", None)
+    if not isinstance(runtime, LearningGuidanceRuntime):
+        raise HTTPException(
+            status_code=503,
+            detail="learning_guidance_runtime_unavailable",
+        )
+    graph = runtime.knowledge_graph
+    return LearningGuidanceCatalogV1.model_validate(
+        {
+            "schema_version": "learning_guidance_catalog_v1",
+            "data_version": graph.data_version,
+            "artifact_fingerprint": graph.artifact_fingerprint,
+            "subjects": [
+                {
+                    "subject_id": subject.subject_id,
+                    "title": subject.title,
+                    "topics": [
+                        {
+                            "topic_id": topic.topic_id,
+                            "title": topic.title,
+                        }
+                        for topic in subject.topics
+                    ],
+                }
+                for subject in graph.subjects
+            ],
+        },
+        strict=True,
+    )
 
 
 @app.get("/profile/{user_id}")

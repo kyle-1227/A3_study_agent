@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import ValidationError
 
 from src.learning_guidance.contracts import (
     LearnerHistoryEventV1,
     LearnerHistorySnapshotV1,
 )
 from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
+from src.learning_guidance.history_contract import (
+    LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
+    LearningGuidanceHistoryBindingV1,
+)
 from src.memory.storage import SQLiteMemoryStore
 
 
@@ -29,39 +32,6 @@ class HistoryAdapterError(RuntimeError):
     def __init__(self, *, code: HistoryAdapterErrorCode) -> None:
         self.code = code
         super().__init__(f"{code}: learning-guidance history binding failed")
-
-
-class LearningGuidanceHistoryBindingV1(BaseModel):
-    """JSON-native marker stored under episodic metadata.learning_guidance_v1."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    schema_version: Literal["learning_guidance_history_event_v1"]
-    topic_id: str = Field(min_length=1, max_length=160)
-    event_type: Literal[
-        "practice",
-        "assessment",
-        "resource_completion",
-        "study_session",
-    ]
-    observed_at: str = Field(min_length=1, max_length=80)
-    outcome_score: float | None = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-
-    @field_validator("topic_id", "observed_at")
-    @classmethod
-    def validate_text(cls, value: str) -> str:
-        if not value.strip() or value != value.strip():
-            raise ValueError("text fields must be normalized and non-blank")
-        return value
-
-    def parsed_observed_at(self) -> datetime:
-        try:
-            parsed = datetime.fromisoformat(self.observed_at)
-        except ValueError:
-            raise ValueError("observed_at must be ISO 8601") from None
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("observed_at must include a timezone")
-        return parsed
 
 
 def _topic_is_bound(
@@ -110,12 +80,13 @@ class HistorySnapshotAdapterV1:
         records = await self._store.query_episodic_metadata_strict(
             user_id=user_id,
             subject=subject,
+            memory_id_prefix=LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
             limit=self._history_limit,
         )
         events: list[LearnerHistoryEventV1] = []
         for record in records:
             if "learning_guidance_v1" not in record.metadata:
-                continue
+                raise HistoryAdapterError(code="history_binding_schema_invalid")
             raw_binding = record.metadata["learning_guidance_v1"]
             try:
                 binding = LearningGuidanceHistoryBindingV1.model_validate(raw_binding)

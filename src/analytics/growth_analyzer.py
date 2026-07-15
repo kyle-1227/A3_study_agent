@@ -1,20 +1,24 @@
 """
 Growth Analyzer — tracks skill mastery over time from episodic memory.
 
-Reads episodic memory (quiz_attempt + error + learning_behavior events)
-and semantic memory (growth trajectories) to build time-series growth curves.
+Reads only authoritative, assessment-bound guidance history when computing
+learning outcomes. Ordinary chat and generic behavior remain engagement data;
+they are never converted into correctness or skill growth.
 """
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from src.analytics.types import GrowthAnalytics, GrowthDataPoint, GrowthSeries
+from src.learning_guidance.history_contract import (
+    LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
+    LearningGuidanceHistoryBindingV1,
+)
+from src.memory.retention import is_protected_episodic_memory_id
+from src.memory.schema import EpisodicMemoryRecord
 from src.memory.storage import MemoryStore, create_memory_store
-
-logger = logging.getLogger(__name__)
 
 
 async def analyze_growth(
@@ -26,9 +30,9 @@ async def analyze_growth(
 ) -> GrowthAnalytics:
     """Analyze skill growth over time from episodic memory.
 
-    Queries episodic memories of types quiz_attempt, error, and learning_behavior
-    over the specified time window, groups by subject/topic, and computes
-    rolling accuracy and skill level estimates.
+    Queries episodic memory over the specified time window, retains only strict
+    assessment history records, groups by their bound topic, and computes rolling
+    accuracy and skill level estimates.
 
     Args:
         user_id: The user to analyze.
@@ -43,46 +47,41 @@ async def analyze_growth(
     now = datetime.now(timezone.utc)
     start_time = (now - timedelta(days=days)).isoformat()
 
-    # Query episodic memories
-    try:
-        records = await store.query_episodic(
-            user_id,
-            start_time=start_time,
-            limit=500,
-        )
-    except Exception as exc:
-        logger.exception("Failed to query episodic memories for growth analysis")
-        return GrowthAnalytics(
-            user_id=user_id, subject=subject, days=days,
-            generated_at=now.isoformat(),
-        )
+    records = await store.query_episodic(
+        user_id,
+        memory_id_prefix=LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
+        start_time=start_time,
+        limit=500,
+    )
 
+    assessment_records: list[EpisodicMemoryRecord] = []
+    for record in records:
+        binding = _guidance_assessment_binding(record)
+        if binding is None:
+            continue
+        if subject and record.subject != subject:
+            continue
+        assessment_records.append(record)
+    records = assessment_records
     if not records:
         return GrowthAnalytics(
-            user_id=user_id, subject=subject, days=days,
+            user_id=user_id,
+            subject=subject,
+            days=days,
             generated_at=now.isoformat(),
         )
 
-    # Filter by subject if specified
-    if subject:
-        subject_lower = subject.lower()
-        records = [
-            r for r in records
-            if subject_lower in (r.subject or "").lower()
-            or subject_lower in (r.content or "").lower()
-        ]
-
     # Group by topic (use subject as topic if topic not available)
-    topic_groups: dict[str, list] = defaultdict(list)
+    topic_groups: dict[str, list[EpisodicMemoryRecord]] = defaultdict(list)
     for rec in records:
-        topic = rec.subject or "general"
-        if subject and subject.lower() not in topic.lower():
-            topic = f"{subject}/{topic}"
-        topic_groups[topic].append(rec)
+        guidance = _guidance_assessment_binding(rec)
+        if guidance is None:
+            raise AssertionError("assessment record lost its strict history binding")
+        topic_groups[guidance.topic_id].append(rec)
 
     # Build time series per topic
     series_list: list[GrowthSeries] = []
-    total_correct = 0
+    total_correct = 0.0
     total_events = 0
 
     for topic, recs in topic_groups.items():
@@ -104,48 +103,58 @@ async def analyze_growth(
             day_recs = daily_bins[date_key]
             event_count += len(day_recs)
 
-            # Estimate accuracy from errors (errors = low accuracy)
-            errors = [r for r in day_recs if r.memory_type == "error"]
-            behaviors = [r for r in day_recs if r.memory_type == "learning_behavior"]
+            guidance_scores = [
+                binding.outcome_score
+                for binding in (
+                    _guidance_assessment_binding(record) for record in day_recs
+                )
+                if binding is not None and binding.outcome_score is not None
+            ]
 
-            if errors:
-                running_accuracy = max(0.0, running_accuracy - 0.1 * len(errors))
-            elif behaviors:
-                running_accuracy = min(1.0, running_accuracy + 0.05 * len(behaviors))
+            if not guidance_scores:
+                raise AssertionError("assessment day has no authoritative outcome")
+            observed_accuracy = sum(guidance_scores) / len(guidance_scores)
+            running_accuracy = running_accuracy * 0.6 + observed_accuracy * 0.4
 
             # Adjust skill level based on importance-weighted events
             avg_importance = (
-                sum(r.importance for r in day_recs) / len(day_recs)
-                if day_recs else 0.5
+                sum(r.importance for r in day_recs) / len(day_recs) if day_recs else 0.5
             )
-            if errors:
-                running_level = max(0.0, running_level - 0.05 * avg_importance)
-            elif behaviors:
-                running_level = min(1.0, running_level + 0.03 * avg_importance)
+            delta = (observed_accuracy - 0.5) * 0.06 * avg_importance
+            running_level = min(1.0, max(0.0, running_level + delta))
 
-            data_points.append(GrowthDataPoint(
-                timestamp=f"{date_key}T00:00:00Z",
-                skill_level=round(running_level, 3),
-                accuracy=round(running_accuracy, 3),
-                topic=topic,
-                event_count=len(day_recs),
-                subject=subject,
-            ))
+            data_points.append(
+                GrowthDataPoint(
+                    timestamp=f"{date_key}T00:00:00Z",
+                    skill_level=round(running_level, 3),
+                    accuracy=round(running_accuracy, 3),
+                    topic=topic,
+                    event_count=len(day_recs),
+                    subject=subject,
+                )
+            )
 
         # Determine trend
         trend = _compute_trend(data_points)
 
-        series_list.append(GrowthSeries(
-            topic=topic,
-            subject=subject,
-            data_points=data_points,
-            trend=trend,
-            current_level=data_points[-1].skill_level if data_points else 0.0,
-        ))
-
-        total_correct += sum(
-            1 for r in recs if r.memory_type != "error"
+        series_list.append(
+            GrowthSeries(
+                topic=topic,
+                subject=subject,
+                data_points=data_points,
+                trend=trend,
+                current_level=data_points[-1].skill_level if data_points else 0.0,
+            )
         )
+
+        for record in recs:
+            guidance = _guidance_assessment_binding(record)
+            if guidance is not None:
+                if guidance.outcome_score is None:
+                    raise ValueError(
+                        "assessment guidance history requires outcome_score"
+                    )
+                total_correct += guidance.outcome_score
         total_events += len(recs)
 
     overall_accuracy = total_correct / max(total_events, 1)
@@ -161,6 +170,18 @@ async def analyze_growth(
         total_events=total_events,
         generated_at=now.isoformat(),
     )
+
+
+def _guidance_assessment_binding(
+    record: EpisodicMemoryRecord,
+) -> LearningGuidanceHistoryBindingV1 | None:
+    if not is_protected_episodic_memory_id(record.memory_id):
+        return None
+    raw = record.metadata.get("learning_guidance_v1")
+    binding = LearningGuidanceHistoryBindingV1.model_validate(raw)
+    if binding.event_type != "assessment":
+        raise ValueError("protected guidance history must be an assessment event")
+    return binding
 
 
 def _compute_trend(points: list[GrowthDataPoint]) -> str:

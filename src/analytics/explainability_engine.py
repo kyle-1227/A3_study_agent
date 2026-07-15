@@ -84,9 +84,11 @@ async def record_decision_trace(
         await store.save_episodic(record)
         logger.debug(
             "Recorded decision trace id=%s node=%s decision=%s",
-            trace_id, node_name, decision[:100],
+            trace_id,
+            node_name,
+            decision[:100],
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to persist decision trace id=%s", trace_id)
 
     return trace
@@ -121,7 +123,7 @@ async def get_decision_traces(
             memory_type="system_event",
             limit=limit * 2,  # Query more to filter
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to query decision traces")
         return DecisionTraceList(user_id=user_id, traces=[], total=0)
 
@@ -144,7 +146,9 @@ async def get_decision_traces(
 
     logger.debug(
         "Retrieved %d decision traces for user=%s (node_filter=%s)",
-        len(traces), user_id, node_name or "none",
+        len(traces),
+        user_id,
+        node_name or "none",
     )
     return DecisionTraceList(user_id=user_id, traces=traces, total=len(traces))
 
@@ -173,7 +177,13 @@ async def record_decision_from_state(
     Returns:
         DecisionTrace that was recorded.
     """
-    thread_id = state.get("thread_id", "") or "unknown"
+    thread_id = state.get("thread_id")
+    if (
+        not isinstance(thread_id, str)
+        or not thread_id.strip()
+        or thread_id != thread_id.strip()
+    ):
+        raise ValueError("decision trace requires a normalized thread_id")
     subject = state.get("subject", "") or state.get("primary_subject", "")
 
     return await record_decision_trace(

@@ -466,15 +466,22 @@ export default function Home() {
   const [isProfileCompleting, setIsProfileCompleting] = useState(false)
   const threadIdRef = useRef<string | null>(null)
   const router = useRouter()
-  const { userId, nickname, hasProfile, isLoading: userLoading, startOnboarding } = useUser()
+  const {
+    userId,
+    nickname,
+    profileAvailability,
+    isLoading: userLoading,
+    startOnboarding,
+    clearUser,
+  } = useUser()
 
   // Redirect to onboarding if user exists but has no profile
   useEffect(() => {
     if (userLoading || !storageReady) return
-    if (userId && !hasProfile) {
+    if (userId && profileAvailability === "missing") {
       router.push("/onboarding")
     }
-  }, [userId, hasProfile, userLoading, storageReady, router])
+  }, [userId, profileAvailability, userLoading, storageReady, router])
   const assistantMessageIdRef = useRef<string>("")
   const pendingChatTitleRef = useRef<string>("")
   const streamHadErrorRef = useRef(false)
@@ -2445,6 +2452,14 @@ export default function Home() {
 
   return (
     <div className="a3-app-shell flex overflow-hidden">
+      {profileAvailability === "unavailable" && (
+        <div
+          role="alert"
+          className="fixed left-1/2 top-3 z-50 -translate-x-1/2 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 shadow-sm"
+        >
+          用户画像服务暂不可用；当前不会把你重定向到重新入门。
+        </div>
+      )}
       <LeftSidebar
         chatHistory={chatHistory}
         onNewChat={handleNewChat}
@@ -2456,12 +2471,8 @@ export default function Home() {
         nickname={nickname}
         onStartOnboarding={startOnboarding}
         onClearUser={() => {
-          if (typeof window !== "undefined") {
-            localStorage.removeItem("a3_user_id")
-            localStorage.removeItem("a3_nickname")
-            localStorage.removeItem("a3_onboarding_completed")
-            window.location.reload()
-          }
+          clearUser()
+          window.location.reload()
         }}
       />
       <div className="flex min-w-0 flex-1 flex-col h-full">

@@ -11,12 +11,12 @@ from src.assessment.attempt_contracts import (
     AdaptivePracticeBatchV1,
     AdaptivePracticeInputV1,
     AssessmentAttemptV1,
-    AssessmentCheckpointResourcesV1,
+    AssessmentCheckpointResourcesV2,
     AssessmentErrorClassificationV1,
     AssessmentEvaluationInputV1,
     AssessmentFinalV1,
     AssessmentQuestionRecordV1,
-    AssessmentResourceRecordV1,
+    AssessmentResourceRecordV2,
     answer_matches,
     build_assessment_final_v1,
     stable_assessment_attempt_hash,
@@ -178,7 +178,7 @@ class AssessmentAttemptService:
         *,
         thread_id: str,
         attempt: AssessmentAttemptV1,
-        checkpoint: AssessmentCheckpointResourcesV1,
+        checkpoint: AssessmentCheckpointResourcesV2,
     ) -> AssessmentFinalV1:
         """Submit one strict attempt through the injected atomic journal."""
 
@@ -303,10 +303,10 @@ class AssessmentAttemptService:
 
 
 def _find_resource(
-    checkpoint: AssessmentCheckpointResourcesV1,
+    checkpoint: AssessmentCheckpointResourcesV2,
     *,
     resource_id: str,
-) -> AssessmentResourceRecordV1:
+) -> AssessmentResourceRecordV2:
     for resource in checkpoint.resources:
         if resource.resource_id == resource_id:
             return resource
@@ -314,7 +314,7 @@ def _find_resource(
 
 
 def _find_question(
-    resource: AssessmentResourceRecordV1,
+    resource: AssessmentResourceRecordV2,
     *,
     question_id: str,
 ) -> AssessmentQuestionRecordV1:

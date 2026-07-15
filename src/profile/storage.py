@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Callable, Literal, TypeAlias
 
 from pydantic import ValidationError
 
@@ -27,6 +28,7 @@ from src.profile.schema import (
     SkillEntry,
     UserProfile,
 )
+from src.user_identity import UserIdentityError, validate_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,13 @@ def _reject_non_finite_json(value: str) -> object:
     raise ValueError("non-finite JSON number")
 
 
+def _strict_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
 def _strict_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -71,6 +80,7 @@ def _strict_json_value(raw: object) -> object:
         raw,
         object_pairs_hook=_strict_json_pairs,
         parse_constant=_reject_non_finite_json,
+        parse_float=_strict_json_float,
     )
 
 
@@ -120,8 +130,90 @@ def _validate_complete_profile_payload(payload: dict[str, object]) -> None:
 
 
 def _validate_read_identity(value: str, *, field_name: str) -> None:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise ValueError(f"{field_name} must be normalized and non-blank")
+    try:
+        validate_user_id(value)
+    except UserIdentityError:
+        raise ValueError(f"{field_name} must be a valid durable user ID") from None
+
+
+def _decode_strict_profile_record(
+    *,
+    requested_user_id: str,
+    stored_user_id: object,
+    raw_profile: object,
+) -> UserProfile:
+    if stored_user_id != requested_user_id:
+        raise ProfileStorageReadError(code="profile_record_identity_mismatch")
+    try:
+        decoded = _strict_json_value(raw_profile)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        raise ProfileStorageReadError(code="profile_record_json_invalid") from None
+    if not isinstance(decoded, dict):
+        raise ProfileStorageReadError(code="profile_record_schema_invalid")
+    try:
+        _validate_complete_profile_payload(decoded)
+        profile = UserProfile.model_validate(decoded, strict=True)
+    except (TypeError, ValueError, ValidationError):
+        raise ProfileStorageReadError(code="profile_record_schema_invalid") from None
+    if profile.user_id != requested_user_id:
+        raise ProfileStorageReadError(code="profile_record_identity_mismatch")
+    return profile
+
+
+def _validated_profile_write(
+    profile: UserProfile,
+    *,
+    user_id: str,
+) -> tuple[UserProfile, str]:
+    if not isinstance(profile, UserProfile):
+        raise TypeError("strict profile mutation must return UserProfile")
+    _validate_read_identity(profile.user_id, field_name="profile.user_id")
+    if profile.user_id != user_id:
+        raise ValueError("strict profile mutation cannot change user_id")
+    if not isinstance(profile.skills, dict) or not isinstance(profile.extra, dict):
+        raise ValueError("strict profile mappings must retain their Python shape")
+    for field_name in ("goals", "agent_observations", "dislikes", "tags"):
+        if not isinstance(getattr(profile, field_name), list):
+            raise ValueError(
+                f"strict profile field {field_name} must remain a Python list"
+            )
+    _validate_json_native_profile_extra(profile.extra)
+    payload = profile.model_dump(mode="json")
+    _validate_complete_profile_payload(payload)
+    try:
+        validated = UserProfile.model_validate(payload, strict=True)
+    except ValidationError:
+        raise ValueError(
+            "strict profile mutation returned an invalid profile"
+        ) from None
+    if validated.user_id != user_id:
+        raise ValueError("strict profile mutation cannot change user_id")
+    canonical_payload = validated.model_dump(mode="json")
+    return validated, json.dumps(
+        canonical_payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _validate_json_native_profile_extra(value: object) -> None:
+    if value is None or isinstance(value, str | bool | int | float):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("profile extra contains a non-finite number")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_json_native_profile_extra(item)
+        return
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("profile extra object keys must be strings")
+        for item in value.values():
+            _validate_json_native_profile_extra(item)
+        return
+    raise ValueError("profile extra must contain only JSON-native values")
 
 
 # ── Abstract interface ─────────────────────────────────────────────────────
@@ -286,26 +378,102 @@ class SQLiteProfileStore(ProfileStore):
 
         if row is None:
             return None
-        stored_user_id = row["user_id"]
-        if stored_user_id != user_id:
-            raise ProfileStorageReadError(code="profile_record_identity_mismatch")
+        return _decode_strict_profile_record(
+            requested_user_id=user_id,
+            stored_user_id=row["user_id"],
+            raw_profile=row["profile_json"],
+        )
+
+    async def mutate_strict(
+        self,
+        user_id: str,
+        mutation: Callable[[UserProfile | None], UserProfile],
+    ) -> UserProfile:
+        """Atomically create or mutate one strictly validated profile row.
+
+        The callback runs while a SQLite ``BEGIN IMMEDIATE`` transaction owns the
+        write lock. Returning a profile identical to the stored record is a true
+        replay: no timestamp or row content is changed.
+        """
+
+        _validate_read_identity(user_id, field_name="user_id")
+        if not callable(mutation):
+            raise TypeError("mutation must be callable")
+        await self._ensure_init()
+
+        import aiosqlite
+
         try:
-            decoded = _strict_json_value(row["profile_json"])
-        except (json.JSONDecodeError, TypeError, ValueError):
-            raise ProfileStorageReadError(code="profile_record_json_invalid") from None
-        if not isinstance(decoded, dict):
-            raise ProfileStorageReadError(code="profile_record_schema_invalid")
-        payload = decoded
-        try:
-            _validate_complete_profile_payload(payload)
-            profile = UserProfile.model_validate(payload, strict=True)
-        except (TypeError, ValueError, ValidationError):
-            raise ProfileStorageReadError(
-                code="profile_record_schema_invalid"
-            ) from None
-        if profile.user_id != user_id:
-            raise ProfileStorageReadError(code="profile_record_identity_mismatch")
-        return profile
+            async with aiosqlite.connect(str(self._db_path)) as db:
+                db.row_factory = aiosqlite.Row
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    schema_cursor = await db.execute("PRAGMA table_info(profiles)")
+                    schema_rows = await schema_cursor.fetchall()
+                    columns = frozenset(str(row[1]) for row in schema_rows)
+                    if not {"user_id", "profile_json"}.issubset(columns):
+                        raise ProfileStorageReadError(
+                            code="profile_table_schema_invalid"
+                        )
+
+                    cursor = await db.execute(
+                        "SELECT user_id, profile_json FROM profiles WHERE user_id = ?",
+                        (user_id,),
+                    )
+                    row = await cursor.fetchone()
+                    current = (
+                        None
+                        if row is None
+                        else _decode_strict_profile_record(
+                            requested_user_id=user_id,
+                            stored_user_id=row["user_id"],
+                            raw_profile=row["profile_json"],
+                        )
+                    )
+                    before_profile_json = (
+                        None
+                        if current is None
+                        else _validated_profile_write(current, user_id=user_id)[1]
+                    )
+                    updated = mutation(current)
+                    if not isinstance(updated, UserProfile):
+                        raise TypeError(
+                            "strict profile mutation must return UserProfile"
+                        )
+                    canonical_updated, candidate_profile_json = (
+                        _validated_profile_write(updated, user_id=user_id)
+                    )
+                    if (
+                        current is not None
+                        and candidate_profile_json == before_profile_json
+                    ):
+                        await db.commit()
+                        return current
+
+                    canonical_updated.touch()
+                    canonical_updated, profile_json = _validated_profile_write(
+                        canonical_updated,
+                        user_id=user_id,
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO profiles (user_id, profile_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            profile_json = excluded.profile_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (user_id, profile_json, canonical_updated.updated_at),
+                    )
+                    await db.commit()
+                    return canonical_updated
+                except BaseException:
+                    await db.rollback()
+                    raise
+        except ProfileStorageReadError:
+            raise
+        except sqlite3.Error as exc:
+            raise ProfileStorageReadError(code="profile_database_read_failed") from exc
 
     async def delete(self, user_id: str) -> bool:
         """Delete a profile. Returns True if it existed."""

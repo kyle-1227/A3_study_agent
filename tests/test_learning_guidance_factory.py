@@ -27,6 +27,9 @@ from src.learning_guidance.knowledge_graph import (
     KnowledgeGraphPathError,
     KnowledgeGraphV1,
 )
+from src.learning_guidance.history_contract import (
+    LEARNING_GUIDANCE_HISTORY_ID_PREFIX,
+)
 from src.memory.schema import EpisodicMemoryRecord
 from src.memory.storage import SQLiteMemoryStore
 from src.profile.schema import Goal, SkillEntry, UserProfile
@@ -118,7 +121,7 @@ async def test_factory_composes_four_real_adapters_end_to_end(tmp_path: Path) ->
     await SQLiteProfileStore(profile_path).save(profile)
     await SQLiteMemoryStore(memory_path).save_episodic(
         EpisodicMemoryRecord(
-            memory_id="memory-1",
+            memory_id=f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'d' * 64}",
             user_id="user-1",
             memory_type="quiz_attempt",
             content="private body",

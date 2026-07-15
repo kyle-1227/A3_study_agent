@@ -11,12 +11,17 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.assessment.attempt_contracts import (
+    AssessmentLearningGuidanceBindingV1,
     AssessmentQuizSourceItemV1,
     PublicExerciseCardV1,
 )
-from src.assessment.checkpoint import merge_assessment_checkpoint_resource_v1
+from src.assessment.checkpoint import merge_assessment_checkpoint_resource_v2
 from src.assessment.identity import stable_exercise_question_id
 from src.config import get_setting, load_prompt
+from src.config.evidence_orchestration_contracts import (
+    RESOURCE_EVIDENCE_CONTRACT_VERSION,
+    ResourceEvidenceAssignment,
+)
 from src.graph.assessment_quiz import (
     build_assessment_quiz_projection_v1,
     build_public_exercise_cards_v1,
@@ -56,6 +61,72 @@ class ExerciseArtifactWriteError(RuntimeError):
 
 class ExerciseOutputValidationError(RuntimeError):
     """Raised when written exercise artifacts fail final renderability checks."""
+
+
+def _assessment_learning_guidance_binding(
+    state: LearningState,
+) -> AssessmentLearningGuidanceBindingV1 | None:
+    """Capture an exact candidate assignment; legacy quiz flows remain unbound."""
+
+    raw_assignment = state.get("resource_evidence_assignment")
+    raw_contract_version = state.get("resource_evidence_contract_version")
+    if raw_assignment in (None, {}) and raw_contract_version in (None, ""):
+        return None
+    if not isinstance(raw_assignment, Mapping):
+        raise ExerciseContractError(
+            "quiz guidance binding requires a resource evidence assignment"
+        )
+    if raw_contract_version != RESOURCE_EVIDENCE_CONTRACT_VERSION:
+        raise ExerciseContractError(
+            "quiz guidance binding has an invalid assignment contract version"
+        )
+    try:
+        assignment = ResourceEvidenceAssignment.model_validate(raw_assignment)
+    except ValidationError as exc:
+        raise ExerciseContractError(
+            "quiz guidance binding violates ResourceEvidenceAssignment"
+        ) from exc
+    if (
+        assignment.resource_type != "quiz"
+        or len(assignment.subjects) != 1
+        or len(assignment.topic_ids) != 1
+    ):
+        raise ExerciseContractError(
+            "quiz guidance binding requires one exact subject and topic"
+        )
+    user_id = state.get("user_id")
+    request_id = state.get("request_id")
+    subject = state.get("subject")
+    if (
+        not isinstance(user_id, str)
+        or not user_id.strip()
+        or user_id != user_id.strip()
+    ):
+        raise ExerciseContractError(
+            "quiz guidance binding requires an explicit normalized user_id"
+        )
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+        or request_id != request_id.strip()
+    ):
+        raise ExerciseContractError(
+            "quiz guidance binding requires an explicit generation request_id"
+        )
+    if subject != assignment.subjects[0]:
+        raise ExerciseContractError(
+            "quiz guidance binding subject differs from its evidence assignment"
+        )
+    return AssessmentLearningGuidanceBindingV1(
+        schema_version="assessment_learning_guidance_binding_v1",
+        user_id=user_id,
+        subject=assignment.subjects[0],
+        topic_id=assignment.topic_ids[0],
+        resource_type="quiz",
+        generation_request_id=request_id,
+        assignment_contract_version=RESOURCE_EVIDENCE_CONTRACT_VERSION,
+        assignment_fingerprint=assignment.assignment_fingerprint,
+    )
 
 
 class ExerciseItem(BaseModel):
@@ -608,8 +679,9 @@ async def exercise_output(state: LearningState) -> dict:
         source_items=source_items,
         artifact_refs=artifact_refs,
         validation=v3_validation,
+        learning_guidance_binding=_assessment_learning_guidance_binding(state),
     )
-    checkpoint = merge_assessment_checkpoint_resource_v1(
+    checkpoint = merge_assessment_checkpoint_resource_v2(
         thread_id=thread_id,
         existing=state.get("assessment_checkpoint_resources"),
         resource=projection.checkpoint_resource,

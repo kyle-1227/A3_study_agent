@@ -13,6 +13,7 @@ from src.memory.consolidation import (
     apply_forgetting,
     run_consolidation_and_forgetting,
 )
+from src.memory.retention import LEARNING_GUIDANCE_HISTORY_ID_PREFIX
 
 
 @pytest.fixture
@@ -115,6 +116,35 @@ async def test_forgetting_detects_duplicates(store_for_forgetting: SQLiteMemoryS
     stats = await apply_forgetting("forget_user", store=store_for_forgetting)
     # May or may not find duplicates depending on similarity threshold
     assert isinstance(stats["duplicates_merged"], int)
+
+
+@pytest.mark.anyio
+async def test_forgetting_never_deletes_or_deduplicates_guidance_facts(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "protected.sqlite")
+    protected_ids = (
+        f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'a' * 64}",
+        f"{LEARNING_GUIDANCE_HISTORY_ID_PREFIX}{'b' * 64}",
+    )
+    for memory_id in protected_ids:
+        await store.save_episodic(
+            EpisodicMemoryRecord(
+                memory_id=memory_id,
+                user_id="learner-1",
+                memory_type="quiz_attempt",
+                content="same protected assessment fact",
+                importance=0.0,
+                subject="math",
+                embedding=None,
+                created_at="2024-01-01T00:00:00+00:00",
+            )
+        )
+
+    await apply_forgetting("learner-1", store=store)
+
+    remaining = await store.get_episodic_by_ids(list(protected_ids))
+    assert {record.memory_id for record in remaining} == set(protected_ids)
 
 
 @pytest.mark.anyio

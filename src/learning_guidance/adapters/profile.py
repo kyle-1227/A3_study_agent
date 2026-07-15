@@ -85,7 +85,7 @@ class LearningGuidanceProfileBindingV1(_StrictBinding):
     schema_version: Literal["learning_guidance_profile_v1"]
     skills: list[ProfileSkillBindingV1] = Field(min_length=1, max_length=200)
     goals: list[ProfileGoalBindingV1] = Field(min_length=1, max_length=50)
-    preferences: list[ProfilePreferenceBindingV1] = Field(max_length=20)
+    preferences: list[ProfilePreferenceBindingV1] = Field(max_length=200)
 
     @model_validator(mode="after")
     def validate_binding_inventory(self) -> "LearningGuidanceProfileBindingV1":

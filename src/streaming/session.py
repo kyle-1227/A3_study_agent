@@ -83,6 +83,7 @@ class StreamSession:
         self._complete = False
         self._producer: asyncio.Task[None] | None = None
         self._failure: Exception | None = None
+        self._recoverable_terminal_error = False
 
     def start(self, source: AsyncIterable[AgentStreamEventDraftV2]) -> None:
         if self._producer is not None:
@@ -127,6 +128,10 @@ class StreamSession:
     def expired(self) -> bool:
         return self._complete and self.journal.expired
 
+    @property
+    def recoverable_terminal_error(self) -> bool:
+        return self._complete and self._recoverable_terminal_error
+
     async def _run(self, source: AsyncIterable[AgentStreamEventDraftV2]) -> None:
         cancellation: asyncio.CancelledError | None = None
         sequencer = StreamEventSequencer(
@@ -143,6 +148,11 @@ class StreamSession:
             async for draft in source:
                 validated = AgentStreamEventDraftV2.model_validate(draft)
                 self.journal.append(sequencer.emit(validated.type, validated.data))
+                if (
+                    validated.type == "stream_error"
+                    and validated.data.get("recoverable") is True
+                ):
+                    self._recoverable_terminal_error = True
                 async with self._condition:
                     self._condition.notify_all()
             if sequencer.terminal is None:
@@ -245,6 +255,7 @@ class StreamSessionManager:
         operation: str,
         request_fingerprint: str,
         source: AsyncIterable[AgentStreamEventDraftV2],
+        allow_recoverable_retry: bool = False,
     ) -> StreamSession:
         async with self._lock:
             self._purge_expired()
@@ -261,7 +272,13 @@ class StreamSessionManager:
                     raise StreamSessionExpiredError(
                         "request_id is bound to an expired stream session"
                     )
-                return existing
+                if not (
+                    allow_recoverable_retry and existing.recoverable_terminal_error
+                ):
+                    return existing
+                self._request_bindings.pop(request_id)
+                if self._active_thread_streams.get(thread_id) == existing.stream_id:
+                    self._active_thread_streams.pop(thread_id, None)
             if stream_id in self._sessions or stream_id in self._expired_streams:
                 raise StreamSessionConflictError("stream_id already exists")
             active_stream_id = self._active_thread_streams.get(thread_id)
@@ -331,6 +348,13 @@ class StreamSessionManager:
         for stream_id in expired:
             session = self._sessions.pop(stream_id)
             self._expired_streams.add(stream_id)
+            binding = self._request_bindings.get(session.request_id)
+            if (
+                session.recoverable_terminal_error
+                and binding is not None
+                and binding.stream_id == stream_id
+            ):
+                self._request_bindings.pop(session.request_id, None)
             if self._active_thread_streams.get(session.thread_id) == stream_id:
                 self._active_thread_streams.pop(session.thread_id, None)
 

@@ -18,6 +18,10 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import get_setting
 from src.memory.retrieval import _cosine_similarity
+from src.memory.retention import (
+    PROTECTED_EPISODIC_MEMORY_ID_PREFIXES,
+    is_protected_episodic_memory_id,
+)
 from src.memory.semantic import consolidate_episodic_to_semantic
 from src.memory.storage import MemoryStore, create_memory_store
 
@@ -49,7 +53,11 @@ async def maybe_consolidate(
         "memory.consolidation_max_per_batch", 5,
     ))
 
-    unconsolidated = await store.get_unconsolidated(user_id, limit=threshold)
+    unconsolidated = await store.get_unconsolidated(
+        user_id,
+        limit=threshold,
+        excluded_memory_id_prefixes=PROTECTED_EPISODIC_MEMORY_ID_PREFIXES,
+    )
 
     if len(unconsolidated) < threshold:
         logger.debug(
@@ -102,7 +110,10 @@ async def apply_forgetting(
     low_importance_deleted = 0
     try:
         low_importance_deleted = await store.delete_low_importance_old(
-            user_id, before_ts=cutoff, importance_max=importance_min,
+            user_id,
+            before_ts=cutoff,
+            importance_max=importance_min,
+            excluded_memory_id_prefixes=PROTECTED_EPISODIC_MEMORY_ID_PREFIXES,
         )
     except Exception as exc:
         logger.warning(
@@ -112,7 +123,11 @@ async def apply_forgetting(
     # ── Duplicate detection ───────────────────────────────────────────────
     duplicates_merged = 0
     try:
-        all_records = await store.get_all_episodic_for_user(user_id, limit=200)
+        all_records = [
+            record
+            for record in await store.get_all_episodic_for_user(user_id, limit=200)
+            if not is_protected_episodic_memory_id(record.memory_id)
+        ]
 
         # Group records with embeddings (only compare embeddable ones)
         embeddable = [r for r in all_records if r.embedding and len(r.embedding) > 0]

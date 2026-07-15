@@ -121,7 +121,7 @@ class LearnerProfileSnapshotV1(_StrictContract):
     skills: tuple[LearnerSkillSignalV1, ...] = Field(min_length=1, max_length=200)
     goals: tuple[LearnerGoalSignalV1, ...] = Field(min_length=1, max_length=50)
     preferences: tuple[LearnerPreferenceSignalV1, ...] = Field(
-        max_length=20,
+        max_length=200,
     )
 
     @model_validator(mode="after")

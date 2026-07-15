@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,10 +16,11 @@ from src.assessment.attempt_contracts import (
     AdaptivePracticeBatchV1,
     AdaptivePracticeTaskV1,
     AssessmentAttemptV1,
-    AssessmentCheckpointResourcesV1,
+    AssessmentCheckpointResourcesV2,
     AssessmentErrorClassificationV1,
     AssessmentQuestionRecordV1,
-    AssessmentResourceRecordV1,
+    AssessmentLearningGuidanceBindingV1,
+    AssessmentResourceRecordV2,
     PrivateExerciseAnswerKeyV1,
     PublicExerciseCardV1,
 )
@@ -30,6 +32,13 @@ from src.assessment.identity import (
     stable_adaptive_practice_question_id,
     stable_exercise_question_id,
 )
+from src.learning_guidance.adapters.history import HistorySnapshotAdapterV1
+from src.learning_guidance.history_writer import (
+    LearningGuidanceHistoryWriterError,
+    LearningGuidanceHistoryWriterV1,
+)
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
+from src.memory.storage import SQLiteMemoryStore
 from src.streaming.session import StreamSessionManager
 from src.streaming.settings import StreamingRuntimeConfig
 
@@ -54,14 +63,18 @@ ADAPTIVE_QUESTION_ID = stable_adaptive_practice_question_id(
 )
 
 
-def _checkpoint() -> AssessmentCheckpointResourcesV1:
-    return AssessmentCheckpointResourcesV1(
-        schema_version="assessment_checkpoint_resources_v1",
+def _checkpoint(
+    *,
+    learning_guidance_binding: AssessmentLearningGuidanceBindingV1 | None = None,
+) -> AssessmentCheckpointResourcesV2:
+    return AssessmentCheckpointResourcesV2(
+        schema_version="assessment_checkpoint_resources_v2",
         thread_id=THREAD_ID,
         resources=(
-            AssessmentResourceRecordV1(
-                schema_version="assessment_resource_record_v1",
+            AssessmentResourceRecordV2(
+                schema_version="assessment_resource_record_v2",
                 resource_id=RESOURCE_ID,
+                learning_guidance_binding=learning_guidance_binding,
                 questions=(
                     AssessmentQuestionRecordV1(
                         schema_version="assessment_question_record_v1",
@@ -135,15 +148,20 @@ def _adaptive_batch() -> AdaptivePracticeBatchV1:
 class _CheckpointGraph:
     _a3_node_ids = frozenset({"resource_bundle_output"})
 
-    def __init__(self, *, with_checkpoint: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        with_checkpoint: bool = True,
+        learning_guidance_binding: AssessmentLearningGuidanceBindingV1 | None = None,
+    ) -> None:
         self.values = (
             {
                 "thread_id": THREAD_ID,
                 "current_node": "",
                 "last_completed_node": "resource_bundle_output",
-                "assessment_checkpoint_resources": _checkpoint().model_dump(
-                    mode="json"
-                ),
+                "assessment_checkpoint_resources": _checkpoint(
+                    learning_guidance_binding=learning_guidance_binding,
+                ).model_dump(mode="json"),
             }
             if with_checkpoint
             else {}
@@ -176,14 +194,65 @@ def _manager() -> StreamSessionManager:
     )
 
 
-def _request(graph: _CheckpointGraph, service) -> SimpleNamespace:
+def _request(
+    graph: _CheckpointGraph,
+    service,
+    *,
+    history_writer: LearningGuidanceHistoryWriterV1 | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 graph=graph,
                 assessment_attempt_service=service,
+                learning_guidance_history_writer=history_writer,
             )
         )
+    )
+
+
+def _guidance_binding() -> AssessmentLearningGuidanceBindingV1:
+    return AssessmentLearningGuidanceBindingV1(
+        schema_version="assessment_learning_guidance_binding_v1",
+        user_id="learner-1",
+        subject="math",
+        topic_id="math.algebra",
+        resource_type="quiz",
+        generation_request_id="00000000-0000-4000-8000-000000000302",
+        assignment_contract_version="resource_evidence_assignment_v1",
+        assignment_fingerprint="c" * 64,
+    )
+
+
+def _guidance_graph() -> KnowledgeGraphV1:
+    return KnowledgeGraphV1.model_validate(
+        {
+            "schema_version": "knowledge_graph_v1",
+            "data_version": "assessment-endpoint-test-v1",
+            "subjects": [
+                {
+                    "subject_id": "math",
+                    "title": "Mathematics",
+                    "topics": [
+                        {
+                            "topic_id": "math.algebra",
+                            "title": "Algebra",
+                            "difficulty": 0.4,
+                            "estimated_hours": 2.0,
+                            "prerequisite_topic_ids": [],
+                            "knowledge_points": ["Equations"],
+                            "resources": [
+                                {
+                                    "resource_id": "math.algebra.review",
+                                    "resource_type": "review_doc",
+                                    "title": "Algebra review",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
     )
 
 
@@ -245,11 +314,17 @@ async def test_correct_attempt_streams_and_replays_one_authoritative_final(
 
     assert [item["type"] for item in first] == [
         "stream_start",
+        "activity_update",
         "assessment_final",
         "stream_done",
     ]
     assert [item["event_id"] for item in second] == [item["event_id"] for item in first]
-    final = first[1]["data"]
+    assert first[1]["data"]["kind"] == "assessment_history"
+    assert first[1]["data"]["payload"]["status"] == "unavailable"
+    assert (
+        first[1]["data"]["payload"]["reason"] == "assessment_topic_binding_unavailable"
+    )
+    final = first[2]["data"]
     assert final["terminal_status"] == "correct"
     assert final["request_id"] == REQUEST_ID
     assert final["thread_id"] == THREAD_ID
@@ -264,6 +339,129 @@ async def test_correct_attempt_streams_and_replays_one_authoritative_final(
         "answer_explanation",
     }
     assert private_keys.isdisjoint(final)
+
+
+@pytest.mark.anyio
+async def test_bound_assessment_persists_history_before_final_and_replays_after_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    graph = _CheckpointGraph(learning_guidance_binding=_guidance_binding())
+    database = tmp_path / "memory.sqlite"
+    writer = LearningGuidanceHistoryWriterV1(
+        store=SQLiteMemoryStore(database),
+        knowledge_graph=_guidance_graph(),
+    )
+    service, _, _ = _service(monkeypatch, graph)
+    monkeypatch.setattr(app_module, "stream_session_manager", _manager())
+
+    first_response = await app_module.assessment_attempt_endpoint(
+        THREAD_ID,
+        _attempt(),
+        _request(graph, service, history_writer=writer),
+    )
+    first = await _payloads(first_response)
+
+    assert [item["type"] for item in first] == [
+        "stream_start",
+        "activity_update",
+        "assessment_final",
+        "stream_done",
+    ]
+    assert first[1]["data"]["kind"] == "assessment_history"
+    assert first[1]["data"]["payload"]["status"] == "inserted"
+    assert first[2]["data"]["terminal_status"] == "correct"
+
+    restarted_service, _, _ = _service(monkeypatch, graph)
+    monkeypatch.setattr(app_module, "stream_session_manager", _manager())
+    replay_response = await app_module.assessment_attempt_endpoint(
+        THREAD_ID,
+        _attempt(),
+        _request(
+            graph,
+            restarted_service,
+            history_writer=LearningGuidanceHistoryWriterV1(
+                store=SQLiteMemoryStore(database),
+                knowledge_graph=_guidance_graph(),
+            ),
+        ),
+    )
+    replay = await _payloads(replay_response)
+
+    assert replay[1]["data"]["payload"]["status"] == "replayed"
+    assert (
+        replay[1]["data"]["payload"]["history_id"]
+        == (first[1]["data"]["payload"]["history_id"])
+    )
+    snapshot = await HistorySnapshotAdapterV1(
+        store=SQLiteMemoryStore(database),
+        knowledge_graph=_guidance_graph(),
+        history_limit=10,
+    ).load("learner-1", "math")
+    assert snapshot is not None
+    assert len(snapshot.events) == 1
+    assert snapshot.events[0].history_id == (first[1]["data"]["payload"]["history_id"])
+
+
+@pytest.mark.anyio
+async def test_transient_history_failure_recovers_with_same_request_without_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    graph = _CheckpointGraph(learning_guidance_binding=_guidance_binding())
+    writer = LearningGuidanceHistoryWriterV1(
+        store=SQLiteMemoryStore(tmp_path / "memory.sqlite"),
+        knowledge_graph=_guidance_graph(),
+    )
+    original_write = writer.write_assessment_once
+    attempts = 0
+
+    async def flaky_write(*, binding, record):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise LearningGuidanceHistoryWriterError(
+                code="learning_guidance_history_persist_failed"
+            )
+        return await original_write(binding=binding, record=record)
+
+    monkeypatch.setattr(writer, "write_assessment_once", flaky_write)
+    service, classifier, generator = _service(monkeypatch, graph)
+    monkeypatch.setattr(app_module, "stream_session_manager", _manager())
+    request = _request(graph, service, history_writer=writer)
+
+    first = await _payloads(
+        await app_module.assessment_attempt_endpoint(
+            THREAD_ID,
+            _attempt(),
+            request,
+        )
+    )
+    second = await _payloads(
+        await app_module.assessment_attempt_endpoint(
+            THREAD_ID,
+            _attempt(),
+            request,
+        )
+    )
+
+    assert [item["type"] for item in first] == [
+        "stream_start",
+        "stream_error",
+        "stream_done",
+    ]
+    assert first[1]["data"]["recoverable"] is True
+    assert [item["type"] for item in second] == [
+        "stream_start",
+        "activity_update",
+        "assessment_final",
+        "stream_done",
+    ]
+    assert second[1]["data"]["payload"]["status"] == "inserted"
+    assert attempts == 2
+    assert graph.update_count == 2
+    classifier.assert_not_awaited()
+    generator.assert_not_awaited()
 
 
 @pytest.mark.anyio
