@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { AgentStreamContractError, parseAgentStreamEvent } from "@/lib/agent-stream-contracts"
+import {
+  AGENT_STREAM_EVENT_TYPES,
+  AgentStreamContractError,
+  parseAgentStreamEvent,
+} from "@/lib/agent-stream-contracts"
+import { unavailableRecommendationFinalWire } from "@/test/recommendation-final-fixtures"
 
 const payload = {
   schema_version: "agent_stream_v2",
@@ -27,6 +32,29 @@ describe("parseAgentStreamEvent", () => {
       sequence: 2,
     })
     expect(event.type).toBe("assessment_final")
+  })
+
+  it("accepts and identity-binds a validated recommendation_final event", () => {
+    const recommendation = unavailableRecommendationFinalWire()
+    const event = parseAgentStreamEvent({
+      ...payload,
+      type: "recommendation_final",
+      request_id: recommendation.request_id,
+      thread_id: recommendation.thread_id,
+      data: recommendation,
+    })
+    expect(event.type).toBe("recommendation_final")
+    expect(AGENT_STREAM_EVENT_TYPES).toContain("recommendation_final")
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...payload,
+        type: "recommendation_final",
+        request_id: recommendation.request_id,
+        thread_id: "another-thread",
+        data: recommendation,
+      }),
+    ).toThrow(/identity does not match/)
   })
 
   it("rejects unknown fields and mismatched event ids", () => {

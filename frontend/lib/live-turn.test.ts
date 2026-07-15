@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import type { AgentStreamEventType, AgentStreamEventV2 } from "@/lib/agent-stream-contracts"
 import { LiveTurnSequenceError, reduceLiveTurn } from "@/lib/live-turn"
+import { unavailableRecommendationFinalWire } from "@/test/recommendation-final-fixtures"
 
 const REQUEST_ID = "00000000-0000-4000-8000-000000000001"
 
@@ -61,6 +62,50 @@ describe("reduceLiveTurn", () => {
     const running = reduceLiveTurn(null, event(1, "stream_start"))
     const committed = reduceLiveTurn(running, event(2, "assessment_final"))
     expect(committed.committed).toBe(true)
+  })
+
+  it("commits only an identity-bound recommendation final and clears provisional text", () => {
+    const recommendation = unavailableRecommendationFinalWire()
+    const requestId = recommendation.request_id as string
+    const threadId = recommendation.thread_id as string
+    let state = reduceLiveTurn(null, {
+      ...event(1, "stream_start"),
+      requestId,
+      threadId,
+    })
+    state = reduceLiveTurn(state, {
+      ...event(2, "content_block_start", {
+        block_id: "recommendation",
+        block_index: 0,
+        block_type: "markdown",
+        provisional: true,
+      }),
+      requestId,
+      threadId,
+    })
+    state = reduceLiveTurn(state, {
+      ...event(3, "content_block_delta", {
+        block_id: "recommendation",
+        delta: "provisional",
+      }),
+      requestId,
+      threadId,
+    })
+    const committed = reduceLiveTurn(state, {
+      ...event(4, "recommendation_final", recommendation),
+      requestId,
+      threadId,
+    })
+    expect(committed.committed).toBe(true)
+    expect(committed.provisionalAnswer).toBe("")
+
+    expect(() =>
+      reduceLiveTurn(state, {
+        ...event(4, "recommendation_final", recommendation),
+        requestId,
+        threadId: "another-thread",
+      }),
+    ).toThrow(LiveTurnSequenceError)
   })
 
   it("aborts active evidence progress on stopped before stream_done", () => {

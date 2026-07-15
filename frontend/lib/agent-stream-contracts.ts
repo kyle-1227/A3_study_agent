@@ -1,4 +1,5 @@
 import { parseEvidenceProgressEvent } from "@/lib/evidence-progress"
+import { parseRecommendationFinalV1 } from "@/lib/recommendation-final"
 
 export const AGENT_STREAM_SCHEMA_VERSION = "agent_stream_v2" as const
 
@@ -13,6 +14,7 @@ export const AGENT_STREAM_EVENT_TYPES = [
   "artifact_progress",
   "qa_final",
   "resource_final",
+  "recommendation_final",
   "assessment_final",
   "interrupt",
   "stopped",
@@ -79,6 +81,15 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEventV2 {
     const progress = parseEvidenceProgressEvent(eventData)
     if (progress.requestId !== requestId || progress.threadId !== threadId) {
       fail("evidence_progress identity does not match stream envelope")
+    }
+  }
+  if (data.type === "recommendation_final") {
+    const recommendationFinal = parseRecommendationFinalV1(eventData)
+    if (
+      recommendationFinal.request_id !== requestId ||
+      recommendationFinal.thread_id !== threadId
+    ) {
+      fail("recommendation_final identity does not match stream envelope")
     }
   }
   return {

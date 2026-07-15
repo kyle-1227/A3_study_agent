@@ -42,6 +42,10 @@ import type {
   ContextUsageReport,
 } from "@/lib/observability-contracts"
 import type { QAFinalEventV1 } from "@/lib/qa-final"
+import type {
+  RecommendationFinalV1,
+  RecommendationResourceType,
+} from "@/lib/recommendation-final"
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown"
 import type { ThreadContextWindowV3 } from "@/lib/thread-context-window-v3"
 import { cn } from "@/lib/utils"
@@ -66,6 +70,8 @@ export interface Message {
   resourceFinalDedupeKey?: string
   qaFinal?: QAFinalEventV1
   qaFinalDedupeKey?: string
+  recommendationFinal?: RecommendationFinalV1
+  recommendationFinalDedupeKey?: string
 }
 
 export type ResourceGenerationState =
@@ -559,7 +565,8 @@ function MessageBubble({
       message.codePractice ||
       message.videoScript ||
       message.videoAnimation ||
-      message.studyPlan,
+      message.studyPlan ||
+      message.recommendationFinal,
   )
 
   return (
@@ -632,6 +639,9 @@ function MessageBubble({
                 markdownText={message.studyPlan.markdown || message.content}
               />
             )}
+            {message.recommendationFinal && (
+              <RecommendationFinalCard recommendationFinal={message.recommendationFinal} />
+            )}
             {message.content ? (
               <div className="min-w-0 max-w-full break-words">
                 {streaming ? (
@@ -649,6 +659,84 @@ function MessageBubble({
         )}
       </div>
     </div>
+  )
+}
+
+const recommendationResourceLabels: Record<RecommendationResourceType, string> = {
+  review_doc: "复习文档",
+  mindmap: "思维导图",
+  quiz: "练习题",
+  code_practice: "代码练习",
+  video_script: "视频脚本",
+  video_animation: "教学动画",
+  study_plan: "学习计划",
+}
+
+function RecommendationFinalCard({
+  recommendationFinal,
+}: {
+  recommendationFinal: RecommendationFinalV1
+}) {
+  const available = recommendationFinal.terminal_status === "available"
+  return (
+    <section
+      aria-label="个性化资源推荐"
+      className="overflow-hidden rounded-lg border border-border bg-[var(--surface-subtle)]"
+    >
+      <div className="flex items-start gap-2.5 border-b border-border px-3 py-2.5">
+        <GraduationCap className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-semibold text-primary">个性化资源推荐</h3>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                available
+                  ? "bg-emerald-100 text-emerald-800"
+                  : "bg-amber-100 text-amber-800",
+              )}
+            >
+              {available ? `${recommendationFinal.recommendations.length} 项` : "暂不可用"}
+            </span>
+          </div>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            {recommendationFinal.summary}
+          </p>
+        </div>
+      </div>
+
+      {available ? (
+        <ol className="divide-y divide-border" aria-label="推荐资源列表">
+          {recommendationFinal.recommendations.map((item) => (
+            <li key={item.recommendation_id} className="px-3 py-2.5">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium text-card-foreground">
+                    <span className="mr-1.5 text-xs text-muted-foreground">{item.rank}.</span>
+                    {item.title}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {item.reason}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+                  <span className="block rounded border border-border bg-card px-1.5 py-0.5">
+                    {recommendationResourceLabels[item.resource_type]}
+                  </span>
+                  <span className="mt-1 block" aria-label={`匹配度 ${Math.round(item.score * 100)}%`}>
+                    {Math.round(item.score * 100)}%
+                  </span>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className="px-3 py-2.5 text-xs text-muted-foreground" role="status">
+          当前没有可安全展示的推荐结果，请补充所需信息后重新发起推荐请求。
+        </div>
+      )}
+    </section>
   )
 }
 

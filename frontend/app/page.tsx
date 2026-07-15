@@ -38,6 +38,12 @@ import {
   type QAFinalEventV1,
 } from "@/lib/qa-final"
 import {
+  attachRecommendationFinalToMessages,
+  parseRecommendationFinalV1,
+  recommendationFinalDedupeKey,
+  type RecommendationFinalV1,
+} from "@/lib/recommendation-final"
+import {
   applyContextUsageError,
   applyContextUsageReport,
   beginContextUsageUpdate,
@@ -181,13 +187,19 @@ function normalizeChatHistory(raw: unknown): ChatHistoryItem[] {
 type NormalizedMessages = {
   messages: Message[]
   rejectedResourceProjectionCount: number
+  rejectedRecommendationProjectionCount: number
 }
 
 function normalizeMessages(raw: unknown): NormalizedMessages {
   if (!Array.isArray(raw)) {
-    return { messages: [], rejectedResourceProjectionCount: 0 }
+    return {
+      messages: [],
+      rejectedResourceProjectionCount: 0,
+      rejectedRecommendationProjectionCount: 0,
+    }
   }
   let rejectedResourceProjectionCount = 0
+  let rejectedRecommendationProjectionCount = 0
   const messages = raw
     .filter((item: any) => {
       return (
@@ -201,9 +213,20 @@ function normalizeMessages(raw: unknown): NormalizedMessages {
       const normalizedActivities = item.activities
         ? parseActivityTimeline(item.activities).items
         : undefined
-      const base = {
+      let base = clearStoredRecommendationProjection({
         ...item,
         activities: normalizedActivities,
+      })
+      if (item.role === "assistant" && item.recommendationFinal) {
+        try {
+          base = attachRecommendationFinalToMessages(
+            [base],
+            parseRecommendationFinalV1(item.recommendationFinal),
+            base.id,
+          ).messages[0]
+        } catch {
+          rejectedRecommendationProjectionCount += 1
+        }
       }
       if (item.role !== "assistant" || !item.resourceFinalPayload) {
         if (item.exercise) rejectedResourceProjectionCount += 1
@@ -221,7 +244,19 @@ function normalizeMessages(raw: unknown): NormalizedMessages {
         return clearStoredResourceProjections(base)
       }
     })
-  return { messages, rejectedResourceProjectionCount }
+  return {
+    messages,
+    rejectedResourceProjectionCount,
+    rejectedRecommendationProjectionCount,
+  }
+}
+
+function clearStoredRecommendationProjection(message: Message): Message {
+  return {
+    ...message,
+    recommendationFinal: undefined,
+    recommendationFinalDedupeKey: undefined,
+  }
 }
 
 function clearStoredResourceProjections(message: Message): Message {
@@ -447,6 +482,7 @@ export default function Home() {
   const graphManifestVersionRef = useRef("")
   const resourceFinalDedupeRef = useRef<Set<string>>(new Set())
   const qaFinalDedupeRef = useRef<Set<string>>(new Set())
+  const recommendationFinalDedupeRef = useRef<Set<string>>(new Set())
   const requestIdRef = useRef("")
   const abortControllerRef = useRef<AbortController | null>(null)
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -533,7 +569,11 @@ export default function Home() {
     const activeThreadId = storedThreadId || storedChatId || storedHistory[0]?.threadId || null
     const restored = activeThreadId
       ? normalizeMessages(readJSON<unknown>(messageStorageKey(activeThreadId), []))
-      : { messages: [], rejectedResourceProjectionCount: 0 }
+      : {
+          messages: [],
+          rejectedResourceProjectionCount: 0,
+          rejectedRecommendationProjectionCount: 0,
+        }
 
     setChatHistory(storedHistory)
     setSelectedChatId(activeThreadId ?? undefined)
@@ -546,6 +586,16 @@ export default function Home() {
         {
           type: "warning",
           message: `[CONTRACT] Rejected ${restored.rejectedResourceProjectionCount} stored resource projection(s).`,
+          ts: timestamp(),
+        },
+      ])
+    }
+    if (restored.rejectedRecommendationProjectionCount > 0) {
+      setLogs((current) => [
+        ...current,
+        {
+          type: "warning",
+          message: `[CONTRACT] Rejected ${restored.rejectedRecommendationProjectionCount} stored recommendation final(s).`,
           ts: timestamp(),
         },
       ])
@@ -722,6 +772,62 @@ export default function Home() {
     return { attached: true, dedupeKey, messageId }
   }, [])
 
+  const attachRecommendationFinalToAssistant = useCallback((
+    event: RecommendationFinalV1,
+    source: "stream" | "restore",
+  ) => {
+    if (source === "stream") {
+      if (threadIdRef.current && event.thread_id !== threadIdRef.current) {
+        throw new ContractParseError(
+          "recommendation_final_binding",
+          "thread_id does not match active stream",
+        )
+      }
+      if (requestIdRef.current && event.request_id !== requestIdRef.current) {
+        throw new ContractParseError(
+          "recommendation_final_binding",
+          "request_id does not match active stream",
+        )
+      }
+    } else if (threadIdRef.current && event.thread_id !== threadIdRef.current) {
+      throw new ContractParseError(
+        "recommendation_final_binding",
+        "thread_id does not match restored thread",
+      )
+    }
+    const dedupeKey = recommendationFinalDedupeKey(event)
+    if (recommendationFinalDedupeRef.current.has(dedupeKey)) return false
+    recommendationFinalDedupeRef.current.add(dedupeKey)
+    setMessages((current) => {
+      try {
+        const result = attachRecommendationFinalToMessages(
+          current,
+          event,
+          source === "stream" ? assistantMessageIdRef.current : "",
+        )
+        return result.messages.map((message) =>
+          message.id === result.messageId
+            ? { ...message, resourceStatus: undefined }
+            : message,
+        )
+      } catch (error) {
+        recommendationFinalDedupeRef.current.delete(dedupeKey)
+        queueMicrotask(() => {
+          setLogs((logs) => [
+            ...logs,
+            {
+              type: "warning",
+              message: `[CONTRACT] Recommendation final binding rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        })
+        return current
+      }
+    })
+    return true
+  }, [])
+
   const handleNewChat = useCallback(() => {
     cancelActiveAssessment()
     setSelectedChatId(undefined)
@@ -744,6 +850,7 @@ export default function Home() {
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
     qaFinalDedupeRef.current.clear()
+    recommendationFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
@@ -774,6 +881,7 @@ export default function Home() {
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
     qaFinalDedupeRef.current.clear()
+    recommendationFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(threadId)
     setLogs((prev) => [
@@ -784,6 +892,15 @@ export default function Home() {
             {
               type: "warning" as const,
               message: `[CONTRACT] Rejected ${restored.rejectedResourceProjectionCount} stored resource projection(s).`,
+              ts: timestamp(),
+            },
+          ]
+        : []),
+      ...(restored.rejectedRecommendationProjectionCount > 0
+        ? [
+            {
+              type: "warning" as const,
+              message: `[CONTRACT] Rejected ${restored.rejectedRecommendationProjectionCount} stored recommendation final(s).`,
               ts: timestamp(),
             },
           ]
@@ -821,6 +938,7 @@ export default function Home() {
     setProfileCompletion(null)
     resourceFinalDedupeRef.current.clear()
     qaFinalDedupeRef.current.clear()
+    recommendationFinalDedupeRef.current.clear()
     assistantMessageIdRef.current = ""
     setActiveThreadId(null)
     pendingChatTitleRef.current = ""
@@ -853,13 +971,14 @@ export default function Home() {
       setThreadContextWindowV3(null)
       liveTurnRef.current = null
       setLiveTurn(null)
-    setActiveRequestId("")
+      setActiveRequestId("")
       setIsInterrupted(false)
       setInterruptDraft("")
       setMemoryConfirmation(null)
       setProfileCompletion(null)
-    resourceFinalDedupeRef.current.clear()
-    qaFinalDedupeRef.current.clear()
+      resourceFinalDedupeRef.current.clear()
+      qaFinalDedupeRef.current.clear()
+      recommendationFinalDedupeRef.current.clear()
       assistantMessageIdRef.current = ""
       setActiveThreadId(null)
       pendingChatTitleRef.current = ""
@@ -1383,6 +1502,23 @@ export default function Home() {
       return
     }
 
+    if (data.type === "recommendation_final") {
+      try {
+        const recommendationFinal = parseRecommendationFinalV1(data)
+        attachRecommendationFinalToAssistant(recommendationFinal, "stream")
+      } catch (error) {
+        setLogs((current) => [
+          ...current,
+          {
+            type: "warning",
+            message: `[CONTRACT] Recommendation final rejected: ${contractFailureReason(error)}`,
+            ts: timestamp(),
+          },
+        ])
+      }
+      return
+    }
+
     if (data.type === "resource_final") {
       let event: ResourceFinalEvent
       try {
@@ -1500,6 +1636,7 @@ export default function Home() {
       ])
     }
   }, [
+    attachRecommendationFinalToAssistant,
     attachResourceFinalToAssistant,
     clearStopTimeout,
     deliverFrontendPerformance,
@@ -1750,6 +1887,23 @@ export default function Home() {
           ])
         }
       }
+      if (status.last_recommendation_final_payload?.type === "recommendation_final") {
+        try {
+          const event = parseRecommendationFinalV1(
+            status.last_recommendation_final_payload,
+          )
+          attachRecommendationFinalToAssistant(event, "restore")
+        } catch (error) {
+          setLogs((current) => [
+            ...current,
+            {
+              type: "warning",
+              message: `[CONTRACT] Stored recommendation final rejected: ${contractFailureReason(error)}`,
+              ts: timestamp(),
+            },
+          ])
+        }
+      }
       const pendingInterruptType =
         typeof status.pending_interrupt_type === "string" ? status.pending_interrupt_type : ""
       if (pendingInterruptType === "profile_completion_required") {
@@ -1778,7 +1932,7 @@ export default function Home() {
         { type: "warning", message: `[RUN] Status unavailable: ${error.message}`, ts: timestamp() },
       ])
     }
-  }, [attachResourceFinalToAssistant, fetchGraphManifest, updateAssistantResourceStatus])
+  }, [attachRecommendationFinalToAssistant, attachResourceFinalToAssistant, fetchGraphManifest, updateAssistantResourceStatus])
 
   useEffect(() => {
     if (!storageReady || !currentThreadId) return

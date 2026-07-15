@@ -6,6 +6,7 @@ import {
   reduceEvidenceProgress,
   type EvidenceProgressTimeline,
 } from "@/lib/evidence-progress"
+import { parseRecommendationFinalV1 } from "@/lib/recommendation-final"
 
 export type LiveTurnLifecycle = "running" | "waiting" | "completed" | "failed"
 
@@ -124,7 +125,18 @@ export function reduceLiveTurn(
     event.type === "resource_final" ||
     event.type === "assessment_final"
   ) {
-    next = { ...next, committed: true }
+    next = { ...next, committed: true, provisionalAnswer: "" }
+  } else if (event.type === "recommendation_final") {
+    const recommendationFinal = parseRecommendationFinalV1(event.data)
+    if (
+      recommendationFinal.request_id !== event.requestId ||
+      recommendationFinal.thread_id !== event.threadId
+    ) {
+      throw new LiveTurnSequenceError(
+        "recommendation_final identity does not match stream envelope",
+      )
+    }
+    next = { ...next, committed: true, provisionalAnswer: "" }
   } else if (event.type === "interrupt" || event.type === "stopped") {
     next = {
       ...next,
