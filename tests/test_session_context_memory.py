@@ -227,6 +227,7 @@ async def test_dispatch_trace_persists_ledger_and_v3_together() -> None:
         thread_id="thread-1",
         event=event,
         state_context=state_context,
+        persist_checkpoint=True,
     )
 
     graph.aupdate_state.assert_awaited_once()
@@ -239,3 +240,31 @@ async def test_dispatch_trace_persists_ledger_and_v3_together() -> None:
         state_context["session_context_memory_ledger"]
         == values["session_context_memory_ledger"]
     )
+
+
+@pytest.mark.anyio
+async def test_dispatch_trace_can_defer_checkpoint_until_terminal() -> None:
+    from app import _update_session_context_memory_from_trace
+
+    graph = AsyncMock()
+    graph._a3_node_ids = frozenset({"supervisor"})
+    state_context = {"thread_id": "thread-1"}
+    record = _record(_item("memory:a", "same"), record_id="record-1")
+
+    window = await _update_session_context_memory_from_trace(
+        graph,
+        {"configurable": {"thread_id": "thread-1"}},
+        thread_id="thread-1",
+        event={
+            "stage": "context_injection.dispatched",
+            **record.model_dump(mode="json"),
+        },
+        state_context=state_context,
+        persist_checkpoint=False,
+    )
+
+    graph.aupdate_state.assert_not_awaited()
+    assert (
+        state_context["session_context_memory_ledger"]["lifetime_injected_tokens"] == 10
+    )
+    assert window == state_context["thread_context_window_v3"]

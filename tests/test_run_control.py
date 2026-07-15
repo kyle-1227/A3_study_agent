@@ -429,7 +429,10 @@ async def test_stream_initializes_checkpoint_before_thread_id():
 
     assert first_payload == {"type": "thread_id", "thread_id": "init-thread"}
     first_update = graph.aupdate_state.await_args_list[0]
-    assert first_update.args[0] == {"configurable": {"thread_id": "init-thread"}}
+    assert first_update.args[0] == {
+        "configurable": {"thread_id": "init-thread"},
+        "recursion_limit": 96,
+    }
     assert first_update.args[1]["run_status"] == "running"
     assert first_update.args[1]["request_context_window"]["current_request_id"]
     assert first_update.kwargs == {"as_node": "supervisor"}
@@ -603,7 +606,8 @@ async def test_dev_memory_clear_uses_registered_supervisor_writer(monkeypatch):
     graph.aupdate_state.assert_awaited_once()
     assert graph.aupdate_state.await_args.kwargs == {"as_node": "supervisor"}
     assert graph.aupdate_state.await_args.args[0] == {
-        "configurable": {"thread_id": "thread-1"}
+        "configurable": {"thread_id": "thread-1"},
+        "recursion_limit": 96,
     }
     clear_values = graph.aupdate_state.await_args.args[1]
     assert clear_values["context_usage_report"] == {}

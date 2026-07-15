@@ -965,6 +965,7 @@ class TestSSEResourceFinalV3:
         mock_graph = _make_mock_graph(
             [_node_start("resource_bundle_output"), end_event]
         )
+        mock_graph._a3_activity_events_enabled = True
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(
                 next=(),
@@ -1003,6 +1004,13 @@ class TestSSEResourceFinalV3:
         assert "resource_type" not in payload
         assert "resource_id" not in payload
         assert "resource" not in payload
+        assert mock_graph.aupdate_state.await_count == 2
+        terminal_update = mock_graph.aupdate_state.await_args_list[-1].args[1]
+        assert terminal_update["run_status"] == "completed"
+        assert (
+            terminal_update["last_resource_final_payload"]["resource_final_id"]
+            == resource_final.resource_final_id
+        )
 
     @pytest.mark.anyio
     async def test_evidence_block_emits_controlled_stop_v3(
@@ -1670,15 +1678,22 @@ class TestSSEContextErrorEvents:
             "source_counts_after": {},
             "source_counts_dropped": {},
         }
-        mock_graph.aupdate_state.assert_any_await(
-            {"configurable": {"thread_id": "t-1"}},
-            {
-                "run_status": "failed",
-                "resume_available": False,
-                "pending_interrupt_type": "",
-            },
-            as_node="supervisor",
-        )
+        failed_calls = [
+            call
+            for call in mock_graph.aupdate_state.await_args_list
+            if call.args[1].get("run_status") == "failed"
+        ]
+        assert failed_calls
+        failed_call = failed_calls[0]
+        assert failed_call.args[0] == {
+            "configurable": {"thread_id": "t-1"},
+            "recursion_limit": 96,
+        }
+        assert failed_call.kwargs == {"as_node": "supervisor"}
+        failed_update = failed_call.args[1]
+        assert failed_update["resume_available"] is False
+        assert failed_update["pending_interrupt_type"] == ""
+        assert failed_update["context_window_events"]
         serialized = json.dumps(context_errors[0], ensure_ascii=False).lower()
         assert "api_key" not in serialized
         assert "sk-secret" not in serialized
@@ -1801,7 +1816,25 @@ class TestProducerTerminalOwnership:
         from app import generate_stream_drafts
 
         mock_graph = MagicMock()
-        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.astream_events = MagicMock(
+            return_value=_trace_only_events(
+                "provider_dispatch.started",
+                {
+                    "dispatch_id": "dispatch-1",
+                    "call_id": "call-1",
+                    "request_id": "request-1",
+                    "thread_id": "t-1",
+                    "attempt": 1,
+                    "provider": "deepseek_official",
+                    "model": "deepseek-v4-pro",
+                    "input_tokens": 1234,
+                    "tokenizer_mode": "estimated_mixed",
+                    "estimated": True,
+                    "trigger_eligible": True,
+                    "dispatched_at": "2026-07-16T00:00:00+00:00",
+                },
+            )
+        )
         mock_graph.aupdate_state = AsyncMock()
 
         interrupt_obj = SimpleNamespace(
@@ -1846,6 +1879,11 @@ class TestProducerTerminalOwnership:
         interrupt_update = mock_graph.aupdate_state.await_args_list[-1].args[1]
         assert interrupt_update["pending_interrupt_type"] == "memory_confirmation"
         assert "activity_timeline" in interrupt_update
+        assert interrupt_update["last_provider_dispatch"]["dispatch_id"] == "dispatch-1"
+        assert interrupt_update["request_context_window"]["last_event_count"] == 0
+        assert interrupt_update["context_window_events"] == []
+        assert interrupt_update["last_context_policy_by_node"] == {}
+        assert interrupt_update["last_resource_subnodes"] == []
 
     @pytest.mark.anyio
     async def test_profile_completion_interrupt_payload_is_typed(self):
@@ -2316,7 +2354,25 @@ class TestSSEInterruptWithEmptyNext:
         from app import generate_stream_drafts
 
         mock_graph = MagicMock()
-        mock_graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+        mock_graph.astream_events = MagicMock(
+            return_value=_trace_only_events(
+                "provider_dispatch.started",
+                {
+                    "dispatch_id": "dispatch-pending",
+                    "call_id": "call-pending",
+                    "request_id": "request-pending",
+                    "thread_id": "t-1",
+                    "attempt": 1,
+                    "provider": "deepseek_official",
+                    "model": "deepseek-v4-pro",
+                    "input_tokens": 321,
+                    "tokenizer_mode": "estimated_mixed",
+                    "estimated": True,
+                    "trigger_eligible": True,
+                    "dispatched_at": "2026-07-16T00:00:00+00:00",
+                },
+            )
+        )
         mock_graph.aupdate_state = AsyncMock()
         mock_graph.aget_state = AsyncMock(
             return_value=SimpleNamespace(
@@ -2350,6 +2406,12 @@ class TestSSEInterruptWithEmptyNext:
             if item.get("type") == "run_status"
             and item.get("run_status") == "completed"
         ] == []
+        assert mock_graph.aupdate_state.await_count == 2
+        error_update = mock_graph.aupdate_state.await_args_list[-1].args[1]
+        assert error_update["run_status"] == "failed"
+        assert (
+            error_update["last_provider_dispatch"]["dispatch_id"] == "dispatch-pending"
+        )
 
     @pytest.mark.anyio
     async def test_request_local_provisional_events_reach_sse_without_trace_logging(

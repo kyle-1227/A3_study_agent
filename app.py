@@ -1859,6 +1859,7 @@ async def _update_llm_manifest_state_from_trace(
     event: dict,
     llm_input_manifests: list[dict],
     state_context: dict,
+    persist_checkpoint: bool,
 ) -> tuple[dict, dict, dict, list[dict]]:
     payload = llm_input_manifest_trace_payload(event)
     llm_input_manifests[:] = merge_llm_input_manifest_history(
@@ -1906,7 +1907,7 @@ async def _update_llm_manifest_state_from_trace(
             "thread_context_window": active_thread_window,
         },
         state={"thread_id": thread_id, "session_id": thread_id},
-        persist_checkpoint=True,
+        persist_checkpoint=persist_checkpoint,
     )
     return (
         dict(payload),
@@ -1923,8 +1924,9 @@ async def _update_session_context_memory_from_trace(
     thread_id: str,
     event: dict,
     state_context: dict,
+    persist_checkpoint: bool,
 ) -> dict:
-    """Persist one actual provider-dispatch item and its V3 projection atomically."""
+    """Record one provider-dispatch item and its V3 projection atomically."""
 
     record = ContextInjectionRecordV1.model_validate(
         {
@@ -1962,7 +1964,7 @@ async def _update_session_context_memory_from_trace(
         "session_context_memory_ledger": updated_ledger.model_dump(mode="json"),
         "thread_context_window_v3": window_v3,
     }
-    await safe_update_thread_state(
+    await _try_update_run_state(
         graph,
         config,
         state_update,
@@ -1971,9 +1973,8 @@ async def _update_session_context_memory_from_trace(
             "thread_id": thread_id,
             "session_id": thread_id,
         },
+        persist_checkpoint=persist_checkpoint,
     )
-    if isinstance(active_run, dict):
-        update_active_run(thread_id, state_update)
     state_context.update(state_update)
     return window_v3
 
@@ -1985,14 +1986,15 @@ async def _update_last_provider_dispatch_from_trace(
     thread_id: str,
     event: dict,
     state_context: dict,
+    persist_checkpoint: bool,
 ) -> ProviderBoundUsageV1:
-    """Persist the latest actual business-provider input for future compaction."""
+    """Record the latest actual business-provider input for future compaction."""
 
     usage = provider_bound_usage_from_trace(event)
     if usage.thread_id != thread_id:
         raise ValueError("provider dispatch trace thread_id mismatch")
     payload = usage.model_dump(mode="json")
-    await safe_update_thread_state(
+    await _try_update_run_state(
         graph,
         config,
         {"last_provider_dispatch": payload},
@@ -2001,10 +2003,8 @@ async def _update_last_provider_dispatch_from_trace(
             "thread_id": thread_id,
             "session_id": thread_id,
         },
+        persist_checkpoint=persist_checkpoint,
     )
-    active_run = get_active_run(thread_id)
-    if isinstance(active_run, dict):
-        update_active_run(thread_id, {"last_provider_dispatch": payload})
     state_context["last_provider_dispatch"] = payload
     return usage
 
@@ -2523,6 +2523,86 @@ async def _stream_graph_event_drafts(
         )
         return [event for event in (stream_event, waiting_event) if event is not None]
 
+    def _inflight_telemetry_checkpoint_values() -> dict:
+        """Project deferred stream telemetry into one terminal checkpoint update."""
+
+        current_request_id = (
+            str(request_context_events[-1].get("request_id", "") or "")
+            if request_context_events
+            else request_id
+        )
+        values: dict = {
+            "request_context_window": {
+                "current_request_id": current_request_id,
+                "current_node": "",
+                "last_event_count": len(request_context_events),
+            },
+            "context_window_events": list(request_context_events),
+            "last_context_policy_by_node": dict(last_context_policy_by_node),
+            "last_provider_supply_by_node": dict(last_provider_supply_by_node),
+            "last_context_selection_by_node": dict(last_context_selection_by_node),
+            "last_context_applied_by_node": dict(last_context_applied_by_node),
+            "last_drop_reasons_by_node": dict(last_drop_reasons_by_node),
+            "last_resource_subnodes": list(last_resource_subnodes),
+            "activity_timeline": list(activity_timeline),
+        }
+        if context_usage_history:
+            values["context_usage"] = context_usage_history[-1]
+            values["context_usage_history"] = list(context_usage_history)
+        if context_usage_reports:
+            values["context_usage_report"] = context_usage_reports[0]
+            values["context_usage_reports"] = list(context_usage_reports)
+        if llm_input_manifests:
+            values["llm_input_manifest"] = llm_input_manifests[0]
+            values["llm_input_manifests"] = list(llm_input_manifests)
+        for key in (
+            "background_context_window",
+            "thread_context_ledger",
+            "session_context_memory_ledger",
+            "thread_context_window_v3",
+            "last_provider_dispatch",
+        ):
+            value = manifest_state_context.get(key)
+            if isinstance(value, dict) and value:
+                values[key] = dict(value)
+        active_run = get_active_run(thread_id)
+        thread_window = (
+            dict(active_run.get("thread_context_window") or {})
+            if isinstance(active_run, dict)
+            else {}
+        )
+        background_window = manifest_state_context.get("background_context_window")
+        if isinstance(background_window, dict) and background_window:
+            thread_window.update(
+                {
+                    "llm_input_manifest_count": len(llm_input_manifests),
+                    "background_context_window": dict(background_window),
+                    **background_context_status_payload(background_window),
+                }
+            )
+        thread_window.update(
+            {
+                "context_usage_history_count": len(context_usage_history),
+                "context_usage_history_kind": "llm_call_history",
+                "context_usage_report_count": len(context_usage_reports),
+                "context_usage_report_present": bool(context_usage_reports),
+                "last_context_policy_by_node_keys": sorted(last_context_policy_by_node),
+                "last_provider_supply_by_node_keys": sorted(
+                    last_provider_supply_by_node
+                ),
+                "last_context_selection_by_node_keys": sorted(
+                    last_context_selection_by_node
+                ),
+                "last_context_applied_by_node_keys": sorted(
+                    last_context_applied_by_node
+                ),
+                "last_resource_subnodes_count": len(last_resource_subnodes),
+                **activity_timeline_status(activity_timeline),
+            }
+        )
+        values["thread_context_window"] = thread_window
+        return values
+
     if activity_enabled:
         stream_started = build_activity_event(
             thread_id=thread_id,
@@ -2578,6 +2658,7 @@ async def _stream_graph_event_drafts(
                         thread_id=thread_id,
                         event=event,
                         state_context=manifest_state_context,
+                        persist_checkpoint=False,
                     )
                 continue
             if stage == "context_injection.dispatched":
@@ -2587,6 +2668,7 @@ async def _stream_graph_event_drafts(
                     thread_id=thread_id,
                     event=event,
                     state_context=manifest_state_context,
+                    persist_checkpoint=False,
                 )
                 drained.append(
                     _activity_update_draft(
@@ -2733,6 +2815,7 @@ async def _stream_graph_event_drafts(
                     event=event,
                     llm_input_manifests=llm_input_manifests,
                     state_context=manifest_state_context,
+                    persist_checkpoint=False,
                 )
                 request_context_events.append(
                     {
@@ -2877,7 +2960,7 @@ async def _stream_graph_event_drafts(
                         "thread_id": thread_id,
                         "session_id": thread_id,
                     },
-                    persist_checkpoint=True,
+                    persist_checkpoint=False,
                 )
                 manifest_state_context.update(
                     {
@@ -3362,6 +3445,7 @@ async def _stream_graph_event_drafts(
                     graph,
                     config,
                     {
+                        **_inflight_telemetry_checkpoint_values(),
                         "run_status": RUN_STATUS_ERROR,
                         "resume_available": False,
                         "pending_interrupt_type": "",
@@ -3623,7 +3707,7 @@ async def _stream_graph_event_drafts(
                                     duration_ms=duration_ms,
                                     error_type="NodeOutputError" if error else "",
                                 ),
-                                persist_checkpoint=True,
+                                persist_checkpoint=False,
                             )
                         await _try_update_run_state(
                             graph,
@@ -3780,6 +3864,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
@@ -3910,6 +3995,7 @@ async def _stream_graph_event_drafts(
                 graph,
                 config,
                 {
+                    **_inflight_telemetry_checkpoint_values(),
                     "schema_version": RUN_CONTROL_SCHEMA_VERSION,
                     "run_status": RUN_STATUS_STOPPED,
                     "resume_available": True,
@@ -3960,6 +4046,7 @@ async def _stream_graph_event_drafts(
                 graph,
                 config,
                 {
+                    **_inflight_telemetry_checkpoint_values(),
                     "resume_available": False,
                     "pending_interrupt_type": "memory_confirmation",
                     "activity_timeline": activity_timeline,
@@ -3990,6 +4077,7 @@ async def _stream_graph_event_drafts(
                 graph,
                 config,
                 {
+                    **_inflight_telemetry_checkpoint_values(),
                     "resume_available": True,
                     "pending_interrupt_type": "profile_completion_required",
                     "profile_completion_request": profile_request,
@@ -4015,6 +4103,7 @@ async def _stream_graph_event_drafts(
                 graph,
                 config,
                 {
+                    **_inflight_telemetry_checkpoint_values(),
                     "resume_available": False,
                     "pending_interrupt_type": "plan_review",
                     "activity_timeline": activity_timeline,
@@ -4052,6 +4141,7 @@ async def _stream_graph_event_drafts(
                 graph,
                 config,
                 {
+                    **_inflight_telemetry_checkpoint_values(),
                     "resume_available": True,
                     "pending_interrupt_type": "profile_completion_required",
                     "profile_completion_request": recovered_request,
@@ -4124,6 +4214,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
@@ -4187,6 +4278,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
@@ -4251,6 +4343,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
@@ -4305,6 +4398,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",
@@ -4344,6 +4438,7 @@ async def _stream_graph_event_drafts(
             summary="Resource workflow ended without Resource Final V3",
         )
         error_values = {
+            **_inflight_telemetry_checkpoint_values(),
             "run_status": RUN_STATUS_ERROR,
             "resume_available": False,
             "pending_interrupt_type": "",
@@ -4491,6 +4586,10 @@ async def _stream_graph_event_drafts(
             updating=False,
         )
 
+    last_provider_dispatch = manifest_state_context.get("last_provider_dispatch")
+    if isinstance(last_provider_dispatch, dict) and last_provider_dispatch:
+        completed_values["last_provider_dispatch"] = last_provider_dispatch
+
     active_run = get_active_run(thread_id)
     completed_thread_window = (
         dict(active_run.get("thread_context_window") or {})
@@ -4524,6 +4623,7 @@ async def _stream_graph_event_drafts(
             graph,
             config,
             {
+                **_inflight_telemetry_checkpoint_values(),
                 "run_status": RUN_STATUS_ERROR,
                 "resume_available": False,
                 "pending_interrupt_type": "",

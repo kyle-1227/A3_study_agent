@@ -323,6 +323,7 @@ async def test_manifest_trace_update_persists_background_context_checkpoint():
         event=event,
         llm_input_manifests=[],
         state_context={"thread_id": "t1"},
+        persist_checkpoint=True,
     )
 
     graph.aupdate_state.assert_awaited_once()
@@ -331,6 +332,44 @@ async def test_manifest_trace_update_persists_background_context_checkpoint():
     assert values["llm_input_manifests"]
     assert values["thread_context_ledger"]
     assert values["background_context_window"]
+
+
+@pytest.mark.anyio
+async def test_manifest_trace_update_can_defer_checkpoint_until_terminal():
+    from app import _update_llm_manifest_state_from_trace
+
+    manifest = build_llm_input_manifest(
+        node_name="mindmap_agent",
+        llm_node="mindmap",
+        provider="deepseek_official",
+        model="deepseek-v4-pro",
+        messages=[HumanMessage(content="mindmap")],
+        state={"request_id": "r1", "thread_id": "t1"},
+        call_purpose="plain_llm",
+    )
+    event = {
+        "stage": "llm_input_manifest.built",
+        **llm_input_manifest_trace_payload(manifest),
+    }
+    graph = MagicMock()
+    graph.aupdate_state = AsyncMock()
+    manifests: list[dict] = []
+
+    payload, ledger, background, history = await _update_llm_manifest_state_from_trace(
+        graph,
+        {"configurable": {"thread_id": "t1"}},
+        thread_id="t1",
+        event=event,
+        llm_input_manifests=manifests,
+        state_context={"thread_id": "t1"},
+        persist_checkpoint=False,
+    )
+
+    graph.aupdate_state.assert_not_awaited()
+    assert payload["manifest_id"] == event["manifest_id"]
+    assert ledger
+    assert background
+    assert history == manifests
 
 
 def test_task_continuity_avoids_long_term_memory_confirmation():

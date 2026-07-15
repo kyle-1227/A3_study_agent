@@ -154,6 +154,7 @@ async def test_actual_provider_dispatch_is_persisted_for_next_request():
         thread_id="thread-1",
         event=event,
         state_context=state_context,
+        persist_checkpoint=True,
     )
 
     assert usage.input_tokens == 1234
@@ -161,6 +162,39 @@ async def test_actual_provider_dispatch_is_persisted_for_next_request():
     assert graph.updates[0][1] == {
         "last_provider_dispatch": state_context["last_provider_dispatch"]
     }
+
+
+@pytest.mark.anyio
+async def test_actual_provider_dispatch_can_defer_checkpoint_until_terminal():
+    graph = FakeGraph()
+    state_context: dict = {}
+    event = {
+        "stage": "provider_dispatch.started",
+        "dispatch_id": "dispatch-1",
+        "call_id": "call-1",
+        "request_id": "request-1",
+        "thread_id": "thread-1",
+        "attempt": 1,
+        "provider": "deepseek_official",
+        "model": "deepseek-v4-pro",
+        "input_tokens": 1234,
+        "tokenizer_mode": "estimated_mixed",
+        "estimated": True,
+        "trigger_eligible": True,
+        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await app_module._update_last_provider_dispatch_from_trace(
+        graph,
+        {"configurable": {"thread_id": "thread-1"}},
+        thread_id="thread-1",
+        event=event,
+        state_context=state_context,
+        persist_checkpoint=False,
+    )
+
+    assert graph.updates == []
+    assert state_context["last_provider_dispatch"]["dispatch_id"] == "dispatch-1"
 
 
 @pytest.mark.anyio
