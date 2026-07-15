@@ -9,6 +9,7 @@ node_modules
 .next
 chroma_store
 indexes/parent_child
+data
 logs
 drafts
 learning_notes

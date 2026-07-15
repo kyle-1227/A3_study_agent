@@ -1,10 +1,11 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: a3_study_agent
       POSTGRES_USER: a3_user
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-a3_study_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -12,30 +13,59 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U a3_user -d a3_study_agent"]
       interval: 5s
-      retries: 5
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
-  app:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      target: backend
+    restart: unless-stopped
+    env_file:
+      - path: ${A3_ENV_FILE:-.env}
+        required: true
+    environment:
+      DB_URI: postgresql://a3_user:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/a3_study_agent
     ports:
       - "8000:8000"
-      - "3000:3000"
-    env_file: .env
-    environment:
-      - DB_URI=postgresql://a3_user:${POSTGRES_PASSWORD:-a3_study_dev}@postgres:5432/a3_study_agent
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
     volumes:
       - chroma_data:/app/chroma_store
       - ./data:/app/data
       - ./indexes/parent_child:/app/indexes/parent_child:ro
+      - artifacts:/app/artifacts
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL in .env}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
 
   jaeger:
     image: jaegertracing/jaeger:2
+    restart: unless-stopped
     ports:
       - "16686:16686"
       - "4317:4317"
@@ -45,3 +75,4 @@ services:
 volumes:
   pgdata:
   chroma_data:
+  artifacts:
