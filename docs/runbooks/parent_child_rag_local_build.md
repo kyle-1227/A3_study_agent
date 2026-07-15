@@ -1,5 +1,87 @@
 # Parent–Child RAG 本地构建运行手册
 
+## 2026-07-15 production-close status (authoritative)
+
+This section supersedes older example IDs and any earlier wording that treats
+`gold_dataset_v1.json` as permanently formal or forbids all experimental
+builds while readiness is blocked.
+
+- The current technical candidate is `pc_20260715_98336c2_55`. It is sealed
+  `READY` and **inactive**. Registry primary, previous, and shadow pointers are
+  unset. Do not activate it.
+- The retained Flat comparison artifact is
+  `artifacts/rag/flat_20260715_98336c2_53`. The existing `chroma_store` remains
+  the legacy rollback asset and must not be deleted before a successful page
+  canary and a separately approved cleanup.
+- Gold V3 is not frozen. The current authoring checkpoint contains 22
+  `human_directed_ai_assisted`, `draft_write_only` approvals, has zero of two
+  required independent reviewers, and is not evaluation- or rollout-eligible.
+  Only a future frozen V3 with two independent reviews and the 150-pair chunk
+  review may be used for formal validation.
+- A blocked readiness audit does not prohibit a clearly labelled local
+  technical build. Such a build must record `experimental_only=true` and
+  `activation_prohibited=true`; it cannot proceed to formal validation,
+  Shadow, or activation.
+- Generated portable commands use `config/rag/index.runtime.yaml`. The tracked
+  `config/rag/index.local.yaml` is an initializer input, not the final runtime
+  config. Generation 55 specifically requires the OCR-aware runtime identity
+  represented by `config/rag/index.ocr.runtime.yaml`.
+
+The provider-backed Gold V2 engineering benchmark found Recall@5 `0.53 ->
+0.41`, MRR `0.3916 -> 0.3442`, and Candidate P95 `3862.5 ms`. A final fixed
+17-query diagnosis compared `reranker_top_n=20` with `80`: hydrated Gold spans
+increased only `6 -> 8`, while P50 increased `2679 -> 4122 ms` and P95 increased
+`4932 -> 7234 ms`. Parameter tuning is closed. These V2 diagnostics cannot be
+used as a production pass.
+
+Reproduce the final body-free diagnosis with the exact READY generation and a
+fixed 10–20 query selection. API keys must already be present under the exact
+environment-variable names declared by the selected index config; never place
+their values on the command line:
+
+```powershell
+$queryArgs = foreach ($id in @(
+  'big_data-q041', 'big_data-q052', 'big_data-q061', 'big_data-q062',
+  'computer-q033',
+  'machine_learning-q069', 'machine_learning-q071',
+  'machine_learning-q075', 'machine_learning-q080',
+  'math-q019', 'python-q093', 'python-q094',
+  'big_data-q060', 'computer-q026', 'machine_learning-q079',
+  'math-q004', 'python-q092'
+)) {
+  '--query-id'
+  $id
+}
+
+python scripts/diagnose_parent_child_regressions.py `
+  --project-root . `
+  --index-config config/rag/index.ocr.runtime.yaml `
+  --gold-dataset data/evaluation/gold_dataset_v2.json `
+  --candidate-generation-id pc_20260715_98336c2_55 `
+  --reranker-top-n 20 `
+  @queryArgs `
+  --output reports/rag_diagnostics/pc55-v2-top20.json
+
+python scripts/diagnose_parent_child_regressions.py `
+  --project-root . `
+  --index-config config/rag/index.runtime.rerank80.yaml `
+  --gold-dataset data/evaluation/gold_dataset_v2.json `
+  --candidate-generation-id pc_20260715_98336c2_55 `
+  --reranker-top-n 80 `
+  @queryArgs `
+  --output reports/rag_diagnostics/pc55-v2-top80.json
+```
+
+The diagnostic CLI never reads an active pointer, persists query/content
+bodies, or substitutes Flat output after Candidate failure. It uses a
+marker-owned disposable Chroma snapshot and requires 10–20 exact query IDs.
+
+Cleanup is registry-owned: FAILED generation staging directories may only be
+removed through `manage_rag_generation.py --operation cleanup` after ownership
+and deployment checks. Never manually delete a READY generation, Flat 53,
+`generation_registry.sqlite`, `chroma_store`, a successful benchmark, or a Gold
+authoring checkpoint.
+
 ## Generated portable runtime configuration
 
 Do not manually edit the ignored runtime YAML. Generate it from the tracked,

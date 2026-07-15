@@ -398,6 +398,80 @@ def test_hybrid_retrieval_merges_reranks_caps_and_hydrates_exact_windows() -> No
     assert second_context.windows[0].content == parent_three.content
 
 
+def test_diagnostic_retrieval_reuses_pipeline_without_query_or_body_leakage() -> None:
+    selected_parent = _parent(
+        41,
+        content="# Selected\n" + "0123456789" * 8,
+        source_relpath="math/source-a.md",
+        section_title="Selected",
+    )
+    source_capped_parent = _parent(
+        42,
+        content="# Capped\n" + "abcdefghij" * 8,
+        source_relpath="math/source-a.md",
+        section_title="Capped",
+    )
+    second_selected_parent = _parent(
+        43,
+        content="# Other\n" + "klmnopqrst" * 8,
+        source_relpath="math/source-b.md",
+        section_title="Other",
+    )
+    selected_child = _child(41, selected_parent, 12, 20, child_id=None)
+    capped_child = _child(42, source_capped_parent, 10, 18, child_id=None)
+    other_child = _child(43, second_selected_parent, 9, 17, child_id=None)
+    retriever = ParentChildHybridRetriever(
+        policy=_policy(),
+        vector_search=_Search(
+            (
+                _search_candidate(selected_child, 0.9),
+                _search_candidate(capped_child, 0.8),
+                _search_candidate(other_child, 0.7),
+            ),
+            None,
+        ),
+        bm25_search=_Search((_search_candidate(selected_child, 3.0),), None),
+        reranker=_ScoreReranker(
+            {
+                selected_child.metadata.child_id: 0.9,
+                capped_child.metadata.child_id: 0.8,
+                other_child.metadata.child_id: 0.7,
+            }
+        ),
+        parent_hydrator=_Hydrator(
+            {
+                selected_parent.parent_id: selected_parent,
+                source_capped_parent.parent_id: source_capped_parent,
+                second_selected_parent.parent_id: second_selected_parent,
+            },
+            None,
+        ),
+    )
+
+    result, trace = retriever.retrieve_with_diagnostics(_request())
+
+    assert result.status == "ok"
+    by_child = {child.child_id: child for child in trace.children}
+    assert by_child[selected_child.metadata.child_id].vector_rank == 1
+    assert by_child[selected_child.metadata.child_id].bm25_rank == 1
+    assert by_child[selected_child.metadata.child_id].fusion_rank == 1
+    assert by_child[selected_child.metadata.child_id].reranker_rank == 1
+    by_parent = {parent.parent_id: parent for parent in trace.parents}
+    assert by_parent[source_capped_parent.parent_id].selection_outcome == "source_cap"
+    assert tuple(parent.parent_id for parent in trace.hydrated_parents) == (
+        selected_parent.parent_id,
+        second_selected_parent.parent_id,
+    )
+    first_window = trace.hydrated_parents[0].windows[0]
+    assert first_window.start_char >= selected_parent.start_char
+    assert first_window.end_char <= selected_parent.end_char
+    serialized = trace.model_dump_json()
+    assert _request().query not in serialized
+    assert selected_parent.content not in serialized
+    assert trace.timings.fusion_ms >= 0
+    assert trace.timings.parent_aggregation_ms >= 0
+
+
 def test_normal_zero_hit_is_explicit_and_skips_rerank_and_hydration() -> None:
     vector = _Search((), None)
     bm25 = _Search((), None)

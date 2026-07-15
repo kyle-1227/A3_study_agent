@@ -295,6 +295,241 @@ class RetrievalTimings(_StrictFrozenModel):
         return value
 
 
+class RetrievalDiagnosticChildCoordinate(_StrictFrozenModel):
+    """Safe child coordinates and ranks across every retrieval stage."""
+
+    schema_version: Literal["retrieval_diagnostic_child_coordinate_v1"]
+    child_id: str = Field(min_length=1)
+    parent_id: str = Field(min_length=1)
+    doc_id: str = Field(min_length=1)
+    source_relpath: str = Field(min_length=1)
+    pagination_kind: Literal["physical", "logical"]
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    start_char: int = Field(ge=0)
+    end_char: int = Field(gt=0)
+    section_path: tuple[str, ...]
+    vector_rank: int | None
+    bm25_rank: int | None
+    fusion_rank: int = Field(gt=0)
+    submitted_to_reranker: bool
+    reranker_rank: int | None
+    vector_raw_score: float | None
+    bm25_raw_score: float | None
+    rrf_score: float = Field(gt=0)
+    reranker_score: float | None
+
+    @field_validator(
+        "vector_raw_score",
+        "bm25_raw_score",
+        "rrf_score",
+        "reranker_score",
+    )
+    @classmethod
+    def validate_finite_scores(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("diagnostic child scores must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_coordinate(self) -> Self:
+        if self.page_end < self.page_start or self.end_char <= self.start_char:
+            raise ValueError("diagnostic child coordinates must be non-empty")
+        if (self.vector_rank is None) != (self.vector_raw_score is None):
+            raise ValueError("vector diagnostic rank and score must coexist")
+        if (self.bm25_rank is None) != (self.bm25_raw_score is None):
+            raise ValueError("BM25 diagnostic rank and score must coexist")
+        if self.vector_rank is None and self.bm25_rank is None:
+            raise ValueError("diagnostic child must originate from a search channel")
+        if self.vector_rank is not None and self.vector_rank <= 0:
+            raise ValueError("vector diagnostic rank must be positive")
+        if self.bm25_rank is not None and self.bm25_rank <= 0:
+            raise ValueError("BM25 diagnostic rank must be positive")
+        if self.submitted_to_reranker != (self.reranker_rank is not None):
+            raise ValueError("reranker submission and rank must agree")
+        if self.submitted_to_reranker != (self.reranker_score is not None):
+            raise ValueError("reranker submission and score must agree")
+        return self
+
+
+class RetrievalDiagnosticParentCoordinate(_StrictFrozenModel):
+    """One parent before source and unique-parent caps are applied."""
+
+    schema_version: Literal["retrieval_diagnostic_parent_coordinate_v1"]
+    parent_id: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+    source_relpath: str = Field(min_length=1)
+    pre_cap_rank: int = Field(gt=0)
+    selected_rank: int | None
+    selection_outcome: Literal["selected", "source_cap", "unique_parent_cap"]
+    parent_score: float = Field(ge=0, le=1)
+    best_child_rank: int = Field(gt=0)
+    all_child_ids: tuple[str, ...] = Field(min_length=1)
+    supporting_child_ids: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("parent_score")
+    @classmethod
+    def validate_finite_parent_score(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("diagnostic parent score must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_parent_selection(self) -> Self:
+        if len(self.all_child_ids) != len(set(self.all_child_ids)):
+            raise ValueError("diagnostic parent child IDs must be unique")
+        if len(self.supporting_child_ids) != len(set(self.supporting_child_ids)):
+            raise ValueError("diagnostic parent support IDs must be unique")
+        if not set(self.supporting_child_ids).issubset(self.all_child_ids):
+            raise ValueError("parent support must be a subset of all parent children")
+        if self.selection_outcome == "selected":
+            if self.selected_rank is None or self.selected_rank <= 0:
+                raise ValueError("selected parent requires a positive selected rank")
+        elif self.selected_rank is not None:
+            raise ValueError("excluded parent cannot carry a selected rank")
+        return self
+
+
+class RetrievalDiagnosticWindowCoordinate(_StrictFrozenModel):
+    """Safe absolute cleaned-document span for one hydrated context window."""
+
+    schema_version: Literal["retrieval_diagnostic_window_coordinate_v1"]
+    start_char: int = Field(ge=0)
+    end_char: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> Self:
+        if self.end_char <= self.start_char:
+            raise ValueError("diagnostic hydration window must be non-empty")
+        return self
+
+
+class RetrievalDiagnosticHydrationCoordinate(_StrictFrozenModel):
+    """Authoritative parent coordinates with body-free expansion windows."""
+
+    schema_version: Literal["retrieval_diagnostic_hydration_coordinate_v1"]
+    parent_id: str = Field(min_length=1)
+    selected_rank: int = Field(gt=0)
+    doc_id: str = Field(min_length=1)
+    source_relpath: str = Field(min_length=1)
+    pagination_kind: Literal["physical", "logical"]
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    start_char: int = Field(ge=0)
+    end_char: int = Field(gt=0)
+    expansion_mode: Literal["full_parent", "hit_window"]
+    windows: tuple[RetrievalDiagnosticWindowCoordinate, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_hydration_coordinate(self) -> Self:
+        if self.page_end < self.page_start or self.end_char <= self.start_char:
+            raise ValueError("diagnostic parent coordinates must be non-empty")
+        cursor = self.start_char
+        for window in self.windows:
+            if window.start_char < cursor or window.end_char > self.end_char:
+                raise ValueError(
+                    "diagnostic hydration windows must be ordered within the parent"
+                )
+            cursor = window.end_char
+        return self
+
+
+class RetrievalDiagnosticTimings(_StrictFrozenModel):
+    """Latency decomposition for every strict diagnostic retrieval stage."""
+
+    schema_version: Literal["retrieval_diagnostic_timings_v1"]
+    vector_ms: float = Field(ge=0)
+    bm25_ms: float = Field(ge=0)
+    fusion_ms: float = Field(ge=0)
+    reranker_ms: float = Field(ge=0)
+    parent_aggregation_ms: float = Field(ge=0)
+    hydration_ms: float = Field(ge=0)
+    total_ms: float = Field(ge=0)
+
+    @field_validator(
+        "vector_ms",
+        "bm25_ms",
+        "fusion_ms",
+        "reranker_ms",
+        "parent_aggregation_ms",
+        "hydration_ms",
+        "total_ms",
+    )
+    @classmethod
+    def validate_finite_timing(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("diagnostic retrieval timings must be finite")
+        return value
+
+
+class HybridRetrievalDiagnosticTrace(_StrictFrozenModel):
+    """Safe trace of one real retrieval, intentionally excluding query and bodies."""
+
+    schema_version: Literal["hybrid_retrieval_diagnostic_trace_v1"]
+    status: Literal["ok", "empty"]
+    request_id: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+    generation_id: str = Field(min_length=1)
+    retrieval_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    children: tuple[RetrievalDiagnosticChildCoordinate, ...]
+    parents: tuple[RetrievalDiagnosticParentCoordinate, ...]
+    hydrated_parents: tuple[RetrievalDiagnosticHydrationCoordinate, ...]
+    timings: RetrievalDiagnosticTimings
+
+    @model_validator(mode="after")
+    def validate_trace(self) -> Self:
+        if self.status == "empty":
+            if self.children or self.parents or self.hydrated_parents:
+                raise ValueError("empty diagnostic trace cannot contain coordinates")
+            return self
+        if not self.children or not self.parents:
+            raise ValueError(
+                "successful diagnostic trace requires child and parent stages"
+            )
+        child_ids = tuple(child.child_id for child in self.children)
+        if len(child_ids) != len(set(child_ids)):
+            raise ValueError("diagnostic child identities must be unique")
+        if tuple(child.fusion_rank for child in self.children) != tuple(
+            range(1, len(self.children) + 1)
+        ):
+            raise ValueError(
+                "diagnostic children must preserve contiguous fusion ranks"
+            )
+        reranker_ranks = tuple(
+            sorted(
+                child.reranker_rank
+                for child in self.children
+                if child.reranker_rank is not None
+            )
+        )
+        if reranker_ranks != tuple(range(1, len(reranker_ranks) + 1)):
+            raise ValueError("diagnostic reranker ranks must be contiguous and unique")
+        if tuple(parent.pre_cap_rank for parent in self.parents) != tuple(
+            range(1, len(self.parents) + 1)
+        ):
+            raise ValueError("diagnostic pre-cap parent ranks must be contiguous")
+        selected = tuple(
+            parent.parent_id
+            for parent in self.parents
+            if parent.selection_outcome == "selected"
+        )
+        selected_ranks = tuple(
+            parent.selected_rank
+            for parent in self.parents
+            if parent.selected_rank is not None
+        )
+        if selected_ranks != tuple(range(1, len(selected_ranks) + 1)):
+            raise ValueError("diagnostic selected-parent ranks must be contiguous")
+        hydrated = tuple(parent.parent_id for parent in self.hydrated_parents)
+        if hydrated != tuple(
+            parent_id for parent_id in selected if parent_id in hydrated
+        ):
+            raise ValueError(
+                "hydrated diagnostic parents must preserve selected-parent order"
+            )
+        return self
+
+
 class HybridRetrievalResult(_StrictFrozenModel):
     """Strict retrieval outcome; zero hits are data, while failures raise."""
 
@@ -560,7 +795,16 @@ class _UnrankedParent:
     source_relpath: str
     parent_score: float
     best_child_rank: int
+    all_child_ids: tuple[str, ...]
     supporting_child_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildRetrievalDiagnosticState:
+    children: tuple[RetrievalDiagnosticChildCoordinate, ...]
+    parents: tuple[RetrievalDiagnosticParentCoordinate, ...]
+    fusion_ms: float
+    parent_aggregation_ms: float
 
 
 @dataclass(slots=True)
@@ -900,10 +1144,56 @@ def _build_child_hits(
     )
 
 
-def _select_parent_aggregates(
+def _diagnostic_child_coordinates(
+    fused: tuple[_MergedCandidate, ...],
+    child_hits: tuple[ChildEvidenceHit, ...],
+) -> tuple[RetrievalDiagnosticChildCoordinate, ...]:
+    reranked = {
+        hit.document.metadata.child_id: (hit.final_rank, hit.rerank_score)
+        for hit in child_hits
+    }
+    coordinates: list[RetrievalDiagnosticChildCoordinate] = []
+    for candidate in fused:
+        metadata = candidate.document.metadata
+        reranker_coordinate = reranked.get(metadata.child_id)
+        coordinates.append(
+            RetrievalDiagnosticChildCoordinate(
+                schema_version="retrieval_diagnostic_child_coordinate_v1",
+                child_id=metadata.child_id,
+                parent_id=metadata.parent_id,
+                doc_id=metadata.doc_id,
+                source_relpath=metadata.source_relpath,
+                pagination_kind=metadata.pagination_kind,
+                page_start=metadata.page_start,
+                page_end=metadata.page_end,
+                start_char=metadata.start_char,
+                end_char=metadata.end_char,
+                section_path=metadata.section_path,
+                vector_rank=candidate.vector_rank,
+                bm25_rank=candidate.bm25_rank,
+                fusion_rank=candidate.fused_rank,
+                submitted_to_reranker=reranker_coordinate is not None,
+                reranker_rank=(
+                    None if reranker_coordinate is None else reranker_coordinate[0]
+                ),
+                vector_raw_score=candidate.vector_raw_score,
+                bm25_raw_score=candidate.bm25_raw_score,
+                rrf_score=candidate.rrf_score,
+                reranker_score=(
+                    None if reranker_coordinate is None else reranker_coordinate[1]
+                ),
+            )
+        )
+    return tuple(coordinates)
+
+
+def _select_parent_aggregates_with_diagnostics(
     hits: tuple[ChildEvidenceHit, ...],
     policy: HybridRetrievalPolicy,
-) -> tuple[ParentAggregate, ...]:
+) -> tuple[
+    tuple[ParentAggregate, ...],
+    tuple[RetrievalDiagnosticParentCoordinate, ...],
+]:
     grouped: dict[str, list[ChildEvidenceHit]] = defaultdict(list)
     for hit in hits:
         grouped[hit.document.metadata.parent_id].append(hit)
@@ -931,6 +1221,9 @@ def _select_parent_aggregates(
                     support_lambda=policy.parent_support_lambda,
                 ),
                 best_child_rank=selected_hits[0].final_rank,
+                all_child_ids=tuple(
+                    hit.document.metadata.child_id for hit in parent_hits
+                ),
                 supporting_child_ids=tuple(
                     hit.document.metadata.child_id for hit in selected_hits
                 ),
@@ -947,15 +1240,36 @@ def _select_parent_aggregates(
     )
     selected: list[_UnrankedParent] = []
     source_counts: dict[str, int] = defaultdict(int)
-    for parent in ordered:
-        if source_counts[parent.source_relpath] >= policy.max_parents_per_source:
-            continue
-        selected.append(parent)
-        source_counts[parent.source_relpath] += 1
+    diagnostic_parents: list[RetrievalDiagnosticParentCoordinate] = []
+    for pre_cap_rank, parent in enumerate(ordered, start=1):
+        selected_rank: int | None = None
+        selection_outcome: Literal["selected", "source_cap", "unique_parent_cap"]
         if len(selected) == policy.unique_parent_top_k:
-            break
+            selection_outcome = "unique_parent_cap"
+        elif source_counts[parent.source_relpath] >= policy.max_parents_per_source:
+            selection_outcome = "source_cap"
+        else:
+            selected.append(parent)
+            source_counts[parent.source_relpath] += 1
+            selected_rank = len(selected)
+            selection_outcome = "selected"
+        diagnostic_parents.append(
+            RetrievalDiagnosticParentCoordinate(
+                schema_version="retrieval_diagnostic_parent_coordinate_v1",
+                parent_id=parent.parent_id,
+                subject=parent.subject,
+                source_relpath=parent.source_relpath,
+                pre_cap_rank=pre_cap_rank,
+                selected_rank=selected_rank,
+                selection_outcome=selection_outcome,
+                parent_score=parent.parent_score,
+                best_child_rank=parent.best_child_rank,
+                all_child_ids=parent.all_child_ids,
+                supporting_child_ids=parent.supporting_child_ids,
+            )
+        )
 
-    return tuple(
+    aggregates = tuple(
         ParentAggregate(
             schema_version="parent_aggregate_v1",
             rank=rank,
@@ -968,6 +1282,7 @@ def _select_parent_aggregates(
         )
         for rank, item in enumerate(selected, start=1)
     )
+    return aggregates, tuple(diagnostic_parents)
 
 
 def _validate_parent_against_hits(
@@ -1113,6 +1428,35 @@ def _expand_parent(
     )
 
 
+def _diagnostic_hydration_coordinates(
+    hydrated: tuple[HydratedParentContext, ...],
+) -> tuple[RetrievalDiagnosticHydrationCoordinate, ...]:
+    return tuple(
+        RetrievalDiagnosticHydrationCoordinate(
+            schema_version="retrieval_diagnostic_hydration_coordinate_v1",
+            parent_id=context.parent.parent_id,
+            selected_rank=context.rank,
+            doc_id=context.parent.doc_id,
+            source_relpath=context.parent.source_relpath,
+            pagination_kind=context.parent.pagination_kind,
+            page_start=context.parent.page_start,
+            page_end=context.parent.page_end,
+            start_char=context.parent.start_char,
+            end_char=context.parent.end_char,
+            expansion_mode=context.expansion_mode,
+            windows=tuple(
+                RetrievalDiagnosticWindowCoordinate(
+                    schema_version="retrieval_diagnostic_window_coordinate_v1",
+                    start_char=context.parent.start_char + window.start_in_parent,
+                    end_char=context.parent.start_char + window.end_in_parent,
+                )
+                for window in context.windows
+            ),
+        )
+        for context in hydrated
+    )
+
+
 class ParentChildHybridRetriever:
     """Strict candidate retriever with no request-time baseline fallback."""
 
@@ -1132,11 +1476,11 @@ class ParentChildHybridRetriever:
         self._parent_hydrator = parent_hydrator
         self._retrieval_fingerprint = compute_retrieval_fingerprint(policy)
 
-    def retrieve_children(
+    def _retrieve_children_with_diagnostics(
         self,
         request: HybridRetrievalRequest,
-    ) -> HybridChildRetrievalResult:
-        """Run precision retrieval for Judge input without hydrating parent bodies."""
+    ) -> tuple[HybridChildRetrievalResult, _ChildRetrievalDiagnosticState]:
+        """Run the one canonical child pipeline and retain safe stage coordinates."""
 
         total_start = perf_counter_ns()
         vector_start = perf_counter_ns()
@@ -1179,23 +1523,33 @@ class ParentChildHybridRetriever:
             top_k=self._policy.bm25_top_k,
         )
 
+        fusion_start = perf_counter_ns()
         fused_all = _merge_child_channels(vector_results, bm25_results, self._policy)
         fused = fused_all[: self._policy.reranker_top_n]
+        fusion_ms = _elapsed_ms(fusion_start)
         if not fused:
-            return HybridChildRetrievalResult(
-                schema_version="hybrid_child_retrieval_result_v1",
-                status="empty",
-                request=request,
-                retrieval_fingerprint=self._retrieval_fingerprint,
-                ranked_children=(),
-                ranked_parents=(),
-                timings=RetrievalTimings(
-                    schema_version="retrieval_timings_v1",
-                    vector_ms=vector_ms,
-                    bm25_ms=bm25_ms,
-                    reranker_ms=0.0,
-                    hydrate_ms=0.0,
-                    total_ms=_elapsed_ms(total_start),
+            return (
+                HybridChildRetrievalResult(
+                    schema_version="hybrid_child_retrieval_result_v1",
+                    status="empty",
+                    request=request,
+                    retrieval_fingerprint=self._retrieval_fingerprint,
+                    ranked_children=(),
+                    ranked_parents=(),
+                    timings=RetrievalTimings(
+                        schema_version="retrieval_timings_v1",
+                        vector_ms=vector_ms,
+                        bm25_ms=bm25_ms,
+                        reranker_ms=0.0,
+                        hydrate_ms=0.0,
+                        total_ms=_elapsed_ms(total_start),
+                    ),
+                ),
+                _ChildRetrievalDiagnosticState(
+                    children=(),
+                    parents=(),
+                    fusion_ms=fusion_ms,
+                    parent_aggregation_ms=0.0,
                 ),
             )
 
@@ -1223,28 +1577,49 @@ class ParentChildHybridRetriever:
             submitted_child_ids=tuple(item.child_id for item in rerank_candidates),
         )
         child_hits = _build_child_hits(fused, reranker_scores)
-        parent_aggregates = _select_parent_aggregates(child_hits, self._policy)
+        parent_start = perf_counter_ns()
+        parent_aggregates, diagnostic_parents = (
+            _select_parent_aggregates_with_diagnostics(child_hits, self._policy)
+        )
+        parent_aggregation_ms = _elapsed_ms(parent_start)
         if not parent_aggregates:
             raise RetrievalInvariantError(
                 "non-empty reranked children produced no selectable parents"
             )
 
-        return HybridChildRetrievalResult(
-            schema_version="hybrid_child_retrieval_result_v1",
-            status="ok",
-            request=request,
-            retrieval_fingerprint=self._retrieval_fingerprint,
-            ranked_children=child_hits,
-            ranked_parents=parent_aggregates,
-            timings=RetrievalTimings(
-                schema_version="retrieval_timings_v1",
-                vector_ms=vector_ms,
-                bm25_ms=bm25_ms,
-                reranker_ms=reranker_ms,
-                hydrate_ms=0.0,
-                total_ms=_elapsed_ms(total_start),
+        return (
+            HybridChildRetrievalResult(
+                schema_version="hybrid_child_retrieval_result_v1",
+                status="ok",
+                request=request,
+                retrieval_fingerprint=self._retrieval_fingerprint,
+                ranked_children=child_hits,
+                ranked_parents=parent_aggregates,
+                timings=RetrievalTimings(
+                    schema_version="retrieval_timings_v1",
+                    vector_ms=vector_ms,
+                    bm25_ms=bm25_ms,
+                    reranker_ms=reranker_ms,
+                    hydrate_ms=0.0,
+                    total_ms=_elapsed_ms(total_start),
+                ),
+            ),
+            _ChildRetrievalDiagnosticState(
+                children=_diagnostic_child_coordinates(fused_all, child_hits),
+                parents=diagnostic_parents,
+                fusion_ms=fusion_ms,
+                parent_aggregation_ms=parent_aggregation_ms,
             ),
         )
+
+    def retrieve_children(
+        self,
+        request: HybridRetrievalRequest,
+    ) -> HybridChildRetrievalResult:
+        """Run precision retrieval for Judge input without hydrating parent bodies."""
+
+        result, _diagnostics = self._retrieve_children_with_diagnostics(request)
+        return result
 
     def hydrate_kept_parents(
         self,
@@ -1500,12 +1875,18 @@ class ParentChildHybridRetriever:
             )
         return tuple(hydrated)
 
-    def retrieve(self, request: HybridRetrievalRequest) -> HybridRetrievalResult:
-        """Compatibility full retrieval; production Judge flow uses two stages."""
+    def retrieve_with_diagnostics(
+        self,
+        request: HybridRetrievalRequest,
+    ) -> tuple[HybridRetrievalResult, HybridRetrievalDiagnosticTrace]:
+        """Run full retrieval once and return a body-free diagnostic stage trace."""
 
-        child_result = self.retrieve_children(request)
+        total_start = perf_counter_ns()
+        child_result, diagnostic_state = self._retrieve_children_with_diagnostics(
+            request
+        )
         if child_result.status == "empty":
-            return HybridRetrievalResult(
+            result = HybridRetrievalResult(
                 schema_version="hybrid_retrieval_result_v1",
                 status="empty",
                 request=request,
@@ -1515,6 +1896,28 @@ class ParentChildHybridRetriever:
                 hydrated_parents=(),
                 timings=child_result.timings,
             )
+            trace = HybridRetrievalDiagnosticTrace(
+                schema_version="hybrid_retrieval_diagnostic_trace_v1",
+                status="empty",
+                request_id=request.request_id,
+                subject=request.subject,
+                generation_id=request.generation_id,
+                retrieval_fingerprint=self._retrieval_fingerprint,
+                children=(),
+                parents=(),
+                hydrated_parents=(),
+                timings=RetrievalDiagnosticTimings(
+                    schema_version="retrieval_diagnostic_timings_v1",
+                    vector_ms=child_result.timings.vector_ms,
+                    bm25_ms=child_result.timings.bm25_ms,
+                    fusion_ms=diagnostic_state.fusion_ms,
+                    reranker_ms=0.0,
+                    parent_aggregation_ms=0.0,
+                    hydration_ms=0.0,
+                    total_ms=_elapsed_ms(total_start),
+                ),
+            )
+            return result, trace
         kept_child_ids = tuple(
             child_id
             for parent in child_result.ranked_parents
@@ -1526,7 +1929,7 @@ class ParentChildHybridRetriever:
             kept_child_ids,
         )
         hydrate_ms = _elapsed_ms(hydrate_start)
-        return HybridRetrievalResult(
+        result = HybridRetrievalResult(
             schema_version="hybrid_retrieval_result_v1",
             status="ok",
             request=request,
@@ -1543,6 +1946,34 @@ class ParentChildHybridRetriever:
                 total_ms=child_result.timings.total_ms + hydrate_ms,
             ),
         )
+        trace = HybridRetrievalDiagnosticTrace(
+            schema_version="hybrid_retrieval_diagnostic_trace_v1",
+            status="ok",
+            request_id=request.request_id,
+            subject=request.subject,
+            generation_id=request.generation_id,
+            retrieval_fingerprint=self._retrieval_fingerprint,
+            children=diagnostic_state.children,
+            parents=diagnostic_state.parents,
+            hydrated_parents=_diagnostic_hydration_coordinates(hydrated_contexts),
+            timings=RetrievalDiagnosticTimings(
+                schema_version="retrieval_diagnostic_timings_v1",
+                vector_ms=child_result.timings.vector_ms,
+                bm25_ms=child_result.timings.bm25_ms,
+                fusion_ms=diagnostic_state.fusion_ms,
+                reranker_ms=child_result.timings.reranker_ms,
+                parent_aggregation_ms=diagnostic_state.parent_aggregation_ms,
+                hydration_ms=hydrate_ms,
+                total_ms=_elapsed_ms(total_start),
+            ),
+        )
+        return result, trace
+
+    def retrieve(self, request: HybridRetrievalRequest) -> HybridRetrievalResult:
+        """Compatibility full retrieval; production Judge flow uses two stages."""
+
+        result, _diagnostics = self.retrieve_with_diagnostics(request)
+        return result
 
     def retrieve_children_multi(
         self,
