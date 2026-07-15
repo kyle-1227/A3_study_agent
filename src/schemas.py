@@ -200,6 +200,24 @@ class LearningGuidanceCatalogTopicV1(_StrictApiModel):
     title: str = Field(min_length=1, max_length=240)
 
 
+class HealthLiveV1(_StrictApiModel):
+    schema_version: Literal["health_live_v1"]
+    status: Literal["live"]
+
+
+class HealthReadyV1(_StrictApiModel):
+    schema_version: Literal["health_ready_v1"]
+    status: Literal["ready"]
+    checkpointer_type: Literal["postgres"]
+    graph_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_data_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_artifact_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parent_child_generation_id: str = Field(min_length=1, max_length=160)
+    parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_orchestration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_mode: Literal["inactive_canary"]
+
+
 class LearningGuidanceCatalogSubjectV1(_StrictApiModel):
     subject_id: str = Field(min_length=1, max_length=120)
     title: str = Field(min_length=1, max_length=240)

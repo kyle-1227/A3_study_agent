@@ -89,6 +89,7 @@ checkpointer:
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
 server:
+  readiness_db_timeout_seconds: 3
   reload:
     enabled: false                      # Keep real performance sampling free from reload noise.
     include_dirs:

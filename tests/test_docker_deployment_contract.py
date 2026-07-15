@@ -32,10 +32,25 @@ def test_compose_requires_secrets_and_persists_runtime_artifacts() -> None:
     assert "${NEXT_PUBLIC_API_URL:-" not in compose_text
     assert "${COURSE_DATA_HOST_PATH:?" in compose_text
     assert "${PARENT_CHILD_INDEX_HOST_PATH:?" in compose_text
+    assert "${PARENT_CHILD_GENERATION_ID:?" in compose_text
     assert ":/app/indexes/parent_child:ro" in compose_text
+    assert (
+        "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in compose_text
+    )
     assert "artifacts:/app/artifacts" in compose_text
     assert compose["services"]["backend"]["build"]["target"] == "backend"
     assert compose["services"]["frontend"]["build"]["target"] == "frontend"
+    assert compose["services"]["backend"]["environment"]["CHECKPOINTER_ENABLED"] == (
+        "true"
+    )
+    assert compose["services"]["backend"]["environment"]["CHECKPOINTER_TYPE"] == (
+        "postgres"
+    )
+    backend_healthcheck = compose["services"]["backend"]["healthcheck"]["test"]
+    assert any("/health/ready" in part for part in backend_healthcheck)
+    assert all("/openapi.json" not in part for part in backend_healthcheck)
+    frontend_healthcheck = compose["services"]["frontend"]["healthcheck"]["test"]
+    assert any("http://127.0.0.1:3000" in part for part in frontend_healthcheck)
 
 
 def test_next_build_does_not_ignore_typescript_errors() -> None:

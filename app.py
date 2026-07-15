@@ -5,9 +5,11 @@ from __future__ import annotations
 # ruff: noqa: E402
 # The application loads .env before importing project modules that read settings at import time.
 
+import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -15,7 +17,7 @@ from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, NoReturn
 from urllib.parse import unquote
 
 from dotenv import load_dotenv
@@ -24,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
+import psycopg
 from pydantic import ValidationError
 
 from src.assessment.attempt_contracts import (
@@ -99,7 +102,11 @@ from src.database.checkpointer import (
 from src.database.assessment_lock import PostgresAssessmentExecutionLock
 from src.config import get_setting
 from src.graph.builder import get_compiled_resource_evidence_parent_child_graph
-from src.graph.served_candidate import load_served_candidate_runtime
+from src.graph.evidence_orchestration import EvidenceOrchestrationRuntime
+from src.graph.served_candidate import (
+    ServedCandidateRuntime,
+    load_served_candidate_runtime,
+)
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
     CONTEXT_CLEAR,
@@ -169,6 +176,8 @@ from src.schemas import (
     ChatRequest,
     CompiledOnboardRequestV2,
     ContinueRequest,
+    HealthLiveV1,
+    HealthReadyV1,
     LearningGuidanceCatalogV1,
     OnboardRequest,
     OnboardResultV2,
@@ -647,6 +656,20 @@ def _emit_graph_config_trace(graph, config: dict, state: dict) -> None:
     )
 
 
+def _readiness_db_timeout_seconds() -> float:
+    value = get_setting("server.readiness_db_timeout_seconds")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise RuntimeError(
+            "server.readiness_db_timeout_seconds must be an explicit positive number"
+        )
+    return float(value)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage async resources: tracing, PostgreSQL checkpointer, graph."""
@@ -658,6 +681,7 @@ async def lifespan(app: FastAPI):
         performance_config.frontend_ingestion.enabled
     )
     app.state.performance_service = performance_service
+    app.state.readiness_db_timeout_seconds = _readiness_db_timeout_seconds()
     runtime_context_policy = validate_context_runtime_policy()
     app.state.context_policy_mode = runtime_context_policy.mode
     app.state.context_policy_environment = runtime_context_policy.environment
@@ -756,6 +780,7 @@ async def lifespan(app: FastAPI):
             served_candidate.orchestration,
             checkpointer=graph_checkpointer,
         )
+        app.state.served_candidate_owner = served_candidate
         app.state.served_candidate_runtime = served_candidate.orchestration
         app.state.parent_child_generation_id = candidate_generation_id
         app.state.parent_child_generation_manifest_fingerprint = (
@@ -842,6 +867,158 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="A3 Study Agent API", lifespan=lifespan)
+
+
+def _readiness_unavailable(code: str) -> NoReturn:
+    raise HTTPException(status_code=503, detail=code)
+
+
+def _ready_state_value(state: object, name: str, *, error_code: str) -> object:
+    value = getattr(state, name, None)
+    if value is None:
+        _readiness_unavailable(error_code)
+    return value
+
+
+async def _probe_postgres_readiness(
+    *,
+    db_uri: str,
+    timeout_seconds: float,
+) -> None:
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async with await psycopg.AsyncConnection.connect(db_uri) as connection:
+                async with connection.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+                    row = await cursor.fetchone()
+    except (TimeoutError, OSError, ValueError, psycopg.Error):
+        _readiness_unavailable("health_ready_database_unavailable")
+    if row != (1,):
+        _readiness_unavailable("health_ready_database_unavailable")
+
+
+@app.get("/health/live", response_model=HealthLiveV1)
+async def health_live_endpoint() -> HealthLiveV1:
+    return HealthLiveV1(schema_version="health_live_v1", status="live")
+
+
+@app.get("/health/ready", response_model=HealthReadyV1)
+async def health_ready_endpoint(request: Request) -> HealthReadyV1:
+    state = request.app.state
+    if getattr(state, "checkpointer_enabled", None) is not True:
+        _readiness_unavailable("health_ready_postgres_checkpointer_required")
+    if getattr(state, "checkpointer_type", None) != "postgres":
+        _readiness_unavailable("health_ready_postgres_checkpointer_required")
+
+    timeout_seconds = _ready_state_value(
+        state,
+        "readiness_db_timeout_seconds",
+        error_code="health_ready_timeout_config_unavailable",
+    )
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0
+    ):
+        _readiness_unavailable("health_ready_timeout_config_invalid")
+
+    manifest = _ready_state_value(
+        state,
+        "graph_manifest",
+        error_code="health_ready_graph_manifest_unavailable",
+    )
+    graph_version = _ready_state_value(
+        state,
+        "graph_version",
+        error_code="health_ready_graph_manifest_unavailable",
+    )
+    if (
+        not isinstance(manifest, GraphManifest)
+        or not isinstance(graph_version, str)
+        or not graph_version
+        or graph_version != manifest.graph_version
+    ):
+        _readiness_unavailable("health_ready_graph_manifest_invalid")
+
+    guidance = _ready_state_value(
+        state,
+        "learning_guidance_runtime",
+        error_code="health_ready_knowledge_graph_unavailable",
+    )
+    if not isinstance(guidance, LearningGuidanceRuntime):
+        _readiness_unavailable("health_ready_knowledge_graph_invalid")
+    knowledge_graph = guidance.knowledge_graph
+
+    orchestration = _ready_state_value(
+        state,
+        "served_candidate_runtime",
+        error_code="health_ready_orchestration_unavailable",
+    )
+    candidate_owner = _ready_state_value(
+        state,
+        "served_candidate_owner",
+        error_code="health_ready_generation_manifest_unavailable",
+    )
+    if (
+        not isinstance(orchestration, EvidenceOrchestrationRuntime)
+        or not isinstance(candidate_owner, ServedCandidateRuntime)
+        or candidate_owner.orchestration is not orchestration
+        or orchestration.learning_guidance is not guidance
+    ):
+        _readiness_unavailable("health_ready_orchestration_invalid")
+
+    generation_id = _ready_state_value(
+        state,
+        "parent_child_generation_id",
+        error_code="health_ready_generation_unavailable",
+    )
+    if (
+        not isinstance(generation_id, str)
+        or not generation_id
+        or generation_id != generation_id.strip()
+        or generation_id != orchestration.parent_child.generation_id
+    ):
+        _readiness_unavailable("health_ready_generation_invalid")
+    generation_manifest_fingerprint = _ready_state_value(
+        state,
+        "parent_child_generation_manifest_fingerprint",
+        error_code="health_ready_generation_manifest_unavailable",
+    )
+    if (
+        not isinstance(generation_manifest_fingerprint, str)
+        or generation_manifest_fingerprint
+        != candidate_owner.generation_manifest_fingerprint
+    ):
+        _readiness_unavailable("health_ready_generation_manifest_invalid")
+
+    db_uri = get_db_uri()
+    if not isinstance(db_uri, str) or not db_uri or db_uri != db_uri.strip():
+        _readiness_unavailable("health_ready_database_config_unavailable")
+    await _probe_postgres_readiness(
+        db_uri=db_uri,
+        timeout_seconds=float(timeout_seconds),
+    )
+
+    try:
+        return HealthReadyV1(
+            schema_version="health_ready_v1",
+            status="ready",
+            checkpointer_type="postgres",
+            graph_version=graph_version,
+            knowledge_graph_data_version=knowledge_graph.data_version,
+            knowledge_graph_artifact_fingerprint=(knowledge_graph.artifact_fingerprint),
+            parent_child_generation_id=generation_id,
+            parent_child_generation_manifest_fingerprint=(
+                generation_manifest_fingerprint
+            ),
+            evidence_orchestration_fingerprint=(
+                orchestration.orchestration_fingerprint
+            ),
+            candidate_mode="inactive_canary",
+        )
+    except ValidationError:
+        _readiness_unavailable("health_ready_identity_invalid")
 
 
 class AgentEventStreamResponse(StreamingResponse):
