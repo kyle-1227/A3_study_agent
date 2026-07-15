@@ -1,0 +1,89 @@
+{
+  "cases": [
+    {
+      "case_id": "replace_simple_initial_case",
+      "initial_evidence_sufficient": true,
+      "query": "REPLACE_WITH_A_HUMAN_REVIEWED_SINGLE_SUBJECT_QUERY",
+      "requirements": [
+        {
+          "criterion": "REPLACE_WITH_ONE_HUMAN_REVIEWED_EVIDENCE_REQUIREMENT",
+          "requirement_id": "replace_simple_requirement",
+          "schema_version": "evidence_requirement_gold_v1",
+          "target_id": "replace_simple_target",
+          "weight": 1.0
+        }
+      ],
+      "resource_types": [
+        "review_doc"
+      ],
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "subjects": [
+        "python"
+      ],
+      "targets": [
+        {
+          "required_sources": [
+            "parent_child"
+          ],
+          "resource_type": "review_doc",
+          "schema_version": "evidence_resource_subject_target_v1",
+          "subject": "python",
+          "target_id": "replace_simple_target"
+        }
+      ]
+    },
+    {
+      "case_id": "replace_multi_case",
+      "initial_evidence_sufficient": false,
+      "query": "REPLACE_WITH_A_HUMAN_REVIEWED_MULTI_SUBJECT_MULTI_RESOURCE_QUERY",
+      "requirements": [
+        {
+          "criterion": "REPLACE_WITH_A_REVIEWED_REQUIREMENT_FOR_THE_FIRST_TARGET",
+          "requirement_id": "replace_multi_requirement_1",
+          "schema_version": "evidence_requirement_gold_v1",
+          "target_id": "replace_multi_target_1",
+          "weight": 1.0
+        },
+        {
+          "criterion": "REPLACE_WITH_A_REVIEWED_REQUIREMENT_FOR_THE_SECOND_TARGET",
+          "requirement_id": "replace_multi_requirement_2",
+          "schema_version": "evidence_requirement_gold_v1",
+          "target_id": "replace_multi_target_2",
+          "weight": 1.0
+        }
+      ],
+      "resource_types": [
+        "review_doc",
+        "code_practice"
+      ],
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "subjects": [
+        "python",
+        "computer"
+      ],
+      "targets": [
+        {
+          "required_sources": [
+            "parent_child",
+            "web"
+          ],
+          "resource_type": "review_doc",
+          "schema_version": "evidence_resource_subject_target_v1",
+          "subject": "python",
+          "target_id": "replace_multi_target_1"
+        },
+        {
+          "required_sources": [
+            "parent_child"
+          ],
+          "resource_type": "code_practice",
+          "schema_version": "evidence_resource_subject_target_v1",
+          "subject": "computer",
+          "target_id": "replace_multi_target_2"
+        }
+      ]
+    }
+  ],
+  "dataset_id": "replace_with_reviewed_dataset_id",
+  "schema_version": "evidence_evaluation_dataset_v1"
+}

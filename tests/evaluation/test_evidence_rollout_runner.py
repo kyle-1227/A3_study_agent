@@ -1,0 +1,957 @@
+"""Hermetic, fail-closed tests for the evidence rollout runner."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import NoReturn
+
+import pytest
+
+from src.config.evidence_benchmark_config import (
+    EvidenceBenchmarkConfig,
+    load_evidence_benchmark_config,
+)
+from src.config.rag_rollout_config import RagRolloutConfig, load_rag_rollout_config
+from src.evaluation.evidence_rollout.contracts import (
+    EvidenceEvaluationCaseSpecV1,
+    EvidenceEvaluationDatasetContentV1,
+    EvidenceEvaluationDatasetV1,
+    EvidenceEvaluationRuntimeBindingV1,
+    EvidenceLiveAdapterIdentityV1,
+    EvidenceRolloutExecutionConfigV1,
+    EvidenceVariantAttemptBatchContentV1,
+    EvidenceVariantAttemptBatchV1,
+    EvidenceVariantAttemptV1,
+    EvidenceVariantDefinitionV1,
+    EvidenceVariantObservationV1,
+    HumanSemanticReviewBatchContentV1,
+    HumanSemanticReviewBatchV1,
+    HumanSemanticReviewV1,
+    canonical_sha256,
+    model_fingerprint,
+    query_fingerprint,
+)
+from src.evaluation.evidence_rollout.runner import (
+    LiveEvidenceVariantExecutor,
+    SealedAttemptVariantExecutor,
+    run_evidence_rollout_evaluation,
+)
+from src.rag.parent_child.evidence_evaluation import (
+    EvidenceEvaluationError,
+    Variant,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+BENCHMARK_CONFIG_PATH = ROOT / "config" / "rag" / "evidence_benchmark.yaml"
+ROLLOUT_CONFIG_PATH = ROOT / "config" / "rag" / "rollout.yaml"
+EXECUTOR_FINGERPRINT = "b" * 64
+RUNTIME_FINGERPRINT = "a" * 64
+REVIEWER_IDENTITY_HASH = "d" * 64
+GENERATION_MANIFEST_FINGERPRINT = "c" * 64
+REVIEW_PROTOCOL_FINGERPRINT = "9" * 64
+
+_VARIANT_FACTORS: tuple[tuple[Variant, bool, bool], ...] = (
+    ("P0", False, False),
+    ("PG", True, False),
+    ("PR", False, True),
+    ("PGR", True, True),
+)
+
+_MEASUREMENTS: dict[tuple[str, Variant], dict[str, float | int]] = {
+    ("simple_case", "P0"): {
+        "coverage": 0.80,
+        "gaps": 1,
+        "precision": 0.94,
+        "claim_support": 0.75,
+        "ungrounded": 0.10,
+        "cost": 1.0,
+        "latency": 100.0,
+    },
+    ("simple_case", "PG"): {
+        "coverage": 0.82,
+        "gaps": 1,
+        "precision": 0.94,
+        "claim_support": 0.77,
+        "ungrounded": 0.09,
+        "cost": 1.05,
+        "latency": 105.0,
+    },
+    ("simple_case", "PR"): {
+        "coverage": 0.83,
+        "gaps": 0,
+        "precision": 0.93,
+        "claim_support": 0.79,
+        "ungrounded": 0.08,
+        "cost": 1.08,
+        "latency": 110.0,
+    },
+    ("simple_case", "PGR"): {
+        "coverage": 0.85,
+        "gaps": 0,
+        "precision": 0.93,
+        "claim_support": 0.84,
+        "ungrounded": 0.07,
+        "cost": 1.10,
+        "latency": 120.0,
+    },
+    ("multi_case", "P0"): {
+        "coverage": 0.60,
+        "gaps": 2,
+        "precision": 0.94,
+        "claim_support": 0.65,
+        "ungrounded": 0.20,
+        "cost": 2.0,
+        "latency": 200.0,
+    },
+    ("multi_case", "PG"): {
+        "coverage": 0.67,
+        "gaps": 1,
+        "precision": 0.93,
+        "claim_support": 0.70,
+        "ungrounded": 0.17,
+        "cost": 2.2,
+        "latency": 215.0,
+    },
+    ("multi_case", "PR"): {
+        "coverage": 0.70,
+        "gaps": 1,
+        "precision": 0.93,
+        "claim_support": 0.72,
+        "ungrounded": 0.15,
+        "cost": 2.5,
+        "latency": 225.0,
+    },
+    ("multi_case", "PGR"): {
+        "coverage": 0.75,
+        "gaps": 1,
+        "precision": 0.93,
+        "claim_support": 0.78,
+        "ungrounded": 0.12,
+        "cost": 2.8,
+        "latency": 240.0,
+    },
+}
+
+
+@dataclass(frozen=True)
+class _Scenario:
+    dataset: EvidenceEvaluationDatasetV1
+    execution_config: EvidenceRolloutExecutionConfigV1
+    benchmark_config: EvidenceBenchmarkConfig
+    rollout_config: RagRolloutConfig
+    binding: EvidenceEvaluationRuntimeBindingV1
+    batch: EvidenceVariantAttemptBatchV1
+    reviews: HumanSemanticReviewBatchV1
+
+
+def _execution_config() -> EvidenceRolloutExecutionConfigV1:
+    return EvidenceRolloutExecutionConfigV1(
+        schema_version="evidence_rollout_execution_config_v1",
+        variants=[
+            EvidenceVariantDefinitionV1(
+                variant=variant,
+                resource_planning_enabled=planning,
+                bounded_repair_enabled=repair,
+            )
+            for variant, planning, repair in _VARIANT_FACTORS
+        ],
+        human_semantic_review_required=True,
+        human_review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
+        candidate_failure_policy="fail_fast",
+        report_policy="content_free_v1",
+        max_case_count=10,
+    )
+
+
+def _dataset(
+    *, simple_query: str = "Explain a Python iterator."
+) -> EvidenceEvaluationDatasetV1:
+    content = EvidenceEvaluationDatasetContentV1(
+        schema_version="evidence_evaluation_dataset_v1",
+        dataset_id="hermetic_runner_suite",
+        cases=[
+            {
+                "schema_version": "evidence_evaluation_case_spec_v1",
+                "case_id": "simple_case",
+                "query": simple_query,
+                "subjects": ["python"],
+                "resource_types": ["review_doc"],
+                "initial_evidence_sufficient": True,
+                "targets": [
+                    {
+                        "schema_version": "evidence_resource_subject_target_v1",
+                        "target_id": "simple_python_doc",
+                        "subject": "python",
+                        "resource_type": "review_doc",
+                        "required_sources": ["parent_child"],
+                    }
+                ],
+                "requirements": [
+                    {
+                        "schema_version": "evidence_requirement_gold_v1",
+                        "requirement_id": "simple_iterator_definition",
+                        "target_id": "simple_python_doc",
+                        "criterion": "Defines iterator behavior accurately.",
+                        "weight": 1.0,
+                    }
+                ],
+            },
+            {
+                "schema_version": "evidence_evaluation_case_spec_v1",
+                "case_id": "multi_case",
+                "query": "Compare a model pipeline with its data platform.",
+                "subjects": ["machine_learning", "big_data"],
+                "resource_types": ["review_doc", "quiz"],
+                "initial_evidence_sufficient": False,
+                "targets": [
+                    {
+                        "schema_version": "evidence_resource_subject_target_v1",
+                        "target_id": "multi_ml_doc",
+                        "subject": "machine_learning",
+                        "resource_type": "review_doc",
+                        "required_sources": ["parent_child"],
+                    },
+                    {
+                        "schema_version": "evidence_resource_subject_target_v1",
+                        "target_id": "multi_data_quiz",
+                        "subject": "big_data",
+                        "resource_type": "quiz",
+                        "required_sources": ["parent_child", "web"],
+                    },
+                ],
+                "requirements": [
+                    {
+                        "schema_version": "evidence_requirement_gold_v1",
+                        "requirement_id": "multi_model_pipeline",
+                        "target_id": "multi_ml_doc",
+                        "criterion": "Explains the model pipeline dependency.",
+                        "weight": 1.0,
+                    },
+                    {
+                        "schema_version": "evidence_requirement_gold_v1",
+                        "requirement_id": "multi_data_platform",
+                        "target_id": "multi_data_quiz",
+                        "criterion": "Tests the data platform relationship.",
+                        "weight": 1.0,
+                    },
+                ],
+            },
+        ],
+    )
+    return EvidenceEvaluationDatasetV1(
+        **content.model_dump(mode="python"),
+        dataset_fingerprint=canonical_sha256(content.model_dump(mode="json")),
+    )
+
+
+def _binding(
+    *,
+    dataset: EvidenceEvaluationDatasetV1,
+    execution_config: EvidenceRolloutExecutionConfigV1,
+    benchmark_config: EvidenceBenchmarkConfig,
+    rollout_config: RagRolloutConfig,
+    executor_fingerprint: str = EXECUTOR_FINGERPRINT,
+) -> EvidenceEvaluationRuntimeBindingV1:
+    return EvidenceEvaluationRuntimeBindingV1(
+        schema_version="evidence_evaluation_runtime_binding_v1",
+        run_id="hermetic_run_1",
+        execution_mode="hermetic",
+        dataset_id=dataset.dataset_id,
+        dataset_fingerprint=dataset.dataset_fingerprint,
+        execution_config_fingerprint=model_fingerprint(execution_config),
+        benchmark_config_fingerprint=model_fingerprint(benchmark_config),
+        rollout_config_fingerprint=model_fingerprint(rollout_config),
+        runtime_fingerprint=RUNTIME_FINGERPRINT,
+        generation_id="hermetic_generation_1",
+        generation_manifest_fingerprint=GENERATION_MANIFEST_FINGERPRINT,
+        executor_fingerprint=executor_fingerprint,
+    )
+
+
+def _observation(
+    *,
+    case: EvidenceEvaluationCaseSpecV1,
+    definition: EvidenceVariantDefinitionV1,
+    binding: EvidenceEvaluationRuntimeBindingV1,
+    **overrides: object,
+) -> EvidenceVariantObservationV1:
+    measurement = _MEASUREMENTS[(case.case_id, definition.variant)]
+    requirement_weight_total = sum(item.weight for item in case.requirements)
+    expected_route_count = sum(len(target.required_sources) for target in case.targets)
+    web_required = any("web" in target.required_sources for target in case.targets)
+    values: dict[str, object] = {
+        "schema_version": "evidence_variant_observation_v1",
+        "case_id": case.case_id,
+        "variant": definition.variant,
+        "query_fingerprint": query_fingerprint(case.query),
+        "dataset_fingerprint": binding.dataset_fingerprint,
+        "execution_config_fingerprint": binding.execution_config_fingerprint,
+        "benchmark_config_fingerprint": binding.benchmark_config_fingerprint,
+        "rollout_config_fingerprint": binding.rollout_config_fingerprint,
+        "runtime_fingerprint": binding.runtime_fingerprint,
+        "generation_id": binding.generation_id,
+        "generation_manifest_fingerprint": (binding.generation_manifest_fingerprint),
+        "executor_fingerprint": binding.executor_fingerprint,
+        "variant_definition_fingerprint": model_fingerprint(definition),
+        "output_fingerprint": canonical_sha256(
+            {
+                "case_id": case.case_id,
+                "variant": definition.variant,
+                "sealed": True,
+            }
+        ),
+        "provider_status": "ok",
+        "parent_child_status": "ok",
+        "web_status": "ok" if web_required else "not_required",
+        "bounded": True,
+        "forced_stop_marked_sufficient": False,
+        "silent_resource_omission": False,
+        "silent_subject_omission": False,
+        "repeated_query_count": 0,
+        "weighted_covered": (float(measurement["coverage"]) * requirement_weight_total),
+        "weighted_total": requirement_weight_total,
+        "required_gap_count": measurement["gaps"],
+        "selected_evidence_count": 100,
+        "correct_evidence_count": int(float(measurement["precision"]) * 100),
+        "premature_stop": False,
+        "over_search": False,
+        "source_route_true_positive": expected_route_count,
+        "source_route_false_positive": 0,
+        "source_route_false_negative": 0,
+        "expected_resource_subject_count": len(case.targets),
+        "assigned_resource_subject_count": len(case.targets),
+        "correct_resource_subject_count": len(case.targets),
+        "retrieval_cost_units": measurement["cost"],
+        "latency_ms": measurement["latency"],
+    }
+    values.update(overrides)
+    return EvidenceVariantObservationV1.model_validate(values)
+
+
+def _signed_batch(
+    *,
+    attempts: list[EvidenceVariantAttemptV1],
+    execution_mode: str = "hermetic",
+    executor_fingerprint: str = EXECUTOR_FINGERPRINT,
+) -> EvidenceVariantAttemptBatchV1:
+    content = EvidenceVariantAttemptBatchContentV1(
+        schema_version="evidence_variant_attempt_batch_v1",
+        execution_mode=execution_mode,
+        executor_fingerprint=executor_fingerprint,
+        attempts=attempts,
+    )
+    return EvidenceVariantAttemptBatchV1(
+        **content.model_dump(mode="python"),
+        bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
+    )
+
+
+def _signed_reviews(
+    *,
+    dataset: EvidenceEvaluationDatasetV1,
+    binding: EvidenceEvaluationRuntimeBindingV1,
+    attempts: list[EvidenceVariantAttemptV1],
+) -> HumanSemanticReviewBatchV1:
+    reviews: list[HumanSemanticReviewV1] = []
+    for attempt in attempts:
+        observation = attempt.observation
+        if observation is None:
+            raise AssertionError("review fixture requires successful observations")
+        measurement = _MEASUREMENTS[(attempt.case_id, attempt.variant)]
+        reviews.append(
+            HumanSemanticReviewV1(
+                schema_version="human_semantic_review_v1",
+                case_id=attempt.case_id,
+                variant=attempt.variant,
+                output_fingerprint=observation.output_fingerprint,
+                reviewer_identity_hash=REVIEWER_IDENTITY_HASH,
+                reviewed_at="2026-07-15T10:00:00+00:00",
+                assessment_source="human",
+                supported_claim_count=int(float(measurement["claim_support"]) * 100),
+                claim_count=100,
+                ungrounded_fact_count=int(float(measurement["ungrounded"]) * 100),
+                fact_count=100,
+            )
+        )
+    content = HumanSemanticReviewBatchContentV1(
+        schema_version="human_semantic_review_batch_v1",
+        dataset_fingerprint=dataset.dataset_fingerprint,
+        runtime_fingerprint=binding.runtime_fingerprint,
+        generation_id=binding.generation_id,
+        generation_manifest_fingerprint=binding.generation_manifest_fingerprint,
+        review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
+        reviews=reviews,
+    )
+    return HumanSemanticReviewBatchV1(
+        **content.model_dump(mode="python"),
+        review_bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
+    )
+
+
+def _scenario(*, simple_query: str = "Explain a Python iterator.") -> _Scenario:
+    dataset = _dataset(simple_query=simple_query)
+    execution_config = _execution_config()
+    benchmark_config = load_evidence_benchmark_config(BENCHMARK_CONFIG_PATH)
+    rollout_config = load_rag_rollout_config(ROLLOUT_CONFIG_PATH)
+    binding = _binding(
+        dataset=dataset,
+        execution_config=execution_config,
+        benchmark_config=benchmark_config,
+        rollout_config=rollout_config,
+    )
+    attempts = [
+        EvidenceVariantAttemptV1(
+            schema_version="evidence_variant_attempt_v1",
+            case_id=case.case_id,
+            variant=definition.variant,
+            status="success",
+            observation=_observation(
+                case=case,
+                definition=definition,
+                binding=binding,
+            ),
+            failure_reason_code=None,
+            failure_type=None,
+        )
+        for case in dataset.cases
+        for definition in execution_config.variants
+    ]
+    return _Scenario(
+        dataset=dataset,
+        execution_config=execution_config,
+        benchmark_config=benchmark_config,
+        rollout_config=rollout_config,
+        binding=binding,
+        batch=_signed_batch(attempts=attempts),
+        reviews=_signed_reviews(
+            dataset=dataset,
+            binding=binding,
+            attempts=attempts,
+        ),
+    )
+
+
+def _resign_reviews(
+    scenario: _Scenario,
+    reviews: list[HumanSemanticReviewV1],
+) -> HumanSemanticReviewBatchV1:
+    content = HumanSemanticReviewBatchContentV1(
+        schema_version="human_semantic_review_batch_v1",
+        dataset_fingerprint=scenario.dataset.dataset_fingerprint,
+        runtime_fingerprint=scenario.binding.runtime_fingerprint,
+        generation_id=scenario.binding.generation_id,
+        generation_manifest_fingerprint=(
+            scenario.binding.generation_manifest_fingerprint
+        ),
+        review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
+        reviews=reviews,
+    )
+    return HumanSemanticReviewBatchV1(
+        **content.model_dump(mode="python"),
+        review_bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
+    )
+
+
+async def _run(
+    scenario: _Scenario,
+    *,
+    executor: object | None = None,
+    binding: EvidenceEvaluationRuntimeBindingV1 | None = None,
+    reviews: HumanSemanticReviewBatchV1 | None = None,
+):
+    return await run_evidence_rollout_evaluation(
+        dataset=scenario.dataset,
+        execution_config=scenario.execution_config,
+        benchmark_config=scenario.benchmark_config,
+        rollout_config=scenario.rollout_config,
+        binding=scenario.binding if binding is None else binding,
+        reviews=scenario.reviews if reviews is None else reviews,
+        executor=(
+            SealedAttemptVariantExecutor(scenario.batch)
+            if executor is None
+            else executor
+        ),
+    )
+
+
+def _replace_first_observation(
+    scenario: _Scenario,
+    **overrides: object,
+) -> EvidenceVariantAttemptBatchV1:
+    attempts = list(scenario.batch.attempts)
+    first = attempts[0]
+    if first.observation is None:
+        raise AssertionError("fixture first attempt must be successful")
+    values = first.observation.model_dump(mode="python")
+    values.update(overrides)
+    observation = EvidenceVariantObservationV1.model_validate(values)
+    attempts[0] = EvidenceVariantAttemptV1(
+        schema_version="evidence_variant_attempt_v1",
+        case_id=first.case_id,
+        variant=first.variant,
+        status="success",
+        observation=observation,
+        failure_reason_code=None,
+        failure_type=None,
+    )
+    return _signed_batch(attempts=attempts)
+
+
+class _RaisingExecutor:
+    def __init__(
+        self,
+        *,
+        declared_slots: frozenset[tuple[str, Variant]],
+        failure: Callable[[], NoReturn],
+    ) -> None:
+        self._declared_slots = declared_slots
+        self._failure = failure
+
+    @property
+    def execution_mode(self) -> str:
+        return "hermetic"
+
+    @property
+    def executor_fingerprint(self) -> str:
+        return EXECUTOR_FINGERPRINT
+
+    @property
+    def declared_slots(self) -> frozenset[tuple[str, Variant]]:
+        return self._declared_slots
+
+    async def execute(self, **_: object) -> EvidenceVariantAttemptV1:
+        self._failure()
+
+
+class _NeverCalledLiveAdapter:
+    def __init__(
+        self,
+        *,
+        identity: EvidenceLiveAdapterIdentityV1,
+    ) -> None:
+        self._identity = identity
+
+    @property
+    def identity(self) -> EvidenceLiveAdapterIdentityV1:
+        return self._identity
+
+    async def execute(self, **_: object) -> EvidenceVariantAttemptV1:
+        raise AssertionError("incomplete live adapter inventory must not execute")
+
+
+class _RebindingFixtureLiveAdapter:
+    def __init__(
+        self,
+        *,
+        identity: EvidenceLiveAdapterIdentityV1,
+        attempts: dict[str, EvidenceVariantAttemptV1],
+    ) -> None:
+        self._identity = identity
+        self._attempts = attempts
+
+    @property
+    def identity(self) -> EvidenceLiveAdapterIdentityV1:
+        return self._identity
+
+    async def execute(
+        self,
+        *,
+        case: EvidenceEvaluationCaseSpecV1,
+        binding: EvidenceEvaluationRuntimeBindingV1,
+    ) -> EvidenceVariantAttemptV1:
+        source = self._attempts[case.case_id]
+        if source.observation is None:
+            raise AssertionError("fixture adapter requires a successful observation")
+        values = source.observation.model_dump(mode="python")
+        values["executor_fingerprint"] = binding.executor_fingerprint
+        observation = EvidenceVariantObservationV1.model_validate(values)
+        return EvidenceVariantAttemptV1(
+            schema_version="evidence_variant_attempt_v1",
+            case_id=case.case_id,
+            variant=self._identity.variant,
+            status="success",
+            observation=observation,
+            failure_reason_code=None,
+            failure_type=None,
+        )
+
+
+def _schema_failure() -> NoReturn:
+    EvidenceVariantAttemptV1.model_validate(
+        {
+            "schema_version": "invalid",
+            "raw_provider_body": "SECRET_PROVIDER_BODY",
+        }
+    )
+    raise AssertionError("invalid attempt unexpectedly passed validation")
+
+
+def _business_failure() -> NoReturn:
+    raise EvidenceEvaluationError(
+        code="private_business_code",
+        reason="SECRET_EVIDENCE_BODY https://private.example.invalid",
+    )
+
+
+def _unexpected_failure() -> NoReturn:
+    raise RuntimeError(
+        "SECRET_QUERY https://private.example.invalid SECRET_PROVIDER_BODY"
+    )
+
+
+async def test_complete_four_variant_hermetic_run_is_never_activation_allowed() -> None:
+    scenario = _scenario()
+
+    decision = await _run(scenario)
+
+    assert decision.status == "blocked"
+    assert decision.reason_codes == [
+        "non_live_execution",
+        "rollout_activation_disabled",
+    ]
+    assert decision.benchmark_eligible is True
+    assert decision.activation_allowed is False
+    assert decision.variant_matrix_complete is True
+    assert decision.expected_execution_count == 8
+    assert decision.successful_execution_count == 8
+    assert decision.reviewed_execution_count == 8
+    assert len(decision.execution_records) == 8
+    assert all(record.status == "success" for record in decision.execution_records)
+
+
+def test_sealed_attempt_bundle_cannot_claim_live_execution() -> None:
+    scenario = _scenario()
+
+    with pytest.raises(ValueError, match="hermetic"):
+        live_content = EvidenceVariantAttemptBatchContentV1(
+            schema_version="evidence_variant_attempt_batch_v1",
+            execution_mode="live",
+            executor_fingerprint=scenario.batch.executor_fingerprint,
+            attempts=list(scenario.batch.attempts),
+        )
+        live_batch = EvidenceVariantAttemptBatchV1(
+            **live_content.model_dump(mode="python"),
+            bundle_fingerprint=canonical_sha256(live_content.model_dump(mode="json")),
+        )
+        SealedAttemptVariantExecutor(live_batch)
+
+
+async def test_missing_human_review_blocks_and_fail_fast_covers_remaining_slots() -> (
+    None
+):
+    scenario = _scenario()
+    reviews = _resign_reviews(scenario, list(scenario.reviews.reviews[1:]))
+
+    decision = await _run(scenario, reviews=reviews)
+
+    assert decision.status == "blocked"
+    assert decision.reason_codes == [
+        "human_semantic_review_inventory_mismatch",
+        "non_live_execution",
+        "rollout_activation_disabled",
+    ]
+    assert decision.successful_execution_count == 0
+    assert decision.reviewed_execution_count == 0
+    assert len(decision.execution_records) == decision.expected_execution_count
+    assert all(
+        record.status == "not_executed"
+        and record.failure_reason_code == "evaluation_binding_invalid"
+        for record in decision.execution_records
+    )
+
+
+async def test_failed_attempt_blocks_and_fail_fast_covers_every_remaining_slot() -> (
+    None
+):
+    scenario = _scenario()
+    attempts = list(scenario.batch.attempts)
+    first = attempts[0]
+    attempts[0] = EvidenceVariantAttemptV1(
+        schema_version="evidence_variant_attempt_v1",
+        case_id=first.case_id,
+        variant=first.variant,
+        status="failed",
+        observation=None,
+        failure_reason_code="hermetic_attempt_failed",
+        failure_type="HermeticAttemptError",
+    )
+    executor = SealedAttemptVariantExecutor(_signed_batch(attempts=attempts))
+
+    decision = await _run(scenario, executor=executor)
+
+    assert decision.status == "blocked"
+    assert "variant_execution_incomplete" in decision.reason_codes
+    assert "factorial_execution_incomplete" in decision.reason_codes
+    assert decision.successful_execution_count == 0
+    assert len(decision.execution_records) == decision.expected_execution_count
+    assert decision.execution_records[0].status == "failed"
+    assert (
+        decision.execution_records[0].failure_reason_code == "hermetic_attempt_failed"
+    )
+    assert all(
+        record.status == "not_executed"
+        and record.failure_reason_code == "not_executed_after_fail_fast"
+        for record in decision.execution_records[1:]
+    )
+
+
+async def test_runtime_binding_mismatch_blocks_before_any_execution() -> None:
+    scenario = _scenario()
+    mismatched_binding = _binding(
+        dataset=scenario.dataset,
+        execution_config=scenario.execution_config,
+        benchmark_config=scenario.benchmark_config,
+        rollout_config=scenario.rollout_config,
+        executor_fingerprint="f" * 64,
+    )
+
+    decision = await _run(scenario, binding=mismatched_binding)
+
+    assert decision.status == "blocked"
+    assert "executor_fingerprint_mismatch" in decision.reason_codes
+    assert decision.successful_execution_count == 0
+    assert all(
+        record.status == "not_executed"
+        and record.failure_reason_code == "evaluation_binding_invalid"
+        for record in decision.execution_records
+    )
+
+
+async def test_missing_pg_and_pr_live_adapters_form_machine_readable_blocker() -> None:
+    scenario = _scenario()
+    case_ids = [case.case_id for case in scenario.dataset.cases]
+
+    def adapter_for(variant: Variant) -> _NeverCalledLiveAdapter:
+        definition = scenario.execution_config.definition_for(variant)
+        return _NeverCalledLiveAdapter(
+            identity=EvidenceLiveAdapterIdentityV1(
+                schema_version="evidence_live_adapter_identity_v1",
+                variant=variant,
+                resource_planning_enabled=(definition.resource_planning_enabled),
+                bounded_repair_enabled=definition.bounded_repair_enabled,
+                adapter_fingerprint=canonical_sha256(
+                    {"adapter": variant, "fixture": True}
+                ),
+                declared_case_ids=case_ids,
+            )
+        )
+
+    executor = LiveEvidenceVariantExecutor(
+        dataset=scenario.dataset,
+        execution_config=scenario.execution_config,
+        adapters=[adapter_for("P0"), adapter_for("PGR")],
+    )
+    binding_values = scenario.binding.model_dump(mode="python")
+    binding_values["execution_mode"] = "live"
+    binding_values["executor_fingerprint"] = executor.executor_fingerprint
+    binding = EvidenceEvaluationRuntimeBindingV1.model_validate(binding_values)
+
+    decision = await _run(scenario, executor=executor, binding=binding)
+
+    assert decision.status == "blocked"
+    assert "executor_variant_inventory_mismatch" in decision.reason_codes
+    assert "live_variant_adapter_missing_pg" in decision.reason_codes
+    assert "live_variant_adapter_missing_pr" in decision.reason_codes
+    assert "rollout_activation_disabled" in decision.reason_codes
+    assert decision.successful_execution_count == 0
+    assert all(record.status == "not_executed" for record in decision.execution_records)
+
+
+async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> None:
+    scenario = _scenario()
+    case_ids = [case.case_id for case in scenario.dataset.cases]
+    adapters = []
+    for definition in scenario.execution_config.variants:
+        variant_attempts = {
+            attempt.case_id: attempt
+            for attempt in scenario.batch.attempts
+            if attempt.variant == definition.variant
+        }
+        adapters.append(
+            _RebindingFixtureLiveAdapter(
+                identity=EvidenceLiveAdapterIdentityV1(
+                    schema_version="evidence_live_adapter_identity_v1",
+                    variant=definition.variant,
+                    resource_planning_enabled=(definition.resource_planning_enabled),
+                    bounded_repair_enabled=definition.bounded_repair_enabled,
+                    adapter_fingerprint=canonical_sha256(
+                        {
+                            "adapter": definition.variant,
+                            "fixture": "live_protocol_only",
+                        }
+                    ),
+                    declared_case_ids=case_ids,
+                ),
+                attempts=variant_attempts,
+            )
+        )
+    executor = LiveEvidenceVariantExecutor(
+        dataset=scenario.dataset,
+        execution_config=scenario.execution_config,
+        adapters=adapters,
+    )
+    binding_values = scenario.binding.model_dump(mode="python")
+    binding_values["execution_mode"] = "live"
+    binding_values["executor_fingerprint"] = executor.executor_fingerprint
+    binding = EvidenceEvaluationRuntimeBindingV1.model_validate(binding_values)
+
+    decision = await _run(scenario, executor=executor, binding=binding)
+
+    assert decision.status == "blocked"
+    assert decision.reason_codes == ["rollout_activation_disabled"]
+    assert decision.benchmark_eligible is True
+    assert decision.activation_allowed is False
+    assert decision.variant_matrix_complete is True
+
+
+@pytest.mark.parametrize(
+    ("status_field", "reason_code"),
+    [
+        ("provider_status", "provider_execution_failed"),
+        ("parent_child_status", "parent_child_execution_failed"),
+        ("web_status", "web_execution_failed"),
+    ],
+)
+async def test_component_failure_is_blocked_without_executing_remaining_slots(
+    status_field: str,
+    reason_code: str,
+) -> None:
+    scenario = _scenario()
+    executor = SealedAttemptVariantExecutor(
+        _replace_first_observation(scenario, **{status_field: "failed"})
+    )
+
+    decision = await _run(scenario, executor=executor)
+
+    assert decision.status == "blocked"
+    assert reason_code in decision.reason_codes
+    assert "factorial_execution_incomplete" in decision.reason_codes
+    assert decision.execution_records[0].status == "blocked"
+    assert decision.execution_records[0].failure_reason_code == reason_code
+    assert all(
+        record.status == "not_executed" for record in decision.execution_records[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason_code"),
+    [
+        (
+            {"weighted_total": 2.0},
+            "observation_requirement_weight_total_mismatch",
+        ),
+        (
+            {"required_gap_count": 2},
+            "observation_required_gap_count_invalid",
+        ),
+        (
+            {"expected_resource_subject_count": 2},
+            "observation_resource_subject_inventory_mismatch",
+        ),
+        (
+            {"source_route_true_positive": 2},
+            "observation_source_route_inventory_mismatch",
+        ),
+    ],
+)
+async def test_observation_must_bind_authored_gold_inventory(
+    overrides: dict[str, object],
+    reason_code: str,
+) -> None:
+    scenario = _scenario()
+    executor = SealedAttemptVariantExecutor(
+        _replace_first_observation(scenario, **overrides)
+    )
+
+    decision = await _run(scenario, executor=executor)
+
+    assert decision.status == "blocked"
+    assert reason_code in decision.reason_codes
+    assert decision.execution_records[0].status == "blocked"
+    assert decision.execution_records[0].failure_reason_code == reason_code
+    assert all(
+        record.status == "not_executed" for record in decision.execution_records[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason_code"),
+    [
+        (_schema_failure, "schema_validation_failed"),
+        (_business_failure, "business_validation_failed"),
+    ],
+)
+async def test_schema_and_business_validation_failures_are_blocked(
+    failure: Callable[[], NoReturn],
+    reason_code: str,
+) -> None:
+    scenario = _scenario()
+    executor = _RaisingExecutor(
+        declared_slots=frozenset(
+            (attempt.case_id, attempt.variant) for attempt in scenario.batch.attempts
+        ),
+        failure=failure,
+    )
+
+    decision = await _run(scenario, executor=executor)
+
+    assert decision.status == "blocked"
+    assert "variant_execution_incomplete" in decision.reason_codes
+    assert decision.execution_records[0].status == "failed"
+    assert decision.execution_records[0].failure_reason_code == reason_code
+    assert all(
+        record.status == "not_executed" for record in decision.execution_records[1:]
+    )
+
+
+async def test_human_review_output_binding_mismatch_is_blocked() -> None:
+    scenario = _scenario()
+    reviews = list(scenario.reviews.reviews)
+    first = reviews[0]
+    values = first.model_dump(mode="python")
+    values["output_fingerprint"] = "e" * 64
+    reviews[0] = HumanSemanticReviewV1.model_validate(values)
+
+    decision = await _run(scenario, reviews=_resign_reviews(scenario, reviews))
+
+    assert decision.status == "blocked"
+    assert "human_semantic_review_invalid" in decision.reason_codes
+    assert "factorial_execution_incomplete" in decision.reason_codes
+    assert decision.reviewed_execution_count == 0
+    assert decision.execution_records[0].status == "success"
+    assert all(
+        record.status == "not_executed" for record in decision.execution_records[1:]
+    )
+
+
+async def test_decision_never_leaks_query_url_evidence_or_provider_body() -> None:
+    sensitive_query = (
+        "SECRET_QUERY https://private.example.invalid "
+        "SECRET_EVIDENCE_BODY SECRET_PROVIDER_BODY api_key=forbidden"
+    )
+    scenario = _scenario(simple_query=sensitive_query)
+    executor = _RaisingExecutor(
+        declared_slots=frozenset(
+            (attempt.case_id, attempt.variant) for attempt in scenario.batch.attempts
+        ),
+        failure=_unexpected_failure,
+    )
+
+    decision = await _run(scenario, executor=executor)
+    serialized = decision.model_dump_json().casefold()
+
+    assert decision.status == "blocked"
+    assert decision.execution_records[0].failure_type == "RuntimeError"
+    for forbidden in (
+        sensitive_query.casefold(),
+        "secret_query",
+        "https://",
+        "secret_evidence_body",
+        "secret_provider_body",
+        "api_key",
+        "authorization",
+        "raw_provider_body",
+    ):
+        assert forbidden not in serialized
