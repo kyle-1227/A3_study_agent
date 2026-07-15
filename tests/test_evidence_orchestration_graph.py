@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1134,6 +1135,13 @@ def test_terminal_hydration_is_one_shot_even_when_no_parent_is_selected(
         match="parent_hydration_repeated",
     ):
         asyncio.run(hydrate({**state, "evidence_hydration_count": 1}))
+
+
+def test_terminal_parent_hydration_stays_on_sqlite_owner_thread():
+    source = inspect.getsource(orchestration.make_terminal_parent_hydration_node)
+
+    assert "asyncio.to_thread" not in source
+    assert "retriever.hydrate_kept_multi" in source
 
 
 def test_all_blocked_resources_skip_workers_and_return_explicit_bundle():

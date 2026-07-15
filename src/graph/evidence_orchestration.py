@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -2324,8 +2323,7 @@ def make_terminal_parent_hydration_node(
                 raise ParentChildGraphContractError(
                     "accepted local evidence is absent from its retrieval snapshot"
                 )
-            contexts = await asyncio.to_thread(
-                runtime.parent_child.retriever.hydrate_kept_multi,
+            contexts = runtime.parent_child.retriever.hydrate_kept_multi(
                 result,
                 selected_child_ids,
             )
