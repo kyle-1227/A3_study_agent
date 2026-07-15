@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { requirePublicApiBaseUrl } from "@/lib/public-config";
 import { ChevronDown, ChevronRight, Brain, Search, FileText } from "lucide-react";
 
 interface DecisionTrace {
@@ -22,7 +23,7 @@ interface TraceList {
   total: number;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = requirePublicApiBaseUrl();
 
 const NODE_ICONS: Record<string, React.ReactNode> = {
   supervisor: <Brain className="w-4 h-4" />,

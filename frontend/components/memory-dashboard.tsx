@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { requirePublicApiBaseUrl } from "@/lib/public-config";
 import GrowthChart from "./growth-chart";
 import CognitiveGraph from "./cognitive-graph";
 import ExplainPanel from "./explain-panel";
@@ -12,7 +13,7 @@ interface DashboardData {
   stats_summary: Record<string, unknown>;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = requirePublicApiBaseUrl();
 
 export default function MemoryDashboard({ userId, subject = "", days = 30 }: {
   userId: string; subject?: string; days?: number;

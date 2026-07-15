@@ -9,6 +9,7 @@ import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { requirePublicApiBaseUrl } from "@/lib/public-config";
 
 interface CogNode {
   id: string; label: string; type: string;
@@ -23,7 +24,7 @@ interface CogGraph {
   summary: string; node_count: number; edge_count: number;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = requirePublicApiBaseUrl();
 
 function cogToFlowNode(n: CogNode): Node {
   const size = Math.max(40, n.size * 120);

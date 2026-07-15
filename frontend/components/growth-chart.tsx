@@ -7,6 +7,7 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { requirePublicApiBaseUrl } from "@/lib/public-config";
 
 interface DataPoint {
   timestamp: string;
@@ -34,7 +35,7 @@ interface GrowthData {
   total_events: number;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = requirePublicApiBaseUrl();
 
 function trendBadge(trend: string) {
   const map: Record<string, { label: string; variant: "default" | "secondary" | "destructive" }> = {
