@@ -22,10 +22,13 @@ builds while readiness is blocked.
   technical build. Such a build must record `experimental_only=true` and
   `activation_prohibited=true`; it cannot proceed to formal validation,
   Shadow, or activation.
-- Generated portable commands use `config/rag/index.runtime.yaml`. The tracked
-  `config/rag/index.local.yaml` is an initializer input, not the final runtime
-  config. Generation 55 specifically requires the OCR-aware runtime identity
-  represented by `config/rag/index.ocr.runtime.yaml`.
+- Local build commands may use the ignored generated
+  `config/rag/index.runtime.yaml`. Clean-checkout read-only validation of
+  generation 55 must instead use the tracked, secret-free
+  `config/rag/index.production-candidate.inactive.yaml`. It is the OCR-aware,
+  `reranker_top_n=20` identity sealed with generation 55. The tracked
+  `config/rag/index.runtime.rerank80.yaml` is diagnostic-only and must never be
+  supplied to a deployment.
 
 The provider-backed Gold V2 engineering benchmark found Recall@5 `0.53 ->
 0.41`, MRR `0.3916 -> 0.3442`, and Candidate P95 `3862.5 ms`. A final fixed
@@ -55,7 +58,7 @@ $queryArgs = foreach ($id in @(
 
 python scripts/diagnose_parent_child_regressions.py `
   --project-root . `
-  --index-config config/rag/index.ocr.runtime.yaml `
+  --index-config config/rag/index.production-candidate.inactive.yaml `
   --gold-dataset data/evaluation/gold_dataset_v2.json `
   --candidate-generation-id pc_20260715_98336c2_55 `
   --reranker-top-n 20 `
@@ -83,6 +86,39 @@ and deployment checks. Never manually delete a READY generation, Flat 53,
 authoring checkpoint.
 
 ## Generated portable runtime configuration
+
+### Clean Docker deployment preflight for the inactive Candidate
+
+`Dockerfile` copies the tracked inactive config into `/app/config/rag/`, so a
+clean image does not depend on an ignored workstation file. The config does
+not contain API-key values and does not resolve an active pointer. It also does
+not package the large sealed generation. Before `docker compose up --build
+--wait`, the deployment owner must provide the canonical registry and
+generation through explicit read-only mounts or an image stage, provide a
+separate writable marker-owned `indexes/parent_child/.runtime_chroma` location,
+and verify all of the following against generation
+`pc_20260715_98336c2_55`:
+
+- the strict config loads and resolves inside the project root;
+- the registry and generation directory exist and are not symlinks;
+- the registry record is exactly `READY` and its manifest digest verifies;
+- primary, previous, and shadow are all unset;
+- the sealed Chroma, BM25, Parent Store, policy, subject, embedding, and
+  collection identities match the config;
+- `reranker_top_n` is exactly `20`.
+
+If any condition fails, do not start Candidate runtime and do not substitute
+the Top80 diagnostic config or legacy output as Candidate success. Keeping the
+configuration filename `inactive` is intentional: merely copying or mounting
+it never authorizes activation, Shadow, or a registry pointer change.
+
+The repository's current `docker-compose.yml` does not mount generation 55 or
+its registry, does not provide the writable snapshot location, does not run
+this preflight, and still starts the legacy-served Graph. Consequently, the
+tracked config closes the missing-config P0 but does **not** claim Candidate is
+Docker-integrated. Until the service/runtime lane adds explicit mounts,
+generation identity, and fail-fast startup validation, a missing Candidate
+artifact will not stop the legacy container from starting.
 
 Do not manually edit the ignored runtime YAML. Generate it from the tracked,
 strict local template; provider, model, endpoint, policy, and retry values are

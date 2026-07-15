@@ -16,16 +16,33 @@ activation decisions.
 - Registry primary / previous / shadow: unset
 - Retained Flat artifact: `flat_20260715_98336c2_53`
 - Legacy rollback asset: repository-root `chroma_store`
+- Tracked inactive runtime config:
+  `config/rag/index.production-candidate.inactive.yaml` (Top20)
 
 `READY` means sealed artifact integrity passed. It does not mean retrieval
 quality passed, and it does not route user traffic. Do not activate generation
 55 or delete the legacy RAG.
 
+The tracked inactive config is the clean-checkout identity for read-only
+generation 55 validation. Docker copies it with `config/`; it contains only
+API-key environment-variable names. It does not activate or select a
+generation. A deployment must separately provide the sealed generation
+directory and registry, then verify that generation 55 is exactly `READY` and
+that primary, previous, and shadow remain unset before startup. Missing
+artifacts or registry are fatal preflight failures.
+
+The current `docker-compose.yml` does not yet mount those artifacts, run that
+preflight, or route the application through Candidate runtime; it continues to
+start the legacy-served graph. This tracked config fixes the clean-image
+configuration gap only. Docker service wiring remains a separate integration
+gate and must not be inferred from this file's presence.
+
 The provider-backed Gold V2 engineering comparison regressed Recall@5 by 12
 percentage points and MRR by 0.0475. A fixed 17-query stage diagnosis compared
 `reranker_top_n=20` with `80`: hydrated Gold coverage rose from 6 to 8 spans,
 but total P50 rose from 2679 to 4122 ms and P95 from 4932 to 7234 ms. Tuning is
-closed; the Top80 policy is not production-eligible.
+closed; `config/rag/index.runtime.rerank80.yaml` is diagnostic-only and must
+not be used for deployment.
 
 Gold V3 also remains incomplete: the current 22 approved authoring changes are
 draft-only, the two independent semantic reviews are missing, and the 150-pair
