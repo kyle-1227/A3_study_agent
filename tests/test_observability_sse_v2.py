@@ -129,6 +129,37 @@ async def test_evidence_trace_emits_only_top_level_progress() -> None:
 
 
 @pytest.mark.anyio
+async def test_stream_fails_closed_before_graph_execution_when_checkpoint_read_fails():
+    from app import _stream_graph_event_drafts
+    from src.streaming.evidence_progress import evidence_progress_sink_active
+
+    graph = _graph([], activity=False)
+    graph.aget_state = AsyncMock(
+        side_effect=RuntimeError("private checkpoint transport diagnostic")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="checkpoint state read failed before graph execution",
+    ):
+        async for _ in _stream_graph_event_drafts(
+            graph,
+            {
+                "request_id": "00000000-0000-4000-8000-000000000009",
+                "thread_id": "t1",
+            },
+            {"configurable": {"thread_id": "t1"}},
+            "t1",
+            request_id="00000000-0000-4000-8000-000000000009",
+            preserve_context_history=True,
+        ):
+            pass
+
+    graph.astream_events.assert_not_called()
+    assert evidence_progress_sink_active() is False
+
+
+@pytest.mark.anyio
 async def test_activity_sse_updates_same_node_and_stream_ids_and_persists_timeline():
     from app import _stream_graph_event_drafts
 

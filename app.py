@@ -2383,11 +2383,17 @@ async def _stream_graph_event_drafts(
                 {
                     "operation": "load_context_history",
                     "error_type": type(exc).__name__,
-                    "error_message": str(exc),
+                    "reason_code": "checkpoint_state_unavailable",
                 },
                 state={"thread_id": thread_id, "session_id": thread_id},
                 env_flag="LOG_A3_TRACE",
             )
+            reset_evidence_progress_sink(evidence_progress_sink_token)
+            reset_provisional_event_sink(provisional_sink_token)
+            reset_trace_event_sink(trace_sink_token)
+            raise RuntimeError(
+                "checkpoint state read failed before graph execution"
+            ) from None
 
     async def _record_activity(
         activity: ActivityEvent,
