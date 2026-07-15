@@ -87,6 +87,26 @@ particular, select a dataset version only after its spans, source groups, and
 human or historical-query semantics have been reviewed; never infer that from a
 filename such as `v2`.
 
+### Human-directed Gold authoring checkpoints
+
+Interactive replacements and additions must be recorded in a strict sidecar
+before a final GoldDataset is sealed. The sidecar stores only approved draft
+proposals, policy-independent coordinates, canonical proposal and cleaned-slice
+digests, and a separate evaluation target describing the product function,
+expected Graph route, RAG stages, capabilities, and success criteria.
+
+Every approved proposal remains `eligible_for_rollout=false` and carries
+`authorization_scope=draft_write_only`. Checkpoints explicitly record the
+required and completed semantic-reviewer counts. A missing second reviewer,
+unfinished source-group quota, unfinished chunk review, or draft schema always
+means `evaluation_eligible=false`; never copy a checkpoint into a final Gold
+file or pass it to readiness/benchmark tooling as if it were sealed Gold.
+
+Private resumable artifacts belong below
+`reports/rag_gold_authoring/<dataset>/`; they may contain question text and
+coordinates and therefore remain Git-ignored. Operational reports should expose
+only hashes, counts, status, and blocker reason codes.
+
 本手册只覆盖可审计的本地构建、评估和部署前验证。它不会下载课程资料、不会修改现有 `chroma_store`，也不会因为某个依赖失败改用旧链路。所有命令从项目根目录执行，并且所有路径都必须位于项目根目录内且不得经过符号链接或 Windows reparse point。
 
 在正式 validation 通过、数据 gate 通过且有明确发布批准以前，**不得执行 activate**。
