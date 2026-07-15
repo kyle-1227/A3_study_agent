@@ -68,3 +68,4 @@ def test_environment_example_uses_dedicated_rag_secret_names() -> None:
     assert "RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY" in env_example
     assert env_example.count("CHROMA_PERSIST_DIR=") == 1
     assert "CONTEXT_POLICY_MODE=strict" in env_example
+    assert "PARENT_CHILD_GENERATION_ID=pc_20260715_98336c2_55" in env_example

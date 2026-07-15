@@ -1,179 +1,171 @@
 # A3 Study Agent
 
-A3 Study Agent - AI-powered personalized learning resource generation assistant for university students.
+[中文](README.md)
 
-<p align="center">
-  <a href="README.md">中文 README</a> |
-  <a href="docs/architecture/v0.3.0/diagram_design.md">Architecture Diagrams</a> |
-  <a href="CHANGELOG.md">Changelog</a>
-</p>
+A3 Study Agent is a multi-agent learning system for university study. It combines strict learner profiles, learning paths, a curated course knowledge graph, Parent-Child RAG, web research, evidence judgement, and seven resource generators in a recoverable streaming experience.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.0-orange?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python" />
-  <a href="https://github.com/langchain-ai/langgraph">
-    <img src="https://img.shields.io/badge/langgraph-v1.1.1-7C3AED?style=flat-square&logo=diagram-next&logoColor=white" alt="langgraph" />
-  </a>
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
-  </a>
-</p>
+## Current production-convergence state
 
-## About
+| Area | State |
+| --- | --- |
+| Web/API | Next.js + FastAPI with `agent_stream_v2` SSE, status recovery, replay, and explicit terminal events |
+| State and identity | PostgreSQL checkpoints; strict user, thread, request, dataset, and case binding |
+| Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
+| New RAG | the served graph explicitly pins generation `pc_20260715_98336c2_55`, which is `READY` and runs in `inactive_canary` mode |
+| RAG deployment | registry primary / previous / shadow are unset; `activation_enabled=false` |
+| Evaluation | real-node P0 / PG / PR / PGR compositions; the six-case dataset is smoke authoring, not formal Gold |
+| Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
-A3 Study Agent is a multi-agent system for university learning scenarios. It helps learners generate personalized resources such as course Q&A, review documents, mind maps, quizzes, code practice, teaching scripts, teaching animations, and study plans.
+`READY` proves artifact integrity only. The current Parent-Child engineering benchmark does not meet the Recall@5, MRR, or P95 replacement gates, so activation is prohibited. `PARENT_CHILD_GENERATION_ID` is a strict inactive-canary runtime pin; it does not write or switch a registry pointer.
 
-The system combines local course-material RAG, BM25, reranking, Tavily Web Research, Evidence Judge V2, DeepSeek strict structured output, SSE streaming, and OpenTelemetry tracing. It is designed for diagnosable end-to-end learning workflows.
+## Capabilities
 
-The external LangGraph/SSE node name `web_search` is kept for lifecycle compatibility, while the internal semantics are Web Research V2.
-
-## Core Capabilities
-
-- **Course Q&A**: Answer university course questions using local course materials and judged web evidence.
-- **Personalized Resource Generation**: The unified resource path supports `review_doc`, `mindmap`, `quiz`, `code_practice`, `video_script`, `video_animation`, and `study_plan`.
-- **Study Planning**: Generate Markdown / Word study plan documents through the unified resource path.
-- **Academic Support**: Respond with the tone of a university learning mentor or academic support advisor.
-- **Stable Structured Output**: Use DeepSeek official strict tool calling for small structured nodes and re-ask retry for recoverable compliance failures.
-- **Observability**: Use A3_TRACE, OpenTelemetry, SSE node events, and structured diagnostics to inspect real interactions.
-- **Configuration Driven**: Control behavior through YAML runtime settings and XML prompt templates.
+- Strict onboarding, learner-profile, learning-history, and assessment binding.
+- Learning-path planning validated against source-backed KnowledgeGraph topics.
+- Parallel single-subject, multi-subject, and multi-resource orchestration.
+- Parent-Child Vector + BM25 + RRF + reranker + parent hydration.
+- Strict local/web requirement, judgement, and bounded-repair evidence loops.
+- P0 (no planning/no repair), PG (planning/no repair), PR (no planning/repair), and PGR (planning/repair) live evaluation adapters.
+- Study plan, mind map, quiz, review document, code practice, video script, and video animation resources.
+- SSE `EvidenceProgress`, Last-Event-ID replay, thread-status recovery, and persistent downloads.
 
 ## Architecture
 
 ```mermaid
-graph TD
-  START([Learner Input]) --> supervisor[Intent Classification]
-  supervisor --> episodic_memory_retriever[Episodic Memory Retriever]
-  supervisor -->|emotional| emotional_response[Academic Support]
-  supervisor -->|unknown| handle_unknown[Unknown Intent]
-
-  episodic_memory_retriever --> memory_use_decider[Memory Use Decider]
-  memory_use_decider --> search_query_rewriter[Query Rewriter]
-  search_query_rewriter --> academic_router[Academic Router]
-  academic_router --> rag_retrieve[Local RAG]
-  academic_router --> web_search[Web Research V2]
-  rag_retrieve --> evidence_judge[Evidence Judge V2]
-  web_search --> evidence_judge
-
-  evidence_judge --> generate_answer[Generate Answer]
-  evidence_judge --> resource_orchestrator[Resource Orchestrator]
-  evidence_judge --> evidence_summary_output[Evidence Summary Output]
-
-  resource_orchestrator --> resource_worker[Resource Worker]
-  resource_worker --> resource_bundle_output[Resource Bundle Output]
+flowchart LR
+    UI[Next.js Web] -->|agent_stream_v2| API[FastAPI]
+    API --> ID[Strict user/thread/request binding]
+    ID --> SUP[Supervisor]
+    SUP --> QA[QA path]
+    SUP --> LP[Learner path planner]
+    LP --> EP[Resource evidence planner]
+    EP --> LR[Parent-Child local retrieval]
+    EP --> WR[Web research]
+    LR --> J[Requirement evidence judge]
+    WR --> J
+    J -->|bounded repair| EP
+    J --> RG[Parallel resource generation]
+    RG --> FINAL[Authoritative resource final]
+    QA --> FINAL
+    API <--> PG[(PostgreSQL checkpoints)]
+    LR --> PC[(READY generation 55)]
 ```
 
-See [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md) for the complete diagrams.
+Provider, model, base URL, API-key environment name, and retry policy come from strict configuration. Business nodes do not hardcode them and do not silently switch Provider, model, or RAG path after failure.
 
-## Tech Stack
+## One-command Docker deployment
 
-| Layer | Components |
-| ----- | ---------- |
-| Frontend | Next.js 16, React, Tailwind CSS, React Flow |
-| Backend API | FastAPI, Uvicorn, SSE |
-| Orchestration | LangGraph |
-| Local Knowledge | ChromaDB, BM25, reranker |
-| Web Research | Tavily |
-| Structured Output | DeepSeek official strict tool calling, Pydantic validation, re-ask retry |
-| Evidence Judging | Evidence Judge V2 item grader + sufficiency judge |
-| State Snapshots | LangGraph Checkpointer, MemorySaver by default, optional PostgreSQL |
-| Observability | A3_TRACE, OpenTelemetry, Jaeger, SQLite fallback |
-| Configuration | YAML settings, XML prompts |
+Requirements: Docker Desktop / Docker Engine, Compose v2, local course data, and the sealed Parent-Child index.
 
-## Quick Start
+```powershell
+Copy-Item .env.example .env
+# Populate secrets, a strong DB password, and the two host asset paths.
 
-### Docker Compose
-
-```bash
-git clone https://github.com/kyle-1227/A3_study_agent.git
-cd A3_study_agent
-
-cp .env.example .env
-# Edit .env and fill in model, search, and observability settings.
-
-docker compose up -d
-
-# Optional: enable Jaeger tracing
-docker compose --profile observability up -d
+docker compose config --quiet
+docker compose up --detach --build --wait
+docker compose ps
 ```
 
-Frontend: `http://localhost:3000`
-Backend API: `http://localhost:8000`
-Jaeger: `http://localhost:16686`
+Required settings:
 
-### Local Development
+- `DEEPSEEK_API_KEY`
+- `RAG_EMBEDDING_API_KEY`
+- `RAG_RERANKER_API_KEY`
+- `TAVILY_API_KEY`
+- `POSTGRES_PASSWORD`
+- `NEXT_PUBLIC_API_URL`
+- `COURSE_DATA_HOST_PATH`
+- `PARENT_CHILD_INDEX_HOST_PATH`
+- `PARENT_CHILD_GENERATION_ID`
 
-```bash
+Compose supervises backend, frontend, and PostgreSQL separately. The sealed Parent-Child index is mounted read-only, `.runtime_chroma` has a dedicated writable volume, and generated downloads use the persistent `artifacts` volume. Chromium and ffmpeg are included for real video-animation output.
+
+Verify startup:
+
+```powershell
+Invoke-WebRequest http://localhost:8000/health/live -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/graph/manifest -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
+Invoke-WebRequest http://localhost:3000 -UseBasicParsing
+```
+
+`/health/ready` must return `health_ready_v1`, `status=ready`, `checkpointer_type=postgres`, and `candidate_mode=inactive_canary`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
+
+See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary, and rollback boundaries.
+
+## Local development
+
+Python 3.11+ and Node.js 20.12+:
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,quality]"
+Copy-Item .env.example .env
+# Populate .env; strict local startup also requires PostgreSQL, secrets,
+# course data, and the sealed index.
 
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
+Push-Location frontend
+npm ci
+Pop-Location
 
-cp .env.example .env
-# Fill in API keys.
+python -m scripts.run_backend --no-reload --host 0.0.0.0 --port 8000
 ```
 
-#### Build the Knowledge Base
+In another terminal:
 
-Place PDF / MD / TXT course materials under one or more subject directories:
-
-- `data/big_data`
-- `data/computer`
-- `data/machine_learning`
-- `data/math`
-- `data/python`
-
-Then run:
-
-```bash
-python scripts/build_index.py
-```
-
-#### Run
-
-```bash
-# Terminal 1: backend
-python -m scripts.run_backend --reload --port 8000
-
-# Terminal 2: frontend
-cd frontend
-npm install
+```powershell
+Push-Location frontend
 npm run dev
 ```
 
-## Project Structure
+Parent-Child builds, Gold authoring, diagnostics, and registry operations require explicit arguments. Follow the [Parent-Child RAG runbook](docs/runbooks/parent_child_rag_local_build.md); do not use the obsolete no-argument `scripts/build_index.py` flow.
+
+## Quality gates
+
+Run the complete matrix once after integration; use focused related tests while developing.
+
+```powershell
+python -m compileall -q src tests app.py
+ruff check .
+ruff format --check .
+python -m pytest -q
+lint-imports --config .importlinter
+bandit -r src -x tests
+
+Push-Location frontend
+npm run test
+npm run typecheck
+npm run lint
+npm run build
+Pop-Location
+```
+
+Unavailable Semgrep, Gitleaks, mypy, or other tools must be reported as missing / not run, never as passing.
+
+## Repository layout
 
 ```text
-A3_study_agent/
-|-- app.py                         # FastAPI SSE endpoints + lifespan
-|-- docker-compose.yml             # Backend + PostgreSQL + Jaeger
-|-- config/
-|   |-- settings.yaml              # Runtime parameters
-|   `-- prompts/                   # XML prompt templates
-|-- src/
-|   |-- graph/                     # LangGraph nodes and state flow
-|   |-- rag/                       # Local retrieval and indexing
-|   |-- llm/                       # LLM factory and structured output runtime
-|   |-- database/                  # Checkpointer management
-|   |-- tracing/                   # OpenTelemetry setup
-|   `-- tools/                     # Web research and resource tools
-|-- frontend/                      # Next.js UI
-|-- data/                          # University course materials
-|-- scripts/                       # Indexing and debug scripts
-`-- tests/                         # Test suite
+app.py                     FastAPI, SSE, status/replay, and artifact APIs
+frontend/                  Next.js web client
+src/graph/                 Served graph, evidence loop, and resource nodes
+src/learning_guidance/     KnowledgeGraph, profile/history, and path contracts
+src/rag/parent_child/      Generation, retrieval, hydration, and runtime
+src/evaluation/            P0/PG/PR/PGR rollout evaluation
+config/                    Strict runtime configuration and prompts
+scripts/                   Build, diagnostics, evaluation, and deployment tools
+tests/                     Backend, contract, security, and integration tests
+docs/runbooks/             Production and RAG operations
 ```
 
-## Testing
+## Important limits
 
-```bash
-python -m pytest tests/test_config.py tests/test_app.py tests/test_rag.py tests/test_tracing.py -v
-
-# If the environment allows:
-python -m pytest -q
-cd frontend && npm run build
-```
+- Do not present the six-case smoke dataset as formal Gold or completed human review.
+- Do not delete the legacy RAG, Flat 53, generation 55, registry, successful reports, or Gold checkpoints.
+- Do not expose API keys, Authorization, full DB URIs, or Provider bodies in reports, traces, screenshots, or commands.
+- Do not turn a Candidate failure into a false legacy-RAG success; rollback is explicit only.
 
 ## License
 
-[MIT](./LICENSE)
+See [LICENSE](LICENSE).

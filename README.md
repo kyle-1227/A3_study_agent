@@ -1,212 +1,170 @@
 # A3 Study Agent
 
-高校个性化学习资源生成智能体。
+[English](README_en.md)
 
-<p align="center">
-  <a href="README_en.md">English README</a> |
-  <a href="docs/architecture/v0.3.0/diagram_design.md">Architecture Diagrams</a> |
-  <a href="CHANGELOG.md">Changelog</a>
-</p>
+A3 Study Agent 是面向高校学习场景的多智能体学习系统。它把严格用户画像、学习路径、课程知识图谱、Parent–Child RAG、网页检索、证据判断与七类学习资源生成统一到可恢复的流式交互中。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-v0.3.0-orange?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square" alt="python" />
-  <a href="https://github.com/langchain-ai/langgraph">
-    <img src="https://img.shields.io/badge/langgraph-v1.1.1-7C3AED?style=flat-square&logo=diagram-next&logoColor=white" alt="langgraph" />
-  </a>
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
-  </a>
-</p>
+## 当前生产收口状态
 
-## 关于项目
+| 范围 | 状态 |
+| --- | --- |
+| Web/API | Next.js + FastAPI，`agent_stream_v2` SSE、状态恢复、事件重放、显式终态 |
+| 状态与身份 | PostgreSQL checkpoint；用户、线程、请求、评测 case 全链路严格绑定 |
+| 课程图谱 | `KnowledgeGraphV1`，5 个学科，source-backed topic/resource identity |
+| 新 RAG | served graph 显式固定 generation `pc_20260715_98336c2_55`，其状态为 `READY`、运行模式为 `inactive_canary` |
+| RAG 发布 | registry 的 primary / previous / shadow 均未设置；`activation_enabled=false` |
+| 评测 | P0 / PG / PR / PGR 四个真实节点组合；6-case 数据集仅为 smoke authoring，不是正式 Gold |
+| 回滚 | 根目录 `chroma_store` 与 Flat 53 在本次发布中必须保留；后续清理需另行审批 |
 
-A3 Study Agent 是一个面向高校课程学习场景的多智能体系统。它围绕学习者的问题、目标和资源需求，生成课程答疑、复习文档、思维导图、练习题、代码实操、教学脚本、教学动画和学习计划等个性化学习资源。
-
-系统结合本地课程资料 RAG、BM25、reranker、Tavily Web Research、Evidence Judge V2、DeepSeek strict structured output、SSE 流式输出和 OpenTelemetry 可观测性，支持真实交互链路中的检索、证据判断、生成和诊断。
-
-当前 React 前端主要用于演示复杂 Agent 交互、SSE 流式输出、资源生成和运行轨迹。外部 LangGraph/SSE 节点名仍保留 `web_search`，内部语义已经统一为 Web Research V2。
+`READY` 只证明 generation 完整性，不代表检索质量通过。当前 Parent–Child 工程基准的 Recall@5、MRR 和 P95 均未达到替换旧 RAG 的条件，因此不得执行 activate。`PARENT_CHILD_GENERATION_ID` 只是 inactive canary 的严格运行时固定值，不会写入或切换 registry。
 
 ## 核心能力
 
-- **课程答疑**：基于本地课程材料和 Web Research evidence 的双源证据，生成面向高校学习者的解释、示例和学习建议。
-- **个性化资源生成**：统一资源链路支持 `review_doc`、`mindmap`、`quiz`、`code_practice`、`video_script`、`video_animation`、`study_plan` 七类资源。
-- **学习计划**：作为统一资源类型生成 Markdown / Word 学习计划文档。
-- **学习支持**：以高校学习导师 / 学业支持导师的语气，提供温暖且可执行的建议。
-- **稳定结构化输出**：小型结构化节点使用 DeepSeek official strict tool calling；结构化失败通过 re-ask retry 提升恢复能力。
-- **可观测性**：通过 A3_TRACE、OpenTelemetry、SSE 节点事件和结构化诊断日志排查真实交互链路。
-- **配置驱动**：通过 YAML settings 和 XML prompts 管理运行参数、模型行为和提示词。
+- 严格 onboarding、用户画像、学习历史与 assessment 绑定。
+- 学习路径规划与 source-backed KnowledgeGraph topic 校验。
+- 单学科、多学科与多资源请求并行编排。
+- Parent–Child Vector + BM25 + RRF + reranker + parent hydration。
+- 本地资料和网页证据的严格 requirement / judge / bounded repair 闭环。
+- P0（无规划/无修复）、PG（有规划/无修复）、PR（无规划/有修复）、PGR（有规划/有修复）live evaluation adapters。
+- study plan、mind map、quiz、review document、code practice、video script、video animation 七类资源。
+- SSE `EvidenceProgress`、Last-Event-ID 重放、thread status 恢复和持久化下载。
 
-## 系统架构
+## 架构
 
 ```mermaid
-graph TD
-  START([学习者输入]) --> supervisor[意图识别]
-
-  supervisor --> episodic_memory_retriever[长期记忆检索]
-  supervisor -->|emotional| emotional_response[学业支持回应]
-  supervisor -->|unknown| handle_unknown[未知意图处理]
-
-  episodic_memory_retriever --> memory_use_decider[记忆使用决策]
-  memory_use_decider --> search_query_rewriter[查询改写]
-  search_query_rewriter --> academic_router[学习路由]
-  academic_router --> rag_retrieve[Local RAG]
-  academic_router --> web_search[Web Research V2]
-  rag_retrieve --> evidence_judge[Evidence Judge V2]
-  web_search --> evidence_judge
-
-  evidence_judge --> generate_answer[回答生成]
-  evidence_judge --> resource_orchestrator[资源编排]
-  evidence_judge --> evidence_summary_output[证据摘要输出]
-
-  generate_answer --> evaluate_hallucination[忠实性评估]
-  evaluate_hallucination -->|通过| END_A([结束])
-  evaluate_hallucination -->|重试| rewrite_query[查询重写]
-  rewrite_query --> academic_router
-
-  resource_orchestrator --> resource_worker[资源生成 Worker]
-  resource_worker --> resource_bundle_output[资源聚合输出]
-  resource_bundle_output --> END_R([结束])
-  evidence_summary_output --> END_S([结束])
-
-  emotional_response --> END_E([结束])
-  handle_unknown --> END_U([结束])
+flowchart LR
+    UI[Next.js Web] -->|agent_stream_v2| API[FastAPI]
+    API --> ID[Strict user/thread/request binding]
+    ID --> SUP[Supervisor]
+    SUP --> QA[QA path]
+    SUP --> LP[Learner path planner]
+    LP --> EP[Resource evidence planner]
+    EP --> LR[Parent-Child local retrieval]
+    EP --> WR[Web research]
+    LR --> J[Requirement evidence judge]
+    WR --> J
+    J -->|bounded repair| EP
+    J --> RG[Parallel resource generation]
+    RG --> FINAL[Authoritative resource final]
+    QA --> FINAL
+    API <--> PG[(PostgreSQL checkpoints)]
+    LR --> PC[(READY generation 55)]
 ```
 
-更多图示见 [`docs/architecture/v0.3.0/diagram_design.md`](docs/architecture/v0.3.0/diagram_design.md)。
+Provider、model、base URL、API key 环境变量名和 retry 策略来自严格配置；业务节点不得硬编码，也不会在失败时静默切换 Provider、模型或旧 RAG。
 
-## 技术栈
+## Docker 一键部署
 
-| 层级 | 组件 |
-| ---- | ---- |
-| 前端 | Next.js 16、React、Tailwind CSS、React Flow |
-| 后端 API | FastAPI、Uvicorn、SSE |
-| 编排 | LangGraph |
-| 本地知识库 | ChromaDB、BM25、reranker |
-| Web Research | Tavily |
-| 结构化输出 | DeepSeek official strict tool calling、Pydantic validation、re-ask retry |
-| 证据判断 | Evidence Judge V2 item grader + sufficiency judge |
-| 状态快照 | LangGraph Checkpointer，默认 MemorySaver，可选 PostgreSQL |
-| 可观测性 | A3_TRACE、OpenTelemetry、Jaeger、SQLite fallback |
-| 配置 | YAML settings、XML prompts |
+要求：Docker Desktop / Docker Engine、Compose v2，以及本地课程资料和已密封 Parent–Child index。
 
-## 快速启动
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env：填入密钥、强数据库密码、数据路径和 index 路径。
 
-### Docker Compose
-
-```bash
-git clone https://github.com/kyle-1227/A3_study_agent.git
-cd A3_study_agent
-
-cp .env.example .env
-# 编辑 .env，填入模型、检索和观测配置。
-
-docker compose up -d
-
-# 可选：启用 Jaeger tracing
-docker compose --profile observability up -d
+docker compose config --quiet
+docker compose up --detach --build --wait
+docker compose ps
 ```
 
-前端：`http://localhost:3000`
-后端 API：`http://localhost:8000`
-Jaeger：`http://localhost:16686`
+关键必填项：
 
-### 本地开发
+- `DEEPSEEK_API_KEY`
+- `RAG_EMBEDDING_API_KEY`
+- `RAG_RERANKER_API_KEY`
+- `TAVILY_API_KEY`
+- `POSTGRES_PASSWORD`
+- `NEXT_PUBLIC_API_URL`
+- `COURSE_DATA_HOST_PATH`
+- `PARENT_CHILD_INDEX_HOST_PATH`
+- `PARENT_CHILD_GENERATION_ID`
 
-```bash
+Compose 将 backend、frontend 和 PostgreSQL 分开监管；Parent–Child sealed index 只读挂载，`.runtime_chroma` 使用独立可写卷，生成文件保存在 `artifacts` volume。镜像包含 Chromium 与 ffmpeg，支持真实 video animation。
+
+启动后检查：
+
+```powershell
+Invoke-WebRequest http://localhost:8000/health/live -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/graph/manifest -UseBasicParsing
+Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
+Invoke-WebRequest http://localhost:3000 -UseBasicParsing
+```
+
+`/health/ready` 必须返回 `health_ready_v1`、`status=ready`、`checkpointer_type=postgres`、`candidate_mode=inactive_canary`，并携带 graph、KnowledgeGraph、generation manifest 与 evidence orchestration 身份。任何缺失或不匹配都视为部署失败。
+
+完整部署、PostgreSQL restart/replay、六场景 Playwright canary 与回滚边界见 [生产部署运行手册](docs/runbooks/production_deployment.md)。
+
+## 本地开发
+
+Python 3.11+ 与 Node.js 20.12+：
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,quality]"
+Copy-Item .env.example .env
+# 编辑 .env；本地严格启动同样需要 PostgreSQL、密钥、课程资料与 sealed index。
 
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
+Push-Location frontend
+npm ci
+Pop-Location
 
-cp .env.example .env
-# 编辑 .env，填入 API keys。
+python -m scripts.run_backend --no-reload --host 0.0.0.0 --port 8000
 ```
 
-#### 构建知识库
+另开终端：
 
-将 PDF / MD / TXT 课程资料放入以下一个或多个目录：
-
-- `data/big_data`
-- `data/computer`
-- `data/machine_learning`
-- `data/math`
-- `data/python`
-
-然后运行：
-
-```bash
-python scripts/build_index.py
-```
-
-#### 启动服务
-
-后端和前端需要分别打开两个终端运行。
-
-**终端 1：后端**
-
-```bash
-python -m scripts.run_backend --reload --port 8000
-```
-
-**终端 2：前端**
-
-```bash
-cd frontend
-npm install
+```powershell
+Push-Location frontend
 npm run dev
 ```
 
-注意：`pytest tests/test_security.py -q` 是后端测试命令，不要放在前端启动终端里。
+Parent–Child 构建、Gold、诊断与 registry 操作必须使用显式参数，详见 [Parent–Child RAG 运行手册](docs/runbooks/parent_child_rag_local_build.md)。不要再按旧说明无参数运行 `scripts/build_index.py`。
+
+## 质量门
+
+集成后只跑一次完整门禁；开发期间优先使用相关聚焦测试。
+
+```powershell
+python -m compileall -q src tests app.py
+ruff check .
+ruff format --check .
+python -m pytest -q
+lint-imports --config .importlinter
+bandit -r src -x tests
+
+Push-Location frontend
+npm run test
+npm run typecheck
+npm run lint
+npm run build
+Pop-Location
+```
+
+缺失的 Semgrep、Gitleaks、mypy 或其他工具必须报告为 missing / not run，不能写成通过。
 
 ## 项目结构
 
 ```text
-A3_study_agent/
-|-- app.py                         # FastAPI SSE endpoints + lifespan
-|-- docker-compose.yml             # Backend + PostgreSQL + Jaeger
-|-- config/
-|   |-- settings.yaml              # Runtime parameters
-|   `-- prompts/                   # XML prompt templates
-|-- src/
-|   |-- graph/                     # LangGraph nodes and state flow
-|   |-- rag/                       # Local retrieval and indexing
-|   |-- llm/                       # LLM factory and structured output runtime
-|   |-- database/                  # Checkpointer management
-|   |-- tracing/                   # OpenTelemetry setup
-|   `-- tools/                     # Web research and resource tools
-|-- frontend/                      # Next.js UI
-|-- data/                          # University course materials
-|-- scripts/                       # Indexing and debug scripts
-`-- tests/                         # Test suite
+app.py                     FastAPI、SSE、status/replay 与 artifact API
+frontend/                  Next.js Web 客户端
+src/graph/                 served graph、证据闭环与资源节点
+src/learning_guidance/     KnowledgeGraph、画像/历史与路径合同
+src/rag/parent_child/      generation、检索、hydration 与 runtime
+src/evaluation/            P0/PG/PR/PGR rollout evaluation
+config/                    严格运行配置与 prompt
+scripts/                   构建、诊断、评测与部署工具
+tests/                     后端、合同、安全和集成测试
+docs/runbooks/             生产与 RAG 运维手册
 ```
 
-## 测试
+## 重要限制
 
-后端测试：
-
-```bash
-python -m pytest tests/test_config.py tests/test_app.py tests/test_rag.py tests/test_tracing.py -v
-python -m pytest tests/test_security.py -q
-```
-
-如果环境允许，可以运行完整后端测试：
-
-```bash
-python -m pytest -q
-```
-
-前端检查：
-
-```bash
-cd frontend
-npm run lint
-.\node_modules\.bin\tsc.cmd --noEmit
-npm run build
-```
+- 不得把 6-case smoke 数据集描述为正式 Gold 或人工评审通过。
+- 不得删除旧 RAG、Flat 53、generation 55、registry、成功报告或 Gold checkpoint。
+- 不得在报告、trace、截图或命令行中输出 API key、Authorization、完整 DB URI 或 Provider body。
+- 不得把 Candidate 失败转换成旧 RAG 的伪成功；回滚只能显式执行。
 
 ## License
 
-[MIT](./LICENSE)
+See [LICENSE](LICENSE).
