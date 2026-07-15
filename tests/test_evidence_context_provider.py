@@ -264,6 +264,7 @@ def test_evidence_provider_enforces_assignment_across_every_bucket():
         "assigned:graded",
         "assigned:workspace",
     ]
+    assert all(item.metadata["grounding_approved"] is True for item in items)
     serialized = repr(items)
     assert "Leaked" not in serialized
     assert "unassigned:" not in serialized

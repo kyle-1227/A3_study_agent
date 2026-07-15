@@ -32,6 +32,8 @@ _SCORE_METADATA_KEYS = (
     "score_reason",
 )
 
+_ASSIGNMENT_APPROVED_KEY = "_resource_assignment_approved"
+
 
 class EvidenceContextProvider:
     """Objectize local/web evidence already present in graph state."""
@@ -118,7 +120,10 @@ def _existing_evidence_candidates(
             if dedupe_key in seen_ids:
                 continue
             seen_ids.add(dedupe_key)
-            candidates.append({**item, "_context_source_bucket": bucket})
+            candidate = {**item, "_context_source_bucket": bucket}
+            if assigned_evidence_ids is not None:
+                candidate[_ASSIGNMENT_APPROVED_KEY] = True
+            candidates.append(candidate)
             if len(candidates) >= limit:
                 return candidates
     if assigned_evidence_ids is not None and not candidates:
@@ -196,6 +201,7 @@ def _candidate_to_item(
         "created_at": candidate.get("created_at", ""),
         "grounding_approved": bool(
             workspace_item
+            or candidate.get(_ASSIGNMENT_APPROVED_KEY) is True
             or candidate.get("judge_keep") is True
             or candidate.get("keep") is True
         ),
