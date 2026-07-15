@@ -45,8 +45,8 @@ services:
       start_period: 30s
     volumes:
       - chroma_data:/app/chroma_store
-      - ./data:/app/data
-      - ./indexes/parent_child:/app/indexes/parent_child:ro
+      - ${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}:/app/data
+      - ${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}:/app/indexes/parent_child:ro
       - artifacts:/app/artifacts
 
   frontend:
