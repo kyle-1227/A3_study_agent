@@ -27,7 +27,7 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md README_en.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --timeout 120 --retries 10 .
 RUN python -m playwright install --with-deps chromium
 
 COPY app.py ./

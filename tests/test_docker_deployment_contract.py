@@ -15,9 +15,8 @@ def test_dockerfile_uses_supervised_single_process_targets() -> None:
     assert '["node", "server.js"]' in dockerfile
     assert 'CMD ["sh", "-c"' not in dockerfile
     assert "& uvicorn" not in dockerfile
-    assert dockerfile.index("COPY src/ ./src/") < dockerfile.index(
-        "RUN pip install --no-cache-dir ."
-    )
+    pip_install = "RUN pip install --no-cache-dir --timeout 120 --retries 10 ."
+    assert dockerfile.index("COPY src/ ./src/") < dockerfile.index(pip_install)
     assert "python -m playwright install --with-deps chromium" in dockerfile
 
 
