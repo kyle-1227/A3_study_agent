@@ -1,0 +1,218 @@
+{
+  "schema_version": "evidence_evaluation_dataset_v1",
+  "dataset_id": "evidence_rollout_smoke_authoring_20260715_draft_v1",
+  "cases": [
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_simple_big_data_review",
+      "query": "Create a concise review document that explains a MapReduce word-count flow and contrasts Hadoop batch execution with Spark transformations and actions.",
+      "subjects": ["big_data"],
+      "resource_types": ["review_doc"],
+      "initial_evidence_sufficient": true,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_big_data_review",
+          "subject": "big_data",
+          "resource_type": "review_doc",
+          "required_sources": ["parent_child"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_batch_stage_flow",
+          "target_id": "smoke_big_data_review",
+          "criterion": "Explain map, partition, shuffle, and reduce stages through one coherent word-count data flow.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_spark_contrast",
+          "target_id": "smoke_big_data_review",
+          "criterion": "Contrast Hadoop execution with Spark transformations and actions without conflating lazy lineage with immediate execution.",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_simple_computer_quiz",
+      "query": "Create a quiz that tests selection and complexity trade-offs among lists, stacks, queues, trees, hash tables, and graph representations.",
+      "subjects": ["computer"],
+      "resource_types": ["quiz"],
+      "initial_evidence_sufficient": false,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_computer_quiz",
+          "subject": "computer",
+          "resource_type": "quiz",
+          "required_sources": ["parent_child", "web"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_structure_selection",
+          "target_id": "smoke_computer_quiz",
+          "criterion": "Test when to choose linear, tree, hash, and graph structures for concrete operations.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_complexity_crosscheck",
+          "target_id": "smoke_computer_quiz",
+          "criterion": "Require complexity justifications and web cross-check any current implementation-specific claim.",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_simple_ml_video_script",
+      "query": "Draft a current video script comparing convolutional, recurrent, and attention-based deep-learning architectures through one practical representation-learning example.",
+      "subjects": ["machine_learning"],
+      "resource_types": ["video_script"],
+      "initial_evidence_sufficient": true,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_ml_video_script",
+          "subject": "machine_learning",
+          "resource_type": "video_script",
+          "required_sources": ["web"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_deep_architecture_contrast",
+          "target_id": "smoke_ml_video_script",
+          "criterion": "Contrast convolutional, recurrent, and attention-based architectures using current, verifiable technical descriptions.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_deep_current_example",
+          "target_id": "smoke_ml_video_script",
+          "criterion": "Use one recent practical example and state its trade-offs without unsupported performance claims.",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_simple_math_mindmap",
+      "query": "Create a mind map that organizes definite and indefinite integrals, integration techniques, applications, sequences, and series.",
+      "subjects": ["math"],
+      "resource_types": ["mindmap"],
+      "initial_evidence_sufficient": false,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_math_mindmap",
+          "subject": "math",
+          "resource_type": "mindmap",
+          "required_sources": ["parent_child"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_integral_structure",
+          "target_id": "smoke_math_mindmap",
+          "criterion": "Separate definite and indefinite integrals and connect major techniques to valid use conditions.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_integral_dependencies",
+          "target_id": "smoke_math_mindmap",
+          "criterion": "Show how applications, sequences, and series depend on differential-calculus foundations.",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_multi_resource_python_ml",
+      "query": "Create Python code practice and a companion animation for data preparation, model training, evaluation, and an end-to-end machine-learning workflow.",
+      "subjects": ["python"],
+      "resource_types": ["code_practice", "video_animation"],
+      "initial_evidence_sufficient": true,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_python_ml_code",
+          "subject": "python",
+          "resource_type": "code_practice",
+          "required_sources": ["parent_child", "web"]
+        },
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_python_ml_animation",
+          "subject": "python",
+          "resource_type": "video_animation",
+          "required_sources": ["parent_child"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_python_ml_code_pipeline",
+          "target_id": "smoke_python_ml_code",
+          "criterion": "Provide runnable data-preparation, training, and evaluation code with current API claims verified and leakage prevented.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_python_ml_animation_flow",
+          "target_id": "smoke_python_ml_animation",
+          "criterion": "Visualize the end-to-end flow while preserving the distinction between training and test data.",
+          "weight": 0.8
+        }
+      ]
+    },
+    {
+      "schema_version": "evidence_evaluation_case_spec_v1",
+      "case_id": "smoke_multi_subject_data_ml",
+      "query": "Produce a big-data study plan and a machine-learning review document that connect stream processing, incremental model updates, concept drift, and model evaluation.",
+      "subjects": ["big_data", "machine_learning"],
+      "resource_types": ["study_plan", "review_doc"],
+      "initial_evidence_sufficient": false,
+      "targets": [
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_data_stream_plan",
+          "subject": "big_data",
+          "resource_type": "study_plan",
+          "required_sources": ["parent_child", "web"]
+        },
+        {
+          "schema_version": "evidence_resource_subject_target_v1",
+          "target_id": "smoke_ml_stream_review",
+          "subject": "machine_learning",
+          "resource_type": "review_doc",
+          "required_sources": ["parent_child"]
+        }
+      ],
+      "requirements": [
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_data_stream_plan_sequence",
+          "target_id": "smoke_data_stream_plan",
+          "criterion": "Sequence stream-processing, drift, and online-evaluation exercises and verify current implementation practice.",
+          "weight": 1.0
+        },
+        {
+          "schema_version": "evidence_requirement_gold_v1",
+          "requirement_id": "smoke_ml_stream_review_context",
+          "target_id": "smoke_ml_stream_review",
+          "criterion": "Explain model-selection and evaluation foundations needed to reason about incremental learners under drift.",
+          "weight": 0.9
+        }
+      ]
+    }
+  ]
+}

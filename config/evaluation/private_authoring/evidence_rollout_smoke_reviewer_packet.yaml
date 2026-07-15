@@ -1,0 +1,107 @@
+schema_version: evidence_rollout_reviewer_packet_draft_v1
+packet_status: draft_unapproved
+smoke_only: true
+activation_eligible: false
+sealing_allowed: false
+human_semantic_review_status: not_started
+first_domain_review_status: pending
+second_independent_review_status: pending
+dataset_path: config/evaluation/private_authoring/evidence_rollout_smoke_dataset.authoring.json
+dataset_id: evidence_rollout_smoke_authoring_20260715_draft_v1
+knowledge_graph:
+  config_path: config/learning_guidance.yaml
+  artifact_path: config/learning_guidance/knowledge_graph_v1.yaml
+  data_version: 2026.07.15-source-groups-v1
+  artifact_fingerprint: c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5
+  binding_status: sidecar_only_blocked
+route_contract:
+  parent_child_production_source_type: local_rag
+  web_production_source_type: web
+statistics:
+  case_count: 6
+  simple_case_count: 4
+  multi_case_count: 2
+  multi_resource_case_count: 2
+  multi_subject_case_count: 1
+  initially_sufficient_case_count: 3
+  initially_insufficient_case_count: 3
+  target_count: 8
+  requirement_count: 12
+  requirement_weight_total: 10.5
+  subject_count: 5
+  resource_type_count: 7
+  target_route_counts:
+    parent_child_only: 4
+    parent_child_and_web: 3
+    web_only: 1
+smoke_rationale: >-
+  Six cases are a deadline-bound contract smoke suite. Four simple cases, one
+  single-subject multi-resource case, and one multi-subject multi-resource case
+  cover all five production subjects, all seven generated resource types,
+  parent_child-only, web-only, and combined routes, plus balanced proposed
+  initial sufficiency labels. Six cases cannot resolve the production 0.05 rate
+  gates and must never produce an activation pass.
+seal_blockers:
+  - schema_v1_missing_kg_identity_binding
+  - schema_v1_missing_initial_evidence_identity
+  - smoke_case_count_below_activation_gate_resolution
+  - human_domain_review_missing
+  - independent_review_missing
+required_human_actions:
+  - Review every private query, target, route, weighted requirement, and proposed sufficiency label.
+  - Author and fingerprint the exact initial-evidence fixture for every case.
+  - Independently verify every KG topic and ordered catalog resource inventory.
+  - Migrate this smoke draft through schema-v2 before any sealing or live execution.
+case_bindings:
+  - case_id: smoke_simple_big_data_review
+    targets:
+      - target_id: smoke_big_data_review
+        subject_id: big_data
+        topic_id: big_data.distributed_batch_processing
+        catalog_resource_ids: [big_data_data_intensive_text_processing]
+        expected_sources: [parent_child]
+  - case_id: smoke_simple_computer_quiz
+    targets:
+      - target_id: smoke_computer_quiz
+        subject_id: computer
+        topic_id: computer.data_structures
+        catalog_resource_ids: [computer_open_data_structures]
+        expected_sources: [parent_child, web]
+  - case_id: smoke_simple_ml_video_script
+    targets:
+      - target_id: smoke_ml_video_script
+        subject_id: machine_learning
+        topic_id: machine_learning.deep_learning
+        catalog_resource_ids: [machine_learning_deep_learning]
+        expected_sources: [web]
+  - case_id: smoke_simple_math_mindmap
+    targets:
+      - target_id: smoke_math_mindmap
+        subject_id: math
+        topic_id: math.integral_calculus
+        catalog_resource_ids: [calculus_clp2]
+        expected_sources: [parent_child]
+  - case_id: smoke_multi_resource_python_ml
+    targets:
+      - target_id: smoke_python_ml_code
+        subject_id: python
+        topic_id: python.applied_machine_learning
+        catalog_resource_ids: [python_machine_learning_sangyuan]
+        expected_sources: [parent_child, web]
+      - target_id: smoke_python_ml_animation
+        subject_id: python
+        topic_id: python.applied_machine_learning
+        catalog_resource_ids: [python_machine_learning_sangyuan]
+        expected_sources: [parent_child]
+  - case_id: smoke_multi_subject_data_ml
+    targets:
+      - target_id: smoke_data_stream_plan
+        subject_id: big_data
+        topic_id: big_data.online_machine_learning
+        catalog_resource_ids: [big_data_online_machine_learning_streams]
+        expected_sources: [parent_child, web]
+      - target_id: smoke_ml_stream_review
+        subject_id: machine_learning
+        topic_id: machine_learning.classical_methods
+        catalog_resource_ids: [machine_learning_zhou_zhihua]
+        expected_sources: [parent_child]
