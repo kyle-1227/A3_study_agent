@@ -1809,6 +1809,7 @@ def make_requirement_evidence_judge_node(
                         {
                             "requirement_id": task.requirement_id,
                             "source_type": task.source_type,
+                            "query": task.query,
                             "query_fingerprint": task.query_fingerprint,
                         }
                         for task in attempted_tasks

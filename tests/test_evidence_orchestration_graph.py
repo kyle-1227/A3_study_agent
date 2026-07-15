@@ -675,6 +675,65 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
     )
 
 
+def test_requirement_evidence_judge_receives_attempted_query_text(monkeypatch):
+    runtime = _runtime()
+    batch = _quiz_draft_batch(runtime)
+
+    async def fake_planner(**_kwargs):
+        return SimpleNamespace(parsed=batch)
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+    base_state = _planner_state()
+    planned = asyncio.run(
+        orchestration.make_resource_evidence_planner_node(runtime)(base_state)
+    )
+    attempted_tasks = [
+        RetrievalTask.model_validate(item) for item in planned["evidence_current_tasks"]
+    ]
+    missing = _missing_coverage(
+        planned["evidence_requirements"],
+        round_index=0,
+        suffix="focused repair",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_judge(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(parsed=missing)
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_judge)
+    outcomes = [
+        {
+            "round_index": 0,
+            "task_id": task.task_id,
+            "requirement_id": task.requirement_id,
+            "source_type": task.source_type,
+            "status": "empty",
+            "candidate_count": 0,
+        }
+        for task in attempted_tasks
+    ]
+    asyncio.run(
+        orchestration.make_requirement_evidence_judge_node(runtime)(
+            {
+                **base_state,
+                **planned,
+                "evidence_candidate_records": [],
+                "evidence_source_outcomes": outcomes,
+            }
+        )
+    )
+
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    prompt = messages[1].content
+    for task in attempted_tasks:
+        assert f'"requirement_id": "{task.requirement_id}"' in prompt
+        assert f'"source_type": "{task.source_type}"' in prompt
+        assert f'"query": "{task.query}"' in prompt
+        assert f'"query_fingerprint": "{task.query_fingerprint}"' in prompt
+
+
 def test_evidence_planner_injects_only_provider_safe_learner_path(monkeypatch):
     runtime = _runtime()
     batch = _quiz_draft_batch(runtime)

@@ -26,8 +26,8 @@ Set suggested_local_query and suggested_web_query with this exact matrix:
 - partial or missing with local_and_web: both fields must be non-empty.
 - partial or missing with local_then_web_on_gap: inspect attempted_queries_json for the same requirement_id. If no local_rag attempt exists, suggested_local_query must be non-empty and suggested_web_query must be the empty string. If a local_rag attempt exists, suggested_local_query must be the empty string and suggested_web_query must be non-empty. Never populate both fields for local_then_web_on_gap.
 
-Every non-empty suggested query must be new and targeted. Do not repeat a prior source-bound query. Determine the local_then_web_on_gap stage only from attempted_queries_json, not from candidate source types.
+Every non-empty suggested query must be new, targeted, and materially more specific than every prior query with the same requirement_id and source_type. Compare against the explicit query text in attempted_queries_json and produce different query text; whitespace-only or punctuation-only changes do not satisfy this rule. Determine the local_then_web_on_gap stage only from attempted_queries_json, not from candidate source types.
 
-Previously attempted query fingerprints and source bindings:
+Previously attempted source-bound queries with exact query text and fingerprints:
 {attempted_queries_json}
 ]]></prompt>

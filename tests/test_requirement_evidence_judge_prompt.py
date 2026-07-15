@@ -12,6 +12,9 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     assert "partial or missing with local_then_web_on_gap" in prompt
     assert "Never populate both fields for local_then_web_on_gap" in prompt
     assert "Determine the local_then_web_on_gap stage only" in prompt
+    assert "same requirement_id and source_type" in prompt
+    assert "explicit query text in attempted_queries_json" in prompt
+    assert "whitespace-only or punctuation-only changes" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
