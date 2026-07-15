@@ -1,0 +1,261 @@
+schema_version: knowledge_graph_v1
+data_version: 2026.07.15-source-groups-v1
+subjects:
+  - subject_id: big_data
+    title: Big Data
+    topics:
+      - topic_id: big_data.foundations
+        title: Big-data foundations
+        difficulty: 0.2
+        estimated_hours: 6.0
+        prerequisite_topic_ids: []
+        knowledge_points:
+          - Big-data characteristics and system architecture
+          - Distributed storage and computation foundations
+          - Batch and stream processing use cases
+        resources:
+          - resource_id: big_data_intro_linziyu
+            resource_type: review_doc
+            title: 大数据导论（林子雨）
+      - topic_id: big_data.distributed_batch_processing
+        title: Distributed batch processing
+        difficulty: 0.5
+        estimated_hours: 12.0
+        prerequisite_topic_ids:
+          - big_data.foundations
+        knowledge_points:
+          - MapReduce programming model
+          - Hadoop distributed execution
+          - Spark transformations and actions
+        resources:
+          - resource_id: big_data_data_intensive_text_processing
+            resource_type: review_doc
+            title: Data-Intensive Text Processing with MapReduce
+          - resource_id: big_data_hadoop_spark_practice
+            resource_type: review_doc
+            title: Hadoop 与 Spark 大数据开发实战
+      - topic_id: big_data.storage_systems
+        title: Storage systems for big data
+        difficulty: 0.55
+        estimated_hours: 8.0
+        prerequisite_topic_ids:
+          - big_data.foundations
+        knowledge_points:
+          - Distributed file systems
+          - NoSQL storage models
+          - Storage scalability and consistency trade-offs
+        resources:
+          - resource_id: big_data_storage_solutions
+            resource_type: review_doc
+            title: Storage Solutions for Big Data Systems
+      - topic_id: big_data.data_engineering
+        title: Data-engineering pipelines
+        difficulty: 0.65
+        estimated_hours: 16.0
+        prerequisite_topic_ids:
+          - big_data.distributed_batch_processing
+          - big_data.storage_systems
+        knowledge_points:
+          - Workflow orchestration
+          - Batch and streaming pipelines
+          - Data warehouses and analytics engineering
+        resources:
+          - resource_id: big_data_data_engineering_zoomcamp
+            resource_type: review_doc
+            title: Data Engineering Zoomcamp
+      - topic_id: big_data.online_machine_learning
+        title: Online machine learning for data streams
+        difficulty: 0.8
+        estimated_hours: 10.0
+        prerequisite_topic_ids:
+          - big_data.distributed_batch_processing
+        knowledge_points:
+          - Incremental model updates
+          - Concept drift in data streams
+          - Evaluation of online learners
+        resources:
+          - resource_id: big_data_online_machine_learning_streams
+            resource_type: review_doc
+            title: Online Machine Learning in Big Data Streams
+  - subject_id: computer
+    title: Computer Science
+    topics:
+      - topic_id: computer.foundations
+        title: Computer-science foundations
+        difficulty: 0.2
+        estimated_hours: 8.0
+        prerequisite_topic_ids: []
+        knowledge_points:
+          - Computer organization and abstraction
+          - Algorithms and program execution
+          - Core computer-science vocabulary
+        resources:
+          - resource_id: computer_foundations
+            resource_type: review_doc
+            title: 计算机学科基础知识
+      - topic_id: computer.data_structures
+        title: Data structures and algorithms
+        difficulty: 0.5
+        estimated_hours: 14.0
+        prerequisite_topic_ids:
+          - computer.foundations
+        knowledge_points:
+          - Lists, stacks, queues, and trees
+          - Hashing and graph representations
+          - Complexity analysis
+        resources:
+          - resource_id: computer_open_data_structures
+            resource_type: review_doc
+            title: Open Data Structures
+      - topic_id: computer.operating_systems
+        title: Operating systems
+        difficulty: 0.65
+        estimated_hours: 18.0
+        prerequisite_topic_ids:
+          - computer.foundations
+        knowledge_points:
+          - Processes, scheduling, and concurrency
+          - Virtual memory and paging
+          - File systems, journaling, and distribution
+        resources:
+          - resource_id: computer_operating_systems_ostep
+            resource_type: review_doc
+            title: "Operating Systems: Three Easy Pieces"
+  - subject_id: machine_learning
+    title: Machine Learning
+    topics:
+      - topic_id: machine_learning.mathematical_foundations
+        title: Mathematical foundations for machine learning
+        difficulty: 0.45
+        estimated_hours: 16.0
+        prerequisite_topic_ids: []
+        knowledge_points:
+          - Linear algebra for models
+          - Multivariate calculus and optimization
+          - Probability and statistics
+        resources:
+          - resource_id: machine_learning_mathematics
+            resource_type: review_doc
+            title: Mathematics for Machine Learning
+      - topic_id: machine_learning.classical_methods
+        title: Classical machine-learning methods
+        difficulty: 0.65
+        estimated_hours: 20.0
+        prerequisite_topic_ids:
+          - machine_learning.mathematical_foundations
+        knowledge_points:
+          - Supervised and unsupervised learning
+          - Model selection and evaluation
+          - Trees, margin methods, and ensembles
+        resources:
+          - resource_id: machine_learning_zhou_zhihua
+            resource_type: review_doc
+            title: 周志华《机器学习》
+      - topic_id: machine_learning.deep_learning
+        title: Deep learning
+        difficulty: 0.8
+        estimated_hours: 24.0
+        prerequisite_topic_ids:
+          - machine_learning.classical_methods
+        knowledge_points:
+          - Neural-network optimization
+          - Convolutional and recurrent architectures
+          - Attention and representation learning
+        resources:
+          - resource_id: machine_learning_deep_learning
+            resource_type: review_doc
+            title: Dive into Deep Learning（中文版）
+  - subject_id: math
+    title: Mathematics
+    topics:
+      - topic_id: math.calculus_foundations
+        title: Calculus foundations
+        difficulty: 0.35
+        estimated_hours: 12.0
+        prerequisite_topic_ids: []
+        knowledge_points:
+          - Functions, limits, and continuity
+          - Coordinate geometry and rates of change
+          - Mathematical reasoning for calculus
+        resources:
+          - resource_id: calculus_tongji_series
+            resource_type: review_doc
+            title: 同济大学《高等数学》系列
+          - resource_id: calculus_openstax
+            resource_type: review_doc
+            title: OpenStax Calculus Volume 1
+      - topic_id: math.differential_calculus
+        title: Differential calculus
+        difficulty: 0.55
+        estimated_hours: 16.0
+        prerequisite_topic_ids:
+          - math.calculus_foundations
+        knowledge_points:
+          - Derivative rules and interpretations
+          - Applications of derivatives
+          - Series and approximation
+        resources:
+          - resource_id: calculus_clp1
+            resource_type: review_doc
+            title: CLP-1 Differential Calculus
+      - topic_id: math.integral_calculus
+        title: Integral calculus
+        difficulty: 0.65
+        estimated_hours: 18.0
+        prerequisite_topic_ids:
+          - math.differential_calculus
+        knowledge_points:
+          - Definite and indefinite integrals
+          - Techniques and applications of integration
+          - Sequences and series
+        resources:
+          - resource_id: calculus_clp2
+            resource_type: review_doc
+            title: CLP-2 Integral Calculus
+  - subject_id: python
+    title: Python Programming
+    topics:
+      - topic_id: python.fundamentals
+        title: Python fundamentals
+        difficulty: 0.2
+        estimated_hours: 10.0
+        prerequisite_topic_ids: []
+        knowledge_points:
+          - Values, variables, and control flow
+          - Functions and modules
+          - Core collections and file input/output
+        resources:
+          - resource_id: python_basics_real_python
+            resource_type: review_doc
+            title: "Python Basics: A Practical Introduction to Python 3"
+          - resource_id: python_for_everybody
+            resource_type: review_doc
+            title: Python for Everybody
+      - topic_id: python.computational_thinking
+        title: Computational thinking with Python
+        difficulty: 0.45
+        estimated_hours: 12.0
+        prerequisite_topic_ids:
+          - python.fundamentals
+        knowledge_points:
+          - Program decomposition and abstraction
+          - Object-oriented programming
+          - Testing and debugging strategies
+        resources:
+          - resource_id: python_think_python
+            resource_type: review_doc
+            title: Think Python, 2nd Edition
+      - topic_id: python.applied_machine_learning
+        title: Applied machine learning with Python
+        difficulty: 0.7
+        estimated_hours: 18.0
+        prerequisite_topic_ids:
+          - python.fundamentals
+        knowledge_points:
+          - Data preparation in Python
+          - Training and evaluating models
+          - End-to-end machine-learning practice
+        resources:
+          - resource_id: python_machine_learning_sangyuan
+            resource_type: review_doc
+            title: Python 机器学习入门与实战（桑园）

@@ -138,3 +138,48 @@ active old-symbol scans passed. The final backend suite passed with
 `2274 passed, 6 skipped`; frontend Vitest (69 tests), typecheck, ESLint, and
 production build also passed. This cleanup does not activate the candidate or
 change any production blocker above.
+
+## 2026-07-15 production LearningGuidance KG artifact
+
+`config/learning_guidance.yaml` now references the versioned artifact
+`config/learning_guidance/knowledge_graph_v1.yaml`. The former
+`data/knowledge_graph.yaml` path did not exist and blocked strict
+LearningGuidance runtime composition before profile or memory stores were
+opened. No loader, schema, provider configuration, fallback, graph selection,
+or RAG rollout behavior changed.
+
+The artifact preserves every unique source-group ID from
+`config/rag/source_groups.json` as its catalog `resource_id`, so the curated
+recommendation catalog remains directly traceable to the RAG source manifest.
+Duplicate path spellings in the manifest do not create duplicate resources.
+The reviewed inventory is 5 subjects, 17 prerequisite-first topics, and 20
+unique source-backed resources:
+
+| Subject | Topics | Unique source groups |
+| --- | ---: | ---: |
+| `big_data` | 5 | 6 |
+| `computer` | 3 | 3 |
+| `machine_learning` | 3 | 3 |
+| `math` | 3 | 4 |
+| `python` | 3 | 4 |
+
+All entries use the existing `review_doc` resource category because the source
+groups represent text learning materials. This is an explicit catalog
+classification, not a generated substitute or failure fallback. The canonical
+artifact identity is data version `2026.07.15-source-groups-v1` and SHA-256
+fingerprint
+`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`.
+
+`tests/test_learning_guidance_production_artifact.py` locks the reviewed
+fingerprint, five-subject order, global ID uniqueness, topological order,
+source-group inventory equality and subject placement, checked-in path
+resolution, and complete runtime composition with explicit temporary store
+paths. `tests/test_learning_guidance_config.py` also requires the configured
+artifact path to exist.
+
+Verification: 31 focused config/KG/artifact/factory tests passed; compileall,
+scoped Ruff check/format, all 3 import-linter contracts, scoped Semgrep (6
+rules, 2 files, 0 findings), and `git diff --check` passed. No provider call,
+secret, database service, or rollout activation was required. This resolves
+only the LearningGuidance KG-file blocker; the production Parent-Child index,
+gold evaluation, provider E2E, activation, and served-graph gates remain closed.

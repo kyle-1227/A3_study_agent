@@ -52,7 +52,10 @@ def test_checked_in_learning_guidance_policy_is_strict_and_complete() -> None:
         config.recommendation_engine_version
         == "learning_guidance_recommendation_engine_v1"
     )
-    assert config.knowledge_graph_path == Path("data/knowledge_graph.yaml")
+    assert config.knowledge_graph_path == Path(
+        "config/learning_guidance/knowledge_graph_v1.yaml"
+    )
+    assert (PROJECT_ROOT / config.knowledge_graph_path).is_file()
     assert (
         tuple(
             binding.resource_type

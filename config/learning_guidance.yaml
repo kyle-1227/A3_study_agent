@@ -3,7 +3,7 @@ profile_adapter_version: learning_guidance_profile_adapter_v1
 history_adapter_version: learning_guidance_history_adapter_v1
 path_engine_version: learning_guidance_path_engine_v1
 recommendation_engine_version: learning_guidance_recommendation_engine_v1
-knowledge_graph_path: data/knowledge_graph.yaml
+knowledge_graph_path: config/learning_guidance/knowledge_graph_v1.yaml
 provider_projection_max_steps: 50
 provider_projection_max_chars: 65536
 history_limit: 200
