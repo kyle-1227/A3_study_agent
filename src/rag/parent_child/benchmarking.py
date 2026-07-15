@@ -241,6 +241,14 @@ def _latency_summary(values: tuple[float, ...]) -> RetrievalLatencySummary:
     )
 
 
+def _project_section_path(
+    section_path: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """Map the explicit domain empty path into the evaluation no-section state."""
+
+    return section_path if section_path else None
+
+
 def _project_baseline(
     *,
     query: GoldQuery,
@@ -261,7 +269,7 @@ def _project_baseline(
             page_end=hit.document.metadata.page_end,
             start_char=hit.document.metadata.start_char,
             end_char=hit.document.metadata.end_char,
-            section_path=hit.document.metadata.section_path,
+            section_path=_project_section_path(hit.document.metadata.section_path),
         )
         for hit in result.hits
     )
@@ -313,7 +321,7 @@ def _project_candidate(
             page_end=hit.document.metadata.page_end,
             start_char=hit.document.metadata.start_char,
             end_char=hit.document.metadata.end_char,
-            section_path=hit.document.metadata.section_path,
+            section_path=_project_section_path(hit.document.metadata.section_path),
         )
         for hit in result.ranked_children
     )

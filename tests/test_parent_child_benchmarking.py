@@ -73,7 +73,9 @@ def _dataset() -> GoldDataset:
     )
 
 
-def _flat_result() -> FlatBaselineRetrievalResult:
+def _flat_result(
+    *, section_path: tuple[str, ...] = ("Alpha",)
+) -> FlatBaselineRetrievalResult:
     content = "alpha"
     chunk_id = make_flat_chunk_id(
         doc_id=DOC_ID,
@@ -100,7 +102,7 @@ def _flat_result() -> FlatBaselineRetrievalResult:
             source_relpath="math/source.md",
             source_file_sha1=SOURCE_SHA1,
             doc_type="markdown",
-            section_path=("Alpha",),
+            section_path=section_path,
             pagination_kind="logical",
             page_start=1,
             page_end=1,
@@ -115,8 +117,11 @@ def _flat_result() -> FlatBaselineRetrievalResult:
     )
 
 
-def _candidate_result() -> HybridRetrievalResult:
+def _candidate_result(
+    *, section_path: tuple[str, ...] = ("Alpha",)
+) -> HybridRetrievalResult:
     content = "alpha"
+    section_title = section_path[-1] if section_path else ""
     parent = ParentRecord(
         schema_version="parent_record_v1",
         parent_id="parent_" + "4" * 40,
@@ -132,8 +137,8 @@ def _candidate_result() -> HybridRetrievalResult:
         extraction_method="fixture_v1",
         cleaning_policy_id="clean_v1",
         section_id="section_" + "5" * 40,
-        section_title="Alpha",
-        section_path=("Alpha",),
+        section_title=section_title,
+        section_path=section_path,
         pagination_kind="logical",
         page_start=1,
         page_end=1,
@@ -166,8 +171,8 @@ def _candidate_result() -> HybridRetrievalResult:
             source_file_sha1=SOURCE_SHA1,
             doc_type="markdown",
             section_id=parent.section_id,
-            section_title="Alpha",
-            section_path=("Alpha",),
+            section_title=section_title,
+            section_path=section_path,
             pagination_kind="logical",
             page_start=1,
             page_end=1,
@@ -287,6 +292,23 @@ def test_paired_benchmark_binds_same_gold_and_projects_policy_independent_spans(
     assert execution.candidate_input.results[0].hits[0].start_char == 0
     assert execution.candidate_input.results[0].hits[0].end_char == 5
     assert len(execution.diagnostics) == 2
+
+
+def test_paired_benchmark_projects_explicit_empty_section_paths_as_none() -> None:
+    dataset = _dataset()
+    baseline, candidate = _bindings()
+
+    execution = run_paired_benchmark(
+        dataset=dataset,
+        baseline_binding=baseline,
+        candidate_binding=candidate,
+        baseline_retrieve=lambda query: _flat_result(section_path=()),
+        candidate_retrieve=lambda query: _candidate_result(section_path=()),
+        token_counter=len,
+    )
+
+    assert execution.baseline_input.results[0].hits[0].section_path is None
+    assert execution.candidate_input.results[0].hits[0].section_path is None
 
 
 def test_candidate_failure_never_returns_baseline_success() -> None:
