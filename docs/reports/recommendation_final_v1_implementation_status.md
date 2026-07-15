@@ -63,8 +63,8 @@ The isolated contract slice passed:
   Final V3 contract tests;
 - `python -m compileall -q src tests app.py`;
 - Ruff check and format for every touched Python file;
-- scoped mypy with `--follow-imports=skip` for the new public module and its
-  dedicated test: 2 files, 0 issues;
+- dependency-following scoped mypy for the new public module and its dedicated
+  test: 2 files, 0 issues;
 - import-linter with the pending D1-A configuration: 331 files, 2,008
   dependencies, 3 contracts kept and 0 broken;
 - the repository no-fallback/no-hardcode Semgrep rules under isolated Semgrep
@@ -79,17 +79,16 @@ name `A3_study_agent` while this isolated worktree is named
 `A3_study_agent-d8`. Pending cleanup commit `544566a` contains the already
 verified cross-worktree correction. No D8 runtime or contract test failed.
 
-A normal dependency-following mypy run is not green on this baseline: it reports
-two pre-existing `arg-type` findings in `src/learning_guidance/contracts.py`
-where `ValidationInfo.field_name` is typed as `str | None` but is passed to a
-helper requiring `str`. This D8 slice does not modify that dependency, and the
-failure is recorded rather than claimed as a pass.
+The D5-A integration also closes the two prior `arg-type` gaps in
+`src/learning_guidance/contracts.py`: validators now reject an absent
+`ValidationInfo.field_name` explicitly before calling helpers that require a
+string. No cast, default field name, or validation bypass was introduced.
 
-The current baseline cannot yet produce `no_eligible_candidates` through
-`ResourceRecommendationOutputV1`. The explicit-final reason union intentionally
-does not advertise that state in this commit. If the new-RAG source contract
-adds it, the source schema, node behavior, final union, and tests must change in
-one integration commit.
+The integrated D5-A source contract and recommendation engine can produce
+`no_eligible_candidates`. The explicit-final reason union accepts that state and
+derives a fixed public summary for it. The automatic-only
+`generated_resources_unavailable` reason remains excluded and is covered by a
+negative test.
 
 Whole-repository Ruff remains historical debt on this baseline: 58 lint
 findings and 61 files requiring formatting. None is in the touched D8 Python

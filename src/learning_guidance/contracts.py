@@ -254,10 +254,13 @@ class LearnerPathStepV1(_StrictContract):
         value: tuple[str, ...],
         info: ValidationInfo,
     ) -> tuple[str, ...]:
+        field_name = info.field_name
+        if field_name is None:
+            raise ValueError("identifier collection validator requires a field name")
         return _validate_identifier_tuple(
             value,
-            field_name=info.field_name,
-            allow_empty=info.field_name == "recommended_resource_types",
+            field_name=field_name,
+            allow_empty=field_name == "recommended_resource_types",
         )
 
 
@@ -481,10 +484,13 @@ class ResourceRecommendationItemV1(_StrictContract):
         value: tuple[str, ...],
         info: ValidationInfo,
     ) -> tuple[str, ...]:
+        field_name = info.field_name
+        if field_name is None:
+            raise ValueError("reference collection validator requires a field name")
         return _validate_identifier_tuple(
             value,
-            field_name=info.field_name,
-            allow_empty=info.field_name == "source_resource_ids",
+            field_name=field_name,
+            allow_empty=field_name == "source_resource_ids",
         )
 
 

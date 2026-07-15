@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from src.learning_guidance.contracts import (
+    RecommendationMode,
+    RecommendationUnavailableReason,
     ResourceRecommendationBatchV1,
     ResourceRecommendationItemV1,
     ResourceRecommendationOutputV1,
@@ -27,6 +29,7 @@ from src.learning_guidance.recommendation_final import (
     build_recommendation_final_v1,
     validate_recommendation_final_v1,
 )
+from src.resource_contracts import ResourceType
 
 
 REQUEST_ID = "00000000-0000-4000-8000-000000000001"
@@ -102,10 +105,10 @@ def _knowledge_graph(*, include_unrelated_wide_entry: bool = False) -> Knowledge
 def _item(
     *,
     resource_id: str = "python.loops.quiz",
-    resource_type: str = "quiz",
+    resource_type: ResourceType = "quiz",
     topic_id: str = "python.loops",
     title: str = "Python loops quiz",
-    mode: str = "explicit_request",
+    mode: RecommendationMode = "explicit_request",
     reason: str = "The learner needs more practice with loops.",
 ) -> ResourceRecommendationItemV1:
     return ResourceRecommendationItemV1(
@@ -141,10 +144,10 @@ def _item(
 def _available_output(
     *,
     resource_id: str = "python.loops.quiz",
-    resource_type: str = "quiz",
+    resource_type: ResourceType = "quiz",
     topic_id: str = "python.loops",
     title: str = "Python loops quiz",
-    mode: str = "explicit_request",
+    mode: RecommendationMode = "explicit_request",
     request_id: str = REQUEST_ID,
     reason: str = "The learner needs more practice with loops.",
 ) -> ResourceRecommendationOutputV1:
@@ -190,7 +193,7 @@ def _available_output(
 
 def _unavailable_output(
     *,
-    reason: str = "profile_unavailable",
+    reason: RecommendationUnavailableReason = "profile_unavailable",
     user_id: str | None = USER_ID,
     subject: str | None = "python",
 ) -> ResourceRecommendationOutputV1:
@@ -287,6 +290,22 @@ def test_unavailable_final_is_authoritative_without_fake_candidates() -> None:
     )
     assert missing_user.user_id is None
     assert missing_user.unavailable_reason == "missing_user_id"
+
+    no_candidates = build_recommendation_final_v1(
+        thread_id=THREAD_ID,
+        request_id=REQUEST_ID,
+        output=_unavailable_output(reason="no_eligible_candidates"),
+        knowledge_graph=_knowledge_graph(),
+        expected_user_id=USER_ID,
+        expected_runtime_fingerprint=RUNTIME_FINGERPRINT,
+    )
+    assert no_candidates.unavailable_reason == "no_eligible_candidates"
+    assert no_candidates.summary == (
+        "Personalized recommendations are unavailable because no catalog "
+        "candidate met the strict evidence and score thresholds."
+    )
+    assert no_candidates.recommendations == ()
+    assert no_candidates.candidate_snapshot is None
 
 
 def test_builder_rejects_non_explicit_mode_and_request_drift() -> None:

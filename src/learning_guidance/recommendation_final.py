@@ -35,6 +35,7 @@ ExplicitRecommendationUnavailableReason: TypeAlias = Literal[
     "missing_subject",
     "profile_unavailable",
     "history_unavailable",
+    "no_eligible_candidates",
     "unsupported_subject_scope",
 ]
 
@@ -50,6 +51,10 @@ _UNAVAILABLE_SUMMARIES: dict[ExplicitRecommendationUnavailableReason, str] = {
     "history_unavailable": (
         "Personalized recommendations are unavailable because learner history "
         "is unavailable."
+    ),
+    "no_eligible_candidates": (
+        "Personalized recommendations are unavailable because no catalog "
+        "candidate met the strict evidence and score thresholds."
     ),
     "unsupported_subject_scope": (
         "Personalized recommendations do not support the requested subject scope."
