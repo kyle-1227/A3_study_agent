@@ -14,6 +14,8 @@ from src.config import get_setting
 
 logger = logging.getLogger(__name__)
 
+_MAX_GRAPH_RECURSION_LIMIT = 256
+
 
 def get_db_uri() -> str | None:
     """Read the PostgreSQL connection URI from environment.
@@ -26,7 +28,7 @@ def get_db_uri() -> str | None:
     """
     uri = os.getenv("DB_URI")
     if uri and uri.startswith("postgresql+"):
-        uri = "postgresql" + uri[uri.index("://"):]
+        uri = "postgresql" + uri[uri.index("://") :]
     return uri
 
 
@@ -51,6 +53,22 @@ def checkpointer_type() -> str:
     return str(value or "memory").strip().lower()
 
 
+def graph_recursion_limit() -> int:
+    """Return the explicit bounded LangGraph superstep ceiling."""
+
+    value = get_setting("graph.execution_recursion_limit")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > _MAX_GRAPH_RECURSION_LIMIT
+    ):
+        raise ValueError(
+            "graph.execution_recursion_limit must be an integer between 1 and 256"
+        )
+    return value
+
+
 def make_thread_config(thread_id: str | None = None) -> dict:
     """Build the LangGraph config dict with a thread_id.
 
@@ -58,8 +76,11 @@ def make_thread_config(thread_id: str | None = None) -> dict:
         thread_id: An explicit session identifier. If None, a new UUID is generated.
 
     Returns:
-        Config dict in the format ``{"configurable": {"thread_id": "..."}}``.
+        Config dict containing the thread identity and explicit recursion limit.
     """
     if thread_id is None:
         thread_id = str(uuid.uuid4())
-    return {"configurable": {"thread_id": thread_id}}
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": graph_recursion_limit(),
+    }

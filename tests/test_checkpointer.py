@@ -104,6 +104,21 @@ class TestCheckpointerModule:
         config = make_thread_config("test")
         assert "configurable" in config
         assert "thread_id" in config["configurable"]
+        assert config["recursion_limit"] == 96
+
+    @pytest.mark.parametrize("value", [None, True, 0, 257, "96"])
+    def test_graph_recursion_limit_rejects_missing_or_invalid_values(
+        self,
+        value,
+    ):
+        from src.database import checkpointer as checkpointer_module
+
+        with patch.object(checkpointer_module, "get_setting", return_value=value):
+            with pytest.raises(
+                ValueError,
+                match="graph.execution_recursion_limit",
+            ):
+                checkpointer_module.graph_recursion_limit()
 
 
 class TestAppLifespanCheckpointer:

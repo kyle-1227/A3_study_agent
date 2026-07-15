@@ -88,6 +88,9 @@ checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
 
+graph:
+  execution_recursion_limit: 96         # Explicit bounded superstep ceiling for the served graph
+
 server:
   readiness_db_timeout_seconds: 3
   reload:
