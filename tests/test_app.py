@@ -342,9 +342,13 @@ class TestDevMemoryClear:
                 return_value=helper_result,
             ),
             patch("app.checkpointer_enabled", return_value=False),
+            patch.object(app.state, "graph", object(), create=True),
         ):
-            with TestClient(app) as client:
+            client = TestClient(app)
+            try:
                 response = client.post("/dev/threads/thread-1/memory/clear")
+            finally:
+                client.close()
 
         assert response.status_code == 200
         assert response.json() == helper_result
@@ -468,8 +472,11 @@ class TestMindmapArtifacts:
         artifact_file.write_bytes(b"fake-xmind")
 
         with patch("app.checkpointer_enabled", return_value=False):
-            with TestClient(app) as client:
+            client = TestClient(app)
+            try:
                 response = client.get("/artifacts/mindmaps/a1/mindmap.xmind")
+            finally:
+                client.close()
 
         assert response.status_code == 200
         assert response.content == b"fake-xmind"
@@ -481,8 +488,11 @@ class TestMindmapArtifacts:
         monkeypatch.setenv("MINDMAP_ARTIFACT_DIR", str(tmp_path))
 
         with patch("app.checkpointer_enabled", return_value=False):
-            with TestClient(app) as client:
+            client = TestClient(app)
+            try:
                 response = client.get("/artifacts/mindmaps/a1/missing.xmind")
+            finally:
+                client.close()
 
         assert response.status_code == 404
 

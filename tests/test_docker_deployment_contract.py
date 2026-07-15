@@ -59,6 +59,20 @@ def test_next_build_does_not_ignore_typescript_errors() -> None:
     assert "ignoreBuildErrors" not in config
 
 
+def test_docker_context_excludes_generated_and_local_runtime_assets() -> None:
+    ignored = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+
+    assert {
+        ".mypy_cache",
+        ".pytest_tmp",
+        ".ruff_cache",
+        "artifacts",
+        "frontend/.next",
+        "frontend/node_modules",
+        "indexes/parent_child",
+    } <= ignored
+
+
 def test_environment_example_uses_dedicated_rag_secret_names() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
