@@ -2127,7 +2127,7 @@ class TestSSEInterruptWithEmptyNext:
                 "resource_subnode.end",
                 {
                     "resource_type": "study_plan",
-                    "subnode": "study_plan_profile_gate",
+                    "subnode": "study_plan_profile_gate_main",
                     "status": "interrupted",
                     "error_type": "GraphInterrupt",
                 },

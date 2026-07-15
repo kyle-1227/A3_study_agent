@@ -434,14 +434,6 @@ async def handle_unknown(state: LearningState) -> dict:
     )
 
 
-def route_by_intent(state: LearningState) -> str:
-    """Conditional edge function: route to the appropriate subgraph."""
-    intent = state.get("intent", "academic")
-    if intent not in ("academic", "emotional", "unknown"):
-        intent = "unknown"
-    return intent
-
-
 def route_after_supervisor(state: LearningState) -> str:
     """Route the strict supervisor response contract without phrase heuristics."""
     response_mode = str(state.get("response_mode") or "").strip()

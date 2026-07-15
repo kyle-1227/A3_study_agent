@@ -17,7 +17,6 @@ from src.graph.supervisor import (
     _validate_valid_intents_config,
     handle_unknown,
     route_after_supervisor,
-    route_by_intent,
     supervisor_node,
     validate_supervisor_output,
 )
@@ -577,24 +576,6 @@ class TestSupervisorNode:
             len(expected_types) > 1
         )
         assert result["requested_resource_type"] != "multi_resource"
-
-
-class TestRouteByIntent:
-    def test_routes_academic(self):
-        assert route_by_intent({"intent": "academic"}) == "academic"
-
-    def test_routes_planning_to_unknown(self):
-        """Planning is no longer a valid intent — routes to unknown."""
-        assert route_by_intent({"intent": "planning"}) == "unknown"
-
-    def test_routes_emotional(self):
-        assert route_by_intent({"intent": "emotional"}) == "emotional"
-
-    def test_routes_unknown(self):
-        assert route_by_intent({"intent": "unknown"}) == "unknown"
-
-    def test_missing_intent_defaults_to_academic(self):
-        assert route_by_intent({}) == "academic"
 
 
 class TestRouteAfterSupervisor:

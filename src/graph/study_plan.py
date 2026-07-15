@@ -319,7 +319,7 @@ def _profile_completion_request_payload(
     state: LearningState,
     missing_required_fields: list[dict[str, Any]],
     *,
-    node_name: str = "study_plan_profile_gate",
+    node_name: str,
 ) -> dict[str, Any]:
     field_keys = {str(field["key"]) for field in missing_required_fields}
     fields = [
@@ -1099,15 +1099,6 @@ async def _study_plan_profile_gate(
             }
         ],
     }
-
-
-@traced_node
-async def study_plan_profile_gate(state: LearningState) -> dict:
-    """Backward-compatible internal profile-completion gate."""
-    return await _study_plan_profile_gate(
-        state,
-        node_name="study_plan_profile_gate",
-    )
 
 
 @traced_node

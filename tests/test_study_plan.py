@@ -24,7 +24,6 @@ from src.graph.study_plan import (
     study_plan_emotional_intel,
     study_plan_output,
     study_plan_planner,
-    study_plan_profile_gate,
     study_plan_profile_gate_main,
     study_plan_reviewer_academic,
     validate_study_plan_artifact,
@@ -283,7 +282,7 @@ def test_route_after_study_plan_consensus_rejects_conflicting_verdicts():
 
 
 @pytest.mark.anyio
-async def test_study_plan_profile_gate_interrupts_when_profile_missing():
+async def test_study_plan_profile_gate_main_interrupts_when_profile_missing():
     resume_value = {
         "type": "profile_completion_required",
         "profile_completion": {
@@ -302,7 +301,7 @@ async def test_study_plan_profile_gate_interrupts_when_profile_missing():
         ) as mock_interrupt,
         patch("src.graph.study_plan.emit_a3_trace") as mock_emit_trace,
     ):
-        result = await study_plan_profile_gate(
+        result = await study_plan_profile_gate_main(
             {
                 "request_id": "r1",
                 "thread_id": "t1",
@@ -375,9 +374,9 @@ async def test_study_plan_profile_gate_main_uses_graph_level_node_name():
 
 
 @pytest.mark.anyio
-async def test_study_plan_profile_gate_skips_when_profile_present():
+async def test_study_plan_profile_gate_main_skips_when_profile_present():
     with patch("src.graph.study_plan.interrupt") as mock_interrupt:
-        result = await study_plan_profile_gate(
+        result = await study_plan_profile_gate_main(
             {
                 "learner_profile": {
                     "learning_goal": "Master ML basics",
@@ -407,7 +406,7 @@ async def test_study_plan_profile_summary_does_not_satisfy_required_gate():
     with patch(
         "src.graph.study_plan.interrupt", return_value=resume_value
     ) as mock_interrupt:
-        result = await study_plan_profile_gate(
+        result = await study_plan_profile_gate_main(
             {
                 "profile_summary": "Goal: master ML basics",
                 "thread_id": "t1",
@@ -422,7 +421,7 @@ async def test_study_plan_profile_summary_does_not_satisfy_required_gate():
 @pytest.mark.anyio
 async def test_study_plan_profile_inferred_fields_do_not_overwrite_confirmed():
     with patch("src.graph.study_plan.interrupt") as mock_interrupt:
-        result = await study_plan_profile_gate(
+        result = await study_plan_profile_gate_main(
             {
                 "learning_goal": "ML basics from current request",
                 "learner_profile": {

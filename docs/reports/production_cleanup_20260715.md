@@ -11,6 +11,19 @@ deletion record, not a generated test artifact.
   configuration reference, and no matching dynamic prompt-name producer. The
   active emotional graph loads `emotional_system`; study-plan prompt content is
   constructed in its runtime module.
+- `frontend-dev.pid`: tracked a stale local process identifier and had no
+  repository references.
+- `tmp_debug_gold.py`: root-level diagnostic with no entry point or references;
+  it also embedded one developer workstation path.
+- `scripts/debug_structured_output_provider.py`: unreferenced local probe that
+  loaded `.env` implicitly and printed raw provider output/error bodies.
+- `route_by_intent`: obsolete supervisor router with no graph, registry, route,
+  configuration, or dynamic reference. It also silently mapped a missing intent
+  to academic. The served graph uses the strict `route_after_supervisor`.
+- `study_plan_profile_gate`: backward-compatibility wrapper with no graph,
+  registry, resource-runner, route, configuration, or dynamic reference. The
+  only registered identity is `study_plan_profile_gate_main`; retained behavior
+  tests now exercise that production node directly.
 
 ## Retained files
 
