@@ -415,6 +415,53 @@ class TestSearchQueryRewriter:
             == ""
         )
 
+    def test_duplicate_retrieval_plan_subject_fails_business_validation(self):
+        parsed = _valid_query_rewrite_output()
+        parsed.retrieval_plan.append(
+            RetrievalPlanItem(
+                subject="python",
+                role="application_example",
+                local_retrieval_query="Python function application examples",
+                web_research_seed_query="Python function application tutorial",
+                purpose="Retrieve application examples for the same subject.",
+                relation_to_goal="Apply the function concepts in code.",
+                retrieval_coverage_goals=["application examples"],
+                priority=0.7,
+            )
+        )
+
+        error = validate_search_query_rewrite_output(
+            parsed,
+            memory_use_policy="ignore",
+        )
+
+        assert error == (
+            "retrieval_plan.1.subject duplicates retrieval_plan.0.subject: python"
+        )
+
+    def test_distinct_retrieval_plan_subjects_pass_business_validation(self):
+        parsed = _valid_query_rewrite_output()
+        parsed.retrieval_plan.append(
+            RetrievalPlanItem(
+                subject="machine_learning",
+                role="application_context",
+                local_retrieval_query="Machine learning Python function applications",
+                web_research_seed_query="Machine learning Python implementation tutorial",
+                purpose="Retrieve a distinct application context.",
+                relation_to_goal="Connect Python functions to model implementation.",
+                retrieval_coverage_goals=["model implementation"],
+                priority=0.7,
+            )
+        )
+
+        assert (
+            validate_search_query_rewrite_output(
+                parsed,
+                memory_use_policy="ignore",
+            )
+            == ""
+        )
+
     @patch("src.graph.academic.get_available_subjects_from_data")
     @patch("src.graph.academic.invoke_structured_llm", new_callable=AsyncMock)
     async def test_produces_rag_web_queries_and_plan(

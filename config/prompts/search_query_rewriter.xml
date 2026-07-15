@@ -42,8 +42,9 @@ Rewrite the user request into retrieval inputs for local course retrieval and We
 6. If the user asks for a mindmap, include knowledge structure, core concepts, prerequisites, relationships, and pitfalls.
 7. If the user asks for code or cases, include implementation, example code, project case, workflow, and runtime/task wording.
 8. retrieval_plan subjects must come from available_subjects. If no suitable subject exists, use an empty retrieval_plan.
-9. Each retrieval_plan item should explain the subject role, purpose, relation_to_goal, retrieval_coverage_hint, retrieval_coverage_goals, and priority.
-10. Return only JSON matching the output shape. Do not add Markdown or wrapper text.
+9. retrieval_plan must contain exactly one item per selected subject. Never repeat a subject. If one subject supports multiple roles, goals, or coverage needs, combine them into that subject's single item using role, purpose, relation_to_goal, retrieval_coverage_hint, and retrieval_coverage_goals.
+10. Each retrieval_plan item should explain the subject role, purpose, relation_to_goal, retrieval_coverage_hint, retrieval_coverage_goals, and priority.
+11. Return only JSON matching the output shape. Do not add Markdown or wrapper text.
 
 ## Output Shape
 {

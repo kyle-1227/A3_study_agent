@@ -493,12 +493,23 @@ def validate_search_query_rewrite_output(
     text_quality_error = _validate_query_rewrite_text_quality(parsed)
     if text_quality_error:
         return text_quality_error
+    seen_plan_subjects: dict[str, int] = {}
     for idx, item in enumerate(parsed.retrieval_plan or []):
         prefix = f"retrieval_plan.{idx}"
         if item.subject and not str(item.subject).strip():
             return f"{prefix}.subject must be a string"
         if item.role and not str(item.role).strip():
             return f"{prefix}.role must be a string"
+        subject = str(item.subject).strip()
+        subject_key = subject.casefold()
+        if subject_key:
+            first_idx = seen_plan_subjects.get(subject_key)
+            if first_idx is not None:
+                return (
+                    f"{prefix}.subject duplicates "
+                    f"retrieval_plan.{first_idx}.subject: {subject}"
+                )
+            seen_plan_subjects[subject_key] = idx
     # Memory use validation.
     # Two valid paths for memory to influence retrieval:
     # 1. Current query contains explicit history-reference language, OR

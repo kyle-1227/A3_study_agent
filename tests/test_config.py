@@ -301,6 +301,8 @@ class TestPromptRendering:
         assert "retrieval_plan" in prompt
         assert "core_concept" in prompt
         assert "Web Research V2" in prompt
+        assert "exactly one item per selected subject" in prompt
+        assert "combine them into that subject's single item" in prompt
 
     def test_resource_prompts_explain_multi_subject_relations(self):
         from src.config import load_prompt
