@@ -22,9 +22,15 @@ class _FakeGraphManifest:
 
 
 @dataclass(frozen=True)
+class _FakeKnowledgeGraphSubject:
+    subject_id: str
+
+
+@dataclass(frozen=True)
 class _FakeKnowledgeGraph:
     data_version: str
     artifact_fingerprint: str
+    subjects: tuple[_FakeKnowledgeGraphSubject, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,51 @@ async def test_health_live_is_strict_v1() -> None:
                 "unexpected": True,
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_subjects_endpoint_uses_curated_knowledge_graph(
+    health_runtime_types: None,
+) -> None:
+    subjects = (
+        _FakeKnowledgeGraphSubject(subject_id="big_data"),
+        _FakeKnowledgeGraphSubject(subject_id="computer"),
+        _FakeKnowledgeGraphSubject(subject_id="machine_learning"),
+        _FakeKnowledgeGraphSubject(subject_id="math"),
+        _FakeKnowledgeGraphSubject(subject_id="python"),
+    )
+    state = SimpleNamespace(
+        learning_guidance_runtime=_FakeLearningGuidanceRuntime(
+            knowledge_graph=_FakeKnowledgeGraph(
+                data_version="kg-2026-07-15",
+                artifact_fingerprint=_DIGEST_A,
+                subjects=subjects,
+            )
+        )
+    )
+
+    payload = await a3_app.get_subjects_endpoint(_request(state))
+
+    assert payload == {
+        "subjects": [
+            "big_data",
+            "computer",
+            "machine_learning",
+            "math",
+            "python",
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_subjects_endpoint_fails_closed_without_curated_runtime(
+    health_runtime_types: None,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await a3_app.get_subjects_endpoint(_request(SimpleNamespace()))
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "subject_catalog_runtime_unavailable"
 
 
 @pytest.mark.asyncio

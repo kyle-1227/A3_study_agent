@@ -6491,11 +6491,18 @@ async def get_profile_endpoint(user_id: str):
 
 
 @app.get("/subjects")
-async def get_subjects_endpoint():
-    """Return the list of available learning subjects discovered from data/."""
-    from src.rag.course_catalog import get_available_subjects_from_data
+async def get_subjects_endpoint(request: Request) -> dict[str, list[str]]:
+    """Return the exact curated subject identities accepted by the runtime."""
 
-    return {"subjects": get_available_subjects_from_data()}
+    runtime = getattr(request.app.state, "learning_guidance_runtime", None)
+    if not isinstance(runtime, LearningGuidanceRuntime):
+        raise HTTPException(
+            status_code=503,
+            detail="subject_catalog_runtime_unavailable",
+        )
+    return {
+        "subjects": [subject.subject_id for subject in runtime.knowledge_graph.subjects]
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
