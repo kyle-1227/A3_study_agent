@@ -1633,6 +1633,7 @@ def _coverage_business_validation(
     parsed: BaseModel,
     *,
     round_index: int,
+    max_evidence_per_requirement: int,
     requirements: tuple[EvidenceRequirement, ...],
     provisional_entries: tuple[EvidenceLedgerEntry, ...],
     attempted_tasks: tuple[RetrievalTask, ...],
@@ -1669,6 +1670,11 @@ def _coverage_business_validation(
             if outcome.source_type == "local_rag"
         }
         for coverage in compiled.coverages:
+            if len(coverage.evidence_ids) > max_evidence_per_requirement:
+                raise EvidenceBudgetExceededError(
+                    code="requirement_evidence_budget_exceeded",
+                    reason=("accepted evidence exceeds max_evidence_per_requirement"),
+                )
             requirement = requirement_by_id[coverage.requirement_id]
             if (
                 coverage.coverage_state != "complete"
@@ -1795,6 +1801,9 @@ def make_requirement_evidence_judge_node(
                     _judge_candidates_payload(records),
                     ensure_ascii=False,
                 ),
+                "max_evidence_per_requirement": (
+                    runtime.policy.max_evidence_per_requirement
+                ),
                 "attempted_queries_json": json.dumps(
                     [
                         {
@@ -1825,6 +1834,9 @@ def make_requirement_evidence_judge_node(
             business_validator=lambda parsed: _coverage_business_validation(
                 parsed,
                 round_index=round_index,
+                max_evidence_per_requirement=(
+                    runtime.policy.max_evidence_per_requirement
+                ),
                 requirements=requirements,
                 provisional_entries=provisional_entries,
                 attempted_tasks=attempted_tasks,
@@ -1840,6 +1852,7 @@ def make_requirement_evidence_judge_node(
         validation_error = _coverage_business_validation(
             parsed,
             round_index=round_index,
+            max_evidence_per_requirement=(runtime.policy.max_evidence_per_requirement),
             requirements=requirements,
             provisional_entries=provisional_entries,
             attempted_tasks=attempted_tasks,

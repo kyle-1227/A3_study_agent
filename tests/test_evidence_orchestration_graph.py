@@ -17,6 +17,7 @@ from src.config.evidence_orchestration_config import (
 )
 from src.config.evidence_orchestration_contracts import (
     DuplicateRetrievalSignatureError,
+    EvidenceLedgerEntry,
     EvidenceRequirementDraft,
     EvidenceRequirementDraftBatch,
     RequirementCoverage,
@@ -27,6 +28,7 @@ from src.config.evidence_orchestration_contracts import (
     build_retrieval_task,
     compile_evidence_requirement_batch,
     compile_requirement_coverage_batch,
+    make_evidence_id,
 )
 from src.graph import academic
 from src.graph import evidence_orchestration as orchestration
@@ -311,6 +313,75 @@ def _missing_coverage(requirements, *, round_index: int, suffix: str):
         round_index=round_index,
         coverages=rows,
     )
+
+
+def _coverage_budget_validation_result(*, evidence_count: int, limit: int) -> str:
+    requirement = compile_evidence_requirement_batch(_quiz_draft_batch(_runtime()))[0]
+    entries: list[EvidenceLedgerEntry] = []
+    for index in range(evidence_count):
+        source_identity = f"{index + 1:064x}"
+        content_fingerprint = f"{index + 101:064x}"
+        evidence_id = make_evidence_id(
+            requirement_id=requirement.requirement_id,
+            source_type="local_rag",
+            source_identity_fingerprint=source_identity,
+            content_fingerprint=content_fingerprint,
+        )
+        entries.append(
+            EvidenceLedgerEntry(
+                round_index=0,
+                task_id=f"task-{index}",
+                requirement_id=requirement.requirement_id,
+                evidence_id=evidence_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                source_type="local_rag",
+                candidate_ref=f"candidate-{index}",
+                candidate_snapshot_fingerprint=f"{index + 201:064x}",
+                source_identity_fingerprint=source_identity,
+                content_fingerprint=content_fingerprint,
+                accepted=True,
+                rejection_reason_code="",
+            )
+        )
+    batch = RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=0,
+        coverages=[
+            RequirementCoverage(
+                requirement_id=requirement.requirement_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                round_index=0,
+                coverage_state="complete",
+                evidence_ids=[entry.evidence_id for entry in entries],
+                confidence=1.0,
+                reason="The selected evidence satisfies the requirement.",
+                suggested_local_query="",
+                suggested_web_query="",
+            )
+        ],
+    )
+    return orchestration._coverage_business_validation(
+        batch,
+        round_index=0,
+        max_evidence_per_requirement=limit,
+        requirements=(requirement,),
+        provisional_entries=tuple(entries),
+        attempted_tasks=(),
+        outcomes=(),
+    )
+
+
+def test_coverage_business_validation_accepts_evidence_limit_boundary() -> None:
+    assert _coverage_budget_validation_result(evidence_count=4, limit=4) == ""
+
+
+def test_coverage_business_validation_rejects_evidence_over_limit() -> None:
+    error = _coverage_budget_validation_result(evidence_count=5, limit=4)
+
+    assert "requirement_evidence_budget_exceeded" in error
+    assert "max_evidence_per_requirement" in error
 
 
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():

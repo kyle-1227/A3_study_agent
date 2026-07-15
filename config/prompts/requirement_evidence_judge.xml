@@ -17,7 +17,7 @@ Evidence requirements:
 Requirement-bound candidates:
 {candidates_json}
 
-Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. A row may reference only candidate evidence_ids bound to that same requirement. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
+Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. A row may reference only candidate evidence_ids bound to that same requirement. Each coverage row may select at most {max_evidence_per_requirement} evidence_ids. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
 
 Set suggested_local_query and suggested_web_query with this exact matrix:
 - complete: both fields must be the empty string.
