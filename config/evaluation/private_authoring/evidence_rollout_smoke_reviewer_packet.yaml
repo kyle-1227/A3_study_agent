@@ -1,4 +1,4 @@
-schema_version: evidence_rollout_reviewer_packet_draft_v1
+schema_version: evidence_rollout_reviewer_packet_draft_v2
 packet_status: draft_unapproved
 smoke_only: true
 activation_eligible: false
@@ -7,13 +7,13 @@ human_semantic_review_status: not_started
 first_domain_review_status: pending
 second_independent_review_status: pending
 dataset_path: config/evaluation/private_authoring/evidence_rollout_smoke_dataset.authoring.json
-dataset_id: evidence_rollout_smoke_authoring_20260715_draft_v1
+dataset_id: evidence_rollout_smoke_authoring_20260715_draft_v2
 knowledge_graph:
   config_path: config/learning_guidance.yaml
   artifact_path: config/learning_guidance/knowledge_graph_v1.yaml
   data_version: 2026.07.15-source-groups-v1
   artifact_fingerprint: c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5
-  binding_status: sidecar_only_blocked
+  binding_status: dataset_authoritative_v2
 route_contract:
   parent_child_production_source_type: local_rag
   web_production_source_type: web
@@ -42,16 +42,16 @@ smoke_rationale: >-
   initial sufficiency labels. Six cases cannot resolve the production 0.05 rate
   gates and must never produce an activation pass.
 seal_blockers:
-  - schema_v1_missing_kg_identity_binding
-  - schema_v1_missing_initial_evidence_identity
+  - initial_evidence_content_not_human_sealed
   - smoke_case_count_below_activation_gate_resolution
   - human_domain_review_missing
   - independent_review_missing
 required_human_actions:
   - Review every private query, target, route, weighted requirement, and proposed sufficiency label.
-  - Author and fingerprint the exact initial-evidence fixture for every case.
+  - Author and seal exact initial-evidence content behind every scenario identity before live use.
   - Independently verify every KG topic and ordered catalog resource inventory.
-  - Migrate this smoke draft through schema-v2 before any sealing or live execution.
+  - Replace this smoke-only draft with an activation-scale reviewed dataset before sealing.
+case_binding_projection_status: reviewer_convenience_only
 case_bindings:
   - case_id: smoke_simple_big_data_review
     targets:

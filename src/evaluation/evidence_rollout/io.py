@@ -10,9 +10,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from src.evaluation.evidence_rollout.contracts import EvidenceRolloutDecisionV1
+from src.evaluation.evidence_rollout.contracts import EvidenceRolloutDecisionV2
 from src.evaluation.evidence_rollout.report import (
-    EvidenceRolloutSafeReportV1,
+    EvidenceRolloutSafeReportV2,
     render_safe_report_markdown,
 )
 from src.rag.parent_child.project_paths import (
@@ -66,15 +66,15 @@ def publish_evidence_rollout_bundle(
     *,
     project_root: Path,
     output_directory: Path,
-    decision: EvidenceRolloutDecisionV1,
-    report: EvidenceRolloutSafeReportV1,
+    decision: EvidenceRolloutDecisionV2,
+    report: EvidenceRolloutSafeReportV2,
 ) -> Path:
     """Publish decision and safe reports together through one staging directory."""
 
-    if not isinstance(decision, EvidenceRolloutDecisionV1):
-        raise TypeError("decision must be EvidenceRolloutDecisionV1")
-    if not isinstance(report, EvidenceRolloutSafeReportV1):
-        raise TypeError("report must be EvidenceRolloutSafeReportV1")
+    if not isinstance(decision, EvidenceRolloutDecisionV2):
+        raise TypeError("decision must be EvidenceRolloutDecisionV2")
+    if not isinstance(report, EvidenceRolloutSafeReportV2):
+        raise TypeError("report must be EvidenceRolloutSafeReportV2")
     output = resolve_project_path(
         project_root,
         output_directory,

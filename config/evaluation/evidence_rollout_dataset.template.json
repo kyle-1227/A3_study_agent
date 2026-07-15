@@ -2,13 +2,22 @@
   "cases": [
     {
       "case_id": "replace_simple_initial_case",
-      "initial_evidence_sufficient": true,
+      "case_fingerprint": "REPLACE_WITH_CANONICAL_CASE_SHA256",
+      "initial_evidence": {
+        "fixture_fingerprint": "REPLACE_WITH_CANONICAL_INITIAL_IDENTITY_SHA256",
+        "fixture_id": "replace_simple_initial_fixture",
+        "schema_version": "evidence_initial_evidence_identity_v2",
+        "source_inventory": [
+          "parent_child"
+        ],
+        "state": "sufficient"
+      },
       "query": "REPLACE_WITH_A_HUMAN_REVIEWED_SINGLE_SUBJECT_QUERY",
       "requirements": [
         {
           "criterion": "REPLACE_WITH_ONE_HUMAN_REVIEWED_EVIDENCE_REQUIREMENT",
           "requirement_id": "replace_simple_requirement",
-          "schema_version": "evidence_requirement_gold_v1",
+          "schema_version": "evidence_requirement_gold_v2",
           "target_id": "replace_simple_target",
           "weight": 1.0
         }
@@ -16,7 +25,7 @@
       "resource_types": [
         "review_doc"
       ],
-      "schema_version": "evidence_evaluation_case_spec_v1",
+      "schema_version": "evidence_evaluation_case_spec_v2",
       "subjects": [
         "python"
       ],
@@ -25,29 +34,41 @@
           "required_sources": [
             "parent_child"
           ],
+          "catalog_resource_ids": [
+            "replace_with_exact_ordered_kg_resource_id"
+          ],
           "resource_type": "review_doc",
-          "schema_version": "evidence_resource_subject_target_v1",
+          "schema_version": "evidence_resource_subject_target_v2",
           "subject": "python",
-          "target_id": "replace_simple_target"
+          "target_fingerprint": "REPLACE_WITH_CANONICAL_TARGET_SHA256",
+          "target_id": "replace_simple_target",
+          "topic_id": "replace_with_exact_kg_topic_id"
         }
       ]
     },
     {
       "case_id": "replace_multi_case",
-      "initial_evidence_sufficient": false,
+      "case_fingerprint": "REPLACE_WITH_CANONICAL_CASE_SHA256",
+      "initial_evidence": {
+        "fixture_fingerprint": "REPLACE_WITH_CANONICAL_INITIAL_IDENTITY_SHA256",
+        "fixture_id": "replace_multi_initial_fixture",
+        "schema_version": "evidence_initial_evidence_identity_v2",
+        "source_inventory": [],
+        "state": "insufficient"
+      },
       "query": "REPLACE_WITH_A_HUMAN_REVIEWED_MULTI_SUBJECT_MULTI_RESOURCE_QUERY",
       "requirements": [
         {
           "criterion": "REPLACE_WITH_A_REVIEWED_REQUIREMENT_FOR_THE_FIRST_TARGET",
           "requirement_id": "replace_multi_requirement_1",
-          "schema_version": "evidence_requirement_gold_v1",
+          "schema_version": "evidence_requirement_gold_v2",
           "target_id": "replace_multi_target_1",
           "weight": 1.0
         },
         {
           "criterion": "REPLACE_WITH_A_REVIEWED_REQUIREMENT_FOR_THE_SECOND_TARGET",
           "requirement_id": "replace_multi_requirement_2",
-          "schema_version": "evidence_requirement_gold_v1",
+          "schema_version": "evidence_requirement_gold_v2",
           "target_id": "replace_multi_target_2",
           "weight": 1.0
         }
@@ -56,7 +77,7 @@
         "review_doc",
         "code_practice"
       ],
-      "schema_version": "evidence_evaluation_case_spec_v1",
+      "schema_version": "evidence_evaluation_case_spec_v2",
       "subjects": [
         "python",
         "computer"
@@ -67,23 +88,35 @@
             "parent_child",
             "web"
           ],
+          "catalog_resource_ids": [
+            "replace_with_exact_ordered_kg_resource_id"
+          ],
           "resource_type": "review_doc",
-          "schema_version": "evidence_resource_subject_target_v1",
+          "schema_version": "evidence_resource_subject_target_v2",
           "subject": "python",
-          "target_id": "replace_multi_target_1"
+          "target_fingerprint": "REPLACE_WITH_CANONICAL_TARGET_SHA256",
+          "target_id": "replace_multi_target_1",
+          "topic_id": "replace_with_exact_kg_topic_id"
         },
         {
           "required_sources": [
             "parent_child"
           ],
+          "catalog_resource_ids": [
+            "replace_with_exact_ordered_kg_resource_id"
+          ],
           "resource_type": "code_practice",
-          "schema_version": "evidence_resource_subject_target_v1",
+          "schema_version": "evidence_resource_subject_target_v2",
           "subject": "computer",
-          "target_id": "replace_multi_target_2"
+          "target_fingerprint": "REPLACE_WITH_CANONICAL_TARGET_SHA256",
+          "target_id": "replace_multi_target_2",
+          "topic_id": "replace_with_exact_kg_topic_id"
         }
       ]
     }
   ],
   "dataset_id": "replace_with_reviewed_dataset_id",
-  "schema_version": "evidence_evaluation_dataset_v1"
+  "knowledge_graph_artifact_fingerprint": "REPLACE_WITH_PRODUCTION_KG_SHA256",
+  "knowledge_graph_data_version": "replace_with_exact_kg_data_version",
+  "schema_version": "evidence_evaluation_dataset_v2"
 }

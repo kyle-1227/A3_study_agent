@@ -13,11 +13,12 @@ from scripts.run_evidence_rollout_evaluation import main
 from src.config.evidence_benchmark_config import load_evidence_benchmark_config
 from src.config.rag_rollout_config import load_rag_rollout_config
 from src.evaluation.evidence_rollout.contracts import (
-    EvidenceEvaluationRuntimeBindingV1,
-    EvidenceRolloutDecisionV1,
-    EvidenceVariantAttemptV1,
-    HumanSemanticReviewBatchContentV1,
-    HumanSemanticReviewV1,
+    EvidenceEvaluationRuntimeBindingV2,
+    EvidenceRolloutDecisionV2,
+    EvidenceVariantAttemptV2,
+    HumanSemanticReviewBatchContentV2,
+    HumanSemanticReviewV2,
+    dataset_case_bindings,
     model_fingerprint,
     seal_human_semantic_review_batch,
     load_evidence_rollout_execution_config,
@@ -26,7 +27,8 @@ from src.evaluation.evidence_rollout.io import (
     canonical_model_bytes,
     load_canonical_json_model,
 )
-from src.evaluation.evidence_rollout.report import EvidenceRolloutSafeReportV1
+from src.evaluation.evidence_rollout.report import EvidenceRolloutSafeReportV2
+from src.learning_guidance.knowledge_graph import load_knowledge_graph
 from src.rag.parent_child.manifests import (
     ArtifactDescriptor,
     ArtifactType,
@@ -75,6 +77,9 @@ _CONFIG_SOURCES = {
     "protocol": (
         ROOT / "config" / "evaluation" / "evidence_semantic_review_protocol.md"
     ),
+    "knowledge_graph": (
+        ROOT / "config" / "learning_guidance" / "knowledge_graph_v1.yaml"
+    ),
 }
 
 
@@ -84,6 +89,7 @@ def _copy_config_inputs(project_root: Path) -> dict[str, Path]:
         "benchmark": project_root / "inputs" / "evidence_benchmark.yaml",
         "rollout": project_root / "inputs" / "rollout.yaml",
         "protocol": project_root / "inputs" / "review_protocol.md",
+        "knowledge_graph": project_root / "inputs" / "knowledge_graph_v1.yaml",
     }
     for name, destination in destinations.items():
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +179,7 @@ def _write_cli_fixture(project_root: Path) -> dict[str, Path]:
     execution_config = load_evidence_rollout_execution_config(config_paths["execution"])
     benchmark_config = load_evidence_benchmark_config(config_paths["benchmark"])
     rollout_config = load_rag_rollout_config(config_paths["rollout"])
+    knowledge_graph = load_knowledge_graph(config_paths["knowledge_graph"])
     query = " ".join(
         (
             _PRIVATE_QUERY,
@@ -186,12 +193,15 @@ def _write_cli_fixture(project_root: Path) -> dict[str, Path]:
     manifest = _generation_manifest("hermetic_generation_1")
     manifest_bytes = canonical_model_bytes(manifest)
     manifest_fingerprint = hashlib.sha256(manifest_bytes).hexdigest()
-    binding = EvidenceEvaluationRuntimeBindingV1(
-        schema_version="evidence_evaluation_runtime_binding_v1",
+    binding = EvidenceEvaluationRuntimeBindingV2(
+        schema_version="evidence_evaluation_runtime_binding_v2",
         run_id="hermetic_cli_run_1",
         execution_mode="hermetic",
         dataset_id=dataset.dataset_id,
         dataset_fingerprint=dataset.dataset_fingerprint,
+        knowledge_graph_data_version=knowledge_graph.data_version,
+        knowledge_graph_artifact_fingerprint=knowledge_graph.artifact_fingerprint,
+        case_bindings=dataset_case_bindings(dataset),
         execution_config_fingerprint=model_fingerprint(execution_config),
         benchmark_config_fingerprint=model_fingerprint(benchmark_config),
         rollout_config_fingerprint=model_fingerprint(rollout_config),
@@ -201,8 +211,8 @@ def _write_cli_fixture(project_root: Path) -> dict[str, Path]:
         executor_fingerprint=EXECUTOR_FINGERPRINT,
     )
     attempts = [
-        EvidenceVariantAttemptV1(
-            schema_version="evidence_variant_attempt_v1",
+        EvidenceVariantAttemptV2(
+            schema_version="evidence_variant_attempt_v2",
             case_id=case.case_id,
             variant=definition.variant,
             status="success",
@@ -225,8 +235,8 @@ def _write_cli_fixture(project_root: Path) -> dict[str, Path]:
             raise AssertionError("CLI fixture requires successful observations")
         measurement = _MEASUREMENTS[(attempt.case_id, attempt.variant)]
         reviews.append(
-            HumanSemanticReviewV1(
-                schema_version="human_semantic_review_v1",
+            HumanSemanticReviewV2(
+                schema_version="human_semantic_review_v2",
                 case_id=attempt.case_id,
                 variant=attempt.variant,
                 output_fingerprint=observation.output_fingerprint,
@@ -240,8 +250,8 @@ def _write_cli_fixture(project_root: Path) -> dict[str, Path]:
             )
         )
     review_batch = seal_human_semantic_review_batch(
-        HumanSemanticReviewBatchContentV1(
-            schema_version="human_semantic_review_batch_v1",
+        HumanSemanticReviewBatchContentV2(
+            schema_version="human_semantic_review_batch_v2",
             dataset_fingerprint=dataset.dataset_fingerprint,
             runtime_fingerprint=binding.runtime_fingerprint,
             generation_id=binding.generation_id,
@@ -285,6 +295,8 @@ def _argv(project_root: Path, paths: dict[str, Path], output: Path) -> list[str]
         str(paths["protocol"]),
         "--dataset",
         str(paths["dataset"]),
+        "--knowledge-graph",
+        str(paths["knowledge_graph"]),
         "--runtime-binding",
         str(paths["binding"]),
         "--human-reviews",
@@ -320,11 +332,11 @@ def test_cli_hermetic_run_publishes_blocked_decision(
     }
     decision = load_canonical_json_model(
         output / "activation_decision.json",
-        EvidenceRolloutDecisionV1,
+        EvidenceRolloutDecisionV2,
     )
     report = load_canonical_json_model(
         output / "safe_report.json",
-        EvidenceRolloutSafeReportV1,
+        EvidenceRolloutSafeReportV2,
     )
     assert decision.status == "blocked"
     assert decision.execution_mode == "hermetic"
@@ -374,9 +386,32 @@ def test_cli_input_error_writes_only_content_free_failure(
     assert failure == {
         "failure_code": "artifact_contract_invalid",
         "failure_type": "EvidenceRolloutArtifactError",
-        "schema_version": "evidence_rollout_cli_failure_v1",
+        "schema_version": "evidence_rollout_cli_failure_v2",
         "status": "blocked",
     }
+    emitted = captured.out + captured.err + failure_path.read_text(encoding="utf-8")
+    for marker in _FORBIDDEN_MARKERS:
+        assert marker.casefold() not in emitted.casefold()
+
+
+def test_cli_invalid_knowledge_graph_fails_before_decision_without_content_leak(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    paths = _write_cli_fixture(tmp_path)
+    paths["knowledge_graph"].write_text(
+        "schema_version: knowledge_graph_v1\nsubjects: [",
+        encoding="utf-8",
+    )
+    output = tmp_path / "outputs" / "invalid-knowledge-graph"
+
+    exit_code = main(_argv(tmp_path, paths, output))
+
+    captured = capsys.readouterr()
+    failure_path = output.with_name(output.name + ".failure.json")
+    assert exit_code == 2
+    assert not output.exists()
+    assert failure_path.is_file()
     emitted = captured.out + captured.err + failure_path.read_text(encoding="utf-8")
     for marker in _FORBIDDEN_MARKERS:
         assert marker.casefold() not in emitted.casefold()

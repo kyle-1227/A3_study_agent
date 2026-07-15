@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 import pytest
 
@@ -15,23 +15,30 @@ from src.config.evidence_benchmark_config import (
 )
 from src.config.rag_rollout_config import RagRolloutConfig, load_rag_rollout_config
 from src.evaluation.evidence_rollout.contracts import (
-    EvidenceEvaluationCaseSpecV1,
-    EvidenceEvaluationDatasetContentV1,
-    EvidenceEvaluationDatasetV1,
-    EvidenceEvaluationRuntimeBindingV1,
-    EvidenceLiveAdapterIdentityV1,
-    EvidenceRolloutExecutionConfigV1,
-    EvidenceVariantAttemptBatchContentV1,
-    EvidenceVariantAttemptBatchV1,
-    EvidenceVariantAttemptV1,
-    EvidenceVariantDefinitionV1,
-    EvidenceVariantObservationV1,
-    HumanSemanticReviewBatchContentV1,
-    HumanSemanticReviewBatchV1,
-    HumanSemanticReviewV1,
+    EvidenceEvaluationCaseSpecV2,
+    EvidenceEvaluationDatasetContentV2,
+    EvidenceEvaluationDatasetV2,
+    EvidenceEvaluationRuntimeBindingV2,
+    EvidenceSource,
+    EvidenceLiveAdapterIdentityV2,
+    EvidenceRolloutExecutionConfigV2,
+    EvidenceVariantAttemptBatchContentV2,
+    EvidenceVariantAttemptBatchV2,
+    EvidenceVariantAttemptV2,
+    EvidenceVariantDefinitionV2,
+    EvidenceVariantObservationV2,
+    HumanSemanticReviewBatchContentV2,
+    HumanSemanticReviewBatchV2,
+    HumanSemanticReviewV2,
+    case_binding_identity,
     canonical_sha256,
+    dataset_case_bindings,
     model_fingerprint,
     query_fingerprint,
+)
+from src.learning_guidance.knowledge_graph import (
+    KnowledgeGraphV1,
+    load_knowledge_graph,
 )
 from src.evaluation.evidence_rollout.runner import (
     LiveEvidenceVariantExecutor,
@@ -46,6 +53,8 @@ from src.rag.parent_child.evidence_evaluation import (
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_CONFIG_PATH = ROOT / "config" / "rag" / "evidence_benchmark.yaml"
 ROLLOUT_CONFIG_PATH = ROOT / "config" / "rag" / "rollout.yaml"
+KNOWLEDGE_GRAPH_PATH = ROOT / "config" / "learning_guidance" / "knowledge_graph_v1.yaml"
+KNOWLEDGE_GRAPH = load_knowledge_graph(KNOWLEDGE_GRAPH_PATH)
 EXECUTOR_FINGERPRINT = "b" * 64
 RUNTIME_FINGERPRINT = "a" * 64
 REVIEWER_IDENTITY_HASH = "d" * 64
@@ -137,20 +146,21 @@ _MEASUREMENTS: dict[tuple[str, Variant], dict[str, float | int]] = {
 
 @dataclass(frozen=True)
 class _Scenario:
-    dataset: EvidenceEvaluationDatasetV1
-    execution_config: EvidenceRolloutExecutionConfigV1
+    dataset: EvidenceEvaluationDatasetV2
+    knowledge_graph: KnowledgeGraphV1
+    execution_config: EvidenceRolloutExecutionConfigV2
     benchmark_config: EvidenceBenchmarkConfig
     rollout_config: RagRolloutConfig
-    binding: EvidenceEvaluationRuntimeBindingV1
-    batch: EvidenceVariantAttemptBatchV1
-    reviews: HumanSemanticReviewBatchV1
+    binding: EvidenceEvaluationRuntimeBindingV2
+    batch: EvidenceVariantAttemptBatchV2
+    reviews: HumanSemanticReviewBatchV2
 
 
-def _execution_config() -> EvidenceRolloutExecutionConfigV1:
-    return EvidenceRolloutExecutionConfigV1(
-        schema_version="evidence_rollout_execution_config_v1",
+def _execution_config() -> EvidenceRolloutExecutionConfigV2:
+    return EvidenceRolloutExecutionConfigV2(
+        schema_version="evidence_rollout_execution_config_v2",
         variants=[
-            EvidenceVariantDefinitionV1(
+            EvidenceVariantDefinitionV2(
                 variant=variant,
                 resource_planning_enabled=planning,
                 bounded_repair_enabled=repair,
@@ -160,87 +170,166 @@ def _execution_config() -> EvidenceRolloutExecutionConfigV1:
         human_semantic_review_required=True,
         human_review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
         candidate_failure_policy="fail_fast",
-        report_policy="content_free_v1",
+        report_policy="content_free_v2",
         max_case_count=10,
     )
 
 
+def _target(
+    *,
+    target_id: str,
+    subject: str,
+    resource_type: str,
+    topic_id: str,
+    catalog_resource_ids: list[str],
+    required_sources: list[EvidenceSource],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "evidence_resource_subject_target_v2",
+        "target_id": target_id,
+        "subject": subject,
+        "resource_type": resource_type,
+        "topic_id": topic_id,
+        "catalog_resource_ids": catalog_resource_ids,
+        "required_sources": required_sources,
+    }
+    payload["target_fingerprint"] = canonical_sha256(payload)
+    return payload
+
+
+def _initial_evidence(
+    *,
+    case_id: str,
+    state: Literal["sufficient", "insufficient"],
+    source_inventory: list[EvidenceSource],
+) -> dict[str, object]:
+    fixture_id = f"{case_id}_initial_evidence"
+    descriptor = {
+        "schema_version": "evidence_initial_evidence_identity_v2",
+        "fixture_id": fixture_id,
+        "state": state,
+        "source_inventory": source_inventory,
+    }
+    return {
+        "schema_version": "evidence_initial_evidence_identity_v2",
+        "state": state,
+        "fixture_id": fixture_id,
+        "fixture_fingerprint": canonical_sha256(descriptor),
+        "source_inventory": source_inventory,
+    }
+
+
+def _case(
+    *,
+    case_id: str,
+    query: str,
+    subjects: list[str],
+    resource_types: list[str],
+    initial_state: Literal["sufficient", "insufficient"],
+    initial_sources: list[EvidenceSource],
+    targets: list[dict[str, object]],
+    requirements: list[dict[str, object]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "evidence_evaluation_case_spec_v2",
+        "case_id": case_id,
+        "query": query,
+        "subjects": subjects,
+        "resource_types": resource_types,
+        "initial_evidence": _initial_evidence(
+            case_id=case_id,
+            state=initial_state,
+            source_inventory=initial_sources,
+        ),
+        "targets": targets,
+        "requirements": requirements,
+    }
+    payload["case_fingerprint"] = canonical_sha256(payload)
+    return payload
+
+
 def _dataset(
     *, simple_query: str = "Explain a Python iterator."
-) -> EvidenceEvaluationDatasetV1:
-    content = EvidenceEvaluationDatasetContentV1(
-        schema_version="evidence_evaluation_dataset_v1",
+) -> EvidenceEvaluationDatasetV2:
+    cases = [
+        _case(
+            case_id="simple_case",
+            query=simple_query,
+            subjects=["python"],
+            resource_types=["review_doc"],
+            initial_state="sufficient",
+            initial_sources=["parent_child"],
+            targets=[
+                _target(
+                    target_id="simple_python_doc",
+                    subject="python",
+                    resource_type="review_doc",
+                    topic_id="python.fundamentals",
+                    catalog_resource_ids=["python_basics_real_python"],
+                    required_sources=["parent_child"],
+                )
+            ],
+            requirements=[
+                {
+                    "schema_version": "evidence_requirement_gold_v2",
+                    "requirement_id": "simple_iterator_definition",
+                    "target_id": "simple_python_doc",
+                    "criterion": "Defines iterator behavior accurately.",
+                    "weight": 1.0,
+                }
+            ],
+        ),
+        _case(
+            case_id="multi_case",
+            query="Compare a model pipeline with its data platform.",
+            subjects=["machine_learning", "big_data"],
+            resource_types=["review_doc", "quiz"],
+            initial_state="insufficient",
+            initial_sources=[],
+            targets=[
+                _target(
+                    target_id="multi_ml_doc",
+                    subject="machine_learning",
+                    resource_type="review_doc",
+                    topic_id="machine_learning.classical_methods",
+                    catalog_resource_ids=["machine_learning_zhou_zhihua"],
+                    required_sources=["parent_child"],
+                ),
+                _target(
+                    target_id="multi_data_quiz",
+                    subject="big_data",
+                    resource_type="quiz",
+                    topic_id="big_data.data_engineering",
+                    catalog_resource_ids=["big_data_data_engineering_zoomcamp"],
+                    required_sources=["parent_child", "web"],
+                ),
+            ],
+            requirements=[
+                {
+                    "schema_version": "evidence_requirement_gold_v2",
+                    "requirement_id": "multi_model_pipeline",
+                    "target_id": "multi_ml_doc",
+                    "criterion": "Explains the model pipeline dependency.",
+                    "weight": 1.0,
+                },
+                {
+                    "schema_version": "evidence_requirement_gold_v2",
+                    "requirement_id": "multi_data_platform",
+                    "target_id": "multi_data_quiz",
+                    "criterion": "Tests the data platform relationship.",
+                    "weight": 1.0,
+                },
+            ],
+        ),
+    ]
+    content = EvidenceEvaluationDatasetContentV2(
+        schema_version="evidence_evaluation_dataset_v2",
         dataset_id="hermetic_runner_suite",
-        cases=[
-            {
-                "schema_version": "evidence_evaluation_case_spec_v1",
-                "case_id": "simple_case",
-                "query": simple_query,
-                "subjects": ["python"],
-                "resource_types": ["review_doc"],
-                "initial_evidence_sufficient": True,
-                "targets": [
-                    {
-                        "schema_version": "evidence_resource_subject_target_v1",
-                        "target_id": "simple_python_doc",
-                        "subject": "python",
-                        "resource_type": "review_doc",
-                        "required_sources": ["parent_child"],
-                    }
-                ],
-                "requirements": [
-                    {
-                        "schema_version": "evidence_requirement_gold_v1",
-                        "requirement_id": "simple_iterator_definition",
-                        "target_id": "simple_python_doc",
-                        "criterion": "Defines iterator behavior accurately.",
-                        "weight": 1.0,
-                    }
-                ],
-            },
-            {
-                "schema_version": "evidence_evaluation_case_spec_v1",
-                "case_id": "multi_case",
-                "query": "Compare a model pipeline with its data platform.",
-                "subjects": ["machine_learning", "big_data"],
-                "resource_types": ["review_doc", "quiz"],
-                "initial_evidence_sufficient": False,
-                "targets": [
-                    {
-                        "schema_version": "evidence_resource_subject_target_v1",
-                        "target_id": "multi_ml_doc",
-                        "subject": "machine_learning",
-                        "resource_type": "review_doc",
-                        "required_sources": ["parent_child"],
-                    },
-                    {
-                        "schema_version": "evidence_resource_subject_target_v1",
-                        "target_id": "multi_data_quiz",
-                        "subject": "big_data",
-                        "resource_type": "quiz",
-                        "required_sources": ["parent_child", "web"],
-                    },
-                ],
-                "requirements": [
-                    {
-                        "schema_version": "evidence_requirement_gold_v1",
-                        "requirement_id": "multi_model_pipeline",
-                        "target_id": "multi_ml_doc",
-                        "criterion": "Explains the model pipeline dependency.",
-                        "weight": 1.0,
-                    },
-                    {
-                        "schema_version": "evidence_requirement_gold_v1",
-                        "requirement_id": "multi_data_platform",
-                        "target_id": "multi_data_quiz",
-                        "criterion": "Tests the data platform relationship.",
-                        "weight": 1.0,
-                    },
-                ],
-            },
-        ],
+        knowledge_graph_data_version=KNOWLEDGE_GRAPH.data_version,
+        knowledge_graph_artifact_fingerprint=KNOWLEDGE_GRAPH.artifact_fingerprint,
+        cases=cases,
     )
-    return EvidenceEvaluationDatasetV1(
+    return EvidenceEvaluationDatasetV2(
         **content.model_dump(mode="python"),
         dataset_fingerprint=canonical_sha256(content.model_dump(mode="json")),
     )
@@ -248,18 +337,23 @@ def _dataset(
 
 def _binding(
     *,
-    dataset: EvidenceEvaluationDatasetV1,
-    execution_config: EvidenceRolloutExecutionConfigV1,
+    dataset: EvidenceEvaluationDatasetV2,
+    execution_config: EvidenceRolloutExecutionConfigV2,
     benchmark_config: EvidenceBenchmarkConfig,
     rollout_config: RagRolloutConfig,
     executor_fingerprint: str = EXECUTOR_FINGERPRINT,
-) -> EvidenceEvaluationRuntimeBindingV1:
-    return EvidenceEvaluationRuntimeBindingV1(
-        schema_version="evidence_evaluation_runtime_binding_v1",
+) -> EvidenceEvaluationRuntimeBindingV2:
+    return EvidenceEvaluationRuntimeBindingV2(
+        schema_version="evidence_evaluation_runtime_binding_v2",
         run_id="hermetic_run_1",
         execution_mode="hermetic",
         dataset_id=dataset.dataset_id,
         dataset_fingerprint=dataset.dataset_fingerprint,
+        knowledge_graph_data_version=dataset.knowledge_graph_data_version,
+        knowledge_graph_artifact_fingerprint=(
+            dataset.knowledge_graph_artifact_fingerprint
+        ),
+        case_bindings=dataset_case_bindings(dataset),
         execution_config_fingerprint=model_fingerprint(execution_config),
         benchmark_config_fingerprint=model_fingerprint(benchmark_config),
         rollout_config_fingerprint=model_fingerprint(rollout_config),
@@ -272,21 +366,26 @@ def _binding(
 
 def _observation(
     *,
-    case: EvidenceEvaluationCaseSpecV1,
-    definition: EvidenceVariantDefinitionV1,
-    binding: EvidenceEvaluationRuntimeBindingV1,
+    case: EvidenceEvaluationCaseSpecV2,
+    definition: EvidenceVariantDefinitionV2,
+    binding: EvidenceEvaluationRuntimeBindingV2,
     **overrides: object,
-) -> EvidenceVariantObservationV1:
+) -> EvidenceVariantObservationV2:
     measurement = _MEASUREMENTS[(case.case_id, definition.variant)]
     requirement_weight_total = sum(item.weight for item in case.requirements)
     expected_route_count = sum(len(target.required_sources) for target in case.targets)
     web_required = any("web" in target.required_sources for target in case.targets)
     values: dict[str, object] = {
-        "schema_version": "evidence_variant_observation_v1",
+        "schema_version": "evidence_variant_observation_v2",
         "case_id": case.case_id,
         "variant": definition.variant,
         "query_fingerprint": query_fingerprint(case.query),
         "dataset_fingerprint": binding.dataset_fingerprint,
+        "knowledge_graph_data_version": binding.knowledge_graph_data_version,
+        "knowledge_graph_artifact_fingerprint": (
+            binding.knowledge_graph_artifact_fingerprint
+        ),
+        "case_binding": case_binding_identity(case),
         "execution_config_fingerprint": binding.execution_config_fingerprint,
         "benchmark_config_fingerprint": binding.benchmark_config_fingerprint,
         "rollout_config_fingerprint": binding.rollout_config_fingerprint,
@@ -327,22 +426,22 @@ def _observation(
         "latency_ms": measurement["latency"],
     }
     values.update(overrides)
-    return EvidenceVariantObservationV1.model_validate(values)
+    return EvidenceVariantObservationV2.model_validate(values)
 
 
 def _signed_batch(
     *,
-    attempts: list[EvidenceVariantAttemptV1],
+    attempts: list[EvidenceVariantAttemptV2],
     execution_mode: str = "hermetic",
     executor_fingerprint: str = EXECUTOR_FINGERPRINT,
-) -> EvidenceVariantAttemptBatchV1:
-    content = EvidenceVariantAttemptBatchContentV1(
-        schema_version="evidence_variant_attempt_batch_v1",
+) -> EvidenceVariantAttemptBatchV2:
+    content = EvidenceVariantAttemptBatchContentV2(
+        schema_version="evidence_variant_attempt_batch_v2",
         execution_mode=execution_mode,
         executor_fingerprint=executor_fingerprint,
         attempts=attempts,
     )
-    return EvidenceVariantAttemptBatchV1(
+    return EvidenceVariantAttemptBatchV2(
         **content.model_dump(mode="python"),
         bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
     )
@@ -350,19 +449,19 @@ def _signed_batch(
 
 def _signed_reviews(
     *,
-    dataset: EvidenceEvaluationDatasetV1,
-    binding: EvidenceEvaluationRuntimeBindingV1,
-    attempts: list[EvidenceVariantAttemptV1],
-) -> HumanSemanticReviewBatchV1:
-    reviews: list[HumanSemanticReviewV1] = []
+    dataset: EvidenceEvaluationDatasetV2,
+    binding: EvidenceEvaluationRuntimeBindingV2,
+    attempts: list[EvidenceVariantAttemptV2],
+) -> HumanSemanticReviewBatchV2:
+    reviews: list[HumanSemanticReviewV2] = []
     for attempt in attempts:
         observation = attempt.observation
         if observation is None:
             raise AssertionError("review fixture requires successful observations")
         measurement = _MEASUREMENTS[(attempt.case_id, attempt.variant)]
         reviews.append(
-            HumanSemanticReviewV1(
-                schema_version="human_semantic_review_v1",
+            HumanSemanticReviewV2(
+                schema_version="human_semantic_review_v2",
                 case_id=attempt.case_id,
                 variant=attempt.variant,
                 output_fingerprint=observation.output_fingerprint,
@@ -375,8 +474,8 @@ def _signed_reviews(
                 fact_count=100,
             )
         )
-    content = HumanSemanticReviewBatchContentV1(
-        schema_version="human_semantic_review_batch_v1",
+    content = HumanSemanticReviewBatchContentV2(
+        schema_version="human_semantic_review_batch_v2",
         dataset_fingerprint=dataset.dataset_fingerprint,
         runtime_fingerprint=binding.runtime_fingerprint,
         generation_id=binding.generation_id,
@@ -384,7 +483,7 @@ def _signed_reviews(
         review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
         reviews=reviews,
     )
-    return HumanSemanticReviewBatchV1(
+    return HumanSemanticReviewBatchV2(
         **content.model_dump(mode="python"),
         review_bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
     )
@@ -402,8 +501,8 @@ def _scenario(*, simple_query: str = "Explain a Python iterator.") -> _Scenario:
         rollout_config=rollout_config,
     )
     attempts = [
-        EvidenceVariantAttemptV1(
-            schema_version="evidence_variant_attempt_v1",
+        EvidenceVariantAttemptV2(
+            schema_version="evidence_variant_attempt_v2",
             case_id=case.case_id,
             variant=definition.variant,
             status="success",
@@ -420,6 +519,7 @@ def _scenario(*, simple_query: str = "Explain a Python iterator.") -> _Scenario:
     ]
     return _Scenario(
         dataset=dataset,
+        knowledge_graph=KNOWLEDGE_GRAPH,
         execution_config=execution_config,
         benchmark_config=benchmark_config,
         rollout_config=rollout_config,
@@ -435,10 +535,10 @@ def _scenario(*, simple_query: str = "Explain a Python iterator.") -> _Scenario:
 
 def _resign_reviews(
     scenario: _Scenario,
-    reviews: list[HumanSemanticReviewV1],
-) -> HumanSemanticReviewBatchV1:
-    content = HumanSemanticReviewBatchContentV1(
-        schema_version="human_semantic_review_batch_v1",
+    reviews: list[HumanSemanticReviewV2],
+) -> HumanSemanticReviewBatchV2:
+    content = HumanSemanticReviewBatchContentV2(
+        schema_version="human_semantic_review_batch_v2",
         dataset_fingerprint=scenario.dataset.dataset_fingerprint,
         runtime_fingerprint=scenario.binding.runtime_fingerprint,
         generation_id=scenario.binding.generation_id,
@@ -448,7 +548,7 @@ def _resign_reviews(
         review_protocol_fingerprint=REVIEW_PROTOCOL_FINGERPRINT,
         reviews=reviews,
     )
-    return HumanSemanticReviewBatchV1(
+    return HumanSemanticReviewBatchV2(
         **content.model_dump(mode="python"),
         review_bundle_fingerprint=canonical_sha256(content.model_dump(mode="json")),
     )
@@ -457,12 +557,17 @@ def _resign_reviews(
 async def _run(
     scenario: _Scenario,
     *,
+    dataset: EvidenceEvaluationDatasetV2 | None = None,
+    knowledge_graph: KnowledgeGraphV1 | None = None,
     executor: object | None = None,
-    binding: EvidenceEvaluationRuntimeBindingV1 | None = None,
-    reviews: HumanSemanticReviewBatchV1 | None = None,
+    binding: EvidenceEvaluationRuntimeBindingV2 | None = None,
+    reviews: HumanSemanticReviewBatchV2 | None = None,
 ):
     return await run_evidence_rollout_evaluation(
-        dataset=scenario.dataset,
+        dataset=scenario.dataset if dataset is None else dataset,
+        knowledge_graph=(
+            scenario.knowledge_graph if knowledge_graph is None else knowledge_graph
+        ),
         execution_config=scenario.execution_config,
         benchmark_config=scenario.benchmark_config,
         rollout_config=scenario.rollout_config,
@@ -476,19 +581,43 @@ async def _run(
     )
 
 
+def _resign_dataset_values(values: dict[str, object]) -> EvidenceEvaluationDatasetV2:
+    values.pop("dataset_fingerprint", None)
+    content = EvidenceEvaluationDatasetContentV2.model_validate(values)
+    return EvidenceEvaluationDatasetV2(
+        **content.model_dump(mode="python"),
+        dataset_fingerprint=canonical_sha256(content.model_dump(mode="json")),
+    )
+
+
+def _mutate_first_target(
+    dataset: EvidenceEvaluationDatasetV2,
+    **changes: object,
+) -> EvidenceEvaluationDatasetV2:
+    values = dataset.model_dump(mode="python")
+    case = values["cases"][0]
+    target = case["targets"][0]
+    target.update(changes)
+    target.pop("target_fingerprint")
+    target["target_fingerprint"] = canonical_sha256(target)
+    case.pop("case_fingerprint")
+    case["case_fingerprint"] = canonical_sha256(case)
+    return _resign_dataset_values(values)
+
+
 def _replace_first_observation(
     scenario: _Scenario,
     **overrides: object,
-) -> EvidenceVariantAttemptBatchV1:
+) -> EvidenceVariantAttemptBatchV2:
     attempts = list(scenario.batch.attempts)
     first = attempts[0]
     if first.observation is None:
         raise AssertionError("fixture first attempt must be successful")
     values = first.observation.model_dump(mode="python")
     values.update(overrides)
-    observation = EvidenceVariantObservationV1.model_validate(values)
-    attempts[0] = EvidenceVariantAttemptV1(
-        schema_version="evidence_variant_attempt_v1",
+    observation = EvidenceVariantObservationV2.model_validate(values)
+    attempts[0] = EvidenceVariantAttemptV2(
+        schema_version="evidence_variant_attempt_v2",
         case_id=first.case_id,
         variant=first.variant,
         status="success",
@@ -521,7 +650,7 @@ class _RaisingExecutor:
     def declared_slots(self) -> frozenset[tuple[str, Variant]]:
         return self._declared_slots
 
-    async def execute(self, **_: object) -> EvidenceVariantAttemptV1:
+    async def execute(self, **_: object) -> EvidenceVariantAttemptV2:
         self._failure()
 
 
@@ -529,15 +658,15 @@ class _NeverCalledLiveAdapter:
     def __init__(
         self,
         *,
-        identity: EvidenceLiveAdapterIdentityV1,
+        identity: EvidenceLiveAdapterIdentityV2,
     ) -> None:
         self._identity = identity
 
     @property
-    def identity(self) -> EvidenceLiveAdapterIdentityV1:
+    def identity(self) -> EvidenceLiveAdapterIdentityV2:
         return self._identity
 
-    async def execute(self, **_: object) -> EvidenceVariantAttemptV1:
+    async def execute(self, **_: object) -> EvidenceVariantAttemptV2:
         raise AssertionError("incomplete live adapter inventory must not execute")
 
 
@@ -545,30 +674,30 @@ class _RebindingFixtureLiveAdapter:
     def __init__(
         self,
         *,
-        identity: EvidenceLiveAdapterIdentityV1,
-        attempts: dict[str, EvidenceVariantAttemptV1],
+        identity: EvidenceLiveAdapterIdentityV2,
+        attempts: dict[str, EvidenceVariantAttemptV2],
     ) -> None:
         self._identity = identity
         self._attempts = attempts
 
     @property
-    def identity(self) -> EvidenceLiveAdapterIdentityV1:
+    def identity(self) -> EvidenceLiveAdapterIdentityV2:
         return self._identity
 
     async def execute(
         self,
         *,
-        case: EvidenceEvaluationCaseSpecV1,
-        binding: EvidenceEvaluationRuntimeBindingV1,
-    ) -> EvidenceVariantAttemptV1:
+        case: EvidenceEvaluationCaseSpecV2,
+        binding: EvidenceEvaluationRuntimeBindingV2,
+    ) -> EvidenceVariantAttemptV2:
         source = self._attempts[case.case_id]
         if source.observation is None:
             raise AssertionError("fixture adapter requires a successful observation")
         values = source.observation.model_dump(mode="python")
         values["executor_fingerprint"] = binding.executor_fingerprint
-        observation = EvidenceVariantObservationV1.model_validate(values)
-        return EvidenceVariantAttemptV1(
-            schema_version="evidence_variant_attempt_v1",
+        observation = EvidenceVariantObservationV2.model_validate(values)
+        return EvidenceVariantAttemptV2(
+            schema_version="evidence_variant_attempt_v2",
             case_id=case.case_id,
             variant=self._identity.variant,
             status="success",
@@ -579,7 +708,7 @@ class _RebindingFixtureLiveAdapter:
 
 
 def _schema_failure() -> NoReturn:
-    EvidenceVariantAttemptV1.model_validate(
+    EvidenceVariantAttemptV2.model_validate(
         {
             "schema_version": "invalid",
             "raw_provider_body": "SECRET_PROVIDER_BODY",
@@ -625,13 +754,13 @@ def test_sealed_attempt_bundle_cannot_claim_live_execution() -> None:
     scenario = _scenario()
 
     with pytest.raises(ValueError, match="hermetic"):
-        live_content = EvidenceVariantAttemptBatchContentV1(
-            schema_version="evidence_variant_attempt_batch_v1",
+        live_content = EvidenceVariantAttemptBatchContentV2(
+            schema_version="evidence_variant_attempt_batch_v2",
             execution_mode="live",
             executor_fingerprint=scenario.batch.executor_fingerprint,
             attempts=list(scenario.batch.attempts),
         )
-        live_batch = EvidenceVariantAttemptBatchV1(
+        live_batch = EvidenceVariantAttemptBatchV2(
             **live_content.model_dump(mode="python"),
             bundle_fingerprint=canonical_sha256(live_content.model_dump(mode="json")),
         )
@@ -668,8 +797,8 @@ async def test_failed_attempt_blocks_and_fail_fast_covers_every_remaining_slot()
     scenario = _scenario()
     attempts = list(scenario.batch.attempts)
     first = attempts[0]
-    attempts[0] = EvidenceVariantAttemptV1(
-        schema_version="evidence_variant_attempt_v1",
+    attempts[0] = EvidenceVariantAttemptV2(
+        schema_version="evidence_variant_attempt_v2",
         case_id=first.case_id,
         variant=first.variant,
         status="failed",
@@ -719,34 +848,128 @@ async def test_runtime_binding_mismatch_blocks_before_any_execution() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("dataset_factory", "reason_code"),
+    [
+        (
+            lambda dataset: _resign_dataset_values(
+                {
+                    **dataset.model_dump(mode="python"),
+                    "knowledge_graph_data_version": "wrong-data-version",
+                }
+            ),
+            "knowledge_graph_data_version_mismatch",
+        ),
+        (
+            lambda dataset: _mutate_first_target(
+                dataset,
+                topic_id="unknown.topic",
+            ),
+            "target_topic_unknown",
+        ),
+        (
+            lambda dataset: _mutate_first_target(
+                dataset,
+                topic_id="big_data.data_engineering",
+                catalog_resource_ids=["big_data_data_engineering_zoomcamp"],
+            ),
+            "target_topic_subject_mismatch",
+        ),
+        (
+            lambda dataset: _mutate_first_target(
+                dataset,
+                catalog_resource_ids=["unknown_resource"],
+            ),
+            "target_catalog_resource_unknown",
+        ),
+        (
+            lambda dataset: _mutate_first_target(
+                dataset,
+                catalog_resource_ids=[
+                    "python_for_everybody",
+                    "python_basics_real_python",
+                ],
+            ),
+            "target_catalog_resource_order_mismatch",
+        ),
+    ],
+)
+async def test_knowledge_graph_binding_drift_blocks_before_execution(
+    dataset_factory,
+    reason_code: str,
+) -> None:
+    scenario = _scenario()
+    drifted = dataset_factory(scenario.dataset)
+
+    decision = await _run(scenario, dataset=drifted)
+
+    assert decision.status == "blocked"
+    assert reason_code in decision.reason_codes
+    assert decision.successful_execution_count == 0
+    assert all(record.status == "not_executed" for record in decision.execution_records)
+
+
+async def test_runtime_and_observation_case_target_identity_drift_are_blocked() -> None:
+    scenario = _scenario()
+    binding_values = scenario.binding.model_dump(mode="python")
+    binding_values["case_bindings"] = list(reversed(binding_values["case_bindings"]))
+    drifted_binding = EvidenceEvaluationRuntimeBindingV2.model_validate(binding_values)
+
+    binding_decision = await _run(scenario, binding=drifted_binding)
+
+    assert "binding_case_target_inventory_mismatch" in binding_decision.reason_codes
+    assert binding_decision.successful_execution_count == 0
+
+    observation_batch = _replace_first_observation(
+        scenario,
+        case_binding=case_binding_identity(scenario.dataset.cases[1]),
+    )
+    observation_decision = await _run(
+        scenario,
+        executor=SealedAttemptVariantExecutor(observation_batch),
+    )
+
+    assert "observation_case_binding_mismatch" in observation_decision.reason_codes
+    assert observation_decision.execution_records[0].status == "blocked"
+
+
 async def test_missing_pg_and_pr_live_adapters_form_machine_readable_blocker() -> None:
     scenario = _scenario()
-    case_ids = [case.case_id for case in scenario.dataset.cases]
+    declared_cases = dataset_case_bindings(scenario.dataset)
 
     def adapter_for(variant: Variant) -> _NeverCalledLiveAdapter:
         definition = scenario.execution_config.definition_for(variant)
         return _NeverCalledLiveAdapter(
-            identity=EvidenceLiveAdapterIdentityV1(
-                schema_version="evidence_live_adapter_identity_v1",
+            identity=EvidenceLiveAdapterIdentityV2(
+                schema_version="evidence_live_adapter_identity_v2",
                 variant=variant,
                 resource_planning_enabled=(definition.resource_planning_enabled),
                 bounded_repair_enabled=definition.bounded_repair_enabled,
                 adapter_fingerprint=canonical_sha256(
                     {"adapter": variant, "fixture": True}
                 ),
-                declared_case_ids=case_ids,
+                dataset_id=scenario.dataset.dataset_id,
+                dataset_fingerprint=scenario.dataset.dataset_fingerprint,
+                knowledge_graph_data_version=(
+                    scenario.dataset.knowledge_graph_data_version
+                ),
+                knowledge_graph_artifact_fingerprint=(
+                    scenario.dataset.knowledge_graph_artifact_fingerprint
+                ),
+                declared_cases=declared_cases,
             )
         )
 
     executor = LiveEvidenceVariantExecutor(
         dataset=scenario.dataset,
+        knowledge_graph=scenario.knowledge_graph,
         execution_config=scenario.execution_config,
         adapters=[adapter_for("P0"), adapter_for("PGR")],
     )
     binding_values = scenario.binding.model_dump(mode="python")
     binding_values["execution_mode"] = "live"
     binding_values["executor_fingerprint"] = executor.executor_fingerprint
-    binding = EvidenceEvaluationRuntimeBindingV1.model_validate(binding_values)
+    binding = EvidenceEvaluationRuntimeBindingV2.model_validate(binding_values)
 
     decision = await _run(scenario, executor=executor, binding=binding)
 
@@ -761,7 +984,7 @@ async def test_missing_pg_and_pr_live_adapters_form_machine_readable_blocker() -
 
 async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> None:
     scenario = _scenario()
-    case_ids = [case.case_id for case in scenario.dataset.cases]
+    declared_cases = dataset_case_bindings(scenario.dataset)
     adapters = []
     for definition in scenario.execution_config.variants:
         variant_attempts = {
@@ -771,8 +994,8 @@ async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> 
         }
         adapters.append(
             _RebindingFixtureLiveAdapter(
-                identity=EvidenceLiveAdapterIdentityV1(
-                    schema_version="evidence_live_adapter_identity_v1",
+                identity=EvidenceLiveAdapterIdentityV2(
+                    schema_version="evidence_live_adapter_identity_v2",
                     variant=definition.variant,
                     resource_planning_enabled=(definition.resource_planning_enabled),
                     bounded_repair_enabled=definition.bounded_repair_enabled,
@@ -782,20 +1005,29 @@ async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> 
                             "fixture": "live_protocol_only",
                         }
                     ),
-                    declared_case_ids=case_ids,
+                    dataset_id=scenario.dataset.dataset_id,
+                    dataset_fingerprint=scenario.dataset.dataset_fingerprint,
+                    knowledge_graph_data_version=(
+                        scenario.dataset.knowledge_graph_data_version
+                    ),
+                    knowledge_graph_artifact_fingerprint=(
+                        scenario.dataset.knowledge_graph_artifact_fingerprint
+                    ),
+                    declared_cases=declared_cases,
                 ),
                 attempts=variant_attempts,
             )
         )
     executor = LiveEvidenceVariantExecutor(
         dataset=scenario.dataset,
+        knowledge_graph=scenario.knowledge_graph,
         execution_config=scenario.execution_config,
         adapters=adapters,
     )
     binding_values = scenario.binding.model_dump(mode="python")
     binding_values["execution_mode"] = "live"
     binding_values["executor_fingerprint"] = executor.executor_fingerprint
-    binding = EvidenceEvaluationRuntimeBindingV1.model_validate(binding_values)
+    binding = EvidenceEvaluationRuntimeBindingV2.model_validate(binding_values)
 
     decision = await _run(scenario, executor=executor, binding=binding)
 
@@ -912,7 +1144,7 @@ async def test_human_review_output_binding_mismatch_is_blocked() -> None:
     first = reviews[0]
     values = first.model_dump(mode="python")
     values["output_fingerprint"] = "e" * 64
-    reviews[0] = HumanSemanticReviewV1.model_validate(values)
+    reviews[0] = HumanSemanticReviewV2.model_validate(values)
 
     decision = await _run(scenario, reviews=_resign_reviews(scenario, reviews))
 

@@ -1,4 +1,4 @@
-schema_version: evidence_rollout_execution_config_v1
+schema_version: evidence_rollout_execution_config_v2
 variants:
   - variant: P0
     resource_planning_enabled: false
@@ -15,5 +15,5 @@ variants:
 human_semantic_review_required: true
 human_review_protocol_fingerprint: 472f880c103669aa23046e1f1e995936c4181088ae8bbb975d4ae38f2c87f2c0
 candidate_failure_policy: fail_fast
-report_policy: content_free_v1
+report_policy: content_free_v2
 max_case_count: 500

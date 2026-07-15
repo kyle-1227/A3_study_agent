@@ -12,25 +12,29 @@ from src.config.evidence_benchmark_config import EvidenceBenchmarkConfig
 from src.config.rag_rollout_config import RagRolloutConfig
 from src.evaluation.evidence_rollout.contracts import (
     DecisionStatus,
-    EvidenceEvaluationCaseSpecV1,
-    EvidenceEvaluationDatasetV1,
-    EvidenceEvaluationRuntimeBindingV1,
-    EvidenceExecutionRecordV1,
-    EvidenceLiveAdapterIdentityV1,
-    EvidenceRolloutDecisionContentV1,
-    EvidenceRolloutDecisionV1,
-    EvidenceRolloutExecutionConfigV1,
-    EvidenceVariantAttemptBatchV1,
-    EvidenceVariantAttemptV1,
-    EvidenceVariantDefinitionV1,
-    EvidenceVariantObservationV1,
+    EvidenceEvaluationCaseSpecV2,
+    EvidenceEvaluationDatasetV2,
+    EvidenceEvaluationRuntimeBindingV2,
+    EvidenceExecutionRecordV2,
+    EvidenceLiveAdapterIdentityV2,
+    EvidenceRolloutDecisionContentV2,
+    EvidenceRolloutDecisionV2,
+    EvidenceRolloutExecutionConfigV2,
+    EvidenceVariantAttemptBatchV2,
+    EvidenceVariantAttemptV2,
+    EvidenceVariantDefinitionV2,
+    EvidenceVariantObservationV2,
     ExecutionMode,
-    HumanSemanticReviewBatchV1,
-    HumanSemanticReviewV1,
+    HumanSemanticReviewBatchV2,
+    HumanSemanticReviewV2,
+    case_binding_identity,
+    case_binding_inventory_fingerprint,
     canonical_sha256,
+    dataset_case_bindings,
     model_fingerprint,
     query_fingerprint,
 )
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
 from src.rag.parent_child.evidence_evaluation import (
     EvidenceActivationDecision,
     EvidenceEvaluationCaseResult,
@@ -58,24 +62,24 @@ class EvidenceVariantExecutor(Protocol):
     async def execute(
         self,
         *,
-        case: EvidenceEvaluationCaseSpecV1,
-        definition: EvidenceVariantDefinitionV1,
-        binding: EvidenceEvaluationRuntimeBindingV1,
-    ) -> EvidenceVariantAttemptV1: ...
+        case: EvidenceEvaluationCaseSpecV2,
+        definition: EvidenceVariantDefinitionV2,
+        binding: EvidenceEvaluationRuntimeBindingV2,
+    ) -> EvidenceVariantAttemptV2: ...
 
 
 class LiveEvidenceVariantAdapter(Protocol):
     """One concrete live implementation of exactly one factorial variant."""
 
     @property
-    def identity(self) -> EvidenceLiveAdapterIdentityV1: ...
+    def identity(self) -> EvidenceLiveAdapterIdentityV2: ...
 
     async def execute(
         self,
         *,
-        case: EvidenceEvaluationCaseSpecV1,
-        binding: EvidenceEvaluationRuntimeBindingV1,
-    ) -> EvidenceVariantAttemptV1: ...
+        case: EvidenceEvaluationCaseSpecV2,
+        binding: EvidenceEvaluationRuntimeBindingV2,
+    ) -> EvidenceVariantAttemptV2: ...
 
 
 class LiveEvidenceVariantExecutor:
@@ -84,22 +88,34 @@ class LiveEvidenceVariantExecutor:
     def __init__(
         self,
         *,
-        dataset: EvidenceEvaluationDatasetV1,
-        execution_config: EvidenceRolloutExecutionConfigV1,
+        dataset: EvidenceEvaluationDatasetV2,
+        knowledge_graph: KnowledgeGraphV1,
+        execution_config: EvidenceRolloutExecutionConfigV2,
         adapters: Sequence[LiveEvidenceVariantAdapter],
     ) -> None:
-        if not isinstance(dataset, EvidenceEvaluationDatasetV1):
-            raise TypeError("dataset must be EvidenceEvaluationDatasetV1")
-        if not isinstance(execution_config, EvidenceRolloutExecutionConfigV1):
-            raise TypeError("execution_config must be EvidenceRolloutExecutionConfigV1")
-        expected_case_ids = [case.case_id for case in dataset.cases]
+        if not isinstance(dataset, EvidenceEvaluationDatasetV2):
+            raise TypeError("dataset must be EvidenceEvaluationDatasetV2")
+        if not isinstance(knowledge_graph, KnowledgeGraphV1):
+            raise TypeError("knowledge_graph must be KnowledgeGraphV1")
+        if not isinstance(execution_config, EvidenceRolloutExecutionConfigV2):
+            raise TypeError("execution_config must be EvidenceRolloutExecutionConfigV2")
+        graph_reasons = _knowledge_graph_failure_reasons(
+            dataset=dataset,
+            knowledge_graph=knowledge_graph,
+        )
+        if graph_reasons:
+            raise EvidenceEvaluationError(
+                code=graph_reasons[0],
+                reason="dataset does not bind the supplied KnowledgeGraphV1",
+            )
+        expected_cases = dataset_case_bindings(dataset)
         by_variant: dict[Variant, LiveEvidenceVariantAdapter] = {}
-        identity_by_variant: dict[Variant, EvidenceLiveAdapterIdentityV1] = {}
+        identity_by_variant: dict[Variant, EvidenceLiveAdapterIdentityV2] = {}
         for adapter in adapters:
             identity = adapter.identity
-            if not isinstance(identity, EvidenceLiveAdapterIdentityV1):
+            if not isinstance(identity, EvidenceLiveAdapterIdentityV2):
                 raise TypeError(
-                    "live adapter identity must be EvidenceLiveAdapterIdentityV1"
+                    "live adapter identity must be EvidenceLiveAdapterIdentityV2"
                 )
             definition = execution_config.definition_for(identity.variant)
             if (
@@ -112,10 +128,21 @@ class LiveEvidenceVariantExecutor:
                     code="live_variant_adapter_semantics_mismatch",
                     reason="live adapter identity differs from canonical variant config",
                 )
-            if identity.declared_case_ids != expected_case_ids:
+            if (
+                identity.dataset_id != dataset.dataset_id
+                or identity.dataset_fingerprint != dataset.dataset_fingerprint
+                or identity.knowledge_graph_data_version
+                != dataset.knowledge_graph_data_version
+                or identity.knowledge_graph_artifact_fingerprint
+                != dataset.knowledge_graph_artifact_fingerprint
+                or identity.declared_cases != expected_cases
+            ):
                 raise EvidenceEvaluationError(
                     code="live_variant_adapter_case_inventory_mismatch",
-                    reason="live adapter must declare the complete ordered case inventory",
+                    reason=(
+                        "live adapter must bind the exact dataset, knowledge graph, "
+                        "and ordered case/target inventory"
+                    ),
                 )
             if identity.variant in by_variant:
                 raise EvidenceEvaluationError(
@@ -137,17 +164,29 @@ class LiveEvidenceVariantExecutor:
         )
 
         self._dataset_fingerprint = dataset.dataset_fingerprint
+        self._knowledge_graph_data_version = dataset.knowledge_graph_data_version
+        self._knowledge_graph_artifact_fingerprint = (
+            dataset.knowledge_graph_artifact_fingerprint
+        )
+        self._case_bindings = expected_cases
         self._execution_config_fingerprint = model_fingerprint(execution_config)
         self._adapters = by_variant
         self._declared_slots = frozenset(
-            (case_id, identity.variant)
+            (case.case_id, identity.variant)
             for identity in identities
-            for case_id in identity.declared_case_ids
+            for case in identity.declared_cases
         )
         self._executor_fingerprint = canonical_sha256(
             {
-                "schema_version": "live_evidence_variant_executor_v1",
+                "schema_version": "live_evidence_variant_executor_v2",
                 "dataset_fingerprint": self._dataset_fingerprint,
+                "knowledge_graph_data_version": self._knowledge_graph_data_version,
+                "knowledge_graph_artifact_fingerprint": (
+                    self._knowledge_graph_artifact_fingerprint
+                ),
+                "case_binding_inventory_fingerprint": (
+                    case_binding_inventory_fingerprint(self._case_bindings)
+                ),
                 "execution_config_fingerprint": self._execution_config_fingerprint,
                 "adapters": [
                     identity.model_dump(mode="json") for identity in identities
@@ -174,10 +213,10 @@ class LiveEvidenceVariantExecutor:
     async def execute(
         self,
         *,
-        case: EvidenceEvaluationCaseSpecV1,
-        definition: EvidenceVariantDefinitionV1,
-        binding: EvidenceEvaluationRuntimeBindingV1,
-    ) -> EvidenceVariantAttemptV1:
+        case: EvidenceEvaluationCaseSpecV2,
+        definition: EvidenceVariantDefinitionV2,
+        binding: EvidenceEvaluationRuntimeBindingV2,
+    ) -> EvidenceVariantAttemptV2:
         if binding.execution_mode != "live":
             raise EvidenceEvaluationError(
                 code="live_executor_mode_mismatch",
@@ -187,6 +226,19 @@ class LiveEvidenceVariantExecutor:
             raise EvidenceEvaluationError(
                 code="live_executor_dataset_mismatch",
                 reason="runtime binding differs from the live executor dataset",
+            )
+        if (
+            binding.knowledge_graph_data_version != self._knowledge_graph_data_version
+            or binding.knowledge_graph_artifact_fingerprint
+            != self._knowledge_graph_artifact_fingerprint
+            or binding.case_bindings != self._case_bindings
+        ):
+            raise EvidenceEvaluationError(
+                code="live_executor_identity_mismatch",
+                reason=(
+                    "runtime binding differs from the live executor knowledge graph "
+                    "or case/target inventory"
+                ),
             )
         if binding.execution_config_fingerprint != self._execution_config_fingerprint:
             raise EvidenceEvaluationError(
@@ -205,9 +257,9 @@ class LiveEvidenceVariantExecutor:
 class SealedAttemptVariantExecutor:
     """Replay a fingerprinted attempt bundle without upgrading it to live proof."""
 
-    def __init__(self, batch: EvidenceVariantAttemptBatchV1) -> None:
-        if not isinstance(batch, EvidenceVariantAttemptBatchV1):
-            raise TypeError("batch must be EvidenceVariantAttemptBatchV1")
+    def __init__(self, batch: EvidenceVariantAttemptBatchV2) -> None:
+        if not isinstance(batch, EvidenceVariantAttemptBatchV2):
+            raise TypeError("batch must be EvidenceVariantAttemptBatchV2")
         if batch.execution_mode != "hermetic":
             raise ValueError("sealed attempt bundles are hermetic-only")
         self._batch = batch
@@ -230,15 +282,15 @@ class SealedAttemptVariantExecutor:
     async def execute(
         self,
         *,
-        case: EvidenceEvaluationCaseSpecV1,
-        definition: EvidenceVariantDefinitionV1,
-        binding: EvidenceEvaluationRuntimeBindingV1,
-    ) -> EvidenceVariantAttemptV1:
+        case: EvidenceEvaluationCaseSpecV2,
+        definition: EvidenceVariantDefinitionV2,
+        binding: EvidenceEvaluationRuntimeBindingV2,
+    ) -> EvidenceVariantAttemptV2:
         del binding
         attempt = self._attempts.get((case.case_id, definition.variant))
         if attempt is None:
-            return EvidenceVariantAttemptV1(
-                schema_version="evidence_variant_attempt_v1",
+            return EvidenceVariantAttemptV2(
+                schema_version="evidence_variant_attempt_v2",
                 case_id=case.case_id,
                 variant=definition.variant,
                 status="blocked",
@@ -265,9 +317,9 @@ def _not_executed_record(
     case_id: str,
     variant: Variant,
     reason_code: str,
-) -> EvidenceExecutionRecordV1:
-    return EvidenceExecutionRecordV1(
-        schema_version="evidence_execution_record_v1",
+) -> EvidenceExecutionRecordV2:
+    return EvidenceExecutionRecordV2(
+        schema_version="evidence_execution_record_v2",
         case_id=case_id,
         variant=variant,
         status="not_executed",
@@ -277,12 +329,12 @@ def _not_executed_record(
     )
 
 
-def _attempt_record(attempt: EvidenceVariantAttemptV1) -> EvidenceExecutionRecordV1:
+def _attempt_record(attempt: EvidenceVariantAttemptV2) -> EvidenceExecutionRecordV2:
     if attempt.status == "success":
         if attempt.observation is None:
             raise AssertionError("validated successful attempt requires observation")
-        return EvidenceExecutionRecordV1(
-            schema_version="evidence_execution_record_v1",
+        return EvidenceExecutionRecordV2(
+            schema_version="evidence_execution_record_v2",
             case_id=attempt.case_id,
             variant=attempt.variant,
             status="success",
@@ -290,8 +342,8 @@ def _attempt_record(attempt: EvidenceVariantAttemptV1) -> EvidenceExecutionRecor
             failure_reason_code=None,
             failure_type=None,
         )
-    return EvidenceExecutionRecordV1(
-        schema_version="evidence_execution_record_v1",
+    return EvidenceExecutionRecordV2(
+        schema_version="evidence_execution_record_v2",
         case_id=attempt.case_id,
         variant=attempt.variant,
         status=attempt.status,
@@ -305,7 +357,7 @@ def _blocked_records(
     slots: Sequence[Slot],
     *,
     reason_code: str,
-) -> list[EvidenceExecutionRecordV1]:
+) -> list[EvidenceExecutionRecordV2]:
     return [
         _not_executed_record(
             case_id=case_id,
@@ -317,10 +369,10 @@ def _blocked_records(
 
 
 def _sign_decision(
-    content: EvidenceRolloutDecisionContentV1,
-) -> EvidenceRolloutDecisionV1:
+    content: EvidenceRolloutDecisionContentV2,
+) -> EvidenceRolloutDecisionV2:
     payload = content.model_dump(mode="json")
-    return EvidenceRolloutDecisionV1(
+    return EvidenceRolloutDecisionV2(
         **content.model_dump(mode="python"),
         decision_fingerprint=canonical_sha256(payload),
     )
@@ -328,8 +380,8 @@ def _sign_decision(
 
 def _build_decision(
     *,
-    binding: EvidenceEvaluationRuntimeBindingV1,
-    reviews: HumanSemanticReviewBatchV1,
+    binding: EvidenceEvaluationRuntimeBindingV2,
+    reviews: HumanSemanticReviewBatchV2,
     status: DecisionStatus,
     benchmark_eligible: bool,
     rollout_activation_enabled: bool,
@@ -339,8 +391,8 @@ def _build_decision(
     reviewed_execution_count: int,
     activation_decision: EvidenceActivationDecision | None,
     case_results: Sequence[EvidenceEvaluationCaseResult],
-    records: Sequence[EvidenceExecutionRecordV1],
-) -> EvidenceRolloutDecisionV1:
+    records: Sequence[EvidenceExecutionRecordV2],
+) -> EvidenceRolloutDecisionV2:
     effective_reason_codes = list(reason_codes)
     if status == "blocked" and binding.execution_mode != "live":
         effective_reason_codes.append("non_live_execution")
@@ -351,8 +403,8 @@ def _build_decision(
         and reviewed_execution_count == expected_execution_count
         and len(case_results) == expected_execution_count
     )
-    content = EvidenceRolloutDecisionContentV1(
-        schema_version="evidence_rollout_activation_decision_v1",
+    content = EvidenceRolloutDecisionContentV2(
+        schema_version="evidence_rollout_activation_decision_v2",
         run_id=binding.run_id,
         execution_mode=binding.execution_mode,
         status=status,
@@ -366,6 +418,13 @@ def _build_decision(
         variant_matrix_complete=complete,
         dataset_id=binding.dataset_id,
         dataset_fingerprint=binding.dataset_fingerprint,
+        knowledge_graph_data_version=binding.knowledge_graph_data_version,
+        knowledge_graph_artifact_fingerprint=(
+            binding.knowledge_graph_artifact_fingerprint
+        ),
+        case_binding_inventory_fingerprint=(
+            case_binding_inventory_fingerprint(binding.case_bindings)
+        ),
         execution_config_fingerprint=binding.execution_config_fingerprint,
         benchmark_config_fingerprint=binding.benchmark_config_fingerprint,
         rollout_config_fingerprint=binding.rollout_config_fingerprint,
@@ -382,24 +441,81 @@ def _build_decision(
     return _sign_decision(content)
 
 
+def _knowledge_graph_failure_reasons(
+    *,
+    dataset: EvidenceEvaluationDatasetV2,
+    knowledge_graph: KnowledgeGraphV1,
+) -> list[str]:
+    reasons: list[str] = []
+    if dataset.knowledge_graph_data_version != knowledge_graph.data_version:
+        reasons.append("knowledge_graph_data_version_mismatch")
+    if (
+        dataset.knowledge_graph_artifact_fingerprint
+        != knowledge_graph.artifact_fingerprint
+    ):
+        reasons.append("knowledge_graph_artifact_fingerprint_mismatch")
+    for case in dataset.cases:
+        for target in case.targets:
+            subject = knowledge_graph.subject(target.subject)
+            if subject is None:
+                reasons.append("target_subject_unknown")
+            topic = knowledge_graph.topic(target.topic_id)
+            if topic is None:
+                reasons.append("target_topic_unknown")
+                continue
+            if subject is not None and target.topic_id not in {
+                item.topic_id for item in subject.topics
+            }:
+                reasons.append("target_topic_subject_mismatch")
+            topic_resource_ids = [resource.resource_id for resource in topic.resources]
+            selected_resource_ids = target.catalog_resource_ids
+            if any(
+                resource_id not in topic_resource_ids
+                for resource_id in selected_resource_ids
+            ):
+                reasons.append("target_catalog_resource_unknown")
+                continue
+            selected_set = set(selected_resource_ids)
+            if selected_resource_ids != [
+                resource_id
+                for resource_id in topic_resource_ids
+                if resource_id in selected_set
+            ]:
+                reasons.append("target_catalog_resource_order_mismatch")
+    return _unique(reasons)
+
+
 def _binding_failure_reasons(
     *,
-    dataset: EvidenceEvaluationDatasetV1,
-    execution_config: EvidenceRolloutExecutionConfigV1,
+    dataset: EvidenceEvaluationDatasetV2,
+    knowledge_graph: KnowledgeGraphV1,
+    execution_config: EvidenceRolloutExecutionConfigV2,
     benchmark_config: EvidenceBenchmarkConfig,
     rollout_config: RagRolloutConfig,
-    binding: EvidenceEvaluationRuntimeBindingV1,
-    reviews: HumanSemanticReviewBatchV1,
+    binding: EvidenceEvaluationRuntimeBindingV2,
+    reviews: HumanSemanticReviewBatchV2,
     executor: EvidenceVariantExecutor,
     expected_slots: frozenset[Slot],
 ) -> list[str]:
-    reasons: list[str] = []
+    reasons = _knowledge_graph_failure_reasons(
+        dataset=dataset,
+        knowledge_graph=knowledge_graph,
+    )
     if len(dataset.cases) > execution_config.max_case_count:
         reasons.append("dataset_case_limit_exceeded")
     if binding.dataset_id != dataset.dataset_id:
         reasons.append("dataset_id_mismatch")
     if binding.dataset_fingerprint != dataset.dataset_fingerprint:
         reasons.append("dataset_fingerprint_mismatch")
+    if binding.knowledge_graph_data_version != dataset.knowledge_graph_data_version:
+        reasons.append("binding_knowledge_graph_data_version_mismatch")
+    if (
+        binding.knowledge_graph_artifact_fingerprint
+        != dataset.knowledge_graph_artifact_fingerprint
+    ):
+        reasons.append("binding_knowledge_graph_artifact_fingerprint_mismatch")
+    if binding.case_bindings != dataset_case_bindings(dataset):
+        reasons.append("binding_case_target_inventory_mismatch")
     if binding.execution_config_fingerprint != model_fingerprint(execution_config):
         reasons.append("execution_config_fingerprint_mismatch")
     if binding.benchmark_config_fingerprint != model_fingerprint(benchmark_config):
@@ -447,16 +563,21 @@ def _binding_failure_reasons(
 
 def _observation_binding_reasons(
     *,
-    observation: EvidenceVariantObservationV1,
-    case: EvidenceEvaluationCaseSpecV1,
-    definition: EvidenceVariantDefinitionV1,
-    binding: EvidenceEvaluationRuntimeBindingV1,
+    observation: EvidenceVariantObservationV2,
+    case: EvidenceEvaluationCaseSpecV2,
+    definition: EvidenceVariantDefinitionV2,
+    binding: EvidenceEvaluationRuntimeBindingV2,
 ) -> list[str]:
     expected = {
         "case_id": case.case_id,
         "variant": definition.variant,
         "query_fingerprint": query_fingerprint(case.query),
         "dataset_fingerprint": binding.dataset_fingerprint,
+        "knowledge_graph_data_version": binding.knowledge_graph_data_version,
+        "knowledge_graph_artifact_fingerprint": (
+            binding.knowledge_graph_artifact_fingerprint
+        ),
+        "case_binding": case_binding_identity(case),
         "execution_config_fingerprint": binding.execution_config_fingerprint,
         "benchmark_config_fingerprint": binding.benchmark_config_fingerprint,
         "rollout_config_fingerprint": binding.rollout_config_fingerprint,
@@ -500,9 +621,9 @@ def _observation_binding_reasons(
 
 def _case_result(
     *,
-    case: EvidenceEvaluationCaseSpecV1,
-    observation: EvidenceVariantObservationV1,
-    review: HumanSemanticReviewV1,
+    case: EvidenceEvaluationCaseSpecV2,
+    observation: EvidenceVariantObservationV2,
+    review: HumanSemanticReviewV2,
 ) -> EvidenceEvaluationCaseResult:
     if review.output_fingerprint != observation.output_fingerprint:
         raise EvidenceEvaluationError(
@@ -532,7 +653,7 @@ def _case_result(
         variant=observation.variant,
         subject_count=len(case.subjects),
         resource_count=len(case.resource_types),
-        initial_evidence_sufficient=case.initial_evidence_sufficient,
+        initial_evidence_sufficient=case.initial_evidence.state == "sufficient",
         bounded=observation.bounded,
         forced_stop_marked_sufficient=observation.forced_stop_marked_sufficient,
         silent_resource_omission=observation.silent_resource_omission,
@@ -558,23 +679,25 @@ def _case_result(
 
 async def run_evidence_rollout_evaluation(
     *,
-    dataset: EvidenceEvaluationDatasetV1,
-    execution_config: EvidenceRolloutExecutionConfigV1,
+    dataset: EvidenceEvaluationDatasetV2,
+    knowledge_graph: KnowledgeGraphV1,
+    execution_config: EvidenceRolloutExecutionConfigV2,
     benchmark_config: EvidenceBenchmarkConfig,
     rollout_config: RagRolloutConfig,
-    binding: EvidenceEvaluationRuntimeBindingV1,
-    reviews: HumanSemanticReviewBatchV1,
+    binding: EvidenceEvaluationRuntimeBindingV2,
+    reviews: HumanSemanticReviewBatchV2,
     executor: EvidenceVariantExecutor,
-) -> EvidenceRolloutDecisionV1:
+) -> EvidenceRolloutDecisionV2:
     """Execute every canonical slot, bind human reviews, then evaluate activation."""
 
     for value, expected_type, field_name in (
-        (dataset, EvidenceEvaluationDatasetV1, "dataset"),
-        (execution_config, EvidenceRolloutExecutionConfigV1, "execution_config"),
+        (dataset, EvidenceEvaluationDatasetV2, "dataset"),
+        (knowledge_graph, KnowledgeGraphV1, "knowledge_graph"),
+        (execution_config, EvidenceRolloutExecutionConfigV2, "execution_config"),
         (benchmark_config, EvidenceBenchmarkConfig, "benchmark_config"),
         (rollout_config, RagRolloutConfig, "rollout_config"),
-        (binding, EvidenceEvaluationRuntimeBindingV1, "binding"),
-        (reviews, HumanSemanticReviewBatchV1, "reviews"),
+        (binding, EvidenceEvaluationRuntimeBindingV2, "binding"),
+        (reviews, HumanSemanticReviewBatchV2, "reviews"),
     ):
         if not isinstance(value, expected_type):
             raise TypeError(
@@ -589,6 +712,7 @@ async def run_evidence_rollout_evaluation(
     expected_slots = frozenset(ordered_slots)
     binding_reasons = _binding_failure_reasons(
         dataset=dataset,
+        knowledge_graph=knowledge_graph,
         execution_config=execution_config,
         benchmark_config=benchmark_config,
         rollout_config=rollout_config,
@@ -620,7 +744,7 @@ async def run_evidence_rollout_evaluation(
         (review.case_id, review.variant): review for review in reviews.reviews
     }
     case_results: list[EvidenceEvaluationCaseResult] = []
-    records: list[EvidenceExecutionRecordV1] = []
+    records: list[EvidenceExecutionRecordV2] = []
     successful_count = 0
     reviewed_count = 0
     global_reasons: list[str] = []
@@ -643,13 +767,13 @@ async def run_evidence_rollout_evaluation(
                     definition=definition,
                     binding=binding,
                 )
-                if not isinstance(attempt, EvidenceVariantAttemptV1):
+                if not isinstance(attempt, EvidenceVariantAttemptV2):
                     raise TypeError(
-                        "variant executor must return EvidenceVariantAttemptV1"
+                        "variant executor must return EvidenceVariantAttemptV2"
                     )
             except ValidationError as error:
-                attempt = EvidenceVariantAttemptV1(
-                    schema_version="evidence_variant_attempt_v1",
+                attempt = EvidenceVariantAttemptV2(
+                    schema_version="evidence_variant_attempt_v2",
                     case_id=case.case_id,
                     variant=definition.variant,
                     status="failed",
@@ -658,8 +782,8 @@ async def run_evidence_rollout_evaluation(
                     failure_type=_safe_exception_type(error),
                 )
             except EvidenceEvaluationError as error:
-                attempt = EvidenceVariantAttemptV1(
-                    schema_version="evidence_variant_attempt_v1",
+                attempt = EvidenceVariantAttemptV2(
+                    schema_version="evidence_variant_attempt_v2",
                     case_id=case.case_id,
                     variant=definition.variant,
                     status="failed",
@@ -668,8 +792,8 @@ async def run_evidence_rollout_evaluation(
                     failure_type=_safe_exception_type(error),
                 )
             except Exception as error:
-                attempt = EvidenceVariantAttemptV1(
-                    schema_version="evidence_variant_attempt_v1",
+                attempt = EvidenceVariantAttemptV2(
+                    schema_version="evidence_variant_attempt_v2",
                     case_id=case.case_id,
                     variant=definition.variant,
                     status="failed",
@@ -679,8 +803,8 @@ async def run_evidence_rollout_evaluation(
                 )
 
             if attempt.case_id != case.case_id or attempt.variant != definition.variant:
-                attempt = EvidenceVariantAttemptV1(
-                    schema_version="evidence_variant_attempt_v1",
+                attempt = EvidenceVariantAttemptV2(
+                    schema_version="evidence_variant_attempt_v2",
                     case_id=case.case_id,
                     variant=definition.variant,
                     status="blocked",
@@ -704,8 +828,8 @@ async def run_evidence_rollout_evaluation(
                 binding=binding,
             )
             if observation_reasons:
-                records[-1] = EvidenceExecutionRecordV1(
-                    schema_version="evidence_execution_record_v1",
+                records[-1] = EvidenceExecutionRecordV2(
+                    schema_version="evidence_execution_record_v2",
                     case_id=case.case_id,
                     variant=definition.variant,
                     status="blocked",

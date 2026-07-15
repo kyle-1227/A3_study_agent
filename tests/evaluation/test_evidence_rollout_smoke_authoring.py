@@ -14,8 +14,9 @@ import yaml  # type: ignore[import-untyped]
 
 from src.config.learning_guidance_config import load_learning_guidance_config
 from src.evaluation.evidence_rollout.contracts import (
-    EvidenceEvaluationDatasetContentV1,
-    EvidenceEvaluationDatasetV1,
+    EvidenceEvaluationDatasetContentV2,
+    EvidenceEvaluationDatasetV2,
+    canonical_sha256,
 )
 from src.graph.evidence import EvidenceCandidate
 from src.learning_guidance.factory import resolve_knowledge_graph_path
@@ -29,8 +30,8 @@ DRAFT_PATH = PRIVATE_ROOT / "evidence_rollout_smoke_dataset.authoring.json"
 PACKET_PATH = PRIVATE_ROOT / "evidence_rollout_smoke_reviewer_packet.yaml"
 
 
-def _draft() -> EvidenceEvaluationDatasetContentV1:
-    return EvidenceEvaluationDatasetContentV1.model_validate_json(
+def _draft() -> EvidenceEvaluationDatasetContentV2:
+    return EvidenceEvaluationDatasetContentV2.model_validate_json(
         DRAFT_PATH.read_bytes()
     )
 
@@ -57,10 +58,10 @@ def test_smoke_draft_is_unsealed_and_cannot_authorize_activation() -> None:
     packet = _packet()
     raw = json.loads(DRAFT_PATH.read_text(encoding="utf-8"))
 
-    assert draft.dataset_id.endswith("_draft_v1")
+    assert draft.dataset_id.endswith("_draft_v2")
     assert "dataset_fingerprint" not in raw
     with pytest.raises(ValidationError, match="dataset_fingerprint"):
-        EvidenceEvaluationDatasetV1.model_validate_json(DRAFT_PATH.read_bytes())
+        EvidenceEvaluationDatasetV2.model_validate_json(DRAFT_PATH.read_bytes())
     assert packet["packet_status"] == "draft_unapproved"
     assert packet["smoke_only"] is True
     assert packet["activation_eligible"] is False
@@ -70,8 +71,7 @@ def test_smoke_draft_is_unsealed_and_cannot_authorize_activation() -> None:
     assert packet["second_independent_review_status"] == "pending"
     blockers = set(_list(packet["seal_blockers"]))
     assert {
-        "schema_v1_missing_kg_identity_binding",
-        "schema_v1_missing_initial_evidence_identity",
+        "initial_evidence_content_not_human_sealed",
         "smoke_case_count_below_activation_gate_resolution",
         "human_domain_review_missing",
         "independent_review_missing",
@@ -110,8 +110,10 @@ def test_smoke_inventory_covers_required_partitions_subjects_resources_and_route
     assert len(multi) == stats["multi_case_count"] == 2
     assert sum(len(case.resource_types) > 1 for case in draft.cases) == 2
     assert sum(len(case.subjects) > 1 for case in draft.cases) == 1
-    assert sum(case.initial_evidence_sufficient for case in draft.cases) == 3
-    assert sum(not case.initial_evidence_sufficient for case in draft.cases) == 3
+    assert sum(case.initial_evidence.state == "sufficient" for case in draft.cases) == 3
+    assert (
+        sum(case.initial_evidence.state == "insufficient" for case in draft.cases) == 3
+    )
     assert {subject for case in draft.cases for subject in case.subjects} == {
         "big_data",
         "computer",
@@ -138,7 +140,7 @@ def test_smoke_inventory_covers_required_partitions_subjects_resources_and_route
     ) == pytest.approx(float(expected_weight))
 
 
-def test_sidecar_kg_bindings_are_exact_but_remain_non_authoritative() -> None:
+def test_dataset_kg_bindings_are_authoritative_and_packet_is_projection() -> None:
     draft = _draft()
     packet = _packet()
     guidance = load_learning_guidance_config(ROOT / "config" / "learning_guidance.yaml")
@@ -147,7 +149,10 @@ def test_sidecar_kg_bindings_are_exact_but_remain_non_authoritative() -> None:
     kg_packet = _dict(packet["knowledge_graph"])
     assert kg_packet["artifact_fingerprint"] == kg.artifact_fingerprint
     assert kg_packet["data_version"] == kg.data_version
-    assert kg_packet["binding_status"] == "sidecar_only_blocked"
+    assert draft.knowledge_graph_artifact_fingerprint == kg.artifact_fingerprint
+    assert draft.knowledge_graph_data_version == kg.data_version
+    assert kg_packet["binding_status"] == "dataset_authoritative_v2"
+    assert packet["case_binding_projection_status"] == "reviewer_convenience_only"
     route_contract = _dict(packet["route_contract"])
     production_sources = set(
         EvidenceCandidate.model_json_schema()["properties"]["source_type"]["enum"]
@@ -167,14 +172,16 @@ def test_sidecar_kg_bindings_are_exact_but_remain_non_authoritative() -> None:
         for raw_target in _list(case_packet["targets"]):
             binding = _dict(raw_target)
             target = target_by_id[str(binding["target_id"])]
-            topic = kg.topic(str(binding["topic_id"]))
+            assert binding["topic_id"] == target.topic_id
+            assert binding["catalog_resource_ids"] == target.catalog_resource_ids
+            topic = kg.topic(target.topic_id)
             assert topic is not None
             subject = kg.subject(str(binding["subject_id"]))
             assert subject is not None
             assert topic.topic_id in {item.topic_id for item in subject.topics}
             assert target.subject == subject.subject_id
             assert binding["expected_sources"] == target.required_sources
-            catalog_ids = [str(item) for item in _list(binding["catalog_resource_ids"])]
+            catalog_ids = list(target.catalog_resource_ids)
             topic_inventory = [resource.resource_id for resource in topic.resources]
             assert catalog_ids
             assert catalog_ids == [
@@ -189,19 +196,22 @@ def test_schema_and_business_negatives_reject_duplicate_gap_and_missing_partitio
 
     duplicate = deepcopy(original)
     duplicate["cases"][1]["case_id"] = duplicate["cases"][0]["case_id"]
+    duplicate_case = duplicate["cases"][1]
+    duplicate_case.pop("case_fingerprint")
+    duplicate_case["case_fingerprint"] = canonical_sha256(duplicate_case)
     with pytest.raises(ValidationError, match="cases must not repeat"):
-        EvidenceEvaluationDatasetContentV1.model_validate(duplicate)
+        EvidenceEvaluationDatasetContentV2.model_validate(duplicate)
 
     uncovered = deepcopy(original)
     multi_case = uncovered["cases"][4]
     multi_case["requirements"] = [multi_case["requirements"][0]]
     with pytest.raises(ValidationError, match="every target must have"):
-        EvidenceEvaluationDatasetContentV1.model_validate(uncovered)
+        EvidenceEvaluationDatasetContentV2.model_validate(uncovered)
 
     no_multi = deepcopy(original)
     no_multi["cases"] = no_multi["cases"][:4]
     with pytest.raises(ValidationError, match="simple, multi"):
-        EvidenceEvaluationDatasetContentV1.model_validate(no_multi)
+        EvidenceEvaluationDatasetContentV2.model_validate(no_multi)
 
 
 def test_private_smoke_artifacts_are_utf8_secret_free_and_report_isolated() -> None:

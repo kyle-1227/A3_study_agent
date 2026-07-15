@@ -28,10 +28,10 @@ from src.config.evidence_benchmark_config import (  # noqa: E402
 )
 from src.config.rag_rollout_config import load_rag_rollout_config  # noqa: E402
 from src.evaluation.evidence_rollout.contracts import (  # noqa: E402
-    EvidenceEvaluationDatasetV1,
-    EvidenceEvaluationRuntimeBindingV1,
-    EvidenceVariantAttemptBatchV1,
-    HumanSemanticReviewBatchV1,
+    EvidenceEvaluationDatasetV2,
+    EvidenceEvaluationRuntimeBindingV2,
+    EvidenceVariantAttemptBatchV2,
+    HumanSemanticReviewBatchV2,
     load_evidence_rollout_execution_config,
 )
 from src.evaluation.evidence_rollout.io import (  # noqa: E402
@@ -45,6 +45,7 @@ from src.evaluation.evidence_rollout.runner import (  # noqa: E402
     SealedAttemptVariantExecutor,
     run_evidence_rollout_evaluation,
 )
+from src.learning_guidance.knowledge_graph import load_knowledge_graph  # noqa: E402
 from src.rag.parent_child.manifests import GenerationManifest  # noqa: E402
 from src.rag.parent_child.project_paths import (  # noqa: E402
     atomic_write_project_bytes,
@@ -58,8 +59,8 @@ class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
-class EvidenceRolloutCliFailureV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_rollout_cli_failure_v1"]
+class EvidenceRolloutCliFailureV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_rollout_cli_failure_v2"]
     status: Literal["blocked"]
     failure_code: str
     failure_type: str
@@ -81,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-config", type=Path, required=True)
     parser.add_argument("--review-protocol", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--knowledge-graph", type=Path, required=True)
     parser.add_argument("--runtime-binding", type=Path, required=True)
     parser.add_argument("--human-reviews", type=Path, required=True)
     parser.add_argument("--attempt-batch", type=Path, required=True)
@@ -118,7 +120,7 @@ def _validate_external_bindings(
     expected_review_protocol_fingerprint: str,
     generation_manifest: GenerationManifest,
     generation_manifest_fingerprint: str,
-    binding: EvidenceEvaluationRuntimeBindingV1,
+    binding: EvidenceEvaluationRuntimeBindingV2,
 ) -> None:
     review_protocol_fingerprint = _canonical_utf8_text_fingerprint(review_protocol_path)
     if review_protocol_fingerprint != expected_review_protocol_fingerprint:
@@ -137,6 +139,7 @@ def run_hermetic_evaluation(
     rollout_config_path: Path,
     review_protocol_path: Path,
     dataset_path: Path,
+    knowledge_graph_path: Path,
     runtime_binding_path: Path,
     human_reviews_path: Path,
     attempt_batch_path: Path,
@@ -151,6 +154,7 @@ def run_hermetic_evaluation(
     rollout_path = require_project_file(root, rollout_config_path)
     protocol_path = require_project_file(root, review_protocol_path)
     dataset_file = require_project_file(root, dataset_path)
+    knowledge_graph_file = require_project_file(root, knowledge_graph_path)
     binding_file = require_project_file(root, runtime_binding_path)
     reviews_file = require_project_file(root, human_reviews_path)
     attempts_file = require_project_file(root, attempt_batch_path)
@@ -160,18 +164,19 @@ def run_hermetic_evaluation(
     execution_config = load_evidence_rollout_execution_config(execution_path)
     benchmark_config = load_evidence_benchmark_config(benchmark_path)
     rollout_config = load_rag_rollout_config(rollout_path)
-    dataset = load_canonical_json_model(dataset_file, EvidenceEvaluationDatasetV1)
+    dataset = load_canonical_json_model(dataset_file, EvidenceEvaluationDatasetV2)
+    knowledge_graph = load_knowledge_graph(knowledge_graph_file)
     binding = load_canonical_json_model(
         binding_file,
-        EvidenceEvaluationRuntimeBindingV1,
+        EvidenceEvaluationRuntimeBindingV2,
     )
     reviews = load_canonical_json_model(
         reviews_file,
-        HumanSemanticReviewBatchV1,
+        HumanSemanticReviewBatchV2,
     )
     attempts = load_canonical_json_model(
         attempts_file,
-        EvidenceVariantAttemptBatchV1,
+        EvidenceVariantAttemptBatchV2,
     )
     generation_manifest, generation_manifest_fingerprint = _load_generation_manifest(
         manifest_file
@@ -188,6 +193,7 @@ def run_hermetic_evaluation(
     decision = asyncio.run(
         run_evidence_rollout_evaluation(
             dataset=dataset,
+            knowledge_graph=knowledge_graph,
             execution_config=execution_config,
             benchmark_config=benchmark_config,
             rollout_config=rollout_config,
@@ -242,8 +248,8 @@ def _write_failure_artifact(
     root = resolve_project_root(project_root)
     output = resolve_project_path(root, output_directory, must_exist=False)
     failure_path = output.with_name(output.name + ".failure.json")
-    artifact = EvidenceRolloutCliFailureV1(
-        schema_version="evidence_rollout_cli_failure_v1",
+    artifact = EvidenceRolloutCliFailureV2(
+        schema_version="evidence_rollout_cli_failure_v2",
         status="blocked",
         failure_code=_failure_code(error),
         failure_type=_safe_failure_type(error),
@@ -266,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             rollout_config_path=args.rollout_config,
             review_protocol_path=args.review_protocol,
             dataset_path=args.dataset,
+            knowledge_graph_path=args.knowledge_graph,
             runtime_binding_path=args.runtime_binding,
             human_reviews_path=args.human_reviews,
             attempt_batch_path=args.attempt_batch,

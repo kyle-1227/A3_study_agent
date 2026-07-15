@@ -35,14 +35,16 @@ specific reason such as `live_variant_adapter_missing_pg` or
 
 Each production adapter must provide:
 
-1. An `EvidenceLiveAdapterIdentityV1` containing its exact variant factors,
-   adapter fingerprint, and the complete ordered case inventory.
+1. An `EvidenceLiveAdapterIdentityV2` containing its exact variant factors,
+   adapter fingerprint, dataset/KG identities, and the complete ordered
+   case/target binding inventory.
 2. An async `execute(case, binding)` implementation for only that variant.
-3. An `EvidenceVariantAttemptV1` containing either a strict content-free
+3. An `EvidenceVariantAttemptV2` containing either a strict content-free
    observation or typed safe failure metadata.
-4. Observations bound to the query digest, dataset, execution/benchmark/rollout
-   configs, runtime, READY generation manifest, executor, and exact variant
-   definition.
+4. Observations bound to the query digest, dataset, curated KG, current case and
+   target fingerprints, initial-evidence scenario identity,
+   execution/benchmark/rollout configs, runtime, READY generation manifest,
+   executor, and exact variant definition.
 5. Counts and weights derived from the authored gold targets, expected source
    routes, and evidence requirements. Raw query text, URLs, evidence bodies,
    Provider bodies, headers, DB URIs, and secrets are forbidden from the public
@@ -56,6 +58,9 @@ as evidence-orchestration gold. The new authoring contract requires:
 - simple and multi-resource or multi-subject cases;
 - an initially-sufficient case partition;
 - explicit resource/subject targets;
+- an exact KG topic and non-empty ordered KG resource inventory per target;
+- target, case, KG artifact, and dataset fingerprints;
+- an explicit initial-evidence state, source inventory, and scenario identity;
 - expected `parent_child` and/or `web` routes per target;
 - human-authored weighted evidence requirements for every target.
 
@@ -65,9 +70,17 @@ no dataset fingerprint and contains replacement markers, so it cannot be loaded
 as a sealed production dataset. `seal_evidence_evaluation_dataset()` seals only
 an already validated authoring model.
 
+The private six-case smoke draft covers five subjects, all seven generated
+resource types, both initial-evidence states, and Parent-Child/Web route shapes.
+It is explicitly smoke-only, unsealed, and human-unapproved. Its
+initial-evidence fingerprint binds only the declared scenario identity; it does
+not prove captured evidence content or semantic sufficiency and cannot satisfy
+the activation gate.
+
 ## Artifact and report behavior
 
-The hermetic CLI requires explicit paths for every input. It accepts only an
+The hermetic CLI requires explicit paths for every input, including the curated
+`KnowledgeGraphV1` artifact. It accepts only an
 `execution_mode: hermetic` attempt bundle; a JSON bundle cannot masquerade as
 live proof. Inputs must be canonical JSON and all embedded fingerprints are
 revalidated. The READY generation manifest and human-review protocol are also
@@ -97,7 +110,7 @@ on stderr and are not silently swallowed.
 | PG live adapter | missing | No independent production graph/adapter exists |
 | PR live adapter | missing | No independent production graph/adapter exists |
 | PGR live adapter | missing | Existing graph factory is not yet wrapped in the evaluation adapter contract |
-| Curated evidence dataset | missing | Only the non-runnable authoring template exists |
+| Curated evidence dataset | blocked | Six-case v2 smoke authoring draft exists but is unsealed, below activation-scale resolution, and lacks human approval |
 | Complete human semantic review bundle | missing | No reviewed output bundle exists |
 | Rollout activation | disabled | `config/rag/rollout.yaml` remains `activation_enabled: false` |
 

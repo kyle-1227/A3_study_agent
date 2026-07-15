@@ -90,45 +90,57 @@ def query_fingerprint(query: str) -> str:
     if not isinstance(query, str) or not query or query != query.strip():
         raise ValueError("query must be a non-blank stripped string")
     return canonical_sha256(
-        {"algorithm": "evidence_evaluation_query_v1", "query": query}
+        {"algorithm": "evidence_evaluation_query_v2", "query": query}
     )
 
 
-class EvidenceVariantDefinitionV1(_StrictFrozenModel):
+class EvidenceVariantDefinitionV2(_StrictFrozenModel):
     variant: Variant
     resource_planning_enabled: bool
     bounded_repair_enabled: bool
 
 
-class EvidenceLiveAdapterIdentityV1(_StrictFrozenModel):
+class EvidenceLiveAdapterIdentityV2(_StrictFrozenModel):
     """Auditable identity exposed by one concrete live variant adapter."""
 
-    schema_version: Literal["evidence_live_adapter_identity_v1"]
+    schema_version: Literal["evidence_live_adapter_identity_v2"]
     variant: Variant
     resource_planning_enabled: bool
     bounded_repair_enabled: bool
     adapter_fingerprint: Sha256Digest
-    declared_case_ids: list[str] = Field(min_length=1)
+    dataset_id: str
+    dataset_fingerprint: Sha256Digest
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    declared_cases: list["EvidenceCaseBindingIdentityV2"] = Field(min_length=1)
 
-    @field_validator("declared_case_ids")
+    @field_validator("dataset_id")
     @classmethod
-    def validate_case_ids(cls, values: list[str]) -> list[str]:
-        for value in values:
-            _identifier(value, field_name="declared_case_id")
-        if len(values) != len(set(values)):
-            raise ValueError("declared_case_ids must not contain duplicates")
-        return values
+    def validate_dataset_id(cls, value: str) -> str:
+        return _identifier(value, field_name="dataset_id")
+
+    @field_validator("knowledge_graph_data_version")
+    @classmethod
+    def validate_knowledge_graph_data_version(cls, value: str) -> str:
+        return _identifier(value, field_name="knowledge_graph_data_version")
+
+    @model_validator(mode="after")
+    def validate_declared_cases(self) -> Self:
+        case_ids = tuple(item.case_id for item in self.declared_cases)
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("declared_cases must not repeat case_id")
+        return self
 
 
-class EvidenceRolloutExecutionConfigV1(_StrictFrozenModel):
+class EvidenceRolloutExecutionConfigV2(_StrictFrozenModel):
     """Execution semantics only; benchmark thresholds remain in their source config."""
 
-    schema_version: Literal["evidence_rollout_execution_config_v1"]
-    variants: list[EvidenceVariantDefinitionV1] = Field(min_length=4, max_length=4)
+    schema_version: Literal["evidence_rollout_execution_config_v2"]
+    variants: list[EvidenceVariantDefinitionV2] = Field(min_length=4, max_length=4)
     human_semantic_review_required: Literal[True]
     human_review_protocol_fingerprint: Sha256Digest
     candidate_failure_policy: Literal["fail_fast"]
-    report_policy: Literal["content_free_v1"]
+    report_policy: Literal["content_free_v2"]
     max_case_count: PositiveInt
 
     @model_validator(mode="after")
@@ -147,7 +159,7 @@ class EvidenceRolloutExecutionConfigV1(_StrictFrozenModel):
             )
         return self
 
-    def definition_for(self, variant: Variant) -> EvidenceVariantDefinitionV1:
+    def definition_for(self, variant: Variant) -> EvidenceVariantDefinitionV2:
         matches = tuple(item for item in self.variants if item.variant == variant)
         if len(matches) != 1:
             raise ValueError("variant must be configured exactly once")
@@ -156,23 +168,29 @@ class EvidenceRolloutExecutionConfigV1(_StrictFrozenModel):
 
 def load_evidence_rollout_execution_config(
     path: Path,
-) -> EvidenceRolloutExecutionConfigV1:
-    return load_strict_rag_yaml(path, EvidenceRolloutExecutionConfigV1)
+) -> EvidenceRolloutExecutionConfigV2:
+    return load_strict_rag_yaml(path, EvidenceRolloutExecutionConfigV2)
 
 
-class EvidenceResourceSubjectTargetV1(_StrictFrozenModel):
+class EvidenceResourceSubjectTargetV2(_StrictFrozenModel):
     """Human-authored resource/subject assignment and expected source routes."""
 
-    schema_version: Literal["evidence_resource_subject_target_v1"]
+    schema_version: Literal["evidence_resource_subject_target_v2"]
     target_id: str
     subject: str
     resource_type: ResourceType
+    topic_id: str
+    catalog_resource_ids: list[str] = Field(min_length=1)
     required_sources: list[EvidenceSource] = Field(min_length=1, max_length=2)
+    target_fingerprint: Sha256Digest
 
-    @field_validator("target_id")
+    @field_validator("target_id", "topic_id")
     @classmethod
-    def validate_target_id(cls, value: str) -> str:
-        return _identifier(value, field_name="target_id")
+    def validate_identifiers(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", None)
+        if not isinstance(field_name, str):
+            raise ValueError("target identifier field is unavailable")
+        return _identifier(value, field_name=field_name)
 
     @field_validator("subject")
     @classmethod
@@ -189,11 +207,63 @@ class EvidenceResourceSubjectTargetV1(_StrictFrozenModel):
             raise ValueError("required_sources must not contain duplicates")
         return values
 
+    @field_validator("catalog_resource_ids")
+    @classmethod
+    def validate_catalog_resource_ids(cls, values: list[str]) -> list[str]:
+        for value in values:
+            _identifier(value, field_name="catalog_resource_id")
+        if len(values) != len(set(values)):
+            raise ValueError("catalog_resource_ids must not contain duplicates")
+        return values
 
-class EvidenceRequirementGoldV1(_StrictFrozenModel):
+    @model_validator(mode="after")
+    def validate_target_fingerprint(self) -> Self:
+        payload = self.model_dump(mode="json", exclude={"target_fingerprint"})
+        if self.target_fingerprint != canonical_sha256(payload):
+            raise ValueError("target_fingerprint does not match target content")
+        return self
+
+
+class EvidenceInitialEvidenceIdentityV2(_StrictFrozenModel):
+    """Scenario identity only; it does not prove evidence content or sufficiency."""
+
+    schema_version: Literal["evidence_initial_evidence_identity_v2"]
+    state: Literal["sufficient", "insufficient"]
+    fixture_id: str
+    fixture_fingerprint: Sha256Digest
+    source_inventory: list[EvidenceSource] = Field(max_length=2)
+
+    @field_validator("fixture_id")
+    @classmethod
+    def validate_fixture_id(cls, value: str) -> str:
+        return _identifier(value, field_name="fixture_id")
+
+    @field_validator("source_inventory")
+    @classmethod
+    def validate_source_inventory(
+        cls,
+        values: list[EvidenceSource],
+    ) -> list[EvidenceSource]:
+        if len(values) != len(set(values)):
+            raise ValueError("source_inventory must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_sufficient_inventory(self) -> Self:
+        if self.state == "sufficient" and not self.source_inventory:
+            raise ValueError("sufficient initial evidence requires a source inventory")
+        payload = self.model_dump(mode="json", exclude={"fixture_fingerprint"})
+        if self.fixture_fingerprint != canonical_sha256(payload):
+            raise ValueError(
+                "fixture_fingerprint does not match initial-evidence identity"
+            )
+        return self
+
+
+class EvidenceRequirementGoldV2(_StrictFrozenModel):
     """One human-authored criterion used to score evidence coverage."""
 
-    schema_version: Literal["evidence_requirement_gold_v1"]
+    schema_version: Literal["evidence_requirement_gold_v2"]
     requirement_id: str
     target_id: str
     criterion: str = Field(min_length=1, max_length=2_000)
@@ -215,17 +285,18 @@ class EvidenceRequirementGoldV1(_StrictFrozenModel):
         return value
 
 
-class EvidenceEvaluationCaseSpecV1(_StrictFrozenModel):
+class EvidenceEvaluationCaseSpecV2(_StrictFrozenModel):
     """One local content-bearing request; query text never enters public reports."""
 
-    schema_version: Literal["evidence_evaluation_case_spec_v1"]
+    schema_version: Literal["evidence_evaluation_case_spec_v2"]
     case_id: str
     query: str = Field(min_length=1, max_length=8_000)
     subjects: list[str] = Field(min_length=1, max_length=20)
     resource_types: list[ResourceType] = Field(min_length=1, max_length=7)
-    initial_evidence_sufficient: bool
-    targets: list[EvidenceResourceSubjectTargetV1] = Field(min_length=1)
-    requirements: list[EvidenceRequirementGoldV1] = Field(min_length=1)
+    initial_evidence: EvidenceInitialEvidenceIdentityV2
+    targets: list[EvidenceResourceSubjectTargetV2] = Field(min_length=1)
+    requirements: list[EvidenceRequirementGoldV2] = Field(min_length=1)
+    case_fingerprint: Sha256Digest
 
     @field_validator("case_id")
     @classmethod
@@ -284,18 +355,26 @@ class EvidenceEvaluationCaseSpecV1(_StrictFrozenModel):
             raise ValueError("requirements must reference declared targets")
         if referenced_targets != known_targets:
             raise ValueError("every target must have at least one gold requirement")
+        payload = self.model_dump(mode="json", exclude={"case_fingerprint"})
+        if self.case_fingerprint != canonical_sha256(payload):
+            raise ValueError("case_fingerprint does not match case content")
         return self
 
 
-class EvidenceEvaluationDatasetContentV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_evaluation_dataset_v1"]
+class EvidenceEvaluationDatasetContentV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_evaluation_dataset_v2"]
     dataset_id: str
-    cases: list[EvidenceEvaluationCaseSpecV1] = Field(min_length=1)
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    cases: list[EvidenceEvaluationCaseSpecV2] = Field(min_length=1)
 
-    @field_validator("dataset_id")
+    @field_validator("dataset_id", "knowledge_graph_data_version")
     @classmethod
-    def validate_dataset_id(cls, value: str) -> str:
-        return _identifier(value, field_name="dataset_id")
+    def validate_identifiers(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", None)
+        if not isinstance(field_name, str):
+            raise ValueError("dataset identifier field is unavailable")
+        return _identifier(value, field_name=field_name)
 
     @model_validator(mode="after")
     def validate_case_inventory(self) -> Self:
@@ -311,7 +390,7 @@ class EvidenceEvaluationDatasetContentV1(_StrictFrozenModel):
             for item in self.cases
         )
         has_initially_sufficient = any(
-            item.initial_evidence_sufficient for item in self.cases
+            item.initial_evidence.state == "sufficient" for item in self.cases
         )
         if not has_simple or not has_multi or not has_initially_sufficient:
             raise ValueError(
@@ -320,7 +399,7 @@ class EvidenceEvaluationDatasetContentV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceEvaluationDatasetV1(EvidenceEvaluationDatasetContentV1):
+class EvidenceEvaluationDatasetV2(EvidenceEvaluationDatasetContentV2):
     dataset_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
@@ -332,25 +411,124 @@ class EvidenceEvaluationDatasetV1(EvidenceEvaluationDatasetContentV1):
 
 
 def seal_evidence_evaluation_dataset(
-    content: EvidenceEvaluationDatasetContentV1,
-) -> EvidenceEvaluationDatasetV1:
+    content: EvidenceEvaluationDatasetContentV2,
+) -> EvidenceEvaluationDatasetV2:
     """Seal one validated authoring document with its canonical fingerprint."""
 
-    if not isinstance(content, EvidenceEvaluationDatasetContentV1):
-        raise TypeError("content must be EvidenceEvaluationDatasetContentV1")
+    if not isinstance(content, EvidenceEvaluationDatasetContentV2):
+        raise TypeError("content must be EvidenceEvaluationDatasetContentV2")
     payload = content.model_dump(mode="json")
-    return EvidenceEvaluationDatasetV1(
+    return EvidenceEvaluationDatasetV2(
         **content.model_dump(mode="python"),
         dataset_fingerprint=canonical_sha256(payload),
     )
 
 
-class EvidenceEvaluationRuntimeBindingV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_evaluation_runtime_binding_v1"]
+class EvidenceTargetBindingIdentityV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_target_binding_identity_v2"]
+    target_id: str
+    target_fingerprint: Sha256Digest
+    topic_id: str
+    catalog_resource_ids: list[str] = Field(min_length=1)
+
+    @field_validator("target_id", "topic_id", "catalog_resource_ids")
+    @classmethod
+    def validate_identifiers(cls, value: object, info: object) -> object:
+        field_name = getattr(info, "field_name", None)
+        if field_name == "catalog_resource_ids":
+            if not isinstance(value, list):
+                raise TypeError("catalog_resource_ids must be a list")
+            for item in value:
+                _identifier(item, field_name="catalog_resource_id")
+            if len(value) != len(set(value)):
+                raise ValueError("catalog_resource_ids must not contain duplicates")
+            return value
+        if not isinstance(value, str) or not isinstance(field_name, str):
+            raise ValueError("target binding identifier field is unavailable")
+        return _identifier(value, field_name=field_name)
+
+
+class EvidenceCaseBindingIdentityV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_case_binding_identity_v2"]
+    case_id: str
+    case_fingerprint: Sha256Digest
+    initial_evidence: EvidenceInitialEvidenceIdentityV2
+    targets: list[EvidenceTargetBindingIdentityV2] = Field(min_length=1)
+
+    @field_validator("case_id")
+    @classmethod
+    def validate_case_id(cls, value: str) -> str:
+        return _identifier(value, field_name="case_id")
+
+    @model_validator(mode="after")
+    def validate_target_inventory(self) -> Self:
+        target_ids = tuple(item.target_id for item in self.targets)
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("case binding targets must not repeat target_id")
+        return self
+
+
+def case_binding_identity(
+    case: EvidenceEvaluationCaseSpecV2,
+) -> EvidenceCaseBindingIdentityV2:
+    """Project one validated case into the shared execution identity contract."""
+
+    if not isinstance(case, EvidenceEvaluationCaseSpecV2):
+        raise TypeError("case must be EvidenceEvaluationCaseSpecV2")
+    return EvidenceCaseBindingIdentityV2(
+        schema_version="evidence_case_binding_identity_v2",
+        case_id=case.case_id,
+        case_fingerprint=case.case_fingerprint,
+        initial_evidence=case.initial_evidence,
+        targets=[
+            EvidenceTargetBindingIdentityV2(
+                schema_version="evidence_target_binding_identity_v2",
+                target_id=target.target_id,
+                target_fingerprint=target.target_fingerprint,
+                topic_id=target.topic_id,
+                catalog_resource_ids=list(target.catalog_resource_ids),
+            )
+            for target in case.targets
+        ],
+    )
+
+
+def dataset_case_bindings(
+    dataset: EvidenceEvaluationDatasetV2,
+) -> list[EvidenceCaseBindingIdentityV2]:
+    """Project the exact ordered case/target inventory of a sealed dataset."""
+
+    if not isinstance(dataset, EvidenceEvaluationDatasetV2):
+        raise TypeError("dataset must be EvidenceEvaluationDatasetV2")
+    return [case_binding_identity(case) for case in dataset.cases]
+
+
+def case_binding_inventory_fingerprint(
+    bindings: list[EvidenceCaseBindingIdentityV2],
+) -> str:
+    """Fingerprint a validated ordered binding inventory without normalization."""
+
+    if not isinstance(bindings, list) or not bindings:
+        raise TypeError("bindings must be a non-empty list")
+    if any(not isinstance(item, EvidenceCaseBindingIdentityV2) for item in bindings):
+        raise TypeError("bindings must contain EvidenceCaseBindingIdentityV2 values")
+    return canonical_sha256(
+        {
+            "schema_version": "evidence_case_binding_inventory_v2",
+            "cases": [item.model_dump(mode="json") for item in bindings],
+        }
+    )
+
+
+class EvidenceEvaluationRuntimeBindingV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_evaluation_runtime_binding_v2"]
     run_id: str
     execution_mode: ExecutionMode
     dataset_id: str
     dataset_fingerprint: Sha256Digest
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    case_bindings: list[EvidenceCaseBindingIdentityV2] = Field(min_length=1)
     execution_config_fingerprint: Sha256Digest
     benchmark_config_fingerprint: Sha256Digest
     rollout_config_fingerprint: Sha256Digest
@@ -359,7 +537,12 @@ class EvidenceEvaluationRuntimeBindingV1(_StrictFrozenModel):
     generation_manifest_fingerprint: Sha256Digest
     executor_fingerprint: Sha256Digest
 
-    @field_validator("run_id", "dataset_id", "generation_id")
+    @field_validator(
+        "run_id",
+        "dataset_id",
+        "knowledge_graph_data_version",
+        "generation_id",
+    )
     @classmethod
     def validate_identifiers(cls, value: str, info: object) -> str:
         field_name = getattr(info, "field_name", None)
@@ -367,15 +550,25 @@ class EvidenceEvaluationRuntimeBindingV1(_StrictFrozenModel):
             raise ValueError("binding identifier field is unavailable")
         return _identifier(value, field_name=field_name)
 
+    @model_validator(mode="after")
+    def validate_case_bindings(self) -> Self:
+        case_ids = tuple(item.case_id for item in self.case_bindings)
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("case_bindings must not repeat case_id")
+        return self
 
-class EvidenceVariantObservationV1(_StrictFrozenModel):
+
+class EvidenceVariantObservationV2(_StrictFrozenModel):
     """Content-free measurement emitted by one real or hermetic variant run."""
 
-    schema_version: Literal["evidence_variant_observation_v1"]
+    schema_version: Literal["evidence_variant_observation_v2"]
     case_id: str
     variant: Variant
     query_fingerprint: Sha256Digest
     dataset_fingerprint: Sha256Digest
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    case_binding: EvidenceCaseBindingIdentityV2
     execution_config_fingerprint: Sha256Digest
     benchmark_config_fingerprint: Sha256Digest
     rollout_config_fingerprint: Sha256Digest
@@ -409,7 +602,7 @@ class EvidenceVariantObservationV1(_StrictFrozenModel):
     retrieval_cost_units: PositiveFloat
     latency_ms: PositiveFloat
 
-    @field_validator("case_id", "generation_id")
+    @field_validator("case_id", "knowledge_graph_data_version", "generation_id")
     @classmethod
     def validate_identifiers(cls, value: str, info: object) -> str:
         field_name = getattr(info, "field_name", None)
@@ -443,12 +636,12 @@ class EvidenceVariantObservationV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceVariantAttemptV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_variant_attempt_v1"]
+class EvidenceVariantAttemptV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_variant_attempt_v2"]
     case_id: str
     variant: Variant
     status: Literal["success", "failed", "blocked"]
-    observation: EvidenceVariantObservationV1 | None
+    observation: EvidenceVariantObservationV2 | None
     failure_reason_code: str | None
     failure_type: str | None
 
@@ -489,11 +682,11 @@ class EvidenceVariantAttemptV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceVariantAttemptBatchContentV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_variant_attempt_batch_v1"]
+class EvidenceVariantAttemptBatchContentV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_variant_attempt_batch_v2"]
     execution_mode: Literal["hermetic"]
     executor_fingerprint: Sha256Digest
-    attempts: list[EvidenceVariantAttemptV1] = Field(min_length=1)
+    attempts: list[EvidenceVariantAttemptV2] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_unique_slots(self) -> Self:
@@ -503,7 +696,7 @@ class EvidenceVariantAttemptBatchContentV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceVariantAttemptBatchV1(EvidenceVariantAttemptBatchContentV1):
+class EvidenceVariantAttemptBatchV2(EvidenceVariantAttemptBatchContentV2):
     bundle_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
@@ -515,21 +708,21 @@ class EvidenceVariantAttemptBatchV1(EvidenceVariantAttemptBatchContentV1):
 
 
 def seal_evidence_variant_attempt_batch(
-    content: EvidenceVariantAttemptBatchContentV1,
-) -> EvidenceVariantAttemptBatchV1:
+    content: EvidenceVariantAttemptBatchContentV2,
+) -> EvidenceVariantAttemptBatchV2:
     """Seal one validated hermetic attempt batch."""
 
-    if not isinstance(content, EvidenceVariantAttemptBatchContentV1):
-        raise TypeError("content must be EvidenceVariantAttemptBatchContentV1")
+    if not isinstance(content, EvidenceVariantAttemptBatchContentV2):
+        raise TypeError("content must be EvidenceVariantAttemptBatchContentV2")
     payload = content.model_dump(mode="json")
-    return EvidenceVariantAttemptBatchV1(
+    return EvidenceVariantAttemptBatchV2(
         **content.model_dump(mode="python"),
         bundle_fingerprint=canonical_sha256(payload),
     )
 
 
-class HumanSemanticReviewV1(_StrictFrozenModel):
-    schema_version: Literal["human_semantic_review_v1"]
+class HumanSemanticReviewV2(_StrictFrozenModel):
+    schema_version: Literal["human_semantic_review_v2"]
     case_id: str
     variant: Variant
     output_fingerprint: Sha256Digest
@@ -568,14 +761,14 @@ class HumanSemanticReviewV1(_StrictFrozenModel):
         return self
 
 
-class HumanSemanticReviewBatchContentV1(_StrictFrozenModel):
-    schema_version: Literal["human_semantic_review_batch_v1"]
+class HumanSemanticReviewBatchContentV2(_StrictFrozenModel):
+    schema_version: Literal["human_semantic_review_batch_v2"]
     dataset_fingerprint: Sha256Digest
     runtime_fingerprint: Sha256Digest
     generation_id: str
     generation_manifest_fingerprint: Sha256Digest
     review_protocol_fingerprint: Sha256Digest
-    reviews: list[HumanSemanticReviewV1]
+    reviews: list[HumanSemanticReviewV2]
 
     @field_validator("generation_id")
     @classmethod
@@ -590,7 +783,7 @@ class HumanSemanticReviewBatchContentV1(_StrictFrozenModel):
         return self
 
 
-class HumanSemanticReviewBatchV1(HumanSemanticReviewBatchContentV1):
+class HumanSemanticReviewBatchV2(HumanSemanticReviewBatchContentV2):
     review_bundle_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
@@ -602,23 +795,23 @@ class HumanSemanticReviewBatchV1(HumanSemanticReviewBatchContentV1):
 
 
 def seal_human_semantic_review_batch(
-    content: HumanSemanticReviewBatchContentV1,
-) -> HumanSemanticReviewBatchV1:
+    content: HumanSemanticReviewBatchContentV2,
+) -> HumanSemanticReviewBatchV2:
     """Seal one complete, validated human semantic-review bundle."""
 
-    if not isinstance(content, HumanSemanticReviewBatchContentV1):
-        raise TypeError("content must be HumanSemanticReviewBatchContentV1")
+    if not isinstance(content, HumanSemanticReviewBatchContentV2):
+        raise TypeError("content must be HumanSemanticReviewBatchContentV2")
     payload = content.model_dump(mode="json")
-    return HumanSemanticReviewBatchV1(
+    return HumanSemanticReviewBatchV2(
         **content.model_dump(mode="python"),
         review_bundle_fingerprint=canonical_sha256(payload),
     )
 
 
-class EvidenceExecutionRecordV1(_StrictFrozenModel):
+class EvidenceExecutionRecordV2(_StrictFrozenModel):
     """Safe record: no query, URL, evidence body, or provider body fields exist."""
 
-    schema_version: Literal["evidence_execution_record_v1"]
+    schema_version: Literal["evidence_execution_record_v2"]
     case_id: str
     variant: Variant
     status: Literal["success", "failed", "blocked", "not_executed"]
@@ -653,8 +846,8 @@ class EvidenceExecutionRecordV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceRolloutDecisionContentV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_rollout_activation_decision_v1"]
+class EvidenceRolloutDecisionContentV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_rollout_activation_decision_v2"]
     run_id: str
     execution_mode: ExecutionMode
     status: DecisionStatus
@@ -668,6 +861,9 @@ class EvidenceRolloutDecisionContentV1(_StrictFrozenModel):
     variant_matrix_complete: bool
     dataset_id: str
     dataset_fingerprint: Sha256Digest
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    case_binding_inventory_fingerprint: Sha256Digest
     execution_config_fingerprint: Sha256Digest
     benchmark_config_fingerprint: Sha256Digest
     rollout_config_fingerprint: Sha256Digest
@@ -679,9 +875,14 @@ class EvidenceRolloutDecisionContentV1(_StrictFrozenModel):
     review_bundle_fingerprint: Sha256Digest
     activation_decision: EvidenceActivationDecision | None
     case_results: list[EvidenceEvaluationCaseResult]
-    execution_records: list[EvidenceExecutionRecordV1]
+    execution_records: list[EvidenceExecutionRecordV2]
 
-    @field_validator("run_id", "dataset_id", "generation_id")
+    @field_validator(
+        "run_id",
+        "dataset_id",
+        "knowledge_graph_data_version",
+        "generation_id",
+    )
     @classmethod
     def validate_identifiers(cls, value: str, info: object) -> str:
         field_name = getattr(info, "field_name", None)
@@ -778,7 +979,7 @@ class EvidenceRolloutDecisionContentV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceRolloutDecisionV1(EvidenceRolloutDecisionContentV1):
+class EvidenceRolloutDecisionV2(EvidenceRolloutDecisionContentV2):
     decision_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
@@ -791,27 +992,34 @@ class EvidenceRolloutDecisionV1(EvidenceRolloutDecisionContentV1):
 
 __all__ = [
     "DecisionStatus",
-    "EvidenceEvaluationCaseSpecV1",
-    "EvidenceEvaluationDatasetContentV1",
-    "EvidenceEvaluationDatasetV1",
-    "EvidenceEvaluationRuntimeBindingV1",
-    "EvidenceRequirementGoldV1",
-    "EvidenceResourceSubjectTargetV1",
-    "EvidenceExecutionRecordV1",
-    "EvidenceLiveAdapterIdentityV1",
-    "EvidenceRolloutDecisionContentV1",
-    "EvidenceRolloutDecisionV1",
-    "EvidenceRolloutExecutionConfigV1",
-    "EvidenceVariantAttemptBatchContentV1",
-    "EvidenceVariantAttemptBatchV1",
-    "EvidenceVariantAttemptV1",
-    "EvidenceVariantDefinitionV1",
-    "EvidenceVariantObservationV1",
+    "EvidenceCaseBindingIdentityV2",
+    "EvidenceEvaluationCaseSpecV2",
+    "EvidenceEvaluationDatasetContentV2",
+    "EvidenceEvaluationDatasetV2",
+    "EvidenceEvaluationRuntimeBindingV2",
+    "EvidenceInitialEvidenceIdentityV2",
+    "EvidenceRequirementGoldV2",
+    "EvidenceResourceSubjectTargetV2",
+    "EvidenceTargetBindingIdentityV2",
+    "EvidenceExecutionRecordV2",
+    "EvidenceLiveAdapterIdentityV2",
+    "EvidenceRolloutDecisionContentV2",
+    "EvidenceRolloutDecisionV2",
+    "EvidenceRolloutExecutionConfigV2",
+    "EvidenceSource",
+    "EvidenceVariantAttemptBatchContentV2",
+    "EvidenceVariantAttemptBatchV2",
+    "EvidenceVariantAttemptV2",
+    "EvidenceVariantDefinitionV2",
+    "EvidenceVariantObservationV2",
     "ExecutionMode",
-    "HumanSemanticReviewBatchContentV1",
-    "HumanSemanticReviewBatchV1",
-    "HumanSemanticReviewV1",
+    "HumanSemanticReviewBatchContentV2",
+    "HumanSemanticReviewBatchV2",
+    "HumanSemanticReviewV2",
+    "case_binding_identity",
+    "case_binding_inventory_fingerprint",
     "canonical_sha256",
+    "dataset_case_bindings",
     "load_evidence_rollout_execution_config",
     "model_fingerprint",
     "query_fingerprint",

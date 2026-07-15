@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.evaluation.evidence_rollout.contracts import (
     DecisionStatus,
-    EvidenceRolloutDecisionV1,
+    EvidenceRolloutDecisionV2,
     ExecutionMode,
     Sha256Digest,
 )
@@ -19,8 +19,8 @@ class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
-class EvidenceExecutionStatusSummaryV1(_StrictFrozenModel):
-    schema_version: Literal["evidence_execution_status_summary_v1"]
+class EvidenceExecutionStatusSummaryV2(_StrictFrozenModel):
+    schema_version: Literal["evidence_execution_status_summary_v2"]
     success: int
     failed: int
     blocked: int
@@ -41,10 +41,10 @@ class EvidenceExecutionStatusSummaryV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceRolloutSafeReportV1(_StrictFrozenModel):
+class EvidenceRolloutSafeReportV2(_StrictFrozenModel):
     """Safe projection; its closed schema cannot carry request or provider content."""
 
-    schema_version: Literal["evidence_rollout_safe_report_v1"]
+    schema_version: Literal["evidence_rollout_safe_report_v2"]
     run_id: str
     execution_mode: ExecutionMode
     status: DecisionStatus
@@ -58,8 +58,11 @@ class EvidenceRolloutSafeReportV1(_StrictFrozenModel):
     successful_execution_count: int
     reviewed_execution_count: int
     variant_matrix_complete: bool
-    execution_statuses: EvidenceExecutionStatusSummaryV1
+    execution_statuses: EvidenceExecutionStatusSummaryV2
     dataset_fingerprint: Sha256Digest
+    knowledge_graph_data_version: str
+    knowledge_graph_artifact_fingerprint: Sha256Digest
+    case_binding_inventory_fingerprint: Sha256Digest
     execution_config_fingerprint: Sha256Digest
     benchmark_config_fingerprint: Sha256Digest
     rollout_config_fingerprint: Sha256Digest
@@ -87,17 +90,17 @@ class EvidenceRolloutSafeReportV1(_StrictFrozenModel):
 
 
 def build_safe_report(
-    decision: EvidenceRolloutDecisionV1,
-) -> EvidenceRolloutSafeReportV1:
+    decision: EvidenceRolloutDecisionV2,
+) -> EvidenceRolloutSafeReportV2:
     """Project one validated decision without accepting any content-bearing input."""
 
-    if not isinstance(decision, EvidenceRolloutDecisionV1):
-        raise TypeError("decision must be EvidenceRolloutDecisionV1")
+    if not isinstance(decision, EvidenceRolloutDecisionV2):
+        raise TypeError("decision must be EvidenceRolloutDecisionV2")
     counts = {status: 0 for status in ("success", "failed", "blocked", "not_executed")}
     for record in decision.execution_records:
         counts[record.status] += 1
-    return EvidenceRolloutSafeReportV1(
-        schema_version="evidence_rollout_safe_report_v1",
+    return EvidenceRolloutSafeReportV2(
+        schema_version="evidence_rollout_safe_report_v2",
         run_id=decision.run_id,
         execution_mode=decision.execution_mode,
         status=decision.status,
@@ -111,14 +114,21 @@ def build_safe_report(
         successful_execution_count=decision.successful_execution_count,
         reviewed_execution_count=decision.reviewed_execution_count,
         variant_matrix_complete=decision.variant_matrix_complete,
-        execution_statuses=EvidenceExecutionStatusSummaryV1(
-            schema_version="evidence_execution_status_summary_v1",
+        execution_statuses=EvidenceExecutionStatusSummaryV2(
+            schema_version="evidence_execution_status_summary_v2",
             success=counts["success"],
             failed=counts["failed"],
             blocked=counts["blocked"],
             not_executed=counts["not_executed"],
         ),
         dataset_fingerprint=decision.dataset_fingerprint,
+        knowledge_graph_data_version=decision.knowledge_graph_data_version,
+        knowledge_graph_artifact_fingerprint=(
+            decision.knowledge_graph_artifact_fingerprint
+        ),
+        case_binding_inventory_fingerprint=(
+            decision.case_binding_inventory_fingerprint
+        ),
         execution_config_fingerprint=decision.execution_config_fingerprint,
         benchmark_config_fingerprint=decision.benchmark_config_fingerprint,
         rollout_config_fingerprint=decision.rollout_config_fingerprint,
@@ -136,11 +146,11 @@ def build_safe_report(
     )
 
 
-def render_safe_report_markdown(report: EvidenceRolloutSafeReportV1) -> bytes:
+def render_safe_report_markdown(report: EvidenceRolloutSafeReportV2) -> bytes:
     """Render only the closed safe projection; never accept dataset or output text."""
 
-    if not isinstance(report, EvidenceRolloutSafeReportV1):
-        raise TypeError("report must be EvidenceRolloutSafeReportV1")
+    if not isinstance(report, EvidenceRolloutSafeReportV2):
+        raise TypeError("report must be EvidenceRolloutSafeReportV2")
     reasons = ", ".join(report.reason_codes) if report.reason_codes else "none"
     status = report.execution_statuses
     lines = [
@@ -167,6 +177,10 @@ def render_safe_report_markdown(report: EvidenceRolloutSafeReportV1) -> bytes:
         "## Bound identities",
         "",
         f"- Dataset: `{report.dataset_id}` / `{report.dataset_fingerprint}`",
+        "- Knowledge graph: "
+        f"`{report.knowledge_graph_data_version}` / "
+        f"`{report.knowledge_graph_artifact_fingerprint}`",
+        f"- Case/target inventory: `{report.case_binding_inventory_fingerprint}`",
         f"- Generation: `{report.generation_id}`",
         f"- Generation manifest: `{report.generation_manifest_fingerprint}`",
         f"- Execution config: `{report.execution_config_fingerprint}`",
@@ -186,8 +200,8 @@ def render_safe_report_markdown(report: EvidenceRolloutSafeReportV1) -> bytes:
 
 
 __all__ = [
-    "EvidenceExecutionStatusSummaryV1",
-    "EvidenceRolloutSafeReportV1",
+    "EvidenceExecutionStatusSummaryV2",
+    "EvidenceRolloutSafeReportV2",
     "build_safe_report",
     "render_safe_report_markdown",
 ]
