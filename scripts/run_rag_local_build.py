@@ -58,6 +58,7 @@ from src.rag.subject_catalog import SubjectCatalog, SubjectCatalogSnapshot
 
 
 if TYPE_CHECKING:
+    from src.rag.parent_child.flat_baseline import FlatBaselineManifest
     from src.rag.parent_child.provider_probe import LlmProbeConfig
     from src.rag.parent_child.runtime_loader import LoadedGenerationRuntime
 
@@ -1540,6 +1541,11 @@ def _validate_flat_baseline(
         FlatBaselineManifest,
         read_flat_collection_ids,
     )
+    from src.rag.parent_child._storage_io import sha256_path
+    from src.rag.parent_child.chroma_runtime_snapshot import (
+        CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        ChromaRuntimeSnapshot,
+    )
     from src.rag.parent_child.provider_clients import StrictEmbeddingClient
 
     if not isinstance(manifest, FlatBaselineManifest):
@@ -1551,9 +1557,19 @@ def _validate_flat_baseline(
         "expected_dimension": manifest.embedding.dimension,
         "hnsw:space": manifest.embedding.distance_metric,
     }
-    with chromadb.PersistentClient(
-        path=str(persist_directory), settings=Settings(anonymized_telemetry=False)
-    ) as client:
+    canonical_sha256 = sha256_path(persist_directory)
+    with (
+        ChromaRuntimeSnapshot.create(
+            index_root=context.root,
+            source_directory=persist_directory,
+            expected_source_sha256=canonical_sha256,
+            owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        ) as snapshot,
+        chromadb.PersistentClient(
+            path=str(snapshot.persist_directory),
+            settings=Settings(anonymized_telemetry=False),
+        ) as client,
+    ):
         collection = client.get_collection(
             manifest.collection_name, embedding_function=None
         )
@@ -1619,6 +1635,8 @@ def _validate_flat_baseline(
             and query_ids[0]
         ):
             raise LocalBuildError("FlatChromaSimilarityQueryEmpty")
+    if sha256_path(persist_directory) != canonical_sha256:
+        raise LocalBuildError("FlatCanonicalArtifactChangedDuringValidation")
     return FlatBaselineSummary(
         build_id=context.inputs.build_id,
         chroma_path=_relative(context.root, persist_directory),
@@ -1915,7 +1933,7 @@ def _candidate_smoke_channel(result: object) -> SmokeChannelResult:
     )
 
 
-def _load_flat_manifest(context: BuildContext) -> object:
+def _load_flat_manifest(context: BuildContext) -> FlatBaselineManifest:
     from src.rag.parent_child.flat_baseline import FlatBaselineManifest
 
     path = (
@@ -1955,7 +1973,8 @@ def _run_smoke_retrieval(
     results: dict[str, object] = {}
     try:
         tokenizer = ConfiguredJiebaTokenizer(config=context.config.bm25)
-        flat_runtime = FlatBaselineRuntime(
+        flat_runtime = FlatBaselineRuntime.from_canonical_artifact(
+            project_root=context.root,
             persist_directory=(
                 context.root / "artifacts" / "rag" / context.inputs.build_id / "chroma"
             ),

@@ -24,9 +24,14 @@ from rank_bm25 import BM25Okapi
 
 from src.rag.parent_child._storage_io import (
     canonical_json_bytes,
+    sha256_path,
     sha256_bytes,
 )
 from src.rag.parent_child.bm25_artifact import digest_identifier_set
+from src.rag.parent_child.chroma_runtime_snapshot import (
+    CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+    ChromaRuntimeSnapshot,
+)
 from src.rag.parent_child.embedding_batches import (
     EmbeddingBatchExecutionError,
     iter_bounded_document_embedding_batches,
@@ -501,6 +506,9 @@ class FlatBaselineRuntime:
         tokenizer: Callable[[str], Sequence[str]],
         read_page_size: int,
     ) -> None:
+        self._snapshot: ChromaRuntimeSnapshot | None = None
+        self._canonical_persist_directory: Path | None = None
+        self._canonical_sha256: str | None = None
         if persist_directory.is_symlink() or not persist_directory.is_dir():
             raise FlatBaselineError(
                 "flat persist directory must be a regular directory"
@@ -546,13 +554,74 @@ class FlatBaselineRuntime:
             self.close()
             raise
 
+    @classmethod
+    def from_canonical_artifact(
+        cls,
+        *,
+        project_root: Path,
+        persist_directory: Path,
+        manifest: FlatBaselineManifest,
+        query_embedding_provider: QueryEmbeddingProvider,
+        reranker: FlatReranker,
+        tokenizer: Callable[[str], Sequence[str]],
+        read_page_size: int,
+    ) -> FlatBaselineRuntime:
+        """Open a disposable copy while keeping the canonical artifact immutable."""
+
+        root = project_root.resolve(strict=True)
+        if root.is_symlink() or not root.is_dir():
+            raise FlatBaselineError("project_root must be a regular directory")
+        if persist_directory.is_symlink():
+            raise FlatBaselineError("flat persist directory must not be a symlink")
+        canonical = persist_directory.resolve(strict=True)
+        if not canonical.is_dir() or not canonical.is_relative_to(root):
+            raise FlatBaselineError(
+                "flat persist directory must be contained by project_root"
+            )
+        canonical_sha256 = sha256_path(canonical)
+        snapshot = ChromaRuntimeSnapshot.create(
+            index_root=root,
+            source_directory=canonical,
+            expected_source_sha256=canonical_sha256,
+            owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+        )
+        try:
+            runtime = cls(
+                persist_directory=snapshot.persist_directory,
+                manifest=manifest,
+                query_embedding_provider=query_embedding_provider,
+                reranker=reranker,
+                tokenizer=tokenizer,
+                read_page_size=read_page_size,
+            )
+        except BaseException:
+            snapshot.close()
+            raise
+        runtime._snapshot = snapshot
+        runtime._canonical_persist_directory = canonical
+        runtime._canonical_sha256 = canonical_sha256
+        return runtime
+
     def close(self) -> None:
         client = getattr(self, "_client", None)
-        if client is not None:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
-            self._client = None
+        try:
+            if client is not None:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+                self._client = None
+        finally:
+            snapshot = self._snapshot
+            if snapshot is not None:
+                snapshot.close()
+                self._snapshot = None
+            canonical = self._canonical_persist_directory
+            canonical_sha256 = self._canonical_sha256
+            if canonical is not None and canonical_sha256 is not None:
+                if sha256_path(canonical) != canonical_sha256:
+                    raise FlatBaselineError(
+                        "canonical flat artifact changed during runtime use"
+                    )
 
     def __enter__(self) -> FlatBaselineRuntime:
         return self

@@ -368,7 +368,8 @@ def run_benchmark(
             reranker=reranker,
             bm25_tokenizer=tokenizer,
         )
-        flat_runtime = FlatBaselineRuntime(
+        flat_runtime = FlatBaselineRuntime.from_canonical_artifact(
+            project_root=root,
             persist_directory=baseline_dir,
             manifest=flat_manifest,
             query_embedding_provider=embedding,

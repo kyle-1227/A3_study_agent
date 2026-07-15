@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts import build_flat_baseline as flat_builder_script
+from src.rag.parent_child._storage_io import sha256_path
 from src.rag.parent_child.flat_baseline import (
     FlatBaselineChunkMetadata,
     FlatBaselineDocument,
@@ -164,7 +165,9 @@ def test_flat_baseline_chroma_round_trip_pages_full_collection_and_runs_all_requ
         max_in_flight_batches=1,
     )
 
-    runtime = FlatBaselineRuntime(
+    canonical_sha256 = sha256_path(persist_directory)
+    runtime = FlatBaselineRuntime.from_canonical_artifact(
+        project_root=tmp_path,
         persist_directory=persist_directory,
         manifest=manifest,
         query_embedding_provider=embedding,
@@ -194,6 +197,8 @@ def test_flat_baseline_chroma_round_trip_pages_full_collection_and_runs_all_requ
     assert result.vector_ms >= 0.0
     assert result.bm25_ms >= 0.0
     assert result.reranker_ms >= 0.0
+    assert sha256_path(persist_directory) == canonical_sha256
+    assert not any((tmp_path / ".runtime_chroma").iterdir())
 
 
 def test_flat_baseline_full_read_requires_explicit_bounded_pages() -> None:

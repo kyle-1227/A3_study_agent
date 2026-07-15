@@ -267,8 +267,9 @@ python scripts/build_parent_child_generation.py `
   build. Child persistence independently rejects remaining NUL characters.
 - Chroma 1.5.x writes internal coordination state whenever a
   `PersistentClient` is opened. Validators and retrieval runtimes therefore
-  open a marker-owned copy below the configured index root and remove it on
-  close. They never open the canonical sealed `chroma_children` directory.
+  open a marker-owned copy below a contained runtime root and remove it on
+  close. This applies to both Flat Baseline and Parent–Child artifacts: they
+  never open the canonical Flat `chroma` or sealed `chroma_children` directory.
 - A digest mismatch is not repairable by editing `manifest.json`. Keep the
   generation inactive and build a new immutable generation after fixing the
   source, cleaning policy, or runtime defect.
