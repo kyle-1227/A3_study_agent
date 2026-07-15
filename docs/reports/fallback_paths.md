@@ -216,3 +216,16 @@ Initial governance report created on 2026-06-20. This is a report-only baseline.
 - The strict API is intentionally not added to the abstract legacy store
   interfaces. Production runtime composition must inject the concrete strict
   adapters explicitly; it must not fall back to the legacy methods.
+
+### 2026-07-15 Candidate resource title provenance
+
+- `src/graph/resource_generation.py::_resource_title` retains a pre-existing
+  display fallback that substitutes the canonical `resource_type` when neither
+  the primary artifact nor its title state contains a title.
+- The candidate automatic-recommendation path now binds recommendations to the
+  generated Resource Final V3 title. That path must not treat the substituted
+  resource type as verified title provenance.
+- Candidate activation remains closed. Before rollout, resource generators must
+  emit a contract-validated title or the candidate worker must fail with a typed
+  missing-title reason; the legacy substitution must not become recommendation
+  evidence. This report does not remove or extend the legacy behavior.

@@ -17,6 +17,7 @@ from src.learning_guidance.contracts import (
     RecommendationScoreWeightsV1,
     ResourceRecommendationBatchV1,
     ResourceRecommendationEngineRequestV1,
+    ResourceRecommendationEngineResultV1,
     ResourceRecommendationItemV1,
     ResourceRecommendationOutputV1,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "RecommendationScoreWeightsV1",
     "ResourceRecommendationBatchV1",
     "ResourceRecommendationEngineRequestV1",
+    "ResourceRecommendationEngineResultV1",
     "ResourceRecommendationItemV1",
     "ResourceRecommendationOutputV1",
 ]

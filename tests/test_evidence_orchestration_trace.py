@@ -138,6 +138,7 @@ def _valid_events() -> list[dict[str, object]]:
             "assigned_evidence_count": 3,
             "missing_requirement_count": 0,
             "assignment_fingerprint": HASH_C,
+            "assignment_contract_version": "resource_evidence_assignment_v1",
         },
         {
             **base,

@@ -30,6 +30,7 @@ from src.config.evidence_orchestration_config import (
     ResourceEvidenceProfilesConfig,
 )
 from src.config.evidence_orchestration_contracts import (
+    CompiledRequirementCoverageBatch,
     DuplicateRetrievalSignatureError,
     EvidenceBudgetExceededError,
     EvidenceLedgerEntry,
@@ -39,10 +40,12 @@ from src.config.evidence_orchestration_contracts import (
     EvidenceRequirementDraftBatch,
     EvidenceSourceType,
     RequirementCoverageBatch,
+    RESOURCE_EVIDENCE_CONTRACT_VERSION,
     ResourceReadiness,
     RetrievalPriority,
     RetrievalTask,
     build_retrieval_task,
+    compile_requirement_coverage_batch,
     compile_evidence_requirement_batch,
     derive_resource_evidence_assignments,
     derive_resource_readiness,
@@ -86,7 +89,6 @@ from src.rag.parent_child.handoff import LocalEvidenceRef, parent_context_items
 from src.rag.parent_child.retrieval import MultiBranchHybridChildResult
 from src.resource_contracts import (
     ResourceType,
-    normalize_requested_resource_types,
 )
 
 logger = logging.getLogger(__name__)
@@ -500,40 +502,75 @@ def _last_human_query(state: LearningState) -> str:
 
 
 def _requested_resources(state: LearningState) -> tuple[ResourceType, ...]:
-    raw_items = [
-        str(item).strip()
-        for item in (state.get("requested_resource_types") or [])
-        if str(item).strip()
-    ]
-    singular = str(state.get("requested_resource_type") or "").strip()
-    if singular:
-        raw_items.append(singular)
-    unique_raw = tuple(dict.fromkeys(raw_items))
-    normalized = tuple(normalize_requested_resource_types(unique_raw))
-    if not unique_raw or normalized != unique_raw:
+    raw_items = state.get("requested_resource_types")
+    if not isinstance(raw_items, (list, tuple)) or not raw_items:
         raise EvidenceOrchestrationRuntimeError(
             code="noncanonical_requested_resources",
             reason="candidate input must contain non-empty canonical resource types",
         )
-    return _RESOURCE_TYPES_ADAPTER.validate_python(normalized)
+    resources = tuple(raw_items)
+    if any(
+        not isinstance(item, str) or not item.strip() or item != item.strip()
+        for item in resources
+    ) or len(resources) != len(set(resources)):
+        raise EvidenceOrchestrationRuntimeError(
+            code="noncanonical_requested_resources",
+            reason=(
+                "candidate resource types must be unique normalized strings "
+                "without repair"
+            ),
+        )
+    try:
+        validated = _RESOURCE_TYPES_ADAPTER.validate_python(resources)
+    except ValueError:
+        raise EvidenceOrchestrationRuntimeError(
+            code="noncanonical_requested_resources",
+            reason="candidate resource types must use exact canonical identifiers",
+        ) from None
+    singular = state.get("requested_resource_type")
+    if singular not in ("", validated[0]):
+        raise EvidenceOrchestrationRuntimeError(
+            code="requested_resource_shadow_mismatch",
+            reason=(
+                "requested_resource_type must be empty or match the first canonical "
+                "resource"
+            ),
+        )
+    return validated
 
 
 def _requested_subjects(
     state: LearningState,
     runtime: EvidenceOrchestrationRuntime,
 ) -> tuple[str, ...]:
-    plan = state.get("retrieval_plan") or []
-    subjects = tuple(
-        dict.fromkeys(
-            str(item.get("subject") or "").strip()
-            for item in plan
-            if isinstance(item, dict) and str(item.get("subject") or "").strip()
-        )
-    )
-    if not subjects:
+    plan = state.get("retrieval_plan")
+    if not isinstance(plan, (list, tuple)) or not plan:
         raise EvidenceOrchestrationRuntimeError(
             code="missing_subject_plan",
             reason="candidate requires a non-empty validated retrieval plan",
+        )
+    subjects: list[str] = []
+    for item in plan:
+        if not isinstance(item, Mapping):
+            raise EvidenceOrchestrationRuntimeError(
+                code="invalid_subject_plan",
+                reason="every retrieval plan entry must be a mapping",
+            )
+        subject = item.get("subject")
+        if (
+            not isinstance(subject, str)
+            or not subject.strip()
+            or subject != subject.strip()
+        ):
+            raise EvidenceOrchestrationRuntimeError(
+                code="invalid_subject_plan",
+                reason="retrieval subjects must be normalized non-blank strings",
+            )
+        subjects.append(subject)
+    if len(subjects) != len(set(subjects)):
+        raise EvidenceOrchestrationRuntimeError(
+            code="duplicate_subject_plan",
+            reason="retrieval plan subjects must be unique without deduplication",
         )
     available = set(runtime.parent_child.available_subjects)
     catalog_subjects = set(get_available_subjects_from_data())
@@ -545,7 +582,7 @@ def _requested_subjects(
             code="unavailable_subject",
             reason="candidate subject must exist in the pinned index and course catalog",
         )
-    return subjects
+    return tuple(subjects)
 
 
 def _render_prompt(name: str, values: dict[str, object]) -> str:
@@ -558,6 +595,7 @@ def _planner_business_validation(
     *,
     resources: tuple[ResourceType, ...],
     subjects: tuple[str, ...],
+    learner_path_projection: LearnerPathProviderProjectionV1,
     runtime: EvidenceOrchestrationRuntime,
 ) -> str:
     if not isinstance(parsed, EvidenceRequirementDraftBatch):
@@ -572,9 +610,100 @@ def _planner_business_validation(
             profiles=runtime.profiles,
             config=runtime.policy,
         )
+        _validate_requirement_topic_bindings(
+            requirements=requirements,
+            subjects=subjects,
+            learner_path_projection=learner_path_projection,
+            runtime=runtime,
+        )
     except (EvidenceOrchestrationContractError, ValueError) as exc:
         return str(exc)
     return ""
+
+
+def _knowledge_graph_topic_projection(
+    *,
+    subjects: tuple[str, ...],
+    runtime: EvidenceOrchestrationRuntime,
+) -> tuple[dict[str, object], ...]:
+    projection: list[dict[str, object]] = []
+    for subject in subjects:
+        subject_node = runtime.learning_guidance.knowledge_graph.subject(subject)
+        if subject_node is None:
+            raise EvidenceOrchestrationRuntimeError(
+                code="knowledge_graph_subject_unavailable",
+                reason="requested subject is absent from the curated knowledge graph",
+            )
+        projection.append(
+            {
+                "subject": subject,
+                "topics": [
+                    {"topic_id": topic.topic_id, "title": topic.title}
+                    for topic in subject_node.topics
+                ],
+            }
+        )
+    return tuple(projection)
+
+
+def _validate_requirement_topic_bindings(
+    *,
+    requirements: Sequence[EvidenceRequirement],
+    subjects: tuple[str, ...],
+    learner_path_projection: LearnerPathProviderProjectionV1,
+    runtime: EvidenceOrchestrationRuntime,
+) -> None:
+    topics_by_subject: dict[str, frozenset[str]] = {}
+    for subject in subjects:
+        subject_node = runtime.learning_guidance.knowledge_graph.subject(subject)
+        if subject_node is None:
+            raise EvidenceOrchestrationRuntimeError(
+                code="knowledge_graph_subject_unavailable",
+                reason="requested subject is absent from the curated knowledge graph",
+            )
+        topics_by_subject[subject] = frozenset(
+            topic.topic_id for topic in subject_node.topics
+        )
+    path_topic_by_resource: dict[ResourceType, str] | None = None
+    if learner_path_projection.status == "available":
+        path_topic_by_resource = {}
+        for step in learner_path_projection.steps:
+            for resource_type in step.recommended_resource_types:
+                if resource_type in path_topic_by_resource:
+                    raise EvidenceOrchestrationContractError(
+                        code="ambiguous_learner_path_resource_binding",
+                        reason=(
+                            "available learner path must bind each resource type "
+                            "to exactly one topic"
+                        ),
+                    )
+                path_topic_by_resource[resource_type] = step.topic_id
+    for requirement in requirements:
+        if requirement.topic_id not in topics_by_subject.get(
+            requirement.subject, frozenset()
+        ):
+            raise EvidenceOrchestrationContractError(
+                code="requirement_topic_not_in_knowledge_graph",
+                reason="requirement topic must exactly match its curated subject",
+            )
+        if path_topic_by_resource is not None:
+            expected_topic_id = path_topic_by_resource.get(requirement.resource_type)
+            if expected_topic_id is None:
+                raise EvidenceOrchestrationContractError(
+                    code="requirement_resource_not_in_learner_path",
+                    reason=(
+                        "available learner path must explicitly bind every requested "
+                        "resource type"
+                    ),
+                )
+            if requirement.topic_id != expected_topic_id:
+                raise EvidenceOrchestrationContractError(
+                    code="requirement_resource_topic_mismatch",
+                    reason=(
+                        "requirement topic must match the learner-path topic bound "
+                        "to its resource type"
+                    ),
+                )
 
 
 def _initial_sources(
@@ -678,6 +807,10 @@ def make_resource_evidence_planner_node(
                 runtime=runtime.learning_guidance,
             )
         )
+        knowledge_graph_topics = _knowledge_graph_topic_projection(
+            subjects=subjects,
+            runtime=runtime,
+        )
         profiles = tuple(
             runtime.profiles.profile_for(resource).model_dump(mode="json")
             for resource in resources
@@ -696,6 +829,12 @@ def make_resource_evidence_planner_node(
                 ),
                 "learner_path_provider_projection_json": json.dumps(
                     learner_path_projection.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "knowledge_graph_topics_json": json.dumps(
+                    knowledge_graph_topics,
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=True,
@@ -723,6 +862,7 @@ def make_resource_evidence_planner_node(
                     parsed,
                     resources=resources,
                     subjects=subjects,
+                    learner_path_projection=learner_path_projection,
                     runtime=runtime,
                 ),
                 state=state,
@@ -756,6 +896,12 @@ def make_resource_evidence_planner_node(
             requirements=requirements,
             profiles=runtime.profiles,
             config=runtime.policy,
+        )
+        _validate_requirement_topic_bindings(
+            requirements=requirements,
+            subjects=subjects,
+            learner_path_projection=learner_path_projection,
+            runtime=runtime,
         )
         tasks = _build_initial_tasks(requirements, runtime)
         emit_evidence_trace(
@@ -1496,13 +1642,14 @@ def _coverage_business_validation(
     if not isinstance(parsed, RequirementCoverageBatch):
         return "parsed result is not RequirementCoverageBatch"
     try:
+        compiled = compile_requirement_coverage_batch(parsed)
         if parsed.round_index != round_index:
             raise EvidenceOrchestrationRuntimeError(
                 code="coverage_round_mismatch",
                 reason="coverage output round must match the active retrieval round",
             )
         validate_requirement_coverage(
-            batch=parsed,
+            batch=compiled,
             requirements=requirements,
             entries=provisional_entries,
         )
@@ -1522,7 +1669,7 @@ def _coverage_business_validation(
             for outcome in outcomes
             if outcome.source_type == "local_rag"
         }
-        for coverage in parsed.coverages:
+        for coverage in compiled.coverages:
             requirement = requirement_by_id[coverage.requirement_id]
             if (
                 coverage.coverage_state != "complete"
@@ -1576,7 +1723,9 @@ def _coverage_business_validation(
     return ""
 
 
-def _coverage_counts(batch: RequirementCoverageBatch) -> dict[str, int]:
+def _coverage_counts(
+    batch: CompiledRequirementCoverageBatch,
+) -> dict[str, int]:
     counts = Counter(item.coverage_state for item in batch.coverages)
     return {
         "complete": counts["complete"],
@@ -1597,7 +1746,7 @@ def _previous_coverage_counts(
         )
     if raw == {}:
         return {"complete": 0, "partial": 0, "missing": requirement_count}
-    parsed = RequirementCoverageBatch.model_validate(raw)
+    parsed = CompiledRequirementCoverageBatch.model_validate(raw)
     return _coverage_counts(parsed)
 
 
@@ -1688,6 +1837,7 @@ def make_requirement_evidence_judge_node(
         parsed = structured.parsed
         if not isinstance(parsed, RequirementCoverageBatch):
             raise TypeError("judge result is not RequirementCoverageBatch")
+        compiled = compile_requirement_coverage_batch(parsed)
         validation_error = _coverage_business_validation(
             parsed,
             round_index=round_index,
@@ -1704,7 +1854,7 @@ def make_requirement_evidence_judge_node(
 
         accepted_ids = {
             evidence_id
-            for coverage in parsed.coverages
+            for coverage in compiled.coverages
             for evidence_id in coverage.evidence_ids
         }
         ledger = tuple(
@@ -1723,9 +1873,9 @@ def make_requirement_evidence_judge_node(
         readiness = derive_resource_readiness(
             requested_resource_types=resources,
             requirements=requirements,
-            batch=parsed,
+            batch=compiled,
         )
-        counts = _coverage_counts(parsed)
+        counts = _coverage_counts(compiled)
         previous_counts = _previous_coverage_counts(state, len(requirements))
         previous_coverage = state.get("evidence_coverage")
         if not isinstance(previous_coverage, dict):
@@ -1796,7 +1946,7 @@ def make_requirement_evidence_judge_node(
                 "partial_count": counts["partial"],
                 "missing_count": counts["missing"],
                 "accepted_evidence_count": len(accepted_ids),
-                "coverage_fingerprint": _digest(parsed.model_dump(mode="json")),
+                "coverage_fingerprint": _digest(compiled.model_dump(mode="json")),
             },
             state=state,
         )
@@ -1840,7 +1990,7 @@ def make_requirement_evidence_judge_node(
             )
         return {
             "evidence_previous_coverage": previous_coverage,
-            "evidence_coverage": parsed.model_dump(mode="json"),
+            "evidence_coverage": compiled.model_dump(mode="json"),
             "evidence_ledger": [item.model_dump(mode="json") for item in ledger],
             "resource_evidence_readiness": [
                 item.model_dump(mode="json") for item in readiness
@@ -1920,7 +2070,7 @@ def make_evidence_repair_planner_node(
             for item in (state.get("evidence_requirements") or [])
         )
         requirement_by_id = {item.requirement_id: item for item in requirements}
-        coverage = RequirementCoverageBatch.model_validate(
+        coverage = CompiledRequirementCoverageBatch.model_validate(
             state.get("evidence_coverage")
         )
         coverage_by_id = {item.requirement_id: item for item in coverage.coverages}
@@ -2087,7 +2237,7 @@ def _accepted_ids(ledger: Sequence[EvidenceLedgerEntry]) -> set[str]:
 
 
 def _coverage_confidence(
-    batch: RequirementCoverageBatch,
+    batch: CompiledRequirementCoverageBatch,
 ) -> dict[str, float]:
     return {
         evidence_id: coverage.confidence
@@ -2120,7 +2270,7 @@ def make_terminal_parent_hydration_node(
         records = tuple(
             record for record in all_records if record.evidence_id in accepted_ids
         )
-        coverage = RequirementCoverageBatch.model_validate(
+        coverage = CompiledRequirementCoverageBatch.model_validate(
             state.get("evidence_coverage")
         )
         confidence_by_id = _coverage_confidence(coverage)
@@ -2338,7 +2488,7 @@ def make_resource_evidence_assignment_node(
             EvidenceRequirement.model_validate(item)
             for item in (state.get("evidence_requirements") or [])
         )
-        coverage = RequirementCoverageBatch.model_validate(
+        coverage = CompiledRequirementCoverageBatch.model_validate(
             state.get("evidence_coverage")
         )
         ledger = tuple(
@@ -2392,6 +2542,7 @@ def make_resource_evidence_assignment_node(
                     "assigned_evidence_count": len(row.evidence_ids),
                     "missing_requirement_count": len(row.blocked_requirement_ids),
                     "assignment_fingerprint": fingerprint,
+                    "assignment_contract_version": (RESOURCE_EVIDENCE_CONTRACT_VERSION),
                 },
                 state=state,
             )
@@ -2465,6 +2616,7 @@ def make_resource_evidence_assignment_node(
             state=state,
         )
         return {
+            "resource_evidence_contract_version": (RESOURCE_EVIDENCE_CONTRACT_VERSION),
             "resource_evidence_readiness": [
                 item.model_dump(mode="json") for item in readiness
             ],

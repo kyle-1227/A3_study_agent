@@ -16,6 +16,7 @@ from src.graph.learning_guidance import (
     learner_path_provider_projection_from_state,
     make_learner_path_planner_node,
     make_resource_recommendation_node,
+    resource_recommendation_output_for_runtime_from_state,
     resource_recommendation_output_from_state,
 )
 from src.graph.state import initial_request_reset_transient_state
@@ -35,8 +36,10 @@ from src.learning_guidance.contracts import (
     RecommendationScoreWeightsV1,
     ResourceRecommendationBatchV1,
     ResourceRecommendationEngineRequestV1,
+    ResourceRecommendationEngineResultV1,
     ResourceRecommendationItemV1,
 )
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
 from src.learning_guidance.runtime import (
     LearningGuidanceContractError,
     LearningGuidanceRuntime,
@@ -44,6 +47,53 @@ from src.learning_guidance.runtime import (
 
 
 NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+
+
+def _knowledge_graph() -> KnowledgeGraphV1:
+    return KnowledgeGraphV1.model_validate(
+        {
+            "schema_version": "knowledge_graph_v1",
+            "data_version": "test-v1",
+            "subjects": [
+                {
+                    "subject_id": "python",
+                    "title": "Python",
+                    "topics": [
+                        {
+                            "topic_id": "python-basics",
+                            "title": "Python basics",
+                            "difficulty": 0.4,
+                            "estimated_hours": 2.0,
+                            "prerequisite_topic_ids": [],
+                            "knowledge_points": ["Python syntax"],
+                            "resources": [
+                                {
+                                    "resource_id": "python-basics-quiz",
+                                    "resource_type": "quiz",
+                                    "title": "Python basics quiz",
+                                }
+                            ],
+                        },
+                        {
+                            "topic_id": "python-practice",
+                            "title": "Python practice",
+                            "difficulty": 0.5,
+                            "estimated_hours": 1.0,
+                            "prerequisite_topic_ids": ["python-basics"],
+                            "knowledge_points": ["Python practice"],
+                            "resources": [
+                                {
+                                    "resource_id": "python-practice-quiz",
+                                    "resource_type": "quiz",
+                                    "title": "Python practice quiz",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
 
 
 def _profile(user_id: str = "learner-1") -> LearnerProfileSnapshotV1:
@@ -58,19 +108,37 @@ def _profile(user_id: str = "learner-1") -> LearnerProfileSnapshotV1:
                 level=0.4,
                 confidence=0.9,
             ),
+            LearnerSkillSignalV1(
+                signal_id="skill-python-practice",
+                subject="python",
+                topic_id="python-practice",
+                level=0.4,
+                confidence=0.7,
+            ),
         ),
         goals=(
             LearnerGoalSignalV1(
                 signal_id="goal-python",
                 subject="python",
+                topic_id="python-basics",
                 goal="掌握 Python 基础",
                 importance=0.8,
                 progress=0.2,
+            ),
+            LearnerGoalSignalV1(
+                signal_id="goal-python-practice",
+                subject="python",
+                topic_id="python-practice",
+                goal="Practice Python basics",
+                importance=0.6,
+                progress=0.1,
             ),
         ),
         preferences=(
             LearnerPreferenceSignalV1(
                 signal_id="preference-practice",
+                subject="python",
+                topic_id="python-basics",
                 dimension="prefer_practice",
                 strength=0.9,
             ),
@@ -92,6 +160,14 @@ def _history(user_id: str = "learner-1") -> LearnerHistorySnapshotV1:
                 observed_at=NOW,
                 outcome_score=0.45,
             ),
+            LearnerHistoryEventV1(
+                history_id="history-python-practice-1",
+                subject="python",
+                topic_id="python-practice",
+                event_type="practice",
+                observed_at=NOW,
+                outcome_score=0.55,
+            ),
         ),
     )
 
@@ -108,7 +184,7 @@ def _path_plan(user_id: str = "learner-1") -> LearnerPathPlanV1:
                 position=1,
                 topic_id="python-basics",
                 subject="python",
-                title="Python 基础巩固",
+                title="Python basics",
                 status="reinforce",
                 estimated_hours=2.0,
                 reason="画像与最近测评均表明该主题需要巩固",
@@ -145,11 +221,9 @@ def _recommendation_batch(
     source_resource_ids = (
         ("generated-quiz-1",) if mode == "automatic_after_generation" else ()
     )
-    resource_id = (
-        "generated-quiz-1"
-        if mode == "automatic_after_generation"
-        else "recommended-quiz-2"
-    )
+    automatic = mode == "automatic_after_generation"
+    resource_id = "generated-quiz-1" if automatic else "python-basics-quiz"
+    title = "Generated Python quiz" if automatic else "Python basics quiz"
     return ResourceRecommendationBatchV1(
         schema_version="resource_recommendation_batch_v1",
         mode=mode,
@@ -163,7 +237,7 @@ def _recommendation_batch(
                 resource_type="quiz",
                 subject="python",
                 topic_id="python-basics",
-                title="Python 基础强化练习",
+                title=title,
                 rank=1,
                 score_factors=_score_factors(),
                 reason="由明确画像信号与最近测评记录共同支持",
@@ -177,6 +251,22 @@ def _recommendation_batch(
             ),
         ),
         summary="推荐一组与当前薄弱主题直接相关的练习。",
+    )
+
+
+def _engine_result(
+    request: ResourceRecommendationEngineRequestV1,
+    batch: ResourceRecommendationBatchV1,
+) -> ResourceRecommendationEngineResultV1:
+    return ResourceRecommendationEngineResultV1(
+        schema_version="resource_recommendation_engine_result_v1",
+        request_id=request.request_id,
+        mode=request.mode,
+        user_id=request.user_id,
+        subject=request.subject,
+        status="available",
+        unavailable_reason=None,
+        batch=batch,
     )
 
 
@@ -216,7 +306,8 @@ class RuntimeStub:
         self.recommendation_requests.append(request)
         if self.recommendation_error is not None:
             raise self.recommendation_error
-        return _recommendation_batch(request.mode, user_id=request.user_id)
+        batch = _recommendation_batch(request.mode, user_id=request.user_id)
+        return _engine_result(request, batch)
 
     def runtime(
         self,
@@ -226,6 +317,7 @@ class RuntimeStub:
     ) -> LearningGuidanceRuntime:
         return LearningGuidanceRuntime(
             runtime_fingerprint="1" * 64,
+            knowledge_graph=_knowledge_graph(),
             provider_projection_max_steps=provider_projection_max_steps,
             provider_projection_max_chars=provider_projection_max_chars,
             load_profile=self.load_profile,
@@ -258,6 +350,9 @@ def _state(**updates):
         "subject": "python",
         "evidence_requested_subjects": ["python"],
         "retrieval_plan": _retrieval_plan("python"),
+        "requested_resource_type": "quiz",
+        "requested_resource_types": ["quiz"],
+        RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY: [],
     }
     state.update(updates)
     return state
@@ -310,6 +405,7 @@ def test_learning_guidance_runtime_requires_explicit_stable_fingerprint() -> Non
     with pytest.raises(ValueError, match="lowercase SHA-256"):
         LearningGuidanceRuntime(
             runtime_fingerprint="not-a-digest",
+            knowledge_graph=_knowledge_graph(),
             provider_projection_max_steps=50,
             provider_projection_max_chars=65_536,
             load_profile=stub.load_profile,
@@ -439,13 +535,16 @@ async def test_learner_path_provider_projection_step_limit_fails_without_truncat
                 position=2,
                 topic_id="python-practice",
                 subject="python",
-                title="Python 基础练习",
+                title="Python practice",
                 status="ready",
                 estimated_hours=1.0,
                 reason="在基础巩固后完成一轮练习。",
-                recommended_resource_types=("quiz",),
-                profile_signal_ids=("skill-python",),
-                history_ids=("history-python-1",),
+                recommended_resource_types=(),
+                profile_signal_ids=(
+                    "skill-python-practice",
+                    "goal-python-practice",
+                ),
+                history_ids=("history-python-practice-1",),
             ),
         ),
         summary="先巩固基础，再完成练习。",
@@ -466,6 +565,30 @@ async def test_learner_path_provider_projection_step_limit_fails_without_truncat
 
     assert error.value.code == "learner_path_provider_projection_too_large"
     assert len(stub.path_requests) == 1
+
+
+@pytest.mark.anyio
+async def test_learner_path_rejects_engine_topic_metadata_tamper() -> None:
+    stub = RuntimeStub()
+    payload = _path_plan().model_dump(mode="python")
+    payload["steps"][0]["title"] = "Tampered topic title"
+    tampered_plan = LearnerPathPlanV1.model_validate(payload)
+
+    async def plan_with_tampered_metadata(request):
+        stub.path_requests.append(request)
+        return tampered_plan
+
+    runtime = replace(
+        stub.runtime(),
+        plan_learning_path=plan_with_tampered_metadata,
+    )
+    node = make_learner_path_planner_node(runtime)
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="path_topic_metadata_mismatch",
+    ):
+        await node(_state())
 
 
 @pytest.mark.anyio
@@ -629,6 +752,8 @@ async def test_resource_recommendation_supports_both_explicit_modes(
                 resource_id="generated-quiz-1",
                 resource_type="quiz",
                 subject="python",
+                topic_id="python-basics",
+                title="Generated Python quiz",
             )
         ]
 
@@ -641,7 +766,20 @@ async def test_resource_recommendation_supports_both_explicit_modes(
     assert request.user_id == "learner-1"
     assert request.mode == mode
     if mode == "automatic_after_generation":
-        assert request.generated_resources[0].resource_id == "generated-quiz-1"
+        generated = request.generated_resources[0]
+        assert (
+            generated.resource_id,
+            generated.resource_type,
+            generated.subject,
+            generated.topic_id,
+            generated.title,
+        ) == (
+            "generated-quiz-1",
+            "quiz",
+            "python",
+            "python-basics",
+            "Generated Python quiz",
+        )
     else:
         assert request.generated_resources == ()
 
@@ -664,6 +802,32 @@ async def test_automatic_recommendation_requires_real_generated_resource() -> No
 
 
 @pytest.mark.anyio
+async def test_automatic_recommendation_requires_explicit_empty_context_key() -> None:
+    stub = RuntimeStub()
+    node = make_resource_recommendation_node(
+        stub.runtime(),
+        mode="automatic_after_generation",
+    )
+    state = _state()
+    del state[RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY]
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="missing_recommendation_resource_context",
+    ):
+        await node(state)
+
+
+@pytest.mark.anyio
+async def test_learner_path_rejects_whitespace_only_identity() -> None:
+    stub = RuntimeStub()
+    node = make_learner_path_planner_node(stub.runtime())
+
+    with pytest.raises(LearningGuidanceContractError, match="invalid_user_id"):
+        await node(_state(user_id="   "))
+
+
+@pytest.mark.anyio
 async def test_automatic_recommendation_rejects_multi_subject_scope_explicitly() -> (
     None
 ):
@@ -678,6 +842,8 @@ async def test_automatic_recommendation_rejects_multi_subject_scope_explicitly()
             resource_id="generated-quiz-1",
             resource_type="quiz",
             subject="python",
+            topic_id="python-basics",
+            title="Generated Python quiz",
         )
     ]
 
@@ -742,10 +908,14 @@ async def test_recommendation_rejects_unbound_engine_evidence() -> None:
     async def unbound_recommendation(request):
         payload = _recommendation_batch(request.mode).model_dump(mode="python")
         payload["items"][0]["history_ids"] = ("unknown-history",)
-        return ResourceRecommendationBatchV1.model_validate(payload)
+        return _engine_result(
+            request,
+            ResourceRecommendationBatchV1.model_validate(payload),
+        )
 
     runtime = LearningGuidanceRuntime(
         runtime_fingerprint="2" * 64,
+        knowledge_graph=_knowledge_graph(),
         provider_projection_max_steps=50,
         provider_projection_max_chars=65_536,
         load_profile=stub.load_profile,
@@ -763,13 +933,42 @@ async def test_recommendation_rejects_unbound_engine_evidence() -> None:
 
 
 @pytest.mark.anyio
+async def test_explicit_recommendation_rejects_non_catalog_engine_target() -> None:
+    stub = RuntimeStub()
+
+    async def invented_recommendation(request):
+        payload = _recommendation_batch(request.mode).model_dump(mode="python")
+        payload["items"][0]["resource_id"] = "invented-quiz"
+        payload["items"][0]["title"] = "Invented quiz"
+        return _engine_result(
+            request,
+            ResourceRecommendationBatchV1.model_validate(payload),
+        )
+
+    runtime = replace(
+        stub.runtime(),
+        recommend_resources=invented_recommendation,
+    )
+    node = make_resource_recommendation_node(runtime, mode="explicit_request")
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_catalog_binding_mismatch",
+    ):
+        await node(_state())
+
+
+@pytest.mark.anyio
 async def test_automatic_recommendation_rejects_unbound_target_resource() -> None:
     stub = RuntimeStub()
 
     async def unbound_target_recommendation(request):
         payload = _recommendation_batch(request.mode).model_dump(mode="python")
         payload["items"][0]["resource_id"] = "catalog-resource-not-generated"
-        return ResourceRecommendationBatchV1.model_validate(payload)
+        return _engine_result(
+            request,
+            ResourceRecommendationBatchV1.model_validate(payload),
+        )
 
     runtime = replace(
         stub.runtime(),
@@ -785,12 +984,52 @@ async def test_automatic_recommendation_rejects_unbound_target_resource() -> Non
             resource_id="generated-quiz-1",
             resource_type="quiz",
             subject="python",
+            topic_id="python-basics",
+            title="Generated Python quiz",
         )
     ]
 
     with pytest.raises(
         LearningGuidanceContractError,
         match="unknown_recommendation_target_resource",
+    ):
+        await node(state)
+
+
+@pytest.mark.anyio
+async def test_automatic_recommendation_rejects_tampered_target_title() -> None:
+    stub = RuntimeStub()
+
+    async def tampered_title_recommendation(request):
+        payload = _recommendation_batch(request.mode).model_dump(mode="python")
+        payload["items"][0]["title"] = "Tampered title"
+        return _engine_result(
+            request,
+            ResourceRecommendationBatchV1.model_validate(payload),
+        )
+
+    runtime = replace(
+        stub.runtime(),
+        recommend_resources=tampered_title_recommendation,
+    )
+    node = make_resource_recommendation_node(
+        runtime,
+        mode="automatic_after_generation",
+    )
+    state = _state()
+    state[RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY] = [
+        RecommendationResourceContextV1(
+            resource_id="generated-quiz-1",
+            resource_type="quiz",
+            subject="python",
+            topic_id="python-basics",
+            title="Generated Python quiz",
+        )
+    ]
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_target_binding_mismatch",
     ):
         await node(state)
 
@@ -838,4 +1077,59 @@ async def test_recommendation_checkpoint_projection_rejects_json_coercion() -> N
         resource_recommendation_output_from_state(
             {**state, RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY: drifted},
             expected_mode="explicit_request",
+        )
+
+
+@pytest.mark.anyio
+async def test_automatic_recommendation_replay_rejects_tampered_title() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    node = make_resource_recommendation_node(
+        runtime,
+        mode="automatic_after_generation",
+    )
+    state = _state()
+    state[RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY] = [
+        RecommendationResourceContextV1(
+            resource_id="generated-quiz-1",
+            resource_type="quiz",
+            subject="python",
+            topic_id="python-basics",
+            title="Generated Python quiz",
+        )
+    ]
+    update = await node(state)
+    update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]["batch"]["items"][0]["title"] = (
+        "Tampered replay title"
+    )
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_target_binding_mismatch",
+    ):
+        resource_recommendation_output_from_state(
+            {**state, **update},
+            expected_mode="automatic_after_generation",
+        )
+
+
+@pytest.mark.anyio
+async def test_explicit_recommendation_replay_rejects_catalog_title_tamper() -> None:
+    stub = RuntimeStub()
+    runtime = stub.runtime()
+    node = make_resource_recommendation_node(runtime, mode="explicit_request")
+    state = _state()
+    update = await node(state)
+    update[RESOURCE_RECOMMENDATION_OUTPUT_STATE_KEY]["batch"]["items"][0]["title"] = (
+        "Tampered catalog title"
+    )
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_catalog_binding_mismatch",
+    ):
+        resource_recommendation_output_for_runtime_from_state(
+            {**state, **update},
+            expected_mode="explicit_request",
+            runtime=runtime,
         )

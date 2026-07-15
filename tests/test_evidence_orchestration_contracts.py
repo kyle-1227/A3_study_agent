@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.config._rag_config import RagConfigValidationError
 from src.config.evidence_orchestration_config import (
@@ -23,6 +24,7 @@ from src.config.evidence_orchestration_contracts import (
     RetrievalTaskValidationError,
     build_retrieval_task,
     compile_evidence_requirement_batch,
+    compile_requirement_coverage_batch,
     derive_resource_evidence_assignments,
     derive_resource_readiness,
     make_evidence_id,
@@ -42,10 +44,11 @@ def _quiz_requirements():
     profile = profiles.profile_for("quiz")
     batch = EvidenceRequirementDraftBatch(
         schema_version="evidence_requirement_draft_batch_v1",
-        requirements=tuple(
+        requirements=[
             EvidenceRequirementDraft(
                 resource_type="quiz",
                 subject="math",
+                topic_id="math.algebra",
                 profile_need_id=need.need_id,
                 evidence_kind=need.evidence_kind,
                 scope=need.scope,
@@ -55,7 +58,7 @@ def _quiz_requirements():
                 query_intent=f"math {need.evidence_kind} retrieval",
             )
             for need in profile.needs
-        ),
+        ],
     )
     return profiles, compile_evidence_requirement_batch(batch)
 
@@ -119,6 +122,64 @@ def test_strict_config_rejects_non_descending_priority_weights():
         location == "retrieval_priority_weights"
         for location, _error_type in exc_info.value.validation_errors
     )
+
+
+def test_provider_batches_reject_tuple_coercion() -> None:
+    profiles = load_resource_evidence_profiles(PROFILES_PATH)
+    need = profiles.profile_for("quiz").needs[0]
+    draft = EvidenceRequirementDraft(
+        resource_type="quiz",
+        subject="math",
+        topic_id="math.algebra",
+        profile_need_id=need.need_id,
+        evidence_kind=need.evidence_kind,
+        scope=need.scope,
+        criticality=need.criticality,
+        source_policy=need.source_policy,
+        acceptance_criteria=need.acceptance_criteria,
+        query_intent="math algebra assessable evidence",
+    )
+    with pytest.raises(ValidationError, match="list_type"):
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=(draft,),
+        )
+
+    coverage = RequirementCoverage(
+        requirement_id="requirement-test",
+        resource_type="quiz",
+        subject="math",
+        round_index=0,
+        coverage_state="missing",
+        evidence_ids=[],
+        confidence=0.0,
+        reason="No evidence is available.",
+        suggested_local_query="math algebra course notes",
+        suggested_web_query="",
+    )
+    with pytest.raises(ValidationError, match="list_type"):
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=(coverage,),
+        )
+
+    coverage_payload = coverage.model_dump(mode="python")
+    coverage_payload["evidence_ids"] = ()
+    with pytest.raises(ValidationError, match="list_type"):
+        RequirementCoverage.model_validate(coverage_payload)
+
+    compiled = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[coverage],
+        )
+    )
+    assert isinstance(compiled.coverages, tuple)
+    assert isinstance(compiled.coverages[0].evidence_ids, tuple)
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        setattr(compiled.coverages[0], "evidence_ids", ())
 
 
 def test_requirement_inventory_exactly_covers_profile_slots():
@@ -242,14 +303,14 @@ def test_coverage_derives_ready_resource_and_exact_assignment():
     batch = RequirementCoverageBatch(
         schema_version="requirement_coverage_batch_v1",
         round_index=0,
-        coverages=(
+        coverages=[
             RequirementCoverage(
                 requirement_id=required.requirement_id,
                 resource_type="quiz",
                 subject="math",
                 round_index=0,
                 coverage_state="complete",
-                evidence_ids=(evidence_id,),
+                evidence_ids=[evidence_id],
                 confidence=0.9,
                 reason="The accepted course excerpt supports the assessable facts.",
                 suggested_local_query="",
@@ -261,14 +322,15 @@ def test_coverage_derives_ready_resource_and_exact_assignment():
                 subject="math",
                 round_index=0,
                 coverage_state="missing",
-                evidence_ids=(),
+                evidence_ids=[],
                 confidence=0.0,
                 reason="No misconception-boundary evidence was retrieved.",
                 suggested_local_query="math misconception boundaries course notes",
                 suggested_web_query="math misconception boundaries official tutorial",
             ),
-        ),
+        ],
     )
+    compiled_batch = compile_requirement_coverage_batch(batch)
 
     validate_evidence_ledger(
         entries=(entry,),
@@ -277,25 +339,26 @@ def test_coverage_derives_ready_resource_and_exact_assignment():
         config=policy,
     )
     validate_requirement_coverage(
-        batch=batch,
+        batch=compiled_batch,
         requirements=requirements,
         entries=(entry,),
     )
     readiness = derive_resource_readiness(
         requested_resource_types=("quiz",),
         requirements=requirements,
-        batch=batch,
+        batch=compiled_batch,
     )
     assignments = derive_resource_evidence_assignments(
         readiness=readiness,
         requirements=requirements,
-        batch=batch,
+        batch=compiled_batch,
         entries=(entry,),
     )
 
     assert readiness[0].readiness_state == "ready"
     assert readiness[0].blocked_requirement_ids == ()
     assert assignments[0].resource_type == "quiz"
+    assert assignments[0].topic_ids == ("math.algebra",)
     assert assignments[0].evidence_ids == (evidence_id,)
 
 
@@ -314,10 +377,11 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
     )
     drafts = EvidenceRequirementDraftBatch(
         schema_version="evidence_requirement_draft_batch_v1",
-        requirements=(
+        requirements=[
             EvidenceRequirementDraft(
                 resource_type="quiz",
                 subject="math",
+                topic_id="math.algebra",
                 profile_need_id=quiz_need.need_id,
                 evidence_kind=quiz_need.evidence_kind,
                 scope=quiz_need.scope,
@@ -329,6 +393,7 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
             EvidenceRequirementDraft(
                 resource_type="mindmap",
                 subject="math",
+                topic_id="math.algebra",
                 profile_need_id=mindmap_need.need_id,
                 evidence_kind=mindmap_need.evidence_kind,
                 scope=mindmap_need.scope,
@@ -337,7 +402,7 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
                 acceptance_criteria=mindmap_need.acceptance_criteria,
                 query_intent="math concept relationship evidence",
             ),
-        ),
+        ],
     )
     quiz_requirement, mindmap_requirement = compile_evidence_requirement_batch(drafts)
     task = build_retrieval_task(
@@ -375,14 +440,14 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
     coverage = RequirementCoverageBatch(
         schema_version="requirement_coverage_batch_v1",
         round_index=0,
-        coverages=(
+        coverages=[
             RequirementCoverage(
                 requirement_id=quiz_requirement.requirement_id,
                 resource_type="quiz",
                 subject="math",
                 round_index=0,
                 coverage_state="complete",
-                evidence_ids=(evidence_id,),
+                evidence_ids=[evidence_id],
                 confidence=0.9,
                 reason="The course excerpt supports assessable quiz facts.",
                 suggested_local_query="",
@@ -394,24 +459,25 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
                 subject="math",
                 round_index=0,
                 coverage_state="missing",
-                evidence_ids=(),
+                evidence_ids=[],
                 confidence=0.0,
                 reason="No concept relationship evidence was retrieved.",
                 suggested_local_query="math concept relationships hierarchy",
                 suggested_web_query="",
             ),
-        ),
+        ],
     )
+    compiled_coverage = compile_requirement_coverage_batch(coverage)
     requirements = (quiz_requirement, mindmap_requirement)
     readiness = derive_resource_readiness(
         requested_resource_types=("quiz", "mindmap"),
         requirements=requirements,
-        batch=coverage,
+        batch=compiled_coverage,
     )
     assignments = derive_resource_evidence_assignments(
         readiness=readiness,
         requirements=requirements,
-        batch=coverage,
+        batch=compiled_coverage,
         entries=(entry,),
     )
 

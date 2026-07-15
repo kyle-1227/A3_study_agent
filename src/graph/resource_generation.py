@@ -17,7 +17,12 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Send
+from pydantic import ValidationError
 
+from src.config.evidence_orchestration_contracts import (
+    RESOURCE_EVIDENCE_CONTRACT_VERSION,
+    ResourceEvidenceAssignment,
+)
 from src.context_engineering.influence import merge_context_influence_ledger
 from src.context_engineering.influence_runtime import (
     begin_influence_capture,
@@ -245,7 +250,136 @@ if set(RESOURCE_RESULT_CONTRACTS) != set(SUPPORTED_RESOURCE_TYPES):
     )
 
 
+def _candidate_resource_assignments_from_state(
+    state: LearningState,
+    *,
+    required: bool,
+) -> tuple[ResourceEvidenceAssignment, ...] | None:
+    marker = state.get("resource_evidence_contract_version")
+    raw_scope = state.get("evidence_requested_resource_types")
+    scope_is_empty = raw_scope is None or raw_scope == [] or raw_scope == ()
+    if marker in (None, ""):
+        if not scope_is_empty:
+            raise LearningGuidanceContractError(
+                code="missing_resource_evidence_contract_version",
+                reason=(
+                    "evidence-scoped resource flow requires an explicit contract "
+                    "version"
+                ),
+            )
+        if required:
+            raise LearningGuidanceContractError(
+                code="missing_candidate_evidence_scope",
+                reason=(
+                    "candidate resource flow requires explicit evidence resource scope"
+                ),
+            )
+        return None
+    if marker != RESOURCE_EVIDENCE_CONTRACT_VERSION:
+        raise LearningGuidanceContractError(
+            code="invalid_resource_evidence_contract_version",
+            reason="resource evidence contract version is unknown",
+        )
+    if scope_is_empty:
+        raise LearningGuidanceContractError(
+            code="missing_candidate_evidence_scope",
+            reason="versioned candidate flow requires non-empty evidence scope",
+        )
+    if not isinstance(raw_scope, (list, tuple)):
+        raise LearningGuidanceContractError(
+            code="invalid_candidate_evidence_scope",
+            reason="candidate evidence resource scope must be a sequence",
+        )
+    scope = tuple(raw_scope)
+    if any(
+        not isinstance(item, str) or item not in SUPPORTED_RESOURCE_TYPES
+        for item in scope
+    ) or len(scope) != len(set(scope)):
+        raise LearningGuidanceContractError(
+            code="invalid_candidate_evidence_scope",
+            reason=(
+                "candidate evidence resource scope must contain unique canonical "
+                "resource types"
+            ),
+        )
+    raw_assignments = state.get("resource_evidence_assignments")
+    if not isinstance(raw_assignments, (list, tuple)):
+        raise LearningGuidanceContractError(
+            code="invalid_resource_evidence_assignments",
+            reason="candidate assignments must be a sequence",
+        )
+    try:
+        assignments = tuple(
+            ResourceEvidenceAssignment.model_validate(item) for item in raw_assignments
+        )
+    except (TypeError, ValidationError, ValueError):
+        raise LearningGuidanceContractError(
+            code="invalid_resource_evidence_assignments",
+            reason="candidate assignment violates its strict fingerprinted contract",
+        ) from None
+    resource_types = tuple(item.resource_type for item in assignments)
+    if len(resource_types) != len(set(resource_types)):
+        raise LearningGuidanceContractError(
+            code="duplicate_resource_evidence_assignment",
+            reason="candidate assignments must contain one row per resource type",
+        )
+    return assignments
+
+
 def _resource_plan_from_state(state: LearningState) -> list[dict]:
+    assignments = _candidate_resource_assignments_from_state(
+        state,
+        required=False,
+    )
+    if assignments is not None:
+        raw_resources = state.get("requested_resource_types")
+        if not isinstance(raw_resources, (list, tuple)):
+            raise LearningGuidanceContractError(
+                code="invalid_candidate_ready_resources",
+                reason="candidate ready resources must be an explicit sequence",
+            )
+        resources = list(raw_resources)
+        if any(
+            not isinstance(item, str) or item not in SUPPORTED_RESOURCE_TYPES
+            for item in resources
+        ) or len(resources) != len(set(resources)):
+            raise LearningGuidanceContractError(
+                code="invalid_candidate_ready_resources",
+                reason=(
+                    "candidate ready resources must use unique exact canonical types"
+                ),
+            )
+        singular = state.get("requested_resource_type")
+        expected_singular = resources[0] if resources else ""
+        if singular != expected_singular:
+            raise LearningGuidanceContractError(
+                code="candidate_ready_resource_shadow_mismatch",
+                reason=(
+                    "candidate requested_resource_type must match the exact ready "
+                    "resource list"
+                ),
+            )
+        assignment_by_resource = {item.resource_type: item for item in assignments}
+        if set(assignment_by_resource) != set(resources):
+            raise LearningGuidanceContractError(
+                code="resource_assignment_inventory_mismatch",
+                reason=(
+                    "candidate assignments must exactly match ready resource types"
+                ),
+            )
+        tasks: list[dict[str, object]] = []
+        for resource_type in resources:
+            assignment = assignment_by_resource[resource_type]
+            tasks.append(
+                {
+                    "task_id": f"resource:{resource_type}",
+                    "resource_type": resource_type,
+                    "subjects": list(assignment.subjects),
+                    "topic_ids": list(assignment.topic_ids),
+                    "status": "pending",
+                }
+            )
+        return tasks
     resources = normalize_requested_resource_types(
         state.get("requested_resource_types") or [],
         state.get("requested_resource_type") or "",
@@ -263,40 +397,59 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
 def _resource_assignment_for_worker(
     state: LearningState,
     resource_type: str,
-) -> tuple[dict, list[dict]] | None:
+) -> tuple[ResourceEvidenceAssignment, list[dict]] | None:
     """Return the strict candidate assignment and its resource-scoped context."""
 
-    orchestration_resources = state.get("evidence_requested_resource_types") or []
-    if not orchestration_resources:
+    parsed_assignments = _candidate_resource_assignments_from_state(
+        state,
+        required=False,
+    )
+    if parsed_assignments is None:
         return None
-    assignments = [
-        item
-        for item in (state.get("resource_evidence_assignments") or [])
-        if isinstance(item, dict) and item.get("resource_type") == resource_type
-    ]
+    assignments = tuple(
+        item for item in parsed_assignments if item.resource_type == resource_type
+    )
     if len(assignments) != 1:
-        raise ValueError(
-            "resource-aware worker requires exactly one ready evidence assignment"
+        raise LearningGuidanceContractError(
+            code="missing_worker_resource_assignment",
+            reason="resource-aware worker requires one exact evidence assignment",
         )
     assignment = assignments[0]
-    evidence_ids = {
-        str(item) for item in (assignment.get("evidence_ids") or []) if str(item)
-    }
-    if not evidence_ids:
-        raise ValueError("resource-aware worker assignment has no evidence ids")
+    evidence_ids = frozenset(assignment.evidence_ids)
     scoped_context: list[dict] = []
     for item in state.get("context") or []:
         if not isinstance(item, dict):
-            continue
-        item_evidence_ids = {
-            str(value)
-            for value in (
-                item.get("evidence_ids")
-                or ([item.get("evidence_id")] if item.get("evidence_id") else [])
+            raise LearningGuidanceContractError(
+                code="invalid_resource_evidence_context",
+                reason="resource-aware context items must be mappings",
             )
-            if str(value)
-        }
-        if item_evidence_ids & evidence_ids:
+        if "evidence_ids" in item:
+            raw_evidence_ids = item["evidence_ids"]
+            if not isinstance(raw_evidence_ids, (list, tuple)):
+                raise LearningGuidanceContractError(
+                    code="invalid_resource_evidence_context",
+                    reason="context evidence_ids must be a sequence",
+                )
+            item_evidence_ids = tuple(raw_evidence_ids)
+        elif "evidence_id" in item:
+            item_evidence_ids = (item["evidence_id"],)
+        else:
+            continue
+        if (
+            not item_evidence_ids
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+                for value in item_evidence_ids
+            )
+            or len(item_evidence_ids) != len(set(item_evidence_ids))
+        ):
+            raise LearningGuidanceContractError(
+                code="invalid_resource_evidence_context",
+                reason="context evidence ids must be unique normalized strings",
+            )
+        if frozenset(item_evidence_ids) & evidence_ids:
             scoped_context.append(item)
     if not scoped_context:
         raise ValueError(
@@ -1008,7 +1161,24 @@ async def resource_worker(state: LearningState) -> dict:
         )
         if assignment_result is not None:
             assignment, scoped_context = assignment_result
-            local_state["resource_evidence_assignment"] = assignment
+            if task.get("resource_type") != resource_type:
+                raise LearningGuidanceContractError(
+                    code="noncanonical_resource_task_type",
+                    reason="candidate worker task must use the exact canonical type",
+                )
+            task_subjects = tuple(task.get("subjects") or ())
+            task_topic_ids = tuple(task.get("topic_ids") or ())
+            if (
+                task_subjects != assignment.subjects
+                or task_topic_ids != assignment.topic_ids
+            ):
+                raise LearningGuidanceContractError(
+                    code="resource_task_assignment_mismatch",
+                    reason="resource task topic binding differs from its assignment",
+                )
+            local_state["resource_evidence_assignment"] = assignment.model_dump(
+                mode="json"
+            )
             local_state["context"] = scoped_context
             local_state["graded_evidence"] = scoped_context
         if resource_type == "study_plan":
@@ -1020,6 +1190,9 @@ async def resource_worker(state: LearningState) -> dict:
             message_content,
             int((time.perf_counter() - start) * 1000),
         )
+        if assignment_result is not None:
+            result["subjects"] = list(task_subjects)
+            result["topic_ids"] = list(task_topic_ids)
         if resource_type == "quiz" and result["status"] in {
             "success",
             "partial_success",
@@ -1080,6 +1253,10 @@ async def resource_worker(state: LearningState) -> dict:
             state=state,
             env_flag="LOG_GENERATION_SUMMARY",
         )
+    if task.get("subjects") is not None:
+        result["subjects"] = list(task.get("subjects") or [])
+    if task.get("topic_ids") is not None:
+        result["topic_ids"] = list(task.get("topic_ids") or [])
     worker_update: dict[str, Any] = {"resource_branch_results": [result]}
     if private_checkpoint_update is not None:
         worker_update["assessment_checkpoint_resources"] = private_checkpoint_update
@@ -1377,6 +1554,8 @@ def _resource_metrics(result: dict) -> dict:
 def _resource_summary(result: dict) -> dict:
     return {
         "resource_type": result.get("resource_type"),
+        "subjects": result.get("subjects") or [],
+        "topic_ids": result.get("topic_ids") or [],
         "status": result.get("status"),
         "title": result.get("title"),
         "artifact": result.get("artifact") or {},
@@ -1527,23 +1706,67 @@ def _recommendation_context_for_bundle(
         or not subject.strip()
         or subject != subject.strip()
     ):
-        return ()
+        raise LearningGuidanceContractError(
+            code="invalid_recommendation_resource_subject",
+            reason="candidate recommendation context requires an exact subject",
+        )
+    assignments = _candidate_resource_assignments_from_state(
+        state,
+        required=True,
+    )
+    if assignments is None:
+        raise AssertionError("required candidate assignments parser returned None")
     if automatic_recommendation_scope_reason(state, subject=subject) is not None:
         return ()
+    assignment_by_resource = {item.resource_type: item for item in assignments}
     provisional = _build_resource_final_for_bundle(
         state,
         inputs=inputs,
         recommendations=(),
         summary=inputs.message,
     )
-    return tuple(
-        RecommendationResourceContextV1(
-            resource_id=resource.resource_id,
-            resource_type=resource.kind,
-            subject=subject,
+    results_by_type = {
+        str(result.get("resource_type")): result for result in inputs.renderable_results
+    }
+    contexts: list[RecommendationResourceContextV1] = []
+    for resource in provisional.resources:
+        result = results_by_type.get(resource.kind)
+        if result is None:
+            raise LearningGuidanceContractError(
+                code="missing_recommendation_resource_binding",
+                reason="verified resource lacks its branch topic binding",
+            )
+        assignment = assignment_by_resource.get(resource.kind)
+        if assignment is None:
+            raise LearningGuidanceContractError(
+                code="missing_recommendation_resource_assignment",
+                reason="verified resource lacks its original evidence assignment",
+            )
+        subjects = tuple(result.get("subjects") or ())
+        topic_ids = tuple(result.get("topic_ids") or ())
+        if subjects != assignment.subjects or topic_ids != assignment.topic_ids:
+            raise LearningGuidanceContractError(
+                code="resource_branch_assignment_mismatch",
+                reason="resource branch topic binding differs from its assignment",
+            )
+        if assignment.subjects != (subject,) or len(assignment.topic_ids) != 1:
+            raise LearningGuidanceContractError(
+                code="invalid_recommendation_resource_binding",
+                reason=(
+                    "automatic recommendation requires one exact subject/topic "
+                    "binding per resource"
+                ),
+            )
+        contexts.append(
+            RecommendationResourceContextV1(
+                resource_id=resource.resource_id,
+                resource_type=resource.kind,
+                subject=subject,
+                topic_id=assignment.topic_ids[0],
+                title=resource.title,
+            )
         )
-        for resource in provisional.resources
-    )
+    return tuple(contexts)
 
 
 def _validate_recommendation_context_for_bundle(

@@ -42,6 +42,7 @@ RecommendationUnavailableReason = Literal[
     "profile_unavailable",
     "history_unavailable",
     "generated_resources_unavailable",
+    "no_eligible_candidates",
     "unsupported_subject_scope",
 ]
 
@@ -92,6 +93,7 @@ class LearnerSkillSignalV1(_StrictContract):
 class LearnerGoalSignalV1(_StrictContract):
     signal_id: str = Field(min_length=1, max_length=160)
     subject: str = Field(min_length=1, max_length=120)
+    topic_id: str = Field(min_length=1, max_length=160)
     goal: str = Field(min_length=1, max_length=500)
     importance: float = Field(ge=0.0, le=1.0)
     progress: float = Field(ge=0.0, le=1.0)
@@ -99,6 +101,8 @@ class LearnerGoalSignalV1(_StrictContract):
 
 class LearnerPreferenceSignalV1(_StrictContract):
     signal_id: str = Field(min_length=1, max_length=160)
+    subject: str = Field(min_length=1, max_length=120)
+    topic_id: str = Field(min_length=1, max_length=160)
     dimension: Literal[
         "prefer_examples",
         "prefer_visual",
@@ -117,7 +121,6 @@ class LearnerProfileSnapshotV1(_StrictContract):
     skills: tuple[LearnerSkillSignalV1, ...] = Field(min_length=1, max_length=200)
     goals: tuple[LearnerGoalSignalV1, ...] = Field(min_length=1, max_length=50)
     preferences: tuple[LearnerPreferenceSignalV1, ...] = Field(
-        min_length=1,
         max_length=20,
     )
 
@@ -136,9 +139,14 @@ class LearnerProfileSnapshotV1(_StrictContract):
         skill_slots = tuple((signal.subject, signal.topic_id) for signal in self.skills)
         if len(skill_slots) != len(set(skill_slots)):
             raise ValueError("profile skills must not repeat a subject/topic slot")
-        dimensions = tuple(signal.dimension for signal in self.preferences)
-        if len(dimensions) != len(set(dimensions)):
-            raise ValueError("profile preferences must not repeat a dimension")
+        preference_slots = tuple(
+            (signal.subject, signal.topic_id, signal.dimension)
+            for signal in self.preferences
+        )
+        if len(preference_slots) != len(set(preference_slots)):
+            raise ValueError(
+                "profile preferences must not repeat a subject/topic/dimension slot"
+            )
         return self
 
     def supports_subject(self, subject: str) -> bool:
@@ -196,6 +204,10 @@ class LearnerPathEngineRequestV1(_StrictContract):
     request_id: str = Field(min_length=1, max_length=160)
     user_id: str = Field(min_length=1, max_length=160)
     subject: str = Field(min_length=1, max_length=120)
+    requested_resource_types: tuple[ResourceType, ...] = Field(
+        min_length=1,
+        max_length=7,
+    )
     profile: LearnerProfileSnapshotV1
     history: LearnerHistorySnapshotV1
 
@@ -211,6 +223,10 @@ class LearnerPathEngineRequestV1(_StrictContract):
             raise ValueError(
                 "profile lacks explicit skill and goal signals for subject"
             )
+        if len(self.requested_resource_types) != len(
+            set(self.requested_resource_types)
+        ):
+            raise ValueError("requested_resource_types must be unique")
         return self
 
 
@@ -368,6 +384,8 @@ class RecommendationResourceContextV1(_StrictContract):
     resource_id: str = Field(min_length=1, max_length=200)
     resource_type: ResourceType
     subject: str = Field(min_length=1, max_length=120)
+    topic_id: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=240)
 
 
 class ResourceRecommendationEngineRequestV1(_StrictContract):
@@ -515,6 +533,40 @@ class ResourceRecommendationBatchV1(_StrictContract):
         return self
 
 
+class ResourceRecommendationEngineResultV1(_StrictContract):
+    """Explicit engine terminal; no-candidate is not an empty success batch."""
+
+    schema_version: Literal["resource_recommendation_engine_result_v1"]
+    request_id: str = Field(min_length=1, max_length=160)
+    mode: RecommendationMode
+    user_id: str = Field(min_length=1, max_length=160)
+    subject: str = Field(min_length=1, max_length=120)
+    status: Literal["available", "unavailable"]
+    unavailable_reason: Literal["no_eligible_candidates"] | None
+    batch: ResourceRecommendationBatchV1 | None
+
+    @model_validator(mode="after")
+    def validate_terminal(self) -> "ResourceRecommendationEngineResultV1":
+        if self.status == "available":
+            if self.unavailable_reason is not None or self.batch is None:
+                raise ValueError("available engine result requires only a batch")
+            if (
+                self.batch.mode != self.mode
+                or self.batch.user_id != self.user_id
+                or self.batch.subject != self.subject
+            ):
+                raise ValueError("engine result identity must match its batch")
+            return self
+        if (
+            self.unavailable_reason != "no_eligible_candidates"
+            or self.batch is not None
+        ):
+            raise ValueError(
+                "unavailable engine result requires no_eligible_candidates only"
+            )
+        return self
+
+
 class LearnerPathPlannerOutputV1(_StrictContract):
     schema_version: Literal["learner_path_planner_output_v1"]
     runtime_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -634,6 +686,7 @@ __all__ = [
     "RecommendationUnavailableReason",
     "ResourceRecommendationBatchV1",
     "ResourceRecommendationEngineRequestV1",
+    "ResourceRecommendationEngineResultV1",
     "ResourceRecommendationItemV1",
     "ResourceRecommendationOutputV1",
 ]

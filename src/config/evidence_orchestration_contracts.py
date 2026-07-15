@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from typing import AbstractSet, Annotated, Literal
+from typing import AbstractSet, Annotated, Literal, TypeAlias
 
 from pydantic import (
     AfterValidator,
@@ -37,6 +37,7 @@ EvidenceSourceType = Literal["local_rag", "web"]
 RetrievalPriority = Literal["high", "medium", "low"]
 CoverageState = Literal["complete", "partial", "missing"]
 ReadinessState = Literal["ready", "blocked_insufficient_evidence"]
+RESOURCE_EVIDENCE_CONTRACT_VERSION = "resource_evidence_assignment_v1"
 
 
 def _freeze_sequence(value: object) -> object:
@@ -80,6 +81,22 @@ def _validate_normalized_identifier(value: str, field_name: str) -> str:
         or not all(character.isalnum() or character == "_" for character in value)
     ):
         raise ValueError(f"{field_name} must be a normalized identifier")
+    return value
+
+
+def _validate_topic_identifier(value: str) -> str:
+    if value != value.casefold():
+        raise ValueError("topic_id must already be case-folded")
+    if (
+        not value
+        or not value[0].isalnum()
+        or not value[-1].isalnum()
+        or any(
+            not (character.isascii() and (character.isalnum() or character in "._:-"))
+            for character in value
+        )
+    ):
+        raise ValueError("topic_id must be a normalized identifier")
     return value
 
 
@@ -129,6 +146,7 @@ class EvidenceRequirementDraft(StrictRagConfigModel):
 
     resource_type: ResourceType
     subject: NonBlankStr
+    topic_id: NonBlankStr
     profile_need_id: NonBlankStr
     evidence_kind: NonBlankStr
     scope: EvidenceNeedScope
@@ -143,21 +161,27 @@ class EvidenceRequirementDraft(StrictRagConfigModel):
         field_name = getattr(info, "field_name", "identifier")
         return _validate_normalized_identifier(value, field_name)
 
+    @field_validator("topic_id")
+    @classmethod
+    def _validate_topic_id(cls, value: str) -> str:
+        return _validate_topic_identifier(value)
+
 
 class EvidenceRequirementDraftBatch(StrictRagConfigModel):
     """Versioned structured-output wrapper for requirement drafts."""
 
     schema_version: Literal["evidence_requirement_draft_batch_v1"]
-    requirements: Annotated[
-        tuple[EvidenceRequirementDraft, ...],
-        BeforeValidator(_freeze_sequence),
-        Field(min_length=1),
-    ]
+    requirements: list[EvidenceRequirementDraft] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _validate_unique_profile_slots(self) -> "EvidenceRequirementDraftBatch":
         keys = tuple(
-            (item.resource_type, item.subject, item.profile_need_id)
+            (
+                item.resource_type,
+                item.subject,
+                item.topic_id,
+                item.profile_need_id,
+            )
             for item in self.requirements
         )
         if len(keys) != len(set(keys)):
@@ -174,6 +198,7 @@ def make_evidence_requirement_id(draft: EvidenceRequirementDraft) -> str:
             "algorithm": "evidence_requirement_id_v1",
             "resource_type": draft.resource_type,
             "subject": draft.subject,
+            "topic_id": draft.topic_id,
             "profile_need_id": draft.profile_need_id,
             "evidence_kind": draft.evidence_kind,
             "scope": draft.scope,
@@ -192,6 +217,7 @@ class EvidenceRequirement(StrictRagConfigModel):
     requirement_id: NonBlankStr
     resource_type: ResourceType
     subject: NonBlankStr
+    topic_id: NonBlankStr
     profile_need_id: NonBlankStr
     evidence_kind: NonBlankStr
     scope: EvidenceNeedScope
@@ -206,11 +232,17 @@ class EvidenceRequirement(StrictRagConfigModel):
         field_name = getattr(info, "field_name", "identifier")
         return _validate_normalized_identifier(value, field_name)
 
+    @field_validator("topic_id")
+    @classmethod
+    def _validate_topic_id(cls, value: str) -> str:
+        return _validate_topic_identifier(value)
+
     @model_validator(mode="after")
     def _validate_requirement_id(self) -> "EvidenceRequirement":
         draft = EvidenceRequirementDraft(
             resource_type=self.resource_type,
             subject=self.subject,
+            topic_id=self.topic_id,
             profile_need_id=self.profile_need_id,
             evidence_kind=self.evidence_kind,
             scope=self.scope,
@@ -232,6 +264,7 @@ def compile_evidence_requirement(
         requirement_id=make_evidence_requirement_id(draft),
         resource_type=draft.resource_type,
         subject=draft.subject,
+        topic_id=draft.topic_id,
         profile_need_id=draft.profile_need_id,
         evidence_kind=draft.evidence_kind,
         scope=draft.scope,
@@ -443,6 +476,99 @@ class RequirementCoverage(StrictRagConfigModel):
     subject: NonBlankStr
     round_index: NonNegativeInt
     coverage_state: CoverageState
+    evidence_ids: list[NonBlankStr]
+    confidence: UnitFloat
+    reason: NonBlankStr
+    suggested_local_query: ExplicitQuery
+    suggested_web_query: ExplicitQuery
+
+    @field_validator("subject")
+    @classmethod
+    def _validate_subject(cls, value: str) -> str:
+        return _validate_normalized_identifier(value, "subject")
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def _validate_unique_evidence_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("evidence_ids must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_coverage_shape(self) -> "RequirementCoverage":
+        _validate_requirement_coverage_shape(
+            coverage_state=self.coverage_state,
+            evidence_ids=self.evidence_ids,
+            suggested_local_query=self.suggested_local_query,
+            suggested_web_query=self.suggested_web_query,
+        )
+        return self
+
+
+class RequirementCoverageBatch(StrictRagConfigModel):
+    """Versioned judge batch containing one row per requirement."""
+
+    schema_version: Literal["requirement_coverage_batch_v1"]
+    round_index: NonNegativeInt
+    coverages: list[RequirementCoverage] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_batch(self) -> "RequirementCoverageBatch":
+        _validate_requirement_coverage_batch(
+            round_index=self.round_index,
+            coverages=self.coverages,
+        )
+        return self
+
+
+def _validate_requirement_coverage_shape(
+    *,
+    coverage_state: CoverageState,
+    evidence_ids: Sequence[str],
+    suggested_local_query: str,
+    suggested_web_query: str,
+) -> None:
+    has_local_query = bool(suggested_local_query)
+    has_web_query = bool(suggested_web_query)
+    if coverage_state == "complete":
+        if not evidence_ids:
+            raise ValueError("complete coverage must reference evidence")
+        if has_local_query or has_web_query:
+            raise ValueError(
+                "complete coverage must explicitly use empty suggested queries"
+            )
+    elif coverage_state == "partial":
+        if not evidence_ids:
+            raise ValueError("partial coverage must reference evidence")
+        if not has_local_query and not has_web_query:
+            raise ValueError("partial coverage must suggest a gap query")
+    else:
+        if evidence_ids:
+            raise ValueError("missing coverage must not reference evidence")
+        if not has_local_query and not has_web_query:
+            raise ValueError("missing coverage must suggest a gap query")
+
+
+def _validate_requirement_coverage_batch(
+    *,
+    round_index: int,
+    coverages: Sequence[RequirementCoverage | "CompiledRequirementCoverage"],
+) -> None:
+    requirement_ids = tuple(item.requirement_id for item in coverages)
+    if len(requirement_ids) != len(set(requirement_ids)):
+        raise ValueError("coverage batch must contain each requirement at most once")
+    if any(item.round_index != round_index for item in coverages):
+        raise ValueError("coverage rows must match the batch round_index")
+
+
+class CompiledRequirementCoverage(StrictRagConfigModel):
+    """Immutable internal projection of one validated Provider coverage row."""
+
+    requirement_id: NonBlankStr
+    resource_type: ResourceType
+    subject: NonBlankStr
+    round_index: NonNegativeInt
+    coverage_state: CoverageState
     evidence_ids: NonBlankStrTuple
     confidence: UnitFloat
     reason: NonBlankStr
@@ -456,56 +582,74 @@ class RequirementCoverage(StrictRagConfigModel):
 
     @field_validator("evidence_ids")
     @classmethod
-    def _validate_unique_evidence_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+    def _validate_unique_evidence_ids(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
         if len(values) != len(set(values)):
             raise ValueError("evidence_ids must not contain duplicates")
         return values
 
     @model_validator(mode="after")
-    def _validate_coverage_shape(self) -> "RequirementCoverage":
-        has_local_query = bool(self.suggested_local_query)
-        has_web_query = bool(self.suggested_web_query)
-        if self.coverage_state == "complete":
-            if not self.evidence_ids:
-                raise ValueError("complete coverage must reference evidence")
-            if has_local_query or has_web_query:
-                raise ValueError(
-                    "complete coverage must explicitly use empty suggested queries"
-                )
-        elif self.coverage_state == "partial":
-            if not self.evidence_ids:
-                raise ValueError("partial coverage must reference evidence")
-            if not has_local_query and not has_web_query:
-                raise ValueError("partial coverage must suggest a gap query")
-        else:
-            if self.evidence_ids:
-                raise ValueError("missing coverage must not reference evidence")
-            if not has_local_query and not has_web_query:
-                raise ValueError("missing coverage must suggest a gap query")
+    def _validate_coverage_shape(self) -> "CompiledRequirementCoverage":
+        _validate_requirement_coverage_shape(
+            coverage_state=self.coverage_state,
+            evidence_ids=self.evidence_ids,
+            suggested_local_query=self.suggested_local_query,
+            suggested_web_query=self.suggested_web_query,
+        )
         return self
 
 
-class RequirementCoverageBatch(StrictRagConfigModel):
-    """Versioned judge batch containing one row per requirement."""
+CompiledRequirementCoverageTuple: TypeAlias = Annotated[
+    tuple[CompiledRequirementCoverage, ...],
+    BeforeValidator(_freeze_sequence),
+    Field(min_length=1),
+]
+
+
+class CompiledRequirementCoverageBatch(StrictRagConfigModel):
+    """Frozen internal coverage batch persisted in graph state and replayed."""
 
     schema_version: Literal["requirement_coverage_batch_v1"]
     round_index: NonNegativeInt
-    coverages: Annotated[
-        tuple[RequirementCoverage, ...],
-        BeforeValidator(_freeze_sequence),
-        Field(min_length=1),
-    ]
+    coverages: CompiledRequirementCoverageTuple
 
     @model_validator(mode="after")
-    def _validate_batch(self) -> "RequirementCoverageBatch":
-        requirement_ids = tuple(item.requirement_id for item in self.coverages)
-        if len(requirement_ids) != len(set(requirement_ids)):
-            raise ValueError(
-                "coverage batch must contain each requirement at most once"
-            )
-        if any(item.round_index != self.round_index for item in self.coverages):
-            raise ValueError("coverage rows must match the batch round_index")
+    def _validate_batch(self) -> "CompiledRequirementCoverageBatch":
+        _validate_requirement_coverage_batch(
+            round_index=self.round_index,
+            coverages=self.coverages,
+        )
         return self
+
+
+def compile_requirement_coverage_batch(
+    batch: RequirementCoverageBatch,
+) -> CompiledRequirementCoverageBatch:
+    """Explicitly project JSON-native Provider lists into immutable tuples."""
+
+    if not isinstance(batch, RequirementCoverageBatch):
+        raise TypeError("batch must be RequirementCoverageBatch")
+    return CompiledRequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=batch.round_index,
+        coverages=tuple(
+            CompiledRequirementCoverage(
+                requirement_id=item.requirement_id,
+                resource_type=item.resource_type,
+                subject=item.subject,
+                round_index=item.round_index,
+                coverage_state=item.coverage_state,
+                evidence_ids=tuple(item.evidence_ids),
+                confidence=item.confidence,
+                reason=item.reason,
+                suggested_local_query=item.suggested_local_query,
+                suggested_web_query=item.suggested_web_query,
+            )
+            for item in batch.coverages
+        ),
+    )
 
 
 def make_repair_plan_signature(
@@ -561,6 +705,7 @@ def make_resource_assignment_fingerprint(
     *,
     resource_type: ResourceType,
     subjects: Sequence[str],
+    topic_ids: Sequence[str],
     requirement_ids: Sequence[str],
     evidence_ids: Sequence[str],
 ) -> str:
@@ -570,6 +715,7 @@ def make_resource_assignment_fingerprint(
             "algorithm": "resource_evidence_assignment_v1",
             "resource_type": resource_type,
             "subjects": list(subjects),
+            "topic_ids": list(topic_ids),
             "requirement_ids": list(requirement_ids),
             "evidence_ids": list(evidence_ids),
         }
@@ -581,21 +727,32 @@ class ResourceEvidenceAssignment(StrictRagConfigModel):
 
     resource_type: ResourceType
     subjects: NonBlankStrTuple
+    topic_ids: NonBlankStrTuple
     requirement_ids: NonBlankStrTuple
     evidence_ids: NonBlankStrTuple
     assignment_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
     def _validate_assignment(self) -> "ResourceEvidenceAssignment":
-        for field_name in ("subjects", "requirement_ids", "evidence_ids"):
+        for field_name in (
+            "subjects",
+            "topic_ids",
+            "requirement_ids",
+            "evidence_ids",
+        ):
             values = getattr(self, field_name)
             if not values:
                 raise ValueError(f"{field_name} must not be empty")
             if len(values) != len(set(values)):
                 raise ValueError(f"{field_name} must not contain duplicates")
+        if len(self.subjects) != len(self.topic_ids):
+            raise ValueError(
+                "subjects and topic_ids must form an ordered one-to-one binding"
+            )
         expected = make_resource_assignment_fingerprint(
             resource_type=self.resource_type,
             subjects=self.subjects,
+            topic_ids=self.topic_ids,
             requirement_ids=self.requirement_ids,
             evidence_ids=self.evidence_ids,
         )
@@ -694,6 +851,7 @@ def validate_requirement_inventory(
                 expected[(resource, subject, need.need_id)] = need
 
     actual: dict[tuple[str, str, str], EvidenceRequirement] = {}
+    topic_by_resource_subject: dict[tuple[str, str], str] = {}
     for requirement in requirements:
         requirement_slot = (
             requirement.resource_type,
@@ -706,6 +864,14 @@ def validate_requirement_inventory(
                 reason="multiple requirements target one resource/profile slot",
             )
         actual[requirement_slot] = requirement
+        resource_subject = (requirement.resource_type, requirement.subject)
+        bound_topic = topic_by_resource_subject.get(resource_subject)
+        if bound_topic is not None and bound_topic != requirement.topic_id:
+            raise EvidenceRequirementValidationError(
+                code="multiple_target_topics_for_resource_subject",
+                reason=("one generated resource must use one target topic per subject"),
+            )
+        topic_by_resource_subject[resource_subject] = requirement.topic_id
     if set(actual) != set(expected):
         raise EvidenceRequirementValidationError(
             code="requirement_inventory_mismatch",
@@ -891,11 +1057,13 @@ def validate_evidence_ledger(
 
 def validate_requirement_coverage(
     *,
-    batch: RequirementCoverageBatch,
+    batch: CompiledRequirementCoverageBatch,
     requirements: Sequence[EvidenceRequirement],
     entries: Sequence[EvidenceLedgerEntry],
 ) -> None:
     """Require exactly one policy-valid coverage row per requirement."""
+    if not isinstance(batch, CompiledRequirementCoverageBatch):
+        raise TypeError("batch must be CompiledRequirementCoverageBatch")
     requirement_by_id = {item.requirement_id: item for item in requirements}
     coverage_by_id = {item.requirement_id: item for item in batch.coverages}
     if set(coverage_by_id) != set(requirement_by_id):
@@ -955,9 +1123,11 @@ def derive_resource_readiness(
     *,
     requested_resource_types: Sequence[ResourceType],
     requirements: Sequence[EvidenceRequirement],
-    batch: RequirementCoverageBatch,
+    batch: CompiledRequirementCoverageBatch,
 ) -> tuple[ResourceReadiness, ...]:
     """Derive readiness in code; LLM coverage cannot declare global readiness."""
+    if not isinstance(batch, CompiledRequirementCoverageBatch):
+        raise TypeError("batch must be CompiledRequirementCoverageBatch")
     coverage_by_id = {item.requirement_id: item for item in batch.coverages}
     readiness_rows: list[ResourceReadiness] = []
     for raw_resource_type in requested_resource_types:
@@ -1022,10 +1192,12 @@ def derive_resource_evidence_assignments(
     *,
     readiness: Sequence[ResourceReadiness],
     requirements: Sequence[EvidenceRequirement],
-    batch: RequirementCoverageBatch,
+    batch: CompiledRequirementCoverageBatch,
     entries: Sequence[EvidenceLedgerEntry],
 ) -> tuple[ResourceEvidenceAssignment, ...]:
     """Assign accepted evidence only to resources whose required needs are ready."""
+    if not isinstance(batch, CompiledRequirementCoverageBatch):
+        raise TypeError("batch must be CompiledRequirementCoverageBatch")
     accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
     coverage_by_id = {item.requirement_id: item for item in batch.coverages}
     assignments: list[ResourceEvidenceAssignment] = []
@@ -1037,6 +1209,9 @@ def derive_resource_evidence_assignments(
         )
         subjects = _unique_preserving_order(
             tuple(item.subject for item in resource_requirements)
+        )
+        topic_ids = _unique_preserving_order(
+            tuple(item.topic_id for item in resource_requirements)
         )
         requirement_ids = tuple(
             item.requirement_id
@@ -1065,6 +1240,7 @@ def derive_resource_evidence_assignments(
         fingerprint = make_resource_assignment_fingerprint(
             resource_type=row.resource_type,
             subjects=subjects,
+            topic_ids=topic_ids,
             requirement_ids=requirement_ids,
             evidence_ids=evidence_ids,
         )
@@ -1072,6 +1248,7 @@ def derive_resource_evidence_assignments(
             ResourceEvidenceAssignment(
                 resource_type=row.resource_type,
                 subjects=subjects,
+                topic_ids=topic_ids,
                 requirement_ids=requirement_ids,
                 evidence_ids=evidence_ids,
                 assignment_fingerprint=fingerprint,
@@ -1081,6 +1258,8 @@ def derive_resource_evidence_assignments(
 
 
 __all__ = [
+    "CompiledRequirementCoverage",
+    "CompiledRequirementCoverageBatch",
     "CoverageState",
     "DuplicateRetrievalSignatureError",
     "EvidenceBudgetExceededError",
@@ -1096,6 +1275,7 @@ __all__ = [
     "RequirementCoverage",
     "RequirementCoverageBatch",
     "RequirementCoverageValidationError",
+    "RESOURCE_EVIDENCE_CONTRACT_VERSION",
     "ResourceEvidenceAssignment",
     "ResourceEvidenceAssignmentError",
     "ResourceReadiness",
@@ -1103,6 +1283,7 @@ __all__ = [
     "RetrievalTask",
     "RetrievalTaskValidationError",
     "build_retrieval_task",
+    "compile_requirement_coverage_batch",
     "compile_evidence_requirement",
     "compile_evidence_requirement_batch",
     "derive_resource_evidence_assignments",

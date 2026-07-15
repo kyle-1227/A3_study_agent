@@ -13,6 +13,10 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 
 from src.assessment.attempt_contracts import AssessmentQuizSourceItemV1
+from src.config.evidence_orchestration_contracts import (
+    RESOURCE_EVIDENCE_CONTRACT_VERSION,
+    make_resource_assignment_fingerprint,
+)
 from src.context_engineering.influence import (
     build_influence_entry,
     merge_context_influence_ledger,
@@ -37,16 +41,93 @@ from src.graph.resource_generation import (
     route_after_resource_preflight,
 )
 from src.graph.state import LearningState, resource_branch_results_reducer
-from src.learning_guidance.runtime import LearningGuidanceRuntime
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
+from src.learning_guidance.runtime import (
+    LearningGuidanceContractError,
+    LearningGuidanceRuntime,
+)
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
+from src.resource_contracts import ResourceType
 
 
 async def _unexpected_guidance_dependency(*_args, **_kwargs):
     raise AssertionError("resource bundle tests must not invoke guidance dependencies")
 
 
+def _knowledge_graph() -> KnowledgeGraphV1:
+    return KnowledgeGraphV1.model_validate(
+        {
+            "schema_version": "knowledge_graph_v1",
+            "data_version": "resource-parallel-test-v1",
+            "subjects": [
+                {
+                    "subject_id": "math",
+                    "title": "Mathematics",
+                    "topics": [
+                        {
+                            "topic_id": "functions",
+                            "title": "Functions",
+                            "difficulty": 0.5,
+                            "estimated_hours": 2.0,
+                            "prerequisite_topic_ids": [],
+                            "knowledge_points": ["Function definitions"],
+                            "resources": [
+                                {
+                                    "resource_id": "functions.mindmap",
+                                    "resource_type": "mindmap",
+                                    "title": "Functions mindmap",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _candidate_assignment(resource_type: ResourceType) -> dict[str, object]:
+    subjects = ("math",)
+    topic_ids = ("functions",)
+    requirement_ids = (f"requirement:{resource_type}",)
+    evidence_ids = (f"evidence:{resource_type}",)
+    return {
+        "resource_type": resource_type,
+        "subjects": list(subjects),
+        "topic_ids": list(topic_ids),
+        "requirement_ids": list(requirement_ids),
+        "evidence_ids": list(evidence_ids),
+        "assignment_fingerprint": make_resource_assignment_fingerprint(
+            resource_type=resource_type,
+            subjects=subjects,
+            topic_ids=topic_ids,
+            requirement_ids=requirement_ids,
+            evidence_ids=evidence_ids,
+        ),
+    }
+
+
+def _candidate_evidence_state(
+    *requested_resource_types: ResourceType,
+    assigned_resource_types: tuple[ResourceType, ...] | None = None,
+) -> dict[str, object]:
+    assigned = (
+        requested_resource_types
+        if assigned_resource_types is None
+        else assigned_resource_types
+    )
+    return {
+        "evidence_requested_resource_types": list(requested_resource_types),
+        "resource_evidence_contract_version": RESOURCE_EVIDENCE_CONTRACT_VERSION,
+        "resource_evidence_assignments": [
+            _candidate_assignment(resource_type) for resource_type in assigned
+        ],
+    }
+
+
 GUIDANCE_RUNTIME = LearningGuidanceRuntime(
     runtime_fingerprint="7" * 64,
+    knowledge_graph=_knowledge_graph(),
     provider_projection_max_steps=50,
     provider_projection_max_chars=65_536,
     load_profile=_unexpected_guidance_dependency,
@@ -149,6 +230,8 @@ def _mindmap_branch_result(*, influence_entries: list[dict] | None = None) -> di
     }
     result = {
         "resource_type": "mindmap",
+        "subjects": ["math"],
+        "topic_ids": ["functions"],
         "status": "success",
         "title": "Mock Map",
         "artifact": {"title": "Mock Map", "tree": tree, "xmind_url": "/m.xmind"},
@@ -225,7 +308,7 @@ def _automatic_recommendation_output(
                     "resource_type": "mindmap",
                     "subject": "math",
                     "topic_id": "functions",
-                    "title": "函数知识结构强化",
+                    "title": "Mock Map",
                     "rank": 1,
                     "score_factors": {
                         "weakness": 0.8,
@@ -348,6 +431,145 @@ async def test_resource_orchestrator_plans_dynamic_worker_tasks():
     ]
 
 
+async def test_candidate_orchestrator_rejects_assignment_topic_fingerprint_tamper():
+    state = {
+        "request_id": "req-candidate-1",
+        "requested_resource_types": ["mindmap"],
+        "requested_resource_type": "",
+        **_candidate_evidence_state("mindmap"),
+    }
+    state["resource_evidence_assignments"][0]["topic_ids"] = ["limits"]
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="invalid_resource_evidence_assignments",
+    ):
+        await resource_orchestrator(state)
+
+
+async def test_candidate_orchestrator_rejects_missing_version_marker():
+    state = {
+        "request_id": "req-candidate-1",
+        "requested_resource_types": ["mindmap"],
+        "requested_resource_type": "",
+        **_candidate_evidence_state("mindmap"),
+    }
+    del state["resource_evidence_contract_version"]
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="missing_resource_evidence_contract_version",
+    ):
+        await resource_orchestrator(state)
+
+
+async def test_candidate_orchestrator_preserves_exact_assignment_binding():
+    result = await resource_orchestrator(
+        {
+            "request_id": "req-candidate-success",
+            "requested_resource_types": ["mindmap"],
+            "requested_resource_type": "mindmap",
+            **_candidate_evidence_state("mindmap"),
+        }
+    )
+
+    assert result["resource_generation_plan"]["tasks"] == [
+        {
+            "task_id": "resource:mindmap",
+            "resource_type": "mindmap",
+            "subjects": ["math"],
+            "topic_ids": ["functions"],
+            "status": "pending",
+        }
+    ]
+
+
+async def test_candidate_orchestrator_rejects_ready_resource_alias():
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="invalid_candidate_ready_resources",
+    ):
+        await resource_orchestrator(
+            {
+                "request_id": "req-candidate-alias",
+                "requested_resource_types": ["exercise"],
+                "requested_resource_type": "exercise",
+                **_candidate_evidence_state("quiz"),
+            }
+        )
+
+
+async def test_candidate_worker_rejects_task_topic_mismatch_before_runner(
+    monkeypatch,
+):
+    called = False
+
+    async def forbidden_runner(_state):
+        nonlocal called
+        called = True
+        raise AssertionError("mismatched task must not reach the resource runner")
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "mindmap", forbidden_runner)
+    result = await resource_worker(
+        {
+            "request_id": "req-candidate-1",
+            **_candidate_evidence_state("mindmap"),
+            "context": [
+                {
+                    "evidence_id": "evidence:mindmap",
+                    "content": "Approved functions evidence.",
+                }
+            ],
+            "resource_task": {
+                "task_id": "resource:mindmap",
+                "resource_type": "mindmap",
+                "subjects": ["math"],
+                "topic_ids": ["limits"],
+            },
+        }
+    )
+
+    branch = result["resource_branch_results"][0]
+    assert called is False
+    assert branch["status"] == "failed"
+    assert branch["error_type"] == "LearningGuidanceContractError"
+    assert "resource_task_assignment_mismatch" in branch["error_message_sanitized"]
+
+
+async def test_candidate_worker_rejects_resource_alias_before_runner(monkeypatch):
+    called = False
+
+    async def forbidden_runner(_state):
+        nonlocal called
+        called = True
+        raise AssertionError("aliased task must not reach the resource runner")
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "quiz", forbidden_runner)
+    result = await resource_worker(
+        {
+            "request_id": "req-candidate-2",
+            **_candidate_evidence_state("quiz"),
+            "context": [
+                {
+                    "evidence_id": "evidence:quiz",
+                    "content": "Approved quiz evidence.",
+                }
+            ],
+            "resource_task": {
+                "task_id": "resource:quiz",
+                "resource_type": "exercise",
+                "subjects": ["math"],
+                "topic_ids": ["functions"],
+            },
+        }
+    )
+
+    branch = result["resource_branch_results"][0]
+    assert called is False
+    assert branch["status"] == "failed"
+    assert "noncanonical_resource_task_type" in branch["error_message_sanitized"]
+
+
 async def test_resource_preflight_routes_study_plan_requests_to_profile_gate():
     result = await resource_preflight_router(
         {
@@ -420,11 +642,15 @@ async def test_candidate_compiled_graph_fans_in_two_sends_before_one_final():
                     {
                         "task_id": "resource:mindmap",
                         "resource_type": "mindmap",
+                        "subjects": ["math"],
+                        "topic_ids": ["functions"],
                         "status": "pending",
                     },
                     {
                         "task_id": "resource:quiz",
                         "resource_type": "quiz",
+                        "subjects": ["math"],
+                        "topic_ids": ["functions"],
                         "status": "pending",
                     },
                 ]
@@ -441,6 +667,8 @@ async def test_candidate_compiled_graph_fans_in_two_sends_before_one_final():
             if resource_type == "mindmap"
             else _failed_branch_result("quiz")
         )
+        branch["subjects"] = list(state["resource_task"]["subjects"])
+        branch["topic_ids"] = list(state["resource_task"]["topic_ids"])
         return {"resource_branch_results": [branch]}
 
     async def counting_aggregator(state: LearningState) -> dict:
@@ -451,7 +679,15 @@ async def test_candidate_compiled_graph_fans_in_two_sends_before_one_final():
         calls["recommendation"] += 1
         contexts = state["recommendation_resource_context"]
         assert len(contexts) == 1
-        assert contexts[0]["resource_type"] == "mindmap"
+        assert {
+            key: contexts[0][key]
+            for key in ("resource_type", "subject", "topic_id", "title")
+        } == {
+            "resource_type": "mindmap",
+            "subject": "math",
+            "topic_id": "functions",
+            "title": "Mock Map",
+        }
         return {
             "resource_recommendation_output": _automatic_recommendation_output(
                 contexts[0]["resource_id"]
@@ -482,6 +718,7 @@ async def test_candidate_compiled_graph_fans_in_two_sends_before_one_final():
             "user_id": "learner-1",
             "subject": "math",
             "evidence_requested_subjects": ["math"],
+            **_candidate_evidence_state("mindmap", "quiz"),
             "requested_resource_types": ["mindmap", "quiz"],
             "resource_generation_debug": {"stages": []},
             "resource_branch_results": [],
@@ -558,6 +795,10 @@ async def test_candidate_compiled_graph_empty_plan_reaches_controlled_stop_once(
             "user_id": "learner-1",
             "subject": "math",
             "evidence_requested_subjects": ["math"],
+            **_candidate_evidence_state(
+                "quiz",
+                assigned_resource_types=(),
+            ),
             "requested_resource_types": ["quiz"],
             "resource_evidence_readiness": [
                 {
@@ -601,6 +842,8 @@ async def test_candidate_compiled_graph_recommendation_error_is_fail_fast():
                     {
                         "task_id": "resource:mindmap",
                         "resource_type": "mindmap",
+                        "subjects": ["math"],
+                        "topic_ids": ["functions"],
                         "status": "pending",
                     }
                 ]
@@ -608,9 +851,12 @@ async def test_candidate_compiled_graph_recommendation_error_is_fail_fast():
             "resource_generation_status": "running",
         }
 
-    async def fake_worker(_state: LearningState) -> dict:
+    async def fake_worker(state: LearningState) -> dict:
         calls["worker"] += 1
-        return {"resource_branch_results": [_mindmap_branch_result()]}
+        branch = _mindmap_branch_result()
+        branch["subjects"] = list(state["resource_task"]["subjects"])
+        branch["topic_ids"] = list(state["resource_task"]["topic_ids"])
+        return {"resource_branch_results": [branch]}
 
     async def counting_aggregator(state: LearningState) -> dict:
         calls["aggregator"] += 1
@@ -639,6 +885,7 @@ async def test_candidate_compiled_graph_recommendation_error_is_fail_fast():
                 "user_id": "learner-1",
                 "subject": "math",
                 "evidence_requested_subjects": ["math"],
+                **_candidate_evidence_state("mindmap"),
                 "requested_resource_types": ["mindmap"],
                 "resource_generation_debug": {"stages": []},
                 "resource_branch_results": [],
@@ -660,6 +907,7 @@ async def test_candidate_aggregator_then_finalizer_emits_one_recommended_v3():
         "user_id": "learner-1",
         "subject": "math",
         "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
         "requested_resource_types": ["mindmap"],
         "resource_generation_debug": {"stages": []},
         "resource_branch_results": [_mindmap_branch_result()],
@@ -670,7 +918,16 @@ async def test_candidate_aggregator_then_finalizer_emits_one_recommended_v3():
     assert set(aggregate) == {"recommendation_resource_context"}
     assert "messages" not in aggregate
     assert "resource_final_v3" not in aggregate
-    resource_id = aggregate["recommendation_resource_context"][0]["resource_id"]
+    context = aggregate["recommendation_resource_context"][0]
+    resource_id = context["resource_id"]
+    assert {
+        key: context[key] for key in ("resource_type", "subject", "topic_id", "title")
+    } == {
+        "resource_type": "mindmap",
+        "subject": "math",
+        "topic_id": "functions",
+        "title": "Mock Map",
+    }
     baseline = await resource_bundle_output(state)
     final = await resource_bundle_output_with_recommendations(
         {
@@ -717,6 +974,7 @@ async def test_candidate_finalizer_keeps_unavailable_status_public_and_empty():
         "user_id": "learner-1",
         "subject": "math",
         "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("quiz"),
         "requested_resource_types": ["quiz"],
         "resource_generation_debug": {"stages": []},
         "resource_branch_results": [_failed_branch_result("quiz")],
@@ -746,6 +1004,7 @@ async def test_candidate_finalizer_rejects_tampered_recommendation_source():
         "user_id": "learner-1",
         "subject": "math",
         "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
         "requested_resource_types": ["mindmap"],
         "resource_generation_debug": {"stages": []},
         "resource_branch_results": [_mindmap_branch_result()],
@@ -775,6 +1034,7 @@ async def test_candidate_finalizer_rejects_tampered_bundle_context():
         "user_id": "learner-1",
         "subject": "math",
         "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
         "requested_resource_types": ["mindmap"],
         "resource_generation_debug": {"stages": []},
         "resource_branch_results": [_mindmap_branch_result()],
@@ -798,6 +1058,70 @@ async def test_candidate_finalizer_rejects_tampered_bundle_context():
         )
 
 
+async def test_candidate_aggregator_rejects_branch_topic_tamper():
+    branch = _mindmap_branch_result()
+    branch["topic_ids"] = ["limits"]
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [branch],
+    }
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="resource_branch_assignment_mismatch",
+    ):
+        await resource_bundle_aggregator(state)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tampered_value"),
+    (
+        ("resource_type", "quiz"),
+        ("topic_id", "limits"),
+        ("title", "Tampered title"),
+    ),
+)
+async def test_candidate_finalizer_rejects_recommendation_target_binding_tamper(
+    field_name: str,
+    tampered_value: str,
+):
+    state = {
+        "thread_id": "thread-1",
+        "request_id": "request-1",
+        "user_id": "learner-1",
+        "subject": "math",
+        "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
+        "requested_resource_types": ["mindmap"],
+        "resource_generation_debug": {"stages": []},
+        "resource_branch_results": [_mindmap_branch_result()],
+    }
+    aggregate = await resource_bundle_aggregator(state)
+    resource_id = aggregate["recommendation_resource_context"][0]["resource_id"]
+    output = _automatic_recommendation_output(resource_id)
+    output["batch"]["items"][0][field_name] = tampered_value
+
+    with pytest.raises(
+        LearningGuidanceContractError,
+        match="recommendation_target_binding_mismatch",
+    ):
+        await resource_bundle_output_with_recommendations(
+            {
+                **state,
+                **aggregate,
+                "resource_recommendation_output": output,
+            },
+            runtime=GUIDANCE_RUNTIME,
+        )
+
+
 async def test_candidate_finalizer_rejects_changed_guidance_runtime():
     state = {
         "thread_id": "thread-1",
@@ -805,6 +1129,7 @@ async def test_candidate_finalizer_rejects_changed_guidance_runtime():
         "user_id": "learner-1",
         "subject": "math",
         "evidence_requested_subjects": ["math"],
+        **_candidate_evidence_state("mindmap"),
         "requested_resource_types": ["mindmap"],
         "resource_generation_debug": {"stages": []},
         "resource_branch_results": [_mindmap_branch_result()],
@@ -892,6 +1217,8 @@ async def test_resource_bundle_output_does_not_copy_private_quiz_checkpoint():
     binding = _quiz_binding(thread_id="thread-1", request_id="request-1")
     branch = {
         "resource_type": "quiz",
+        "subjects": ["math"],
+        "topic_ids": ["functions"],
         "status": "success",
         "title": "Mock Quiz",
         "artifact": binding["exercise_artifact"],
@@ -947,6 +1274,7 @@ async def test_resource_bundle_output_does_not_copy_private_quiz_checkpoint():
             "user_id": "learner-1",
             "subject": "math",
             "evidence_requested_subjects": ["math"],
+            **_candidate_evidence_state("quiz"),
             "requested_resource_types": ["quiz"],
             "assessment_checkpoint_resources": binding[
                 "assessment_checkpoint_resources"
@@ -956,6 +1284,15 @@ async def test_resource_bundle_output_does_not_copy_private_quiz_checkpoint():
     )
     assert "SERVER_ONLY_ANSWER" not in json.dumps(aggregate, ensure_ascii=False)
     assert set(aggregate) == {"recommendation_resource_context"}
+    context = aggregate["recommendation_resource_context"][0]
+    assert {
+        key: context[key] for key in ("resource_type", "subject", "topic_id", "title")
+    } == {
+        "resource_type": "quiz",
+        "subject": "math",
+        "topic_id": "functions",
+        "title": "Mock Quiz",
+    }
 
 
 async def test_resource_worker_emits_safe_internal_subnode_traces(monkeypatch):

@@ -12,10 +12,11 @@ from src.learning_guidance.contracts import (
     LearnerPathEngineRequestV1,
     LearnerPathPlanV1,
     LearnerProfileSnapshotV1,
-    ResourceRecommendationBatchV1,
     ResourceRecommendationEngineRequestV1,
+    ResourceRecommendationEngineResultV1,
     build_learner_path_provider_policy_fingerprint,
 )
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
 
 
 ProfileSnapshotLoader = Callable[
@@ -32,7 +33,7 @@ LearnerPathEngine = Callable[
 ]
 ResourceRecommendationEngine = Callable[
     [ResourceRecommendationEngineRequestV1],
-    Awaitable[ResourceRecommendationBatchV1],
+    Awaitable[ResourceRecommendationEngineResultV1],
 ]
 
 
@@ -55,6 +56,7 @@ class LearningGuidanceRuntime:
     """
 
     runtime_fingerprint: str
+    knowledge_graph: KnowledgeGraphV1 = field(repr=False)
     provider_projection_max_steps: int
     provider_projection_max_chars: int
     load_profile: ProfileSnapshotLoader
@@ -73,6 +75,8 @@ class LearningGuidanceRuntime:
             raise ValueError(
                 "runtime_fingerprint must be a lowercase SHA-256 hex digest"
             )
+        if not isinstance(self.knowledge_graph, KnowledgeGraphV1):
+            raise TypeError("knowledge_graph must be KnowledgeGraphV1")
         if (
             isinstance(self.provider_projection_max_steps, bool)
             or not 1

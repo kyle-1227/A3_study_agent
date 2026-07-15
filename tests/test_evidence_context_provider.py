@@ -196,15 +196,18 @@ def test_evidence_provider_dedupes_existing_bucket_overlap():
 
 def _resource_assignment(*evidence_ids: str) -> dict:
     subjects = ("computer_science",)
+    topic_ids = ("computer_science.functions",)
     requirement_ids = ("requirement:1",)
     return {
         "resource_type": "quiz",
         "subjects": list(subjects),
+        "topic_ids": list(topic_ids),
         "requirement_ids": list(requirement_ids),
         "evidence_ids": list(evidence_ids),
         "assignment_fingerprint": make_resource_assignment_fingerprint(
             resource_type="quiz",
             subjects=subjects,
+            topic_ids=topic_ids,
             requirement_ids=requirement_ids,
             evidence_ids=evidence_ids,
         ),

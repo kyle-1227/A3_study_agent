@@ -24,12 +24,14 @@ from src.learning_guidance.contracts import (
     RecommendationUnavailableReason,
     ResourceRecommendationBatchV1,
     ResourceRecommendationEngineRequestV1,
+    ResourceRecommendationEngineResultV1,
     ResourceRecommendationOutputV1,
 )
 from src.learning_guidance.runtime import (
     LearningGuidanceContractError,
     LearningGuidanceRuntime,
 )
+from src.resource_contracts import normalize_requested_resource_types
 
 
 LEARNER_PATH_OUTPUT_STATE_KEY = "learner_path_planner_output"
@@ -59,8 +61,13 @@ def _optional_state_text(
     state: Mapping[str, object],
     field_name: str,
 ) -> str | None:
-    value = state.get(field_name)
-    if value is None or value == "":
+    if field_name not in state:
+        raise LearningGuidanceContractError(
+            code=f"missing_{field_name}",
+            reason=f"{field_name} must be explicitly present in graph state",
+        )
+    value = state[field_name]
+    if value == "":
         return None
     if not isinstance(value, str):
         raise LearningGuidanceContractError(
@@ -68,7 +75,13 @@ def _optional_state_text(
             reason=f"{field_name} must be a string when present",
         )
     if not value.strip():
-        return None
+        raise LearningGuidanceContractError(
+            code=f"invalid_{field_name}",
+            reason=(
+                f"{field_name} must use an explicit empty string or a normalized "
+                "non-blank value"
+            ),
+        )
     if value != value.strip():
         raise LearningGuidanceContractError(
             code=f"invalid_{field_name}",
@@ -302,36 +315,137 @@ def _subject_profile_signal_ids(
     return frozenset(
         [signal.signal_id for signal in profile.skills if signal.subject == subject]
         + [signal.signal_id for signal in profile.goals if signal.subject == subject]
-        + [signal.signal_id for signal in profile.preferences]
+        + [
+            signal.signal_id
+            for signal in profile.preferences
+            if signal.subject == subject
+        ]
     )
+
+
+def _profile_signal_bindings(
+    profile: LearnerProfileSnapshotV1,
+) -> dict[str, tuple[str, str, str]]:
+    bindings: dict[str, tuple[str, str, str]] = {}
+    for signal in profile.skills:
+        bindings[signal.signal_id] = ("skill", signal.subject, signal.topic_id)
+    for signal in profile.goals:
+        bindings[signal.signal_id] = ("goal", signal.subject, signal.topic_id)
+    for signal in profile.preferences:
+        bindings[signal.signal_id] = (
+            "preference",
+            signal.subject,
+            signal.topic_id,
+        )
+    return bindings
+
+
+def _history_bindings(
+    history: LearnerHistorySnapshotV1,
+) -> dict[str, tuple[str, str]]:
+    return {
+        event.history_id: (event.subject, event.topic_id) for event in history.events
+    }
 
 
 def _validate_plan_binding(
     plan: LearnerPathPlanV1,
     *,
     request: LearnerPathEngineRequestV1,
+    runtime: LearningGuidanceRuntime,
 ) -> None:
     if plan.user_id != request.user_id or plan.subject != request.subject:
         raise LearningGuidanceContractError(
             code="learner_path_identity_mismatch",
             reason="learner path identity differs from its engine request",
         )
-    allowed_profile_ids = _subject_profile_signal_ids(
-        request.profile,
-        request.subject,
-    )
-    allowed_history_ids = request.history.history_ids()
+    subject_node = runtime.knowledge_graph.subject(request.subject)
+    if subject_node is None:
+        raise LearningGuidanceContractError(
+            code="path_subject_not_in_knowledge_graph",
+            reason="learner path subject is absent from the curated graph",
+        )
+    topics_by_id = {topic.topic_id: topic for topic in subject_node.topics}
+    topic_positions = {
+        topic.topic_id: position for position, topic in enumerate(subject_node.topics)
+    }
+    step_topic_ids = tuple(step.topic_id for step in plan.steps)
+    if len(step_topic_ids) != len(set(step_topic_ids)):
+        raise LearningGuidanceContractError(
+            code="duplicate_path_topic",
+            reason="learner path must contain each curated topic at most once",
+        )
+    step_topic_positions: list[int] = []
     for step in plan.steps:
-        if not set(step.profile_signal_ids).issubset(allowed_profile_ids):
+        topic = topics_by_id.get(step.topic_id)
+        if topic is None:
+            raise LearningGuidanceContractError(
+                code="path_topic_not_in_knowledge_graph",
+                reason="learner path step references an unknown curated topic",
+            )
+        if step.title != topic.title or step.estimated_hours != topic.estimated_hours:
+            raise LearningGuidanceContractError(
+                code="path_topic_metadata_mismatch",
+                reason=(
+                    "learner path title and estimated hours must match the curated "
+                    "topic"
+                ),
+            )
+        step_topic_positions.append(topic_positions[step.topic_id])
+    if step_topic_positions != sorted(step_topic_positions):
+        raise LearningGuidanceContractError(
+            code="path_topic_order_mismatch",
+            reason="learner path topics must preserve curated topological order",
+        )
+    profile_bindings = _profile_signal_bindings(request.profile)
+    history_bindings = _history_bindings(request.history)
+    for step in plan.steps:
+        profile_refs = tuple(
+            profile_bindings.get(signal_id) for signal_id in step.profile_signal_ids
+        )
+        if any(binding is None for binding in profile_refs):
             raise LearningGuidanceContractError(
                 code="unknown_path_profile_evidence",
                 reason="learner path references profile signals outside its request",
             )
-        if not set(step.history_ids).issubset(allowed_history_ids):
+        if any(
+            binding is not None
+            and (binding[1], binding[2]) != (step.subject, step.topic_id)
+            for binding in profile_refs
+        ):
+            raise LearningGuidanceContractError(
+                code="off_topic_path_profile_evidence",
+                reason="learner path profile evidence must match its exact topic",
+            )
+        history_refs = tuple(
+            history_bindings.get(history_id) for history_id in step.history_ids
+        )
+        if any(binding is None for binding in history_refs):
             raise LearningGuidanceContractError(
                 code="unknown_path_history_evidence",
                 reason="learner path references history outside its request",
             )
+        if any(binding != (step.subject, step.topic_id) for binding in history_refs):
+            raise LearningGuidanceContractError(
+                code="off_topic_path_history_evidence",
+                reason="learner path history evidence must match its exact topic",
+            )
+
+    assigned_resource_types = tuple(
+        resource_type
+        for step in plan.steps
+        for resource_type in step.recommended_resource_types
+    )
+    if len(assigned_resource_types) != len(set(assigned_resource_types)):
+        raise LearningGuidanceContractError(
+            code="duplicate_path_resource_binding",
+            reason="each requested resource type must bind to exactly one topic",
+        )
+    if set(assigned_resource_types) != set(request.requested_resource_types):
+        raise LearningGuidanceContractError(
+            code="incomplete_path_resource_binding",
+            reason="learner path must bind every requested resource type exactly once",
+        )
 
 
 def _recommendation_resources(
@@ -339,7 +453,12 @@ def _recommendation_resources(
 ) -> tuple[RecommendationResourceContextV1, ...]:
     raw = state.get(RECOMMENDATION_RESOURCE_CONTEXT_STATE_KEY)
     if raw is None:
-        return ()
+        raise LearningGuidanceContractError(
+            code="missing_recommendation_resource_context",
+            reason=(
+                "automatic recommendation requires an explicit resource context list"
+            ),
+        )
     if not isinstance(raw, (list, tuple)):
         raise LearningGuidanceContractError(
             code="invalid_recommendation_resource_context",
@@ -388,10 +507,48 @@ def automatic_recommendation_scope_reason(
     return None
 
 
+def _validate_explicit_recommendation_catalog(
+    batch: ResourceRecommendationBatchV1,
+    *,
+    runtime: LearningGuidanceRuntime,
+) -> None:
+    subject_node = runtime.knowledge_graph.subject(batch.subject)
+    if subject_node is None:
+        raise LearningGuidanceContractError(
+            code="recommendation_subject_not_in_knowledge_graph",
+            reason="explicit recommendation subject is absent from the catalog",
+        )
+    catalog_by_id = {
+        resource.resource_id: (
+            resource.resource_type,
+            batch.subject,
+            topic.topic_id,
+            resource.title,
+        )
+        for topic in subject_node.topics
+        for resource in topic.resources
+    }
+    for item in batch.items:
+        if catalog_by_id.get(item.resource_id) != (
+            item.resource_type,
+            item.subject,
+            item.topic_id,
+            item.title,
+        ):
+            raise LearningGuidanceContractError(
+                code="recommendation_catalog_binding_mismatch",
+                reason=(
+                    "explicit recommendation must exactly match one curated "
+                    "catalog resource"
+                ),
+            )
+
+
 def _validate_recommendation_binding(
     batch: ResourceRecommendationBatchV1,
     *,
     request: ResourceRecommendationEngineRequestV1,
+    runtime: LearningGuidanceRuntime,
 ) -> None:
     if (
         batch.user_id != request.user_id
@@ -402,24 +559,52 @@ def _validate_recommendation_binding(
             code="recommendation_identity_mismatch",
             reason="recommendation batch binding differs from its engine request",
         )
-    allowed_profile_ids = _subject_profile_signal_ids(
-        request.profile,
-        request.subject,
-    )
-    allowed_history_ids = request.history.history_ids()
-    allowed_resource_ids = frozenset(
-        resource.resource_id for resource in request.generated_resources
-    )
+    profile_bindings = _profile_signal_bindings(request.profile)
+    history_bindings = _history_bindings(request.history)
+    resources_by_id = {
+        resource.resource_id: resource for resource in request.generated_resources
+    }
+    allowed_resource_ids = frozenset(resources_by_id)
+    if request.mode == "explicit_request":
+        _validate_explicit_recommendation_catalog(batch, runtime=runtime)
     for item in batch.items:
-        if not set(item.profile_signal_ids).issubset(allowed_profile_ids):
+        profile_refs = tuple(
+            profile_bindings.get(signal_id) for signal_id in item.profile_signal_ids
+        )
+        if any(binding is None for binding in profile_refs):
             raise LearningGuidanceContractError(
                 code="unknown_recommendation_profile_evidence",
                 reason="recommendation references profile signals outside its request",
             )
-        if not set(item.history_ids).issubset(allowed_history_ids):
+        if any(
+            binding is not None
+            and (binding[1], binding[2]) != (item.subject, item.topic_id)
+            for binding in profile_refs
+        ):
+            raise LearningGuidanceContractError(
+                code="off_topic_recommendation_profile_evidence",
+                reason="recommendation profile evidence must match its exact topic",
+            )
+        referenced_kinds = {
+            binding[0] for binding in profile_refs if binding is not None
+        }
+        if referenced_kinds != {"skill", "goal", "preference"}:
+            raise LearningGuidanceContractError(
+                code="incomplete_recommendation_profile_evidence",
+                reason=("recommendation must cite skill, goal, and preference signals"),
+            )
+        history_refs = tuple(
+            history_bindings.get(history_id) for history_id in item.history_ids
+        )
+        if any(binding is None for binding in history_refs):
             raise LearningGuidanceContractError(
                 code="unknown_recommendation_history_evidence",
                 reason="recommendation references history outside its request",
+            )
+        if any(binding != (item.subject, item.topic_id) for binding in history_refs):
+            raise LearningGuidanceContractError(
+                code="off_topic_recommendation_history_evidence",
+                reason="recommendation history evidence must match its exact topic",
             )
         if not set(item.source_resource_ids).issubset(allowed_resource_ids):
             raise LearningGuidanceContractError(
@@ -437,6 +622,29 @@ def _validate_recommendation_binding(
                     "generated resource"
                 ),
             )
+        if request.mode == "automatic_after_generation":
+            target = resources_by_id[item.resource_id]
+            if (
+                target.resource_type != item.resource_type
+                or target.subject != item.subject
+                or target.topic_id != item.topic_id
+                or target.title != item.title
+            ):
+                raise LearningGuidanceContractError(
+                    code="recommendation_target_binding_mismatch",
+                    reason=(
+                        "automatic recommendation target must match the verified "
+                        "resource type, subject, topic, and title"
+                    ),
+                )
+            if any(
+                resources_by_id[source_id].topic_id != item.topic_id
+                for source_id in item.source_resource_ids
+            ):
+                raise LearningGuidanceContractError(
+                    code="off_topic_recommendation_resource_evidence",
+                    reason="generated resource evidence must match the target topic",
+                )
 
 
 def _strict_json_state_model(
@@ -675,9 +883,10 @@ def resource_recommendation_output_from_state(
     if parsed.status == "available" and parsed.mode == "automatic_after_generation":
         if parsed.batch is None:
             raise AssertionError("available recommendation output requires a batch")
-        allowed_resource_ids = frozenset(
-            item.resource_id for item in _recommendation_resources(state)
-        )
+        resources_by_id = {
+            item.resource_id: item for item in _recommendation_resources(state)
+        }
+        allowed_resource_ids = frozenset(resources_by_id)
         for item in parsed.batch.items:
             if not set(item.source_resource_ids).issubset(allowed_resource_ids):
                 raise LearningGuidanceContractError(
@@ -698,6 +907,28 @@ def resource_recommendation_output_from_state(
                         "bundle context"
                     ),
                 )
+            target = resources_by_id[item.resource_id]
+            if (
+                target.resource_type != item.resource_type
+                or target.subject != item.subject
+                or target.topic_id != item.topic_id
+                or target.title != item.title
+            ):
+                raise LearningGuidanceContractError(
+                    code="recommendation_target_binding_mismatch",
+                    reason=(
+                        "recommendation target differs from the verified resource "
+                        "type, subject, topic, or title"
+                    ),
+                )
+            if any(
+                resources_by_id[source_id].topic_id != item.topic_id
+                for source_id in item.source_resource_ids
+            ):
+                raise LearningGuidanceContractError(
+                    code="off_topic_recommendation_resource_evidence",
+                    reason="recommendation source resources must match its topic",
+                )
     return parsed
 
 
@@ -714,6 +945,12 @@ def resource_recommendation_output_for_runtime_from_state(
         expected_mode=expected_mode,
     )
     _validate_guidance_output_runtime_binding(output, runtime=runtime)
+    if (
+        output.status == "available"
+        and output.mode == "explicit_request"
+        and output.batch is not None
+    ):
+        _validate_explicit_recommendation_catalog(output.batch, runtime=runtime)
     return output
 
 
@@ -755,6 +992,7 @@ _RECOMMENDATION_UNAVAILABLE_MESSAGES: dict[
     "profile_unavailable": "学习画像不可用",
     "history_unavailable": "学习历史不可用",
     "generated_resources_unavailable": "没有真实生成且可推荐的资源",
+    "no_eligible_candidates": "没有满足严格证据和评分门槛的推荐候选",
     "unsupported_subject_scope": "资源跨多个科目或与当前主科目不一致",
 }
 
@@ -864,11 +1102,24 @@ def make_learner_path_planner_node(
                 subject=subject,
             )
 
+        requested_resource_types = tuple(
+            normalize_requested_resource_types(
+                state.get("requested_resource_types") or [],
+                state.get("requested_resource_type") or "",
+            )
+        )
+        if not requested_resource_types:
+            raise LearningGuidanceContractError(
+                code="missing_path_resource_types",
+                reason="learner path planning requires explicit resource types",
+            )
+
         request = LearnerPathEngineRequestV1(
             schema_version="learner_path_engine_request_v1",
             request_id=request_id,
             user_id=user_id,
             subject=subject,
+            requested_resource_types=requested_resource_types,
             profile=profile,
             history=history,
         )
@@ -878,7 +1129,11 @@ def make_learner_path_planner_node(
                 code="invalid_learner_path_type",
                 reason="learner path engine must return LearnerPathPlanV1",
             )
-        _validate_plan_binding(plan, request=request)
+        _validate_plan_binding(
+            plan,
+            request=request,
+            runtime=runtime,
+        )
         output = LearnerPathPlannerOutputV1(
             schema_version="learner_path_planner_output_v1",
             runtime_fingerprint=runtime.runtime_fingerprint,
@@ -995,15 +1250,42 @@ def make_resource_recommendation_node(
             history=history,
             generated_resources=generated_resources,
         )
-        batch = await runtime.recommend_resources(request)
-        if not isinstance(batch, ResourceRecommendationBatchV1):
+        result = await runtime.recommend_resources(request)
+        if not isinstance(result, ResourceRecommendationEngineResultV1):
             raise LearningGuidanceContractError(
-                code="invalid_recommendation_batch_type",
+                code="invalid_recommendation_result_type",
                 reason=(
-                    "recommendation engine must return ResourceRecommendationBatchV1"
+                    "recommendation engine must return "
+                    "ResourceRecommendationEngineResultV1"
                 ),
             )
-        _validate_recommendation_binding(batch, request=request)
+        if (
+            result.request_id != request.request_id
+            or result.mode != request.mode
+            or result.user_id != request.user_id
+            or result.subject != request.subject
+        ):
+            raise LearningGuidanceContractError(
+                code="recommendation_engine_result_mismatch",
+                reason="recommendation engine result differs from its request identity",
+            )
+        if result.status == "unavailable":
+            return _recommendation_unavailable(
+                runtime=runtime,
+                request_id=request_id,
+                mode=mode,
+                reason="no_eligible_candidates",
+                user_id=user_id,
+                subject=subject,
+            )
+        batch = result.batch
+        if batch is None:
+            raise AssertionError("available recommendation engine result has no batch")
+        _validate_recommendation_binding(
+            batch,
+            request=request,
+            runtime=runtime,
+        )
         output = ResourceRecommendationOutputV1(
             schema_version="resource_recommendation_output_v1",
             runtime_fingerprint=runtime.runtime_fingerprint,

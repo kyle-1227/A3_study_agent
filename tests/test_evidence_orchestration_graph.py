@@ -20,10 +20,12 @@ from src.config.evidence_orchestration_contracts import (
     EvidenceRequirementDraftBatch,
     RequirementCoverage,
     RequirementCoverageBatch,
+    RESOURCE_EVIDENCE_CONTRACT_VERSION,
     ResourceReadiness,
     RetrievalTask,
     build_retrieval_task,
     compile_evidence_requirement_batch,
+    compile_requirement_coverage_batch,
 )
 from src.graph import academic
 from src.graph import evidence_orchestration as orchestration
@@ -41,6 +43,7 @@ from src.graph.resource_generation import (
 from src.graph.web_research import WebResearchTask
 from src.graph.state import LearningState, initial_request_reset_transient_state
 from src.learning_guidance.runtime import LearningGuidanceRuntime
+from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 from src.observability.node_registry import get_node_runtime_metadata
 
@@ -59,9 +62,57 @@ async def _unexpected_guidance_dependency(*_args, **_kwargs):
     raise AssertionError("this evidence-orchestration test must not call guidance")
 
 
+def _knowledge_graph() -> KnowledgeGraphV1:
+    return KnowledgeGraphV1.model_validate(
+        {
+            "schema_version": "knowledge_graph_v1",
+            "data_version": "test-v1",
+            "subjects": [
+                {
+                    "subject_id": "math",
+                    "title": "Mathematics",
+                    "topics": [
+                        {
+                            "topic_id": "functions",
+                            "title": "Functions",
+                            "difficulty": 0.5,
+                            "estimated_hours": 2.0,
+                            "prerequisite_topic_ids": [],
+                            "knowledge_points": ["Function definitions"],
+                            "resources": [
+                                {
+                                    "resource_id": "functions_quiz",
+                                    "resource_type": "quiz",
+                                    "title": "Functions quiz",
+                                }
+                            ],
+                        },
+                        {
+                            "topic_id": "limits",
+                            "title": "Limits",
+                            "difficulty": 0.6,
+                            "estimated_hours": 2.0,
+                            "prerequisite_topic_ids": ["functions"],
+                            "knowledge_points": ["Limit definitions"],
+                            "resources": [
+                                {
+                                    "resource_id": "limits_quiz",
+                                    "resource_type": "quiz",
+                                    "title": "Limits quiz",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def _learning_guidance_runtime() -> LearningGuidanceRuntime:
     return LearningGuidanceRuntime(
         runtime_fingerprint="3" * 64,
+        knowledge_graph=_knowledge_graph(),
         provider_projection_max_steps=50,
         provider_projection_max_chars=65_536,
         load_profile=_unexpected_guidance_dependency,
@@ -98,10 +149,11 @@ def _quiz_draft_batch(runtime: orchestration.EvidenceOrchestrationRuntime):
     profile = runtime.profiles.profile_for("quiz")
     return EvidenceRequirementDraftBatch(
         schema_version="evidence_requirement_draft_batch_v1",
-        requirements=tuple(
+        requirements=[
             EvidenceRequirementDraft(
                 resource_type="quiz",
                 subject="math",
+                topic_id="functions",
                 profile_need_id=need.need_id,
                 evidence_kind=need.evidence_kind,
                 scope=need.scope,
@@ -111,7 +163,7 @@ def _quiz_draft_batch(runtime: orchestration.EvidenceOrchestrationRuntime):
                 query_intent=f"math {need.evidence_kind} initial evidence",
             )
             for need in profile.needs
-        ),
+        ],
     )
 
 
@@ -246,7 +298,7 @@ def _missing_coverage(requirements, *, round_index: int, suffix: str):
                 subject=requirement["subject"],
                 round_index=round_index,
                 coverage_state="missing",
-                evidence_ids=(),
+                evidence_ids=[],
                 confidence=0.0,
                 reason="No candidate satisfies the configured acceptance criteria.",
                 suggested_local_query=local_query,
@@ -256,7 +308,7 @@ def _missing_coverage(requirements, *, round_index: int, suffix: str):
     return RequirementCoverageBatch(
         schema_version="requirement_coverage_batch_v1",
         round_index=round_index,
-        coverages=tuple(rows),
+        coverages=rows,
     )
 
 
@@ -422,6 +474,51 @@ def test_candidate_query_route_requires_explicit_canonical_resources():
         route_after_candidate_query_rewrite({"response_mode": "resource"})
 
 
+@pytest.mark.parametrize(
+    ("requested", "singular", "expected_code"),
+    (
+        ([" quiz "], "quiz", "noncanonical_requested_resources"),
+        (["quiz", "quiz"], "quiz", "noncanonical_requested_resources"),
+        (["exercise"], "exercise", "noncanonical_requested_resources"),
+        (["quiz"], "mindmap", "requested_resource_shadow_mismatch"),
+    ),
+)
+def test_evidence_planner_rejects_resource_ingress_repair(
+    requested,
+    singular,
+    expected_code,
+):
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match=expected_code,
+    ):
+        orchestration._requested_resources(
+            {
+                "requested_resource_types": requested,
+                "requested_resource_type": singular,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected_code"),
+    (
+        ([{"subject": " math "}], "invalid_subject_plan"),
+        ([{"subject": "math"}, {"subject": "math"}], "duplicate_subject_plan"),
+        ([{"subject": "math"}, "bad-entry"], "invalid_subject_plan"),
+    ),
+)
+def test_evidence_planner_rejects_subject_ingress_repair(plan, expected_code):
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match=expected_code,
+    ):
+        orchestration._requested_subjects(
+            {"retrieval_plan": plan},
+            _runtime(),
+        )
+
+
 def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
     runtime = _runtime()
     batch = _quiz_draft_batch(runtime)
@@ -537,6 +634,35 @@ def test_evidence_planner_injects_only_provider_safe_learner_path(monkeypatch):
     assert "history-functions-1" not in prompt
 
 
+def test_evidence_planner_rejects_resource_topic_swap_inside_available_path(
+    monkeypatch,
+):
+    runtime = _runtime()
+    payload = _quiz_draft_batch(runtime).model_dump(mode="python")
+    for requirement in payload["requirements"]:
+        requirement["topic_id"] = "limits"
+    swapped = EvidenceRequirementDraftBatch.model_validate(payload)
+
+    async def fake_planner(**_kwargs):
+        return SimpleNamespace(parsed=swapped)
+
+    state = {
+        **_planner_state(),
+        "user_id": "learner-math-1",
+        "learner_path_planner_output": _available_math_path_output(),
+        "learner_path_provider_projection": (
+            _available_math_path_provider_projection()
+        ),
+    }
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationContractError,
+        match="requirement_resource_topic_mismatch",
+    ):
+        asyncio.run(orchestration.make_resource_evidence_planner_node(runtime)(state))
+
+
 def test_evidence_planner_rejects_stale_learner_path_before_llm(monkeypatch):
     runtime = _runtime()
     state = _planner_state()
@@ -605,7 +731,9 @@ def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypa
     round_one_state = {
         **_planner_state(),
         **planned,
-        "evidence_coverage": first_missing.model_dump(mode="json"),
+        "evidence_coverage": compile_requirement_coverage_batch(
+            first_missing
+        ).model_dump(mode="json"),
         "resource_evidence_readiness": readiness,
     }
     round_one = orchestration.make_evidence_repair_planner_node(runtime)(
@@ -620,7 +748,9 @@ def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypa
         {
             **round_one_state,
             **round_one,
-            "evidence_coverage": second_missing.model_dump(mode="json"),
+            "evidence_coverage": compile_requirement_coverage_batch(
+                second_missing
+            ).model_dump(mode="json"),
             "resource_evidence_readiness": readiness,
         }
     )
@@ -644,7 +774,9 @@ def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypa
             {
                 **round_one_state,
                 **round_one,
-                "evidence_coverage": repeated.model_dump(mode="json"),
+                "evidence_coverage": compile_requirement_coverage_batch(
+                    repeated
+                ).model_dump(mode="json"),
                 "resource_evidence_readiness": readiness,
             }
         )
@@ -660,10 +792,11 @@ def test_local_then_web_policy_never_skips_the_required_local_attempt():
     requirement = compile_evidence_requirement_batch(
         EvidenceRequirementDraftBatch(
             schema_version="evidence_requirement_draft_batch_v1",
-            requirements=(
+            requirements=[
                 EvidenceRequirementDraft(
                     resource_type="review_doc",
                     subject="math",
+                    topic_id="functions",
                     profile_need_id=need.need_id,
                     evidence_kind=need.evidence_kind,
                     scope=need.scope,
@@ -672,7 +805,7 @@ def test_local_then_web_policy_never_skips_the_required_local_attempt():
                     acceptance_criteria=need.acceptance_criteria,
                     query_intent="math authoritative concepts",
                 ),
-            ),
+            ],
         )
     )[0]
     gap = SimpleNamespace(
@@ -699,10 +832,11 @@ def test_repair_planner_skips_a_prior_source_signature_and_keeps_unseen_source()
     requirement = compile_evidence_requirement_batch(
         EvidenceRequirementDraftBatch(
             schema_version="evidence_requirement_draft_batch_v1",
-            requirements=(
+            requirements=[
                 EvidenceRequirementDraft(
                     resource_type="code_practice",
                     subject="math",
+                    topic_id="functions",
                     profile_need_id=need.need_id,
                     evidence_kind=need.evidence_kind,
                     scope=need.scope,
@@ -711,7 +845,7 @@ def test_repair_planner_skips_a_prior_source_signature_and_keeps_unseen_source()
                     acceptance_criteria=need.acceptance_criteria,
                     query_intent="math executable pattern evidence",
                 ),
-            ),
+            ],
         )
     )[0]
     prior_local_task = build_retrieval_task(
@@ -726,20 +860,20 @@ def test_repair_planner_skips_a_prior_source_signature_and_keeps_unseen_source()
     coverage = RequirementCoverageBatch(
         schema_version="requirement_coverage_batch_v1",
         round_index=0,
-        coverages=(
+        coverages=[
             RequirementCoverage(
                 requirement_id=requirement.requirement_id,
                 resource_type=requirement.resource_type,
                 subject=requirement.subject,
                 round_index=0,
                 coverage_state="missing",
-                evidence_ids=(),
+                evidence_ids=[],
                 confidence=0.2,
                 reason="The Web half of the required evidence is still missing.",
                 suggested_local_query="math executable pattern evidence",
                 suggested_web_query="math official executable pattern evidence",
             ),
-        ),
+        ],
     )
     readiness = ResourceReadiness(
         resource_type=requirement.resource_type,
@@ -756,7 +890,9 @@ def test_repair_planner_skips_a_prior_source_signature_and_keeps_unseen_source()
             "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
             "evidence_current_round": 0,
             "evidence_requirements": [requirement.model_dump(mode="json")],
-            "evidence_coverage": coverage.model_dump(mode="json"),
+            "evidence_coverage": compile_requirement_coverage_batch(
+                coverage
+            ).model_dump(mode="json"),
             "resource_evidence_readiness": [readiness.model_dump(mode="json")],
             "evidence_all_tasks": [prior_local_task.model_dump(mode="json")],
             "evidence_source_outcomes": [],
@@ -973,7 +1109,9 @@ def test_terminal_hydration_is_one_shot_even_when_no_parent_is_selected(
     state = {
         **_planner_state(),
         **planned,
-        "evidence_coverage": missing.model_dump(mode="json"),
+        "evidence_coverage": compile_requirement_coverage_batch(missing).model_dump(
+            mode="json"
+        ),
         "evidence_ledger": [],
         "evidence_candidate_records": [],
         "evidence_parent_child_rounds": [],
@@ -998,6 +1136,8 @@ def test_all_blocked_resources_skip_workers_and_return_explicit_bundle():
         "requested_resource_type": "",
         "requested_resource_types": [],
         "blocked_resource_types": ["quiz"],
+        "resource_evidence_contract_version": RESOURCE_EVIDENCE_CONTRACT_VERSION,
+        "resource_evidence_assignments": [],
         "resource_evidence_readiness": [
             {
                 "resource_type": "quiz",

@@ -524,6 +524,7 @@ def initial_request_reset_transient_state() -> dict:
         "resource_generation_status": "",
         "resource_evidence_readiness": [],
         "resource_evidence_assignments": [],
+        "resource_evidence_contract_version": "",
         "ready_resource_types": [],
         "blocked_resource_types": [],
         "learning_path": {},
@@ -930,6 +931,7 @@ class LearningState(TypedDict):
     resource_generation_status: str  # success / partial_success / failed / skipped
     resource_evidence_readiness: list[dict]  # Per-resource code-derived readiness
     resource_evidence_assignments: list[dict]  # Evidence refs for ready resources
+    resource_evidence_contract_version: str  # Explicit candidate assignment contract
     ready_resource_types: list[str]  # Workers permitted to run
     blocked_resource_types: list[str]  # Explicit insufficient-evidence resources
     learning_path: dict  # Curriculum Engine: LearningPath serialized

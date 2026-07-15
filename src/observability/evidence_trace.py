@@ -191,6 +191,7 @@ class EvidenceResourceAssignedTrace(_EvidenceTraceBase):
     assigned_evidence_count: BoundedCount
     missing_requirement_count: BoundedCount
     assignment_fingerprint: Sha256Digest
+    assignment_contract_version: Literal["resource_evidence_assignment_v1"]
 
     @model_validator(mode="after")
     def validate_readiness(self) -> "EvidenceResourceAssignedTrace":
