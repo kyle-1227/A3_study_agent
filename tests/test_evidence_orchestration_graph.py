@@ -571,6 +571,41 @@ def test_candidate_records_are_stably_bounded_per_task() -> None:
     ]
 
 
+def test_judge_requirement_payload_has_exact_evidence_allowlists() -> None:
+    runtime = _runtime()
+    requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))
+    tasks = orchestration._build_initial_tasks(requirements, runtime)
+    records = tuple(
+        orchestration._candidate_record(
+            candidate=EvidenceCandidate(
+                evidence_id=f"raw-candidate-{index}",
+                source_type=task.source_type,
+                provider="test-provider",
+                subject=task.subject,
+                role=task.requirement_id,
+                title=f"Candidate {index}",
+                source=f"source-{index}",
+                content_preview=f"Evidence content {index}.",
+                metadata={"source_id": f"source-{index}"},
+            ),
+            original={"content": f"Original content {index}."},
+            task=task,
+        )
+        for index, task in enumerate(tasks)
+    )
+
+    payload = orchestration._judge_requirements_payload(requirements, records)
+    payload_by_id = {str(item["requirement_id"]): item for item in payload}
+
+    assert set(payload_by_id) == {item.requirement_id for item in requirements}
+    for requirement in requirements:
+        assert payload_by_id[requirement.requirement_id]["eligible_evidence_ids"] == [
+            record.evidence_id
+            for record in records
+            if record.requirement_id == requirement.requirement_id
+        ]
+
+
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():
     runtime = _runtime()
     legacy = build_graph(runtime.learning_guidance)

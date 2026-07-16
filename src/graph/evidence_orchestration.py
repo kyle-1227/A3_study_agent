@@ -1654,6 +1654,32 @@ def _judge_candidates_payload(
     ]
 
 
+def _judge_requirements_payload(
+    requirements: Sequence[EvidenceRequirement],
+    records: Sequence[EvidenceCandidateRecord],
+) -> list[dict[str, object]]:
+    requirement_ids = {item.requirement_id for item in requirements}
+    unknown_bindings = sorted(
+        {record.requirement_id for record in records} - requirement_ids
+    )
+    if unknown_bindings:
+        raise EvidenceOrchestrationRuntimeError(
+            code="judge_candidate_requirement_binding_invalid",
+            reason="judge candidates must bind the active requirement inventory",
+        )
+    return [
+        {
+            **requirement.model_dump(mode="json"),
+            "eligible_evidence_ids": [
+                record.evidence_id
+                for record in records
+                if record.requirement_id == requirement.requirement_id
+            ],
+        }
+        for requirement in requirements
+    ]
+
+
 def _coverage_business_validation(
     parsed: BaseModel,
     *,
@@ -1831,7 +1857,7 @@ def make_requirement_evidence_judge_node(
                 "learning_goal": str(state.get("learning_goal") or "").strip(),
                 "round_index": round_index,
                 "requirements_json": json.dumps(
-                    [item.model_dump(mode="json") for item in requirements],
+                    _judge_requirements_payload(requirements, records),
                     ensure_ascii=False,
                 ),
                 "candidates_json": json.dumps(

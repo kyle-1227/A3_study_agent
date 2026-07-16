@@ -17,7 +17,7 @@ Evidence requirements:
 Requirement-bound candidates:
 {candidates_json}
 
-Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. A row may reference only candidate evidence_ids bound to that same requirement. Each coverage row may select at most {max_evidence_per_requirement} evidence_ids. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
+Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. Treat eligible_evidence_ids in each requirement as the complete allowlist for that coverage row. Every evidence_id in a partial or complete row must be a subset of that same requirement's eligible_evidence_ids; never copy an evidence_id between requirements and never invent one. Each coverage row may select at most {max_evidence_per_requirement} evidence_ids. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
 
 Set suggested_local_query and suggested_web_query with this exact matrix:
 - complete: both fields must be the empty string.
@@ -30,7 +30,7 @@ The local_and_web rule is never staged: attempted query history must not suppres
 
 Every non-empty suggested query must be new, targeted, and materially more specific than every prior query with the same requirement_id and source_type. Compare against the explicit query text in attempted_queries_json and produce different query text; whitespace-only or punctuation-only changes do not satisfy this rule. Determine the local_then_web_on_gap stage only from attempted_queries_json, not from candidate source types.
 
-Before returning, self-check every row against its source_policy: complete means zero queries; local_only means local only; web_only means web only; local_and_web means both; local_then_web_on_gap means exactly the stage selected from attempted_queries_json. Correct every violating row before returning the batch.
+Before returning, self-check every row against both binding and source policy. First verify that every selected evidence_id belongs to that row's eligible_evidence_ids and that missing rows select none. Then verify: complete means zero queries; local_only means local only; web_only means web only; local_and_web means both; local_then_web_on_gap means exactly the stage selected from attempted_queries_json. Correct every violating row before returning the batch.
 
 Previously attempted source-bound queries with exact query text and fingerprints:
 {attempted_queries_json}

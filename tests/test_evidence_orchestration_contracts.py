@@ -616,3 +616,98 @@ def test_coverage_uses_matrix_code_for_mixed_query_shape_violations() -> None:
     assert "source_policy=local_only,actual_shape=both" in exc_info.value.reason
     assert "source_policy=web_only,actual_shape=both" in exc_info.value.reason
     assert all(query not in str(exc_info.value) for query in secret_queries)
+
+
+def test_coverage_reports_all_invalid_evidence_bindings_without_ids() -> None:
+    requirements = _requirements_for_source_policies("local_only", "web_only")
+    entries_list: list[EvidenceLedgerEntry] = []
+    for index, requirement in enumerate(requirements):
+        source_identity_fingerprint = f"{index + 11:064x}"
+        content_fingerprint = f"{index + 21:064x}"
+        evidence_id = make_evidence_id(
+            requirement_id=requirement.requirement_id,
+            source_type="local_rag" if index == 0 else "web",
+            source_identity_fingerprint=source_identity_fingerprint,
+            content_fingerprint=content_fingerprint,
+        )
+        entries_list.append(
+            EvidenceLedgerEntry(
+                round_index=0,
+                task_id=f"task-{index}",
+                requirement_id=requirement.requirement_id,
+                evidence_id=evidence_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                source_type="local_rag" if index == 0 else "web",
+                candidate_ref=f"candidate-{index}",
+                candidate_snapshot_fingerprint=f"{index + 1:064x}",
+                source_identity_fingerprint=source_identity_fingerprint,
+                content_fingerprint=content_fingerprint,
+                accepted=True,
+                rejection_reason_code="",
+            )
+        )
+    entries = tuple(entries_list)
+    unknown_evidence_id = make_evidence_id(
+        requirement_id=requirements[1].requirement_id,
+        source_type="web",
+        source_identity_fingerprint="9" * 64,
+        content_fingerprint="a" * 64,
+    )
+    private_evidence_ids = (
+        entries[0].evidence_id,
+        entries[1].evidence_id,
+        unknown_evidence_id,
+    )
+    batch = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=requirements[0].requirement_id,
+                    resource_type="quiz",
+                    subject="math",
+                    round_index=0,
+                    coverage_state="partial",
+                    evidence_ids=[private_evidence_ids[1]],
+                    confidence=0.5,
+                    reason="The accepted evidence is incomplete.",
+                    suggested_local_query="math private local repair",
+                    suggested_web_query="",
+                ),
+                RequirementCoverage(
+                    requirement_id=requirements[1].requirement_id,
+                    resource_type="quiz",
+                    subject="math",
+                    round_index=0,
+                    coverage_state="partial",
+                    evidence_ids=[private_evidence_ids[2]],
+                    confidence=0.5,
+                    reason="The accepted evidence is incomplete.",
+                    suggested_local_query="",
+                    suggested_web_query="math private web repair",
+                ),
+            ],
+        )
+    )
+
+    with pytest.raises(RequirementCoverageValidationError) as exc_info:
+        validate_requirement_coverage(
+            batch=batch,
+            requirements=requirements,
+            entries=entries,
+        )
+
+    assert exc_info.value.code == "invalid_coverage_evidence_ref"
+    assert (
+        f"requirement_id={requirements[0].requirement_id},unknown_ref_count=0,"
+        "cross_requirement_ref_count=1"
+    ) in exc_info.value.reason
+    assert (
+        f"requirement_id={requirements[1].requirement_id},unknown_ref_count=1,"
+        "cross_requirement_ref_count=0"
+    ) in exc_info.value.reason
+    assert all(
+        evidence_id not in str(exc_info.value) for evidence_id in private_evidence_ids
+    )

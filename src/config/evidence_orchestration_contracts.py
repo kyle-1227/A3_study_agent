@@ -1072,6 +1072,7 @@ def validate_requirement_coverage(
             reason="coverage batch must contain exactly one row per requirement",
         )
     accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
+    evidence_ref_violations: list[tuple[str, int, int]] = []
     query_shape_violations: list[tuple[str, str, str, str]] = []
     for requirement_id, coverage in coverage_by_id.items():
         requirement = requirement_by_id[requirement_id]
@@ -1083,13 +1084,22 @@ def validate_requirement_coverage(
                 code="coverage_requirement_mismatch",
                 reason="coverage resource and subject must match its requirement",
             )
+        unknown_ref_count = 0
+        cross_requirement_ref_count = 0
         for evidence_id in coverage.evidence_ids:
             entry = accepted_by_id.get(evidence_id)
-            if entry is None or entry.requirement_id != requirement_id:
-                raise RequirementCoverageValidationError(
-                    code="invalid_coverage_evidence_ref",
-                    reason="coverage may reference only accepted evidence for its requirement",
+            if entry is None:
+                unknown_ref_count += 1
+            elif entry.requirement_id != requirement_id:
+                cross_requirement_ref_count += 1
+        if unknown_ref_count or cross_requirement_ref_count:
+            evidence_ref_violations.append(
+                (
+                    requirement_id,
+                    unknown_ref_count,
+                    cross_requirement_ref_count,
                 )
+            )
         has_local = bool(coverage.suggested_local_query)
         has_web = bool(coverage.suggested_web_query)
         if coverage.coverage_state == "complete":
@@ -1125,26 +1135,49 @@ def validate_requirement_coverage(
                     violation_code,
                 )
             )
-    if query_shape_violations:
-        ordered_violations = sorted(query_shape_violations)
-        violation_codes = {item[3] for item in ordered_violations}
+    ordered_query_shape_violations = sorted(query_shape_violations)
+    query_shape_details = "; ".join(
+        (
+            f"requirement_id={requirement_id},"
+            f"source_policy={source_policy},actual_shape={actual_shape}"
+        )
+        for requirement_id, source_policy, actual_shape, _code in (
+            ordered_query_shape_violations
+        )
+    )
+    if evidence_ref_violations:
+        evidence_ref_details = "; ".join(
+            (
+                f"requirement_id={requirement_id},"
+                f"unknown_ref_count={unknown_ref_count},"
+                f"cross_requirement_ref_count={cross_requirement_ref_count}"
+            )
+            for requirement_id, unknown_ref_count, cross_requirement_ref_count in sorted(
+                evidence_ref_violations
+            )
+        )
+        reason = (
+            "coverage rows may reference only accepted evidence bound to the same "
+            f"requirement; violations=[{evidence_ref_details}]"
+        )
+        if query_shape_details:
+            reason += f"; query_shape_violations=[{query_shape_details}]"
+        raise RequirementCoverageValidationError(
+            code="invalid_coverage_evidence_ref",
+            reason=reason,
+        )
+    if ordered_query_shape_violations:
+        violation_codes = {item[3] for item in ordered_query_shape_violations}
         error_code = (
             next(iter(violation_codes))
             if len(violation_codes) == 1
             else "invalid_source_gap_query_matrix"
         )
-        violation_details = "; ".join(
-            (
-                f"requirement_id={requirement_id},"
-                f"source_policy={source_policy},actual_shape={actual_shape}"
-            )
-            for requirement_id, source_policy, actual_shape, _code in ordered_violations
-        )
         raise RequirementCoverageValidationError(
             code=error_code,
             reason=(
                 "coverage gap query shapes violate their source policies; "
-                f"violations=[{violation_details}]"
+                f"violations=[{query_shape_details}]"
             ),
         )
 

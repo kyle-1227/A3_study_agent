@@ -17,7 +17,13 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     assert "whitespace-only or punctuation-only changes" in prompt
     assert "local_and_web rule is never staged" in prompt
     assert "attempted query history must not suppress either field" in prompt
-    assert "Before returning, self-check every row against its source_policy" in prompt
+    assert "Before returning, self-check every row against both binding" in prompt
+    assert "eligible_evidence_ids in each requirement" in prompt
+    assert "never copy an evidence_id between requirements" in prompt
+    assert (
+        "every selected evidence_id belongs to that row's eligible_evidence_ids"
+        in prompt
+    )
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
