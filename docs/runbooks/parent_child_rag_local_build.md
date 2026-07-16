@@ -6,9 +6,9 @@ This section supersedes older example IDs and any earlier wording that treats
 `gold_dataset_v1.json` as permanently formal or forbids all experimental
 builds while readiness is blocked.
 
-- The current technical candidate is `pc_20260715_98336c2_55`. It is sealed
-  `READY` and **inactive**. Registry primary, previous, and shadow pointers are
-  unset. Do not activate it.
+- Generation `pc_20260715_98336c2_55` is sealed `READY` and is the explicit
+  production registry primary. Previous and shadow pointers are unset;
+  `activation_enabled=true` and `shadow_enabled=false`.
 - The retained Flat comparison artifact is
   `artifacts/rag/flat_20260715_98336c2_53`. The existing `chroma_store` remains
   the legacy rollback asset and must not be deleted before a successful page
@@ -18,10 +18,10 @@ builds while readiness is blocked.
   required independent reviewers, and is not evaluation- or rollout-eligible.
   Only a future frozen V3 with two independent reviews and the 150-pair chunk
   review may be used for formal validation.
-- A blocked readiness audit does not prohibit a clearly labelled local
-  technical build. Such a build must record `experimental_only=true` and
-  `activation_prohibited=true`; it cannot proceed to formal validation,
-  Shadow, or activation.
+- The direct production cutover is an explicit owner decision and does not
+  rewrite the blocked historical benchmark as a pass. New local technical
+  builds remain `experimental_only=true` and `activation_prohibited=true`;
+  they cannot replace the production primary without a separate release.
 - Local build commands may use the ignored generated
   `config/rag/index.runtime.yaml`. Clean-checkout read-only validation of
   generation 55 must instead use the tracked, secret-free

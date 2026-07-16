@@ -7,35 +7,29 @@ loading, hybrid retrieval, evaluation projection, and safe regression traces.
 It does not own Graph routing, streaming, frontend state, or deployment
 activation decisions.
 
-## Current verified state
+## Current production state
 
-- Candidate generation: `pc_20260715_98336c2_55`
-- Lifecycle: `READY`, inactive
+- Served generation: `pc_20260715_98336c2_55`
+- Lifecycle: sealed `READY`, active registry primary
 - Parents / children: `21,225 / 35,365`
 - Orphan children / hydration failures: `0 / 0`
-- Registry primary / previous / shadow: unset
+- Registry previous / shadow: unset
 - Retained Flat artifact: `flat_20260715_98336c2_53`
-- Legacy rollback asset: repository-root `chroma_store`
-- Tracked inactive runtime config:
+- Offline recovery asset: repository-root `chroma_store`
+- Production runtime config:
   `config/rag/index.production.yaml` (Top20)
 
 `READY` means sealed artifact integrity passed. It does not mean retrieval
-quality passed, and it does not route user traffic. Do not activate generation
-55 or delete the legacy RAG.
+quality passed. The direct production cutover is an explicit owner decision;
+the prior benchmark regressions remain recorded and the six authored cases are
+production smoke, not formal Gold.
 
-The tracked inactive config is the clean-checkout identity for read-only
-generation 55 validation. Docker copies it with `config/`; it contains only
-API-key environment-variable names. It does not activate or select a
-generation. A deployment must separately provide the sealed generation
-directory and registry, then verify that generation 55 is exactly `READY` and
-that primary, previous, and shadow remain unset before startup. Missing
-artifacts or registry are fatal preflight failures.
-
-The current `docker-compose.yml` does not yet mount those artifacts, run that
-preflight, or route the application through Candidate runtime; it continues to
-start the legacy-served graph. This tracked config fixes the clean-image
-configuration gap only. Docker service wiring remains a separate integration
-gate and must not be inferred from this file's presence.
+Docker mounts the canonical Parent-Child index read-only and overlays only the
+designated runtime snapshot directory with a writable volume. Startup requires
+generation 55 to be `READY`, the registry primary and explicit generation ID to
+match, the exact manifest identity, and an empty shadow pointer. Any mismatch is
+fatal. The application serves the Parent-Child + resource-aware PGR graph and
+never converts a failed request into Flat RAG success.
 
 The provider-backed Gold V2 engineering comparison regressed Recall@5 by 12
 percentage points and MRR by 0.0475. A fixed 17-query stage diagnosis compared
@@ -77,10 +71,11 @@ production pass.
   externally scored inputs.
 - `scripts/manage_rag_generation.py`: registry-owned lifecycle and cleanup.
 
-The authoritative commands, current fixed 17-query diagnostic, Gold workflow,
-and activation prohibition are documented in
-`docs/runbooks/parent_child_rag_local_build.md`. The safe A/B result is recorded
-in `docs/reports/rag_parent_child_regression_diagnosis_20260715.md`.
+The production build, activation, recovery, and browser-canary procedure is in
+`docs/runbooks/production_deployment.md`. Local generation construction and the
+Gold workflow remain in `docs/runbooks/parent_child_rag_local_build.md`. The
+historical A/B result remains in
+`docs/reports/rag_parent_child_regression_diagnosis_20260715.md`.
 
 ## Focused verification
 

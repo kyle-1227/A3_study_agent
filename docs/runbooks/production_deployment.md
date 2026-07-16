@@ -46,7 +46,7 @@ subdirectory.
 Set shell-level `A3_ENV_FILE` to the ignored env file's absolute path before
 every Compose command. Compose intentionally has no implicit `.env` fallback.
 
-## 3. Build and start
+## 3. Build, activate, and start
 
 Validate the fully interpolated Compose model without rendering it to logs.
 Required-variable interpolation fails here without revealing the missing
@@ -56,10 +56,45 @@ values; Docker validates the two host directories when it creates mounts:
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE config --quiet
 ```
 
-Build and wait for PostgreSQL, backend, and frontend readiness:
+Build both images without replacing the currently running containers:
 
 ```powershell
-docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --build --wait
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE build
+```
+
+The first activation has no `previous` registry pointer. Before changing the
+registry, preserve executable recovery assets and stop served writers. The
+management CLI requires the production config and `indexes/parent_child` to be
+inside the same resolved project root; do not bypass that containment check or
+update SQLite manually.
+
+```powershell
+$Release = 'direct-active-20260716'
+$Registry = Join-Path $PWD 'indexes/parent_child/generation_registry.sqlite'
+$RegistryBackup = Join-Path $PWD "artifacts/backups/$Release-generation_registry.sqlite"
+
+docker commit a3_study_agent-backend-1 "a3_study_agent-backend:pre-$Release"
+docker commit a3_study_agent-frontend-1 "a3_study_agent-frontend:pre-$Release"
+
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE stop frontend backend
+New-Item -ItemType Directory -Force (Split-Path -Parent $RegistryBackup) | Out-Null
+Copy-Item -LiteralPath $Registry -Destination $RegistryBackup
+if ((Get-FileHash $Registry).Hash -ne (Get-FileHash $RegistryBackup).Hash) {
+  throw 'registry backup hash mismatch'
+}
+
+python scripts/manage_rag_generation.py `
+  --project-root . `
+  --index-config config/rag/index.production.yaml `
+  --operation activate `
+  --generation-id pc_20260715_98336c2_55
+```
+
+Start only from the images already built, then wait for PostgreSQL, backend,
+and frontend readiness:
+
+```powershell
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --no-build --wait --wait-timeout 900
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
@@ -174,8 +209,13 @@ be rewritten as a benchmark pass.
 
 The first activation has no previous registry generation, so `rollback` is not
 available. Preserve the pre-activation registry backup, Flat 53, root
-`chroma_store`, and the prior image for offline disaster recovery. Never convert
-a request failure into a Flat success or perform an automatic generation switch.
+`chroma_store`, and the tagged prior images for offline disaster recovery.
+Before the browser canary, a failed deployment is recovered only while backend
+and frontend are stopped: restore the verified registry backup, retag both
+`pre-$Release` images as `latest`, and run the same `up --no-build --wait`
+command. Never convert a request failure into a Flat success or perform an
+automatic generation switch. Any registry change requires a backend restart;
+the in-process readiness identity must not be treated as a live registry watch.
 
 ## 8. Shutdown and cleanup
 
