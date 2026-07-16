@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
@@ -27,7 +29,8 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md README_en.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir --timeout 120 --retries 10 .
+RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \
+    pip install --timeout 120 --retries 10 .
 RUN python -m playwright install --with-deps chromium
 
 COPY app.py ./
