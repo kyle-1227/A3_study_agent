@@ -11,9 +11,12 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 | Web/API | Next.js + FastAPI with `agent_stream_v2` SSE, status recovery, replay, and explicit terminal events |
 | State and identity | PostgreSQL checkpoints; strict user, thread, request, dataset, and case binding |
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
-| New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
-| RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true`, `shadow_enabled=false` |
-| Evaluation | P0 / PG / PR / PGR real-node adapters are implemented evaluation variants; PGR is served, and the six-case dataset remains smoke authoring rather than formal Gold |
+| New RAG | this release config pins sealed `READY` generation `pc_20260715_98336c2_55` and the resource-aware PGR path; final runtime verification is authoritative |
+| RAG deployment | registry primary is configured as generation 55 and previous / shadow are unset; activation, manifest, and served identity require final `health_ready_v3` / manifest verification |
+| Evaluation | Evidence is V2-only and V1 is rejected; P0 / PG / PR / PGR real-node adapters are evaluation variants, while the six-case dataset remains smoke authoring rather than formal Gold |
+| Quality gate | the latest complete backend gate recorded `2871 passed / 7 skipped`; Semgrep and Gitleaks are not installed and were not run |
+| Live canary | the active-PGR browser canary is being rerun; final acceptance must not yet be claimed |
+| Deployment boundary | this is a trusted local demo; public multi-tenant authentication and tenant isolation are not closed |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
 `READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. A request fails fast; it never switches to Flat RAG after an error. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
@@ -58,7 +61,9 @@ Provider, model, base URL, API-key environment name, and retry policy come from 
 Requirements: Docker Desktop / Docker Engine, Compose v2, local course data, and the sealed Parent-Child index.
 
 ```powershell
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath '.env')) {
+  Copy-Item -LiteralPath '.env.example' -Destination '.env'
+}
 # Populate secrets, a strong DB password, and the two host asset paths.
 $env:A3_ENV_FILE = (Resolve-Path '.env').Path
 
@@ -104,7 +109,9 @@ Python 3.11+ and Node.js 20.12+:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev,quality]"
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath '.env')) {
+  Copy-Item -LiteralPath '.env.example' -Destination '.env'
+}
 # Populate .env; strict local startup also requires PostgreSQL, secrets,
 # course data, and the sealed index.
 
@@ -122,7 +129,7 @@ Push-Location frontend
 npm run dev
 ```
 
-Parent-Child builds, Gold authoring, diagnostics, and registry operations require explicit arguments. Follow the [Parent-Child RAG runbook](docs/runbooks/parent_child_rag_local_build.md); do not use the obsolete no-argument `scripts/build_index.py` flow.
+Parent-Child builds, Gold authoring, diagnostics, and registry operations require explicit arguments. Follow the [Parent-Child RAG runbook](docs/runbooks/parent_child_rag_local_build.md).
 
 ## Quality gates
 
@@ -144,7 +151,7 @@ npm run build
 Pop-Location
 ```
 
-Unavailable Semgrep, Gitleaks, mypy, or other tools must be reported as missing / not run, never as passing.
+The recorded complete backend result is `2871 passed / 7 skipped`. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. The real browser canary is still being rerun and cannot be replaced by unit-test evidence.
 
 ## Repository layout
 
@@ -167,6 +174,7 @@ docs/runbooks/             Production and RAG operations
 - Do not delete the legacy RAG, Flat 53, generation 55, registry, successful reports, or Gold checkpoints.
 - Do not expose API keys, Authorization, full DB URIs, or Provider bodies in reports, traces, screenshots, or commands.
 - Do not turn a Candidate failure into a false legacy-RAG success; rollback is explicit only.
+- This deployment is for a trusted local demo only. Do not expose it publicly until multi-tenant authentication, tenant isolation, and abuse controls are closed.
 
 ## License
 

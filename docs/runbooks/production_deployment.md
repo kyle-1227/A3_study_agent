@@ -1,6 +1,6 @@
 # A3 Study Agent production deployment
 
-This runbook is the final Docker and canary procedure for the 2026-07-15
+This runbook is the Docker and canary procedure current on 2026-07-17 for the
 production convergence. Run commands from the repository root. Never print or
 commit `.env` values.
 
@@ -10,15 +10,27 @@ commit `.env` values.
 - The served graph uses strict user/thread identity, structured contracts,
   journal replay, status recovery, and explicit resource terminal states.
 - Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` and is the
-  active production primary. Registry previous and shadow pointers are unset;
+  configured production registry primary. Final runtime service state and the
+  exact generation-manifest identity must be revalidated; this document is not
+  runtime evidence. Registry previous and shadow pointers are unset, and
   startup rejects any generation or manifest mismatch.
 - The repository-root Flat `chroma_store` and Flat generation 53 are retained
   recovery assets. Production never selects or silently falls back to them.
-- Evidence activation is enabled and shadow is disabled. PGR is the served path;
-  the six-case dataset remains smoke authoring, not a human-sealed benchmark.
+- Evidence evaluation and adapter binding are V2-only; V1 inputs are rejected.
+  PGR is the configured served path with activation enabled and shadow disabled,
+  but the effective state must come from the final `health_ready_v3` response.
+  The six-case dataset remains smoke authoring, not a human-sealed benchmark.
+- The served course graph is strict `KnowledgeGraphV1` with five production
+  subjects and source-backed topic/resource identity.
 - The backend loads `config/rag/index.production.yaml`; the generation fixed by
   `PARENT_CHILD_GENERATION_ID` must match the registry primary. The tracked
   config contains environment-variable names, never secret values.
+- The latest complete backend gate recorded `2871 passed / 7 skipped`.
+  Semgrep and Gitleaks are not installed and were not run. The real active-PGR
+  browser canary is being rerun and is not yet a final acceptance result.
+- This deployment is a trusted local demo. Public multi-tenant authentication,
+  tenant isolation, and abuse controls are not closed; do not expose it as a
+  public service.
 
 ## 2. Required local assets
 
@@ -46,7 +58,7 @@ subdirectory.
 Set shell-level `A3_ENV_FILE` to the ignored env file's absolute path before
 every Compose command. Compose intentionally has no implicit `.env` fallback.
 
-## 3. Build, activate, and start
+## 3. Build and start the configured active release
 
 Validate the fully interpolated Compose model without rendering it to logs.
 Required-variable interpolation fails here without revealing the missing
@@ -62,33 +74,11 @@ Build both images without replacing the currently running containers:
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE build
 ```
 
-The first activation has no `previous` registry pointer. Before changing the
-registry, preserve executable recovery assets and stop served writers. The
-management CLI requires the production config and `indexes/parent_child` to be
-inside the same resolved project root; do not bypass that containment check or
-update SQLite manually.
-
-```powershell
-$Release = 'direct-active-20260716'
-$Registry = Join-Path $PWD 'indexes/parent_child/generation_registry.sqlite'
-$RegistryBackup = Join-Path $PWD "artifacts/backups/$Release-generation_registry.sqlite"
-
-docker commit a3_study_agent-backend-1 "a3_study_agent-backend:pre-$Release"
-docker commit a3_study_agent-frontend-1 "a3_study_agent-frontend:pre-$Release"
-
-docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE stop frontend backend
-New-Item -ItemType Directory -Force (Split-Path -Parent $RegistryBackup) | Out-Null
-Copy-Item -LiteralPath $Registry -Destination $RegistryBackup
-if ((Get-FileHash $Registry).Hash -ne (Get-FileHash $RegistryBackup).Hash) {
-  throw 'registry backup hash mismatch'
-}
-
-python scripts/manage_rag_generation.py `
-  --project-root . `
-  --index-config config/rag/index.production.yaml `
-  --operation activate `
-  --generation-id pc_20260715_98336c2_55
-```
+Generation 55 is already configured as the active primary. A routine rebuild or
+restart must not call `manage_rag_generation.py`, mutate the registry SQLite
+file, or repeat activation. Preserve the existing pre-activation registry
+backup and recovery images. Startup fails closed if the registry, configured
+generation, manifest, KnowledgeGraph, or evidence identity drifts.
 
 Start only from the images already built, then wait for PostgreSQL, backend,
 and frontend readiness:
@@ -155,6 +145,10 @@ Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 
 ## 6. Browser canary
 
+Current status: the real active-PGR browser canary is being rerun. Historical
+or failed canary directories are not acceptance evidence. Do not report a live
+pass until a new complete report succeeds against the final runtime identities.
+
 Use the real web page and capture screenshots plus machine-readable SSE/status
 evidence for exactly these six bounded scenarios:
 
@@ -207,13 +201,13 @@ This direct cutover is an owner decision; the six-case suite is still production
 smoke rather than formal Gold, and the historical benchmark regressions must not
 be rewritten as a benchmark pass.
 
-The first activation has no previous registry generation, so `rollback` is not
-available. Preserve the pre-activation registry backup, Flat 53, root
+The registry has no previous generation, so `rollback` is not available.
+Preserve the pre-activation registry backup, Flat 53, root
 `chroma_store`, and the tagged prior images for offline disaster recovery.
 Before the browser canary, a failed deployment is recovered only while backend
-and frontend are stopped: restore the verified registry backup, retag both
-`pre-$Release` images as `latest`, and run the same `up --no-build --wait`
-command. Never convert a request failure into a Flat success or perform an
+and frontend are stopped: restore the verified registry backup, retag the
+recorded pre-release backend/frontend images as `latest`, and run the same
+`up --no-build --wait` command. Never convert a request failure into a Flat success or perform an
 automatic generation switch. Any registry change requires a backend restart;
 the in-process readiness identity must not be treated as a live registry watch.
 

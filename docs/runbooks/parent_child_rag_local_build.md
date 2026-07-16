@@ -1,14 +1,16 @@
 # Parent–Child RAG 本地构建运行手册
 
-## 2026-07-15 production-close status (authoritative)
+## 2026-07-17 production-close status (authoritative)
 
 This section supersedes older example IDs and any earlier wording that treats
 `gold_dataset_v1.json` as permanently formal or forbids all experimental
 builds while readiness is blocked.
 
 - Generation `pc_20260715_98336c2_55` is sealed `READY` and is the explicit
-  production registry primary. Previous and shadow pointers are unset;
-  `activation_enabled=true` and `shadow_enabled=false`.
+  configured production registry primary. Previous and shadow pointers are
+  unset; `activation_enabled=true` and `shadow_enabled=false` are the expected
+  release contract. Final served state and the exact generation-manifest
+  identity must be verified from the runtime readiness and manifest responses.
 - The retained Flat comparison artifact is
   `artifacts/rag/flat_20260715_98336c2_53`. The existing `chroma_store` remains
   the legacy rollback asset and must not be deleted before a successful page
@@ -22,6 +24,15 @@ builds while readiness is blocked.
   rewrite the blocked historical benchmark as a pass. New local technical
   builds remain `experimental_only=true` and `activation_prohibited=true`;
   they cannot replace the production primary without a separate release.
+- Evidence evaluation and adapter binding are V2-only; V1 inputs are rejected.
+  PGR is the configured served evidence path, and `KnowledgeGraphV1` supplies
+  the strict five-subject topic/resource identity.
+- The latest complete backend gate recorded `2871 passed / 7 skipped`.
+  Semgrep and Gitleaks are not installed and were not run. The real active-PGR
+  browser canary is being rerun, so no final live-canary pass is claimed here.
+- The running deployment is a trusted local demo. Public multi-tenant
+  authentication, tenant isolation, and abuse controls are not closed.
+
 - Local build commands may use the ignored generated
   `config/rag/index.runtime.yaml`. Clean-checkout read-only validation of
   generation 55 must instead use the tracked, secret-free
@@ -130,7 +141,7 @@ excluded. It does not call a provider or create an index.
 
 Use the one-key build entrypoint only with explicit paths and identifiers. It
 never reads `chroma_store`, never resolves an active generation as a candidate,
-and never invokes `activate`, `set-primary`, `set-shadow`, or `rollback`.
+and never invokes registry activation, pointer mutation, or rollback operations.
 
 Run the real loader/splitter and write only an experimental, provider-free
 report first. This mode creates no Chroma collection, BM25 artifact, Parent
@@ -457,13 +468,15 @@ python scripts/validate_parent_child_candidate.py `
   --output artifacts/rag/candidate_validation.json
 ```
 
-## 8. READY、Shadow、activate 与 rollback
+## 8. READY、active primary 与显式恢复
 
 | 状态/操作 | 含义 | 是否改变用户服务路径 |
 | --- | --- | --- |
 | `READY` | generation 通过构建完整性校验，尚未部署。 | 否 |
-| Shadow | baseline 正常服务，candidate 仅按明确控制面并行观察。 | 否 |
 | activate | Registry 原子地把一个已验证的 READY generation 设为 primary。 | 是 |
 | rollback | Registry 显式把 previous READY generation 重新设为 primary。 | 是 |
 
-`scripts/manage_rag_generation.py` 是控制面工具；它不会因请求异常自动切换。只有所有离线、正式 validation、Shadow 和灰度门槛通过，并且 `rollout.yaml` 已由产品/数据负责人明确启用时，才可执行 `set-shadow` 或 `activate`。在本手册所述 validation 通过前，不得运行这些操作；若要回退，只能显式使用 `rollback`，不能把 candidate 失败伪装成 baseline 成功。
+Generation 55 已配置为 active primary，日常构建、诊断、重启与复测不得再次调用
+activate 或直接修改 registry。`scripts/manage_rag_generation.py` 是显式控制面工具，
+不会因请求异常自动切换。未来 generation 若要改变服务路径，必须有独立发布计划、
+完整验证和负责人授权；回退也只能显式执行，不能把 candidate 失败伪装成旧路径成功。
