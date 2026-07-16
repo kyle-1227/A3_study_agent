@@ -9,13 +9,20 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 from playwright.async_api import BrowserContext, Page, async_playwright
-from pydantic import ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from src.evaluation.evidence_rollout.contracts import (
     EvidenceEvaluationDatasetContentV2,
@@ -23,6 +30,7 @@ from src.evaluation.evidence_rollout.contracts import (
 )
 from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.schemas import (
+    HealthReadyV2,
     LearningGuidanceCatalogV1,
     OnboardResultV2,
     ThreadStatusResponse,
@@ -93,6 +101,181 @@ _STREAM_CAPTURE_SCRIPT = r"""
 
 class ProductionCanaryError(RuntimeError):
     """The live browser canary violated a production contract."""
+
+
+class _StrictCanaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    @field_validator("*", mode="before", check_fields=False)
+    @classmethod
+    def reject_unnormalized_text(cls, value: object) -> object:
+        if isinstance(value, str) and (not value.strip() or value != value.strip()):
+            raise ValueError("canary text fields must be normalized and non-blank")
+        return value
+
+
+class ProductionCanaryExpectedGenerationV1(_StrictCanaryModel):
+    parent_child_generation_id: str = Field(min_length=1, max_length=160)
+    parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ProductionCanaryServedIdentityV1(_StrictCanaryModel):
+    schema_version: Literal["production_canary_served_identity_v1"]
+    health_ready_schema_version: Literal["health_ready_v2"]
+    status: Literal["ready"]
+    checkpointer_type: Literal["postgres"]
+    graph_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_data_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_artifact_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parent_child_generation_id: str = Field(min_length=1, max_length=160)
+    parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_orchestration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_mode: Literal["inactive_canary"]
+    rollout_activation_enabled: bool
+    rollout_shadow_enabled: bool
+    identity_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_identity_fingerprint(self) -> Self:
+        if self.rollout_activation_enabled or self.rollout_shadow_enabled:
+            raise ValueError("served identity requires activation and shadow disabled")
+        payload = self.model_dump(mode="json", exclude={"identity_fingerprint"})
+        if self.identity_fingerprint != canonical_sha256(payload):
+            raise ValueError("served identity fingerprint does not match identity")
+        return self
+
+
+class ProductionBrowserCanaryReportV2(_StrictCanaryModel):
+    schema_version: Literal["production_browser_canary_v2"]
+    created_at_utc: str
+    dataset_id: str = Field(min_length=1, max_length=160)
+    dataset_content_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    served_identity: ProductionCanaryServedIdentityV1
+    canary_binding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    readiness_observation_count: Literal[2]
+    smoke_authoring_only: Literal[True]
+    case_count: int = Field(ge=1)
+    all_cases_completed: Literal[True]
+    verified_download_count: int = Field(ge=1)
+    cases: list[dict[str, Any]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_report_binding(self) -> Self:
+        if self.case_count != len(self.cases):
+            raise ValueError("case_count does not match cases")
+        expected = canonical_sha256(
+            {
+                "schema_version": "production_canary_binding_v1",
+                "dataset_content_fingerprint": self.dataset_content_fingerprint,
+                "served_identity_fingerprint": (
+                    self.served_identity.identity_fingerprint
+                ),
+            }
+        )
+        if self.canary_binding_fingerprint != expected:
+            raise ValueError("canary binding fingerprint does not match identities")
+        return self
+
+
+def _served_identity(readiness: HealthReadyV2) -> ProductionCanaryServedIdentityV1:
+    payload = {
+        "schema_version": "production_canary_served_identity_v1",
+        "health_ready_schema_version": readiness.schema_version,
+        "status": readiness.status,
+        "checkpointer_type": readiness.checkpointer_type,
+        "graph_version": readiness.graph_version,
+        "knowledge_graph_data_version": readiness.knowledge_graph_data_version,
+        "knowledge_graph_artifact_fingerprint": (
+            readiness.knowledge_graph_artifact_fingerprint
+        ),
+        "parent_child_generation_id": readiness.parent_child_generation_id,
+        "parent_child_generation_manifest_fingerprint": (
+            readiness.parent_child_generation_manifest_fingerprint
+        ),
+        "evidence_orchestration_fingerprint": (
+            readiness.evidence_orchestration_fingerprint
+        ),
+        "candidate_mode": readiness.candidate_mode,
+        "rollout_activation_enabled": readiness.rollout_activation_enabled,
+        "rollout_shadow_enabled": readiness.rollout_shadow_enabled,
+    }
+    return ProductionCanaryServedIdentityV1(
+        schema_version="production_canary_served_identity_v1",
+        health_ready_schema_version=readiness.schema_version,
+        status=readiness.status,
+        checkpointer_type=readiness.checkpointer_type,
+        graph_version=readiness.graph_version,
+        knowledge_graph_data_version=readiness.knowledge_graph_data_version,
+        knowledge_graph_artifact_fingerprint=(
+            readiness.knowledge_graph_artifact_fingerprint
+        ),
+        parent_child_generation_id=readiness.parent_child_generation_id,
+        parent_child_generation_manifest_fingerprint=(
+            readiness.parent_child_generation_manifest_fingerprint
+        ),
+        evidence_orchestration_fingerprint=(
+            readiness.evidence_orchestration_fingerprint
+        ),
+        candidate_mode=readiness.candidate_mode,
+        rollout_activation_enabled=readiness.rollout_activation_enabled,
+        rollout_shadow_enabled=readiness.rollout_shadow_enabled,
+        identity_fingerprint=canonical_sha256(payload),
+    )
+
+
+async def _fetch_served_identity(
+    *,
+    client: httpx.AsyncClient,
+    backend_url: str,
+    expected_generation: ProductionCanaryExpectedGenerationV1,
+    expected_knowledge_graph_data_version: str,
+    expected_knowledge_graph_artifact_fingerprint: str,
+) -> ProductionCanaryServedIdentityV1:
+    try:
+        response = await client.get(f"{backend_url}/health/ready")
+        response.raise_for_status()
+    except httpx.HTTPError:
+        raise ProductionCanaryError("health readiness request failed") from None
+    try:
+        readiness = HealthReadyV2.model_validate_json(response.content, strict=True)
+    except (TypeError, ValueError, ValidationError):
+        raise ProductionCanaryError(
+            "health readiness violates health_ready_v2"
+        ) from None
+    if (
+        readiness.parent_child_generation_id
+        != expected_generation.parent_child_generation_id
+    ):
+        raise ProductionCanaryError("health readiness generation identity mismatch")
+    if (
+        readiness.parent_child_generation_manifest_fingerprint
+        != expected_generation.parent_child_generation_manifest_fingerprint
+    ):
+        raise ProductionCanaryError(
+            "health readiness generation manifest identity mismatch"
+        )
+    if readiness.knowledge_graph_data_version != expected_knowledge_graph_data_version:
+        raise ProductionCanaryError(
+            "health readiness knowledge graph data identity mismatch"
+        )
+    if (
+        readiness.knowledge_graph_artifact_fingerprint
+        != expected_knowledge_graph_artifact_fingerprint
+    ):
+        raise ProductionCanaryError(
+            "health readiness knowledge graph artifact identity mismatch"
+        )
+    return _served_identity(readiness)
+
+
+def _require_stable_served_identity(
+    before: ProductionCanaryServedIdentityV1,
+    after: ProductionCanaryServedIdentityV1,
+) -> None:
+    if before != after:
+        raise ProductionCanaryError(
+            "served identity changed during production browser canary"
+        )
 
 
 def _required_url(value: str, *, field_name: str) -> str:
@@ -755,10 +938,33 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     backend_url = _required_url(args.backend_url, field_name="backend_url")
     if args.timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    try:
+        expected_generation = ProductionCanaryExpectedGenerationV1(
+            parent_child_generation_id=args.expected_generation_id,
+            parent_child_generation_manifest_fingerprint=(
+                args.expected_generation_manifest_fingerprint
+            ),
+        )
+    except ValidationError:
+        raise ValueError("expected generation identity is invalid") from None
     dataset = _load_dataset(dataset_path)
     if len(dataset.cases) != 6:
         raise ProductionCanaryError(
             "production smoke dataset must contain exactly 6 cases"
+        )
+    dataset_content_fingerprint = canonical_sha256(dataset.model_dump(mode="json"))
+
+    async with httpx.AsyncClient(timeout=args.timeout_seconds) as identity_client:
+        served_identity = await _fetch_served_identity(
+            client=identity_client,
+            backend_url=backend_url,
+            expected_generation=expected_generation,
+            expected_knowledge_graph_data_version=(
+                dataset.knowledge_graph_data_version
+            ),
+            expected_knowledge_graph_artifact_fingerprint=(
+                dataset.knowledge_graph_artifact_fingerprint
+            ),
         )
 
     user_id, nickname = await _provision_user(
@@ -801,19 +1007,44 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "six-case canary did not verify any local artifact download"
         )
 
-    report = {
-        "schema_version": "production_browser_canary_v1",
-        "created_at_utc": datetime.now(UTC).isoformat(),
-        "dataset_id": dataset.dataset_id,
-        "dataset_content_fingerprint": canonical_sha256(
-            dataset.model_dump(mode="json")
-        ),
-        "smoke_authoring_only": True,
-        "case_count": len(results),
-        "all_cases_completed": len(results) == len(dataset.cases),
-        "verified_download_count": verified_downloads,
-        "cases": results,
-    }
+    async with httpx.AsyncClient(timeout=args.timeout_seconds) as identity_client:
+        final_served_identity = await _fetch_served_identity(
+            client=identity_client,
+            backend_url=backend_url,
+            expected_generation=expected_generation,
+            expected_knowledge_graph_data_version=(
+                dataset.knowledge_graph_data_version
+            ),
+            expected_knowledge_graph_artifact_fingerprint=(
+                dataset.knowledge_graph_artifact_fingerprint
+            ),
+        )
+    _require_stable_served_identity(served_identity, final_served_identity)
+
+    canary_binding_fingerprint = canonical_sha256(
+        {
+            "schema_version": "production_canary_binding_v1",
+            "dataset_content_fingerprint": dataset_content_fingerprint,
+            "served_identity_fingerprint": served_identity.identity_fingerprint,
+        }
+    )
+    if len(results) != len(dataset.cases):
+        raise ProductionCanaryError("production browser canary cases are incomplete")
+    validated_report = ProductionBrowserCanaryReportV2(
+        schema_version="production_browser_canary_v2",
+        created_at_utc=datetime.now(UTC).isoformat(),
+        dataset_id=dataset.dataset_id,
+        dataset_content_fingerprint=dataset_content_fingerprint,
+        served_identity=served_identity,
+        canary_binding_fingerprint=canary_binding_fingerprint,
+        readiness_observation_count=2,
+        smoke_authoring_only=True,
+        case_count=len(results),
+        all_cases_completed=True,
+        verified_download_count=verified_downloads,
+        cases=results,
+    )
+    report = validated_report.model_dump(mode="json")
     (output_dir / "result.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -828,6 +1059,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--frontend-url", required=True)
     parser.add_argument("--backend-url", required=True)
+    parser.add_argument("--expected-generation-id", required=True)
+    parser.add_argument("--expected-generation-manifest-fingerprint", required=True)
     parser.add_argument("--timeout-seconds", type=float, required=True)
     browser_mode = parser.add_mutually_exclusive_group(required=True)
     browser_mode.add_argument("--headless", action="store_true")
@@ -843,6 +1076,9 @@ def main() -> None:
                 "schema_version": report["schema_version"],
                 "case_count": report["case_count"],
                 "all_cases_completed": report["all_cases_completed"],
+                "served_identity_fingerprint": report["served_identity"][
+                    "identity_fingerprint"
+                ],
             },
             separators=(",", ":"),
         )

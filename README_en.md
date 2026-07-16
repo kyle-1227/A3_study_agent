@@ -90,7 +90,7 @@ Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
 Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
-`/health/ready` must return `health_ready_v1`, `status=ready`, `checkpointer_type=postgres`, and `candidate_mode=inactive_canary`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
+`/health/ready` must return `health_ready_v2`, `status=ready`, `checkpointer_type=postgres`, `candidate_mode=inactive_canary`, `rollout_activation_enabled=false`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
 
 See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary, and rollback boundaries.
 

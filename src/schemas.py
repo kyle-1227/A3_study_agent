@@ -205,8 +205,8 @@ class HealthLiveV1(_StrictApiModel):
     status: Literal["live"]
 
 
-class HealthReadyV1(_StrictApiModel):
-    schema_version: Literal["health_ready_v1"]
+class HealthReadyV2(_StrictApiModel):
+    schema_version: Literal["health_ready_v2"]
     status: Literal["ready"]
     checkpointer_type: Literal["postgres"]
     graph_version: str = Field(min_length=1, max_length=160)
@@ -216,6 +216,14 @@ class HealthReadyV1(_StrictApiModel):
     parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_orchestration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     candidate_mode: Literal["inactive_canary"]
+    rollout_activation_enabled: bool
+    rollout_shadow_enabled: bool
+
+    @model_validator(mode="after")
+    def require_disabled_rollout(self) -> "HealthReadyV2":
+        if self.rollout_activation_enabled or self.rollout_shadow_enabled:
+            raise ValueError("health readiness requires activation and shadow disabled")
+        return self
 
 
 class LearningGuidanceCatalogSubjectV1(_StrictApiModel):

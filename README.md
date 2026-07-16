@@ -90,7 +90,7 @@ Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
 Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
-`/health/ready` 必须返回 `health_ready_v1`、`status=ready`、`checkpointer_type=postgres`、`candidate_mode=inactive_canary`，并携带 graph、KnowledgeGraph、generation manifest 与 evidence orchestration 身份。任何缺失或不匹配都视为部署失败。
+`/health/ready` 必须返回 `health_ready_v2`、`status=ready`、`checkpointer_type=postgres`、`candidate_mode=inactive_canary`、`rollout_activation_enabled=false` 与 `rollout_shadow_enabled=false`，并携带 graph、KnowledgeGraph、generation manifest 与 evidence orchestration 身份。任何缺失或不匹配都视为部署失败。
 
 完整部署、PostgreSQL restart/replay、六场景 Playwright canary 与回滚边界见 [生产部署运行手册](docs/runbooks/production_deployment.md)。
 

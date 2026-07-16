@@ -106,10 +106,10 @@ on stderr and are not silently swallowed.
 | READY generation | ready | `pc_20260715_98336c2_55`; manifest validates as `ready`, `validation_passed=true`, SHA-256 `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218` |
 | Dedicated RAG embedding key | present | `RAG_EMBEDDING_API_KEY=true`, verified externally without reading the value in this worktree |
 | Dedicated RAG reranker key | present | `RAG_RERANKER_API_KEY=true`, verified externally without reading the value in this worktree |
-| P0 live adapter | missing | Existing graph factory is not yet wrapped in the evaluation adapter contract |
-| PG live adapter | missing | No independent production graph/adapter exists |
-| PR live adapter | missing | No independent production graph/adapter exists |
-| PGR live adapter | missing | Existing graph factory is not yet wrapped in the evaluation adapter contract |
+| P0 live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
+| PG live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
+| PR live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
+| PGR live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
 | Curated evidence dataset | blocked | Six-case v2 smoke authoring draft exists but is unsealed, below activation-scale resolution, and lacks human approval |
 | Complete human semantic review bundle | missing | No reviewed output bundle exists |
 | Rollout activation | disabled | `config/rag/rollout.yaml` remains `activation_enabled: false` |
@@ -126,9 +126,9 @@ graph output is counted as live evidence.
 
 ## Integration handoff
 
-The service integration lane should implement four concrete adapters against
-the protocol above, compute each adapter fingerprint from its exact graph/runtime
-composition, and construct the runtime binding only after the executor computes
+The service integration lane should wire the four existing concrete adapters
+into a production live launcher, preserve each exact graph/runtime composition
+fingerprint, and construct the runtime binding only after the executor computes
 its fingerprint. It must then:
 
 1. curate and seal the dedicated dataset;

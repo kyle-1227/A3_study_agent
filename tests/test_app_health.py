@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 import app as a3_app
-from src.schemas import HealthLiveV1, HealthReadyV1
+from src.schemas import HealthLiveV1, HealthReadyV2
 
 
 _DIGEST_A = "a" * 64
@@ -54,6 +54,9 @@ class _FakeEvidenceOrchestrationRuntime:
 class _FakeServedCandidateRuntime:
     orchestration: _FakeEvidenceOrchestrationRuntime
     generation_manifest_fingerprint: str
+    candidate_mode: str
+    rollout_activation_enabled: bool
+    rollout_shadow_enabled: bool
 
 
 def _ready_state() -> SimpleNamespace:
@@ -78,6 +81,9 @@ def _ready_state() -> SimpleNamespace:
         served_candidate_owner=_FakeServedCandidateRuntime(
             orchestration=orchestration,
             generation_manifest_fingerprint=_DIGEST_C,
+            candidate_mode="inactive_canary",
+            rollout_activation_enabled=False,
+            rollout_shadow_enabled=False,
         ),
         served_candidate_runtime=orchestration,
         parent_child_generation_id="pc-generation-1",
@@ -184,8 +190,8 @@ async def test_health_ready_returns_all_verified_identities(
 
     payload = await a3_app.health_ready_endpoint(_request(_ready_state()))
 
-    assert payload == HealthReadyV1(
-        schema_version="health_ready_v1",
+    assert payload == HealthReadyV2(
+        schema_version="health_ready_v2",
         status="ready",
         checkpointer_type="postgres",
         graph_version="graph-v1",
@@ -195,6 +201,8 @@ async def test_health_ready_returns_all_verified_identities(
         parent_child_generation_manifest_fingerprint=_DIGEST_C,
         evidence_orchestration_fingerprint=_DIGEST_B,
         candidate_mode="inactive_canary",
+        rollout_activation_enabled=False,
+        rollout_shadow_enabled=False,
     )
     assert probes == [("postgresql:///a3_test", 3.0)]
 
@@ -226,6 +234,36 @@ async def test_health_ready_returns_all_verified_identities(
                 _DIGEST_A,
             ),
             "health_ready_generation_manifest_invalid",
+        ),
+        (
+            lambda state: setattr(
+                state,
+                "served_candidate_owner",
+                replace(state.served_candidate_owner, candidate_mode="active"),
+            ),
+            "health_ready_candidate_mode_invalid",
+        ),
+        (
+            lambda state: setattr(
+                state,
+                "served_candidate_owner",
+                replace(
+                    state.served_candidate_owner,
+                    rollout_activation_enabled=True,
+                ),
+            ),
+            "health_ready_rollout_state_invalid",
+        ),
+        (
+            lambda state: setattr(
+                state,
+                "served_candidate_owner",
+                replace(
+                    state.served_candidate_owner,
+                    rollout_shadow_enabled=True,
+                ),
+            ),
+            "health_ready_rollout_state_invalid",
         ),
         (
             lambda state: setattr(state, "checkpointer_type", "memory"),
@@ -291,17 +329,54 @@ def test_readiness_timeout_is_explicit_and_strict(
         a3_app._readiness_db_timeout_seconds()
 
 
-def test_health_ready_schema_rejects_invalid_identity() -> None:
+def _health_ready_payload() -> dict[str, object]:
+    return {
+        "schema_version": "health_ready_v2",
+        "status": "ready",
+        "checkpointer_type": "postgres",
+        "graph_version": "graph-v1",
+        "knowledge_graph_data_version": "kg-v1",
+        "knowledge_graph_artifact_fingerprint": _DIGEST_A,
+        "parent_child_generation_id": "generation-v1",
+        "parent_child_generation_manifest_fingerprint": _DIGEST_C,
+        "evidence_orchestration_fingerprint": _DIGEST_B,
+        "candidate_mode": "inactive_canary",
+        "rollout_activation_enabled": False,
+        "rollout_shadow_enabled": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("schema_version", "health_ready_v1"),
+        ("knowledge_graph_artifact_fingerprint", "not-a-digest"),
+        ("candidate_mode", "active"),
+        ("rollout_activation_enabled", True),
+        ("rollout_shadow_enabled", True),
+        ("rollout_activation_enabled", "false"),
+        ("rollout_activation_enabled", 0),
+        ("rollout_activation_enabled", None),
+    ],
+)
+def test_health_ready_v2_rejects_invalid_identity(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    payload = _health_ready_payload()
+    payload[field_name] = invalid_value
+
     with pytest.raises(ValidationError):
-        HealthReadyV1(
-            schema_version="health_ready_v1",
-            status="ready",
-            checkpointer_type="postgres",
-            graph_version="graph-v1",
-            knowledge_graph_data_version="kg-v1",
-            knowledge_graph_artifact_fingerprint="not-a-digest",
-            parent_child_generation_id="generation-v1",
-            parent_child_generation_manifest_fingerprint=_DIGEST_C,
-            evidence_orchestration_fingerprint=_DIGEST_B,
-            candidate_mode="inactive_canary",
-        )
+        HealthReadyV2.model_validate(payload, strict=True)
+
+
+def test_health_ready_v2_rejects_missing_and_extra_fields() -> None:
+    missing = _health_ready_payload()
+    missing.pop("rollout_activation_enabled")
+    extra = _health_ready_payload()
+    extra["activation_enabled"] = False
+
+    with pytest.raises(ValidationError):
+        HealthReadyV2.model_validate(missing, strict=True)
+    with pytest.raises(ValidationError):
+        HealthReadyV2.model_validate(extra, strict=True)

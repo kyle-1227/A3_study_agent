@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
 from src.config.evidence_orchestration_config import (
     load_evidence_orchestration_config,
     load_resource_evidence_profiles,
@@ -35,6 +37,9 @@ class ServedCandidateRuntime:
 
     orchestration: EvidenceOrchestrationRuntime
     generation_manifest_fingerprint: str
+    candidate_mode: Literal["inactive_canary"]
+    rollout_activation_enabled: bool
+    rollout_shadow_enabled: bool
     _loaded_generation: LoadedGenerationRuntime
     _embedding_client: StrictEmbeddingClient
     _reranker_client: StrictRerankerClient
@@ -125,7 +130,7 @@ def load_served_candidate_runtime(
         raise TypeError("index_root must be an absolute Path")
 
     rollout = load_rag_rollout_config(rollout_config_path)
-    if rollout.activation_enabled or rollout.shadow_enabled:
+    if rollout.activation_enabled is not False or rollout.shadow_enabled is not False:
         raise ServedCandidateRuntimeError(
             "internal candidate serving requires activation and shadow rollout disabled"
         )
@@ -188,6 +193,9 @@ def load_served_candidate_runtime(
         return ServedCandidateRuntime(
             orchestration=orchestration,
             generation_manifest_fingerprint=record.manifest_sha256,
+            candidate_mode="inactive_canary",
+            rollout_activation_enabled=rollout.activation_enabled,
+            rollout_shadow_enabled=rollout.shadow_enabled,
             _loaded_generation=loaded,
             _embedding_client=embedding,
             _reranker_client=reranker,

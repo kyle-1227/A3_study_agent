@@ -83,8 +83,9 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
 `/health/live` proves only that the API process can answer. `/health/ready`
-must return `health_ready_v1`, `status=ready`, `checkpointer_type=postgres`,
-and `candidate_mode=inactive_canary`, plus the graph version, KnowledgeGraph
+must return `health_ready_v2`, `status=ready`, `checkpointer_type=postgres`,
+`candidate_mode=inactive_canary`, `rollout_activation_enabled=false`, and
+`rollout_shadow_enabled=false`, plus the graph version, KnowledgeGraph
 data/artifact identity, generation ID/manifest fingerprint, and evidence
 orchestration fingerprint. It also performs a bounded PostgreSQL `SELECT 1`.
 Only the typed, redacted 503 code may be recorded when readiness fails; never
@@ -153,13 +154,19 @@ python scripts/run_production_browser_canary.py `
   --output-dir artifacts/browser_canary/production-close `
   --frontend-url http://localhost:3000 `
   --backend-url http://localhost:8000 `
+  --expected-generation-id $ExpectedGenerationId `
+  --expected-generation-manifest-fingerprint $ExpectedGenerationManifestFingerprint `
   --timeout-seconds 1200 `
   --headless
 ```
 
-The machine-readable report contains identity, sequence, terminal status,
-replay, download, refresh, and conflict evidence only. It intentionally omits
-generated bodies and Provider payloads. Screenshots are retained separately.
+Set both expected-generation variables explicitly from the independently
+validated sealed READY record; never infer them from `/health/ready`. The
+machine-readable V2 report binds that generation, the dataset KnowledgeGraph
+identity, inactive-canary/disabled-rollout state, and matching pre/post
+readiness observations. It also contains sequence, terminal, replay, download,
+refresh, and conflict evidence only. It intentionally omits generated bodies
+and Provider payloads. Screenshots are retained separately.
 
 ## 7. RAG activation and rollback
 

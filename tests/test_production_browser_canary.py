@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+import scripts.run_production_browser_canary as canary
 from scripts.run_production_browser_canary import (
+    ProductionBrowserCanaryReportV2,
     ProductionCanaryError,
+    ProductionCanaryExpectedGenerationV1,
     _artifact_paths,
+    _fetch_served_identity,
     _parse_sse_text,
     _refresh_projection_mode,
+    _require_stable_served_identity,
     _safe_terminal_projection,
+    _served_identity,
     _validate_stream_events,
     _verify_downloads,
     _verify_replay,
@@ -26,6 +36,36 @@ from src.graph.resource_final_v3 import (
 REQUEST_ID = "00000000-0000-4000-8000-000000000001"
 RESUME_REQUEST_ID = "00000000-0000-4000-8000-000000000002"
 THREAD_ID = "thread-1"
+DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+DIGEST_C = "c" * 64
+DIGEST_D = "d" * 64
+
+
+def _health_ready_payload(**updates: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "health_ready_v2",
+        "status": "ready",
+        "checkpointer_type": "postgres",
+        "graph_version": "graph-v1",
+        "knowledge_graph_data_version": "kg-2026-07-15",
+        "knowledge_graph_artifact_fingerprint": DIGEST_A,
+        "parent_child_generation_id": "pc-generation-1",
+        "parent_child_generation_manifest_fingerprint": DIGEST_B,
+        "evidence_orchestration_fingerprint": DIGEST_C,
+        "candidate_mode": "inactive_canary",
+        "rollout_activation_enabled": False,
+        "rollout_shadow_enabled": False,
+    }
+    payload.update(updates)
+    return payload
+
+
+def _expected_generation() -> ProductionCanaryExpectedGenerationV1:
+    return ProductionCanaryExpectedGenerationV1(
+        parent_child_generation_id="pc-generation-1",
+        parent_child_generation_manifest_fingerprint=DIGEST_B,
+    )
 
 
 def _resource_final(*, request_id: str = REQUEST_ID) -> dict:
@@ -351,3 +391,219 @@ async def test_verify_downloads_consumes_nonempty_attachment() -> None:
         "attachment_header_count": 1,
         "downloaded_bytes": len(b"bounded-artifact"),
     }
+
+
+async def _identity_from_payload(
+    payload: dict[str, object],
+    *,
+    status_code: int = 200,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/health/ready"
+        return httpx.Response(status_code, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        return await _fetch_served_identity(
+            client=client,
+            backend_url="http://backend.test",
+            expected_generation=_expected_generation(),
+            expected_knowledge_graph_data_version="kg-2026-07-15",
+            expected_knowledge_graph_artifact_fingerprint=DIGEST_A,
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_served_identity_binds_exact_health_ready_v2() -> None:
+    identity = await _identity_from_payload(_health_ready_payload())
+
+    assert identity.health_ready_schema_version == "health_ready_v2"
+    assert identity.parent_child_generation_id == "pc-generation-1"
+    assert identity.knowledge_graph_artifact_fingerprint == DIGEST_A
+    assert identity.candidate_mode == "inactive_canary"
+    assert identity.rollout_activation_enabled is False
+    assert identity.rollout_shadow_enabled is False
+    assert identity.identity_fingerprint == canary.canonical_sha256(
+        identity.model_dump(mode="json", exclude={"identity_fingerprint"})
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _health_ready_payload(schema_version="health_ready_v1"),
+        _health_ready_payload(candidate_mode="active"),
+        _health_ready_payload(rollout_activation_enabled=True),
+        _health_ready_payload(rollout_shadow_enabled=True),
+        _health_ready_payload(rollout_activation_enabled="false"),
+        _health_ready_payload(parent_child_generation_id="different-generation"),
+        _health_ready_payload(parent_child_generation_manifest_fingerprint=DIGEST_D),
+        _health_ready_payload(knowledge_graph_data_version="different-kg"),
+        _health_ready_payload(knowledge_graph_artifact_fingerprint=DIGEST_D),
+        _health_ready_payload(knowledge_graph_artifact_fingerprint="A" * 64),
+    ],
+)
+async def test_fetch_served_identity_rejects_contract_and_identity_drift(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ProductionCanaryError):
+        await _identity_from_payload(payload)
+
+
+@pytest.mark.asyncio
+async def test_fetch_served_identity_rejects_missing_extra_and_http_failure() -> None:
+    missing = _health_ready_payload()
+    missing.pop("rollout_activation_enabled")
+    extra = _health_ready_payload(activation_enabled=False)
+
+    for payload in (missing, extra):
+        with pytest.raises(ProductionCanaryError, match="health_ready_v2"):
+            await _identity_from_payload(payload)
+    with pytest.raises(ProductionCanaryError, match="request failed"):
+        await _identity_from_payload(_health_ready_payload(), status_code=503)
+
+
+def test_expected_generation_rejects_defaults_and_aliases() -> None:
+    with pytest.raises(ValidationError):
+        ProductionCanaryExpectedGenerationV1(
+            parent_child_generation_id=" pc-generation-1 ",
+            parent_child_generation_manifest_fingerprint=DIGEST_B,
+        )
+    with pytest.raises(ValidationError):
+        ProductionCanaryExpectedGenerationV1(
+            parent_child_generation_id="pc-generation-1",
+            parent_child_generation_manifest_fingerprint="B" * 64,
+        )
+    with pytest.raises(ValidationError):
+        ProductionCanaryExpectedGenerationV1.model_validate(
+            {
+                "generation_id": "pc-generation-1",
+                "manifest_fingerprint": DIGEST_B,
+            },
+            strict=True,
+        )
+
+
+def test_identity_and_report_fingerprints_fail_closed() -> None:
+    readiness = canary.HealthReadyV2.model_validate(
+        _health_ready_payload(),
+        strict=True,
+    )
+    identity = _served_identity(readiness)
+    binding = canary.canonical_sha256(
+        {
+            "schema_version": "production_canary_binding_v1",
+            "dataset_content_fingerprint": DIGEST_D,
+            "served_identity_fingerprint": identity.identity_fingerprint,
+        }
+    )
+    report = ProductionBrowserCanaryReportV2(
+        schema_version="production_browser_canary_v2",
+        created_at_utc="2026-07-16T00:00:00+00:00",
+        dataset_id="smoke-v2",
+        dataset_content_fingerprint=DIGEST_D,
+        served_identity=identity,
+        canary_binding_fingerprint=binding,
+        readiness_observation_count=2,
+        smoke_authoring_only=True,
+        case_count=1,
+        all_cases_completed=True,
+        verified_download_count=1,
+        cases=[{"case_id": "case-1"}],
+    )
+
+    serialized = report.model_dump_json()
+    for forbidden in (
+        "query",
+        "http://",
+        "authorization",
+        "provider_body",
+        "db_uri",
+    ):
+        assert forbidden not in serialized.casefold()
+
+    invalid_binding = report.model_dump(mode="python")
+    invalid_binding["canary_binding_fingerprint"] = DIGEST_A
+    with pytest.raises(ValidationError):
+        ProductionBrowserCanaryReportV2.model_validate(invalid_binding, strict=True)
+
+    invalid_identity = report.model_dump(mode="python")
+    invalid_identity["served_identity"]["identity_fingerprint"] = DIGEST_D
+    with pytest.raises(ValidationError):
+        ProductionBrowserCanaryReportV2.model_validate(invalid_identity, strict=True)
+
+    missing_identity = report.model_dump(mode="python")
+    missing_identity.pop("served_identity")
+    with pytest.raises(ValidationError):
+        ProductionBrowserCanaryReportV2.model_validate(missing_identity, strict=True)
+
+    extra_identity = report.model_dump(mode="python")
+    extra_identity["health"] = _health_ready_payload()
+    with pytest.raises(ValidationError):
+        ProductionBrowserCanaryReportV2.model_validate(extra_identity, strict=True)
+
+
+def test_stable_served_identity_rejects_pre_post_drift() -> None:
+    before = _served_identity(
+        canary.HealthReadyV2.model_validate(_health_ready_payload(), strict=True)
+    )
+    after = _served_identity(
+        canary.HealthReadyV2.model_validate(
+            _health_ready_payload(graph_version="graph-v2"),
+            strict=True,
+        )
+    )
+
+    with pytest.raises(ProductionCanaryError, match="changed"):
+        _require_stable_served_identity(before, after)
+
+
+@pytest.mark.asyncio
+async def test_run_aborts_before_user_or_browser_when_readiness_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dataset = SimpleNamespace(
+        cases=tuple(range(6)),
+        knowledge_graph_data_version="kg-2026-07-15",
+        knowledge_graph_artifact_fingerprint=DIGEST_A,
+        model_dump=lambda *, mode: {"mode": mode},
+    )
+    calls: list[str] = []
+
+    async def fail_readiness(**kwargs):
+        del kwargs
+        raise ProductionCanaryError("health readiness request failed")
+
+    async def forbid_provision(**kwargs):
+        del kwargs
+        calls.append("provision")
+        raise AssertionError("user provisioning must not run")
+
+    def forbid_browser():
+        calls.append("browser")
+        raise AssertionError("browser must not run")
+
+    monkeypatch.setattr(canary, "_contained_file", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(canary, "_contained_output", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(canary, "_load_dataset", lambda path: dataset)
+    monkeypatch.setattr(canary, "_fetch_served_identity", fail_readiness)
+    monkeypatch.setattr(canary, "_provision_user", forbid_provision)
+    monkeypatch.setattr(canary, "async_playwright", forbid_browser)
+    args = argparse.Namespace(
+        project_root=tmp_path,
+        dataset=Path("dataset.json"),
+        output_dir=Path("output"),
+        frontend_url="http://frontend.test",
+        backend_url="http://backend.test",
+        expected_generation_id="pc-generation-1",
+        expected_generation_manifest_fingerprint=DIGEST_B,
+        timeout_seconds=1.0,
+        headless=True,
+    )
+
+    with pytest.raises(ProductionCanaryError, match="request failed"):
+        await canary._run(args)
+
+    assert calls == []
+    assert not (tmp_path / "result.json").exists()

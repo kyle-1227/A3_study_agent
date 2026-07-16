@@ -177,7 +177,7 @@ from src.schemas import (
     CompiledOnboardRequestV2,
     ContinueRequest,
     HealthLiveV1,
-    HealthReadyV1,
+    HealthReadyV2,
     LearningGuidanceCatalogV1,
     OnboardRequest,
     OnboardResultV2,
@@ -902,8 +902,8 @@ async def health_live_endpoint() -> HealthLiveV1:
     return HealthLiveV1(schema_version="health_live_v1", status="live")
 
 
-@app.get("/health/ready", response_model=HealthReadyV1)
-async def health_ready_endpoint(request: Request) -> HealthReadyV1:
+@app.get("/health/ready", response_model=HealthReadyV2)
+async def health_ready_endpoint(request: Request) -> HealthReadyV2:
     state = request.app.state
     if getattr(state, "checkpointer_enabled", None) is not True:
         _readiness_unavailable("health_ready_postgres_checkpointer_required")
@@ -967,6 +967,13 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV1:
         or orchestration.learning_guidance is not guidance
     ):
         _readiness_unavailable("health_ready_orchestration_invalid")
+    if candidate_owner.candidate_mode != "inactive_canary":
+        _readiness_unavailable("health_ready_candidate_mode_invalid")
+    if (
+        candidate_owner.rollout_activation_enabled is not False
+        or candidate_owner.rollout_shadow_enabled is not False
+    ):
+        _readiness_unavailable("health_ready_rollout_state_invalid")
 
     generation_id = _ready_state_value(
         state,
@@ -1001,8 +1008,8 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV1:
     )
 
     try:
-        return HealthReadyV1(
-            schema_version="health_ready_v1",
+        return HealthReadyV2(
+            schema_version="health_ready_v2",
             status="ready",
             checkpointer_type="postgres",
             graph_version=graph_version,
@@ -1015,7 +1022,9 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV1:
             evidence_orchestration_fingerprint=(
                 orchestration.orchestration_fingerprint
             ),
-            candidate_mode="inactive_canary",
+            candidate_mode=candidate_owner.candidate_mode,
+            rollout_activation_enabled=(candidate_owner.rollout_activation_enabled),
+            rollout_shadow_enabled=candidate_owner.rollout_shadow_enabled,
         )
     except ValidationError:
         _readiness_unavailable("health_ready_identity_invalid")
