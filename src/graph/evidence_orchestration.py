@@ -1097,6 +1097,29 @@ def _candidate_record(
     )
 
 
+def _bound_candidate_records_to_task_limits(
+    records: Sequence[EvidenceCandidateRecord],
+    tasks: Sequence[RetrievalTask],
+) -> tuple[EvidenceCandidateRecord, ...]:
+    """Preserve source rank order while enforcing every explicit task limit."""
+
+    task_by_id = {task.task_id: task for task in tasks}
+    selected: list[EvidenceCandidateRecord] = []
+    counts: Counter[str] = Counter()
+    for record in records:
+        task = task_by_id.get(record.task_id)
+        if task is None or task.source_type != record.source_type:
+            raise EvidenceOrchestrationRuntimeError(
+                code="candidate_task_binding_mismatch",
+                reason="candidate record is not bound to the active source task",
+            )
+        if counts[record.task_id] >= task.result_limit:
+            continue
+        selected.append(record)
+        counts[record.task_id] += 1
+    return tuple(selected)
+
+
 def _source_outcomes(
     tasks: Sequence[RetrievalTask],
     records: Sequence[EvidenceCandidateRecord],
@@ -1256,6 +1279,7 @@ def make_local_rag_search_batch_node(
                     task=task,
                 )
             )
+        records = list(_bound_candidate_records_to_task_limits(records, tasks))
         snapshot_payload = {
             "round_index": round_index,
             "retrieval_result": output.get("parent_child_retrieval_result") or {},
@@ -1393,6 +1417,7 @@ def make_web_research_search_batch_node(
                     task=task,
                 )
             )
+        records = list(_bound_candidate_records_to_task_limits(records, tasks))
         outcomes = _source_outcomes(tasks, records)
         latency_ms = int((time.perf_counter() - started) * 1000)
         _emit_source_trace(

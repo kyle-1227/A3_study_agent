@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import replace
 import inspect
 from pathlib import Path
@@ -32,6 +33,7 @@ from src.config.evidence_orchestration_contracts import (
 )
 from src.graph import academic
 from src.graph import evidence_orchestration as orchestration
+from src.graph.evidence import EvidenceCandidate
 from src.graph.builder import (
     build_graph,
     build_resource_evidence_parent_child_graph,
@@ -455,6 +457,57 @@ def test_coverage_validation_reports_all_repeated_query_bindings() -> None:
     assert "repeated_gap_query" in error
     for requirement_id, source_type in expected_bindings:
         assert f"{requirement_id}:{source_type}" in error
+
+
+def test_candidate_records_are_stably_bounded_per_task() -> None:
+    runtime = _runtime()
+    requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))
+    local_tasks = tuple(
+        task
+        for task in orchestration._build_initial_tasks(requirements, runtime)
+        if task.source_type == "local_rag"
+    )
+    assert len(local_tasks) == 2
+    assert all(task.result_limit == 3 for task in local_tasks)
+
+    records: list[orchestration.EvidenceCandidateRecord] = []
+    for candidate_index in range(5):
+        for task_index, task in enumerate(local_tasks):
+            raw_id = f"raw-local-{task_index}-{candidate_index}"
+            records.append(
+                orchestration._candidate_record(
+                    candidate=EvidenceCandidate(
+                        evidence_id=raw_id,
+                        source_type="local_rag",
+                        provider="chroma_parent_child",
+                        subject=task.subject,
+                        role=task.requirement_id,
+                        title=f"Candidate {task_index}-{candidate_index}",
+                        source=f"source-{task_index}.md",
+                        content_preview=(
+                            f"Evidence content {task_index}-{candidate_index}."
+                        ),
+                        metadata={"source_id": raw_id},
+                    ),
+                    original={"content": f"Original content for {raw_id}."},
+                    task=task,
+                )
+            )
+
+    bounded = orchestration._bound_candidate_records_to_task_limits(
+        records,
+        local_tasks,
+    )
+
+    assert len(bounded) == 6
+    assert Counter(record.task_id for record in bounded) == {
+        task.task_id: 3 for task in local_tasks
+    }
+    assert [record.candidate_ref for record in bounded] == [
+        f"raw-local-{task_index}-{candidate_index}"
+        for candidate_index in range(3)
+        for task_index in range(2)
+    ]
 
 
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():
