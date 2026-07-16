@@ -1669,6 +1669,7 @@ def _coverage_business_validation(
             for outcome in outcomes
             if outcome.source_type == "local_rag"
         }
+        repeated_query_bindings: list[tuple[str, str]] = []
         for coverage in compiled.coverages:
             if len(coverage.evidence_ids) > max_evidence_per_requirement:
                 raise EvidenceBudgetExceededError(
@@ -1715,10 +1716,21 @@ def _coverage_business_validation(
                     source_type,
                     query_fingerprint,
                 ) in prior_signatures:
-                    raise EvidenceOrchestrationRuntimeError(
-                        code="repeated_gap_query",
-                        reason="coverage repair query repeats a prior source-bound query",
+                    repeated_query_bindings.append(
+                        (coverage.requirement_id, source_type)
                     )
+        if repeated_query_bindings:
+            bindings = ", ".join(
+                f"{requirement_id}:{source_type}"
+                for requirement_id, source_type in sorted(set(repeated_query_bindings))
+            )
+            raise EvidenceOrchestrationRuntimeError(
+                code="repeated_gap_query",
+                reason=(
+                    "coverage repair query repeats a prior source-bound query; "
+                    f"conflicting_bindings=[{bindings}]"
+                ),
+            )
     except (
         EvidenceOrchestrationContractError,
         EvidenceOrchestrationRuntimeError,

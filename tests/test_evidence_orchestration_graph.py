@@ -384,6 +384,79 @@ def test_coverage_business_validation_rejects_evidence_over_limit() -> None:
     assert "max_evidence_per_requirement" in error
 
 
+def test_coverage_validation_reports_all_repeated_query_bindings() -> None:
+    runtime = _runtime()
+    requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))
+    attempted_tasks: list[RetrievalTask] = []
+    coverages: list[RequirementCoverage] = []
+    expected_bindings: set[tuple[str, str]] = set()
+
+    for index, requirement in enumerate(requirements):
+        if requirement.source_policy == "local_only":
+            source_types = ("local_rag",)
+        elif requirement.source_policy == "web_only":
+            source_types = ("web",)
+        elif requirement.source_policy == "local_and_web":
+            source_types = ("local_rag", "web")
+        elif requirement.source_policy == "local_then_web_on_gap":
+            source_types = ("local_rag",)
+        else:
+            raise AssertionError(
+                f"unsupported source policy: {requirement.source_policy}"
+            )
+
+        queries = {
+            source_type: f"math repeated evidence query {index} {source_type}"
+            for source_type in source_types
+        }
+        for source_type, query in queries.items():
+            attempted_tasks.append(
+                build_retrieval_task(
+                    requirement=requirement,
+                    source_type=source_type,
+                    query=query,
+                    purpose=requirement.acceptance_criteria,
+                    priority=runtime.policy.required_task_priority,
+                    round_index=0,
+                    result_limit=runtime.policy.max_results_per_task,
+                )
+            )
+            expected_bindings.add((requirement.requirement_id, source_type))
+        coverages.append(
+            RequirementCoverage(
+                requirement_id=requirement.requirement_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                round_index=0,
+                coverage_state="missing",
+                evidence_ids=[],
+                confidence=0.0,
+                reason="The configured acceptance criteria are not yet satisfied.",
+                suggested_local_query=queries.get("local_rag", ""),
+                suggested_web_query=queries.get("web", ""),
+            )
+        )
+
+    error = orchestration._coverage_business_validation(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=coverages,
+        ),
+        round_index=0,
+        max_evidence_per_requirement=runtime.policy.max_evidence_per_requirement,
+        requirements=requirements,
+        provisional_entries=(),
+        attempted_tasks=tuple(attempted_tasks),
+        outcomes=(),
+    )
+
+    assert len(expected_bindings) >= 2
+    assert "repeated_gap_query" in error
+    for requirement_id, source_type in expected_bindings:
+        assert f"{requirement_id}:{source_type}" in error
+
+
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():
     runtime = _runtime()
     legacy = build_graph(runtime.learning_guidance)
