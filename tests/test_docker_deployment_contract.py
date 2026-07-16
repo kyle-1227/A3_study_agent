@@ -15,11 +15,20 @@ def test_dockerfile_uses_supervised_single_process_targets() -> None:
     assert '["node", "server.js"]' in dockerfile
     assert 'CMD ["sh", "-c"' not in dockerfile
     assert "& uvicorn" not in dockerfile
+    pip_bootstrap = (
+        "RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \\\n"
+        "    python -m pip install --timeout 120 --retries 10 pip==26.1.2"
+    )
     pip_install = (
         "RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \\\n"
-        "    pip install --timeout 120 --retries 10 ."
+        "    PIP_RESUME_RETRIES=20 python -m pip install --timeout 120 "
+        "--retries 10 ."
     )
-    assert dockerfile.index("COPY src/ ./src/") < dockerfile.index(pip_install)
+    assert (
+        dockerfile.index("COPY src/ ./src/")
+        < dockerfile.index(pip_bootstrap)
+        < dockerfile.index(pip_install)
+    )
     assert "--no-cache-dir" not in dockerfile
     assert "python -m playwright install --with-deps chromium" in dockerfile
 

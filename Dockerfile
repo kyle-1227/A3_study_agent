@@ -30,7 +30,9 @@ RUN apt-get update \
 COPY pyproject.toml README.md README_en.md ./
 COPY src/ ./src/
 RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \
-    pip install --timeout 120 --retries 10 .
+    python -m pip install --timeout 120 --retries 10 pip==26.1.2
+RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \
+    PIP_RESUME_RETRIES=20 python -m pip install --timeout 120 --retries 10 .
 RUN python -m playwright install --with-deps chromium
 
 COPY app.py ./
