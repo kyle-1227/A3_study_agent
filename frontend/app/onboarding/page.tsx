@@ -722,7 +722,7 @@ function OnboardingPageInner() {
           ) : (
             <Button
               type="button"
-              disabled={!canAdvance || catalogLoading || !catalog}
+              disabled={!canAdvance || !catalog}
               onClick={() => setStep(STEP_ORDER[currentIndex + 1])}
             >
               下一步 <ArrowRight className="ml-1 h-4 w-4" />

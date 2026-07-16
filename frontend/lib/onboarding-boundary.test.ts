@@ -32,4 +32,13 @@ describe("onboarding V2 frontend boundary", () => {
     expect(page).not.toContain("console.error")
     expect(client).not.toContain("response.text()")
   })
+
+  it("does not let stale catalog loading disable a catalog-bound completed step", () => {
+    const page = frontendSource("app/onboarding/page.tsx")
+
+    expect(page).toContain("disabled={!canAdvance || !catalog}")
+    expect(page).not.toContain(
+      "disabled={!canAdvance || catalogLoading || !catalog}",
+    )
+  })
 })
