@@ -11,6 +11,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import ValidationError
 
 from src.config import load_settings
+from src.config.evidence_orchestration_config import (
+    load_resource_evidence_profiles,
+)
 from src.graph.code_practice import (
     CodePracticeApprovalError,
     CodePracticeGenerationError,
@@ -149,6 +152,21 @@ def test_code_practice_runtime_configuration_is_explicit() -> None:
     }
     assert settings["llm_outputs"]["code_practice_reviewer"]["output_mode"] == (
         "deepseek_tool_call_strict"
+    )
+
+
+def test_code_practice_evidence_profile_keeps_semantics_required() -> None:
+    profiles = load_resource_evidence_profiles(
+        Path("config/rag/resource_evidence_profiles.yaml")
+    )
+    profile = profiles.profile_for("code_practice")
+
+    assert [(need.need_id, need.criticality) for need in profile.needs] == [
+        ("api_semantics", "required"),
+        ("executable_patterns", "supporting"),
+    ]
+    assert "unsupported operations must be omitted" in (
+        profile.needs[0].acceptance_criteria
     )
 
 

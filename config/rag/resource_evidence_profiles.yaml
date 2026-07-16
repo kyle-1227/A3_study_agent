@@ -53,7 +53,7 @@ profiles:
       - need_id: executable_patterns
         evidence_kind: implementation_patterns
         scope: per_subject
-        criticality: required
+        criticality: supporting
         source_policy: local_and_web
         acceptance_criteria: At least one accepted source provides a technically compatible implementation pattern for a verifiable solution; the exercise scope must be constrained to that supported pattern.
   - resource_type: video_script
