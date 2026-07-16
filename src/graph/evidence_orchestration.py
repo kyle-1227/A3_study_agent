@@ -1674,21 +1674,27 @@ def _judge_requirements_payload(
         for task in attempted_tasks
         if task.source_type == "local_rag"
     }
-    return [
-        {
-            **requirement.model_dump(mode="json"),
-            "required_incomplete_query_shape": _required_incomplete_query_shape(
-                source_policy=requirement.source_policy,
-                local_attempted=requirement.requirement_id in local_attempted_ids,
-            ),
-            "eligible_evidence_ids": [
-                record.evidence_id
-                for record in records
-                if record.requirement_id == requirement.requirement_id
-            ],
-        }
-        for requirement in requirements
-    ]
+    payload: list[dict[str, object]] = []
+    for requirement in requirements:
+        bound_records = tuple(
+            record
+            for record in records
+            if record.requirement_id == requirement.requirement_id
+        )
+        payload.append(
+            {
+                **requirement.model_dump(mode="json"),
+                "required_incomplete_query_shape": _required_incomplete_query_shape(
+                    source_policy=requirement.source_policy,
+                    local_attempted=requirement.requirement_id in local_attempted_ids,
+                ),
+                "eligible_evidence_ids": [
+                    record.evidence_id for record in bound_records
+                ],
+                "bound_candidates": _judge_candidates_payload(bound_records),
+            }
+        )
+    return payload
 
 
 def _required_incomplete_query_shape(
@@ -1729,11 +1735,23 @@ def _coverage_business_validation(
                 code="coverage_round_mismatch",
                 reason="coverage output round must match the active retrieval round",
             )
-        validate_requirement_coverage(
-            batch=compiled,
-            requirements=requirements,
-            entries=provisional_entries,
-        )
+        try:
+            validate_requirement_coverage(
+                batch=compiled,
+                requirements=requirements,
+                entries=provisional_entries,
+            )
+        except EvidenceOrchestrationContractError as exc:
+            if exc.code == "invalid_coverage_evidence_ref":
+                return (
+                    f"{exc}; correction=For every listed violating requirement_id, "
+                    "discard all evidence_ids from the previous row and use only "
+                    "from that requirement's nested bound_candidates. If no bound "
+                    "candidate materially supports the requirement, use missing with "
+                    "an empty evidence_ids list. Never retain an ID from another "
+                    "requirement."
+                )
+            raise
         requirement_by_id = {
             requirement.requirement_id: requirement for requirement in requirements
         }
@@ -1894,10 +1912,6 @@ def make_requirement_evidence_judge_node(
                     ),
                     ensure_ascii=False,
                 ),
-                "candidates_json": json.dumps(
-                    _judge_candidates_payload(records),
-                    ensure_ascii=False,
-                ),
                 "max_evidence_per_requirement": (
                     runtime.policy.max_evidence_per_requirement
                 ),
@@ -1925,8 +1939,9 @@ def make_requirement_evidence_judge_node(
                         "Judge every supplied requirement exactly once. "
                         "Preserve round_index on every coverage row. Every incomplete "
                         "local_and_web row must contain both new suggested queries in "
-                        "every round. Never declare resource readiness or invent "
-                        "evidence ids."
+                        "every round. Evaluate only the bound_candidates nested under "
+                        "the same requirement_id. Never declare resource readiness, "
+                        "invent evidence ids, or copy them between requirements."
                     )
                 ),
                 HumanMessage(content=prompt),

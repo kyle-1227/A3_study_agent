@@ -19,6 +19,9 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     assert "attempted query history must not suppress either field" in prompt
     assert "Before returning, self-check every row against both binding" in prompt
     assert "eligible_evidence_ids in each requirement" in prompt
+    assert "bound_candidates nested inside that same requirement group" in prompt
+    assert "no ID was copied from another requirement group" in prompt
+    assert "{candidates_json}" not in prompt
     assert "never copy an evidence_id between requirements" in prompt
     assert (
         "every selected evidence_id belongs to that row's eligible_evidence_ids"
@@ -39,7 +42,6 @@ def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
         learning_goal="Review functions",
         round_index=0,
         requirements_json="[]",
-        candidates_json="[]",
         max_evidence_per_requirement=4,
         attempted_queries_json="[]",
     )

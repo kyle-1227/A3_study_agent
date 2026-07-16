@@ -599,18 +599,93 @@ def test_judge_requirement_payload_has_exact_evidence_allowlists() -> None:
 
     assert set(payload_by_id) == {item.requirement_id for item in requirements}
     for requirement in requirements:
-        assert payload_by_id[requirement.requirement_id]["eligible_evidence_ids"] == [
+        requirement_payload = payload_by_id[requirement.requirement_id]
+        expected_evidence_ids = [
             record.evidence_id
             for record in records
             if record.requirement_id == requirement.requirement_id
         ]
+        assert requirement_payload["eligible_evidence_ids"] == expected_evidence_ids
+        bound_candidates = requirement_payload["bound_candidates"]
+        assert isinstance(bound_candidates, list)
+        assert [item["evidence_id"] for item in bound_candidates] == (
+            expected_evidence_ids
+        )
+        assert {item["requirement_id"] for item in bound_candidates} == {
+            requirement.requirement_id
+        }
         expected_shape = (
             "both" if requirement.source_policy == "local_and_web" else "local_only"
         )
-        assert (
-            payload_by_id[requirement.requirement_id]["required_incomplete_query_shape"]
-            == expected_shape
+        assert requirement_payload["required_incomplete_query_shape"] == expected_shape
+
+
+def test_coverage_binding_reask_discards_cross_requirement_references() -> None:
+    runtime = _runtime()
+    requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))
+    tasks = orchestration._build_initial_tasks(requirements, runtime)
+    records = tuple(
+        orchestration._candidate_record(
+            candidate=EvidenceCandidate(
+                evidence_id=f"raw-candidate-{index}",
+                source_type=task.source_type,
+                provider="test-provider",
+                subject=task.subject,
+                role=task.requirement_id,
+                title=f"Candidate {index}",
+                source=f"source-{index}",
+                content_preview=f"Evidence content {index}.",
+                metadata={"source_id": f"source-{index}"},
+            ),
+            original={"content": f"Original content {index}."},
+            task=task,
         )
+        for index, task in enumerate(tasks)
+    )
+    first_requirement, second_requirement = requirements[:2]
+    first_record = next(
+        record
+        for record in records
+        if record.requirement_id == first_requirement.requirement_id
+    )
+    missing_batch = _missing_coverage(
+        [requirement.model_dump(mode="json") for requirement in requirements],
+        round_index=0,
+        suffix="binding",
+    )
+    cross_bound_requirement_ids = {
+        first_requirement.requirement_id,
+        second_requirement.requirement_id,
+    }
+    coverage_rows: list[RequirementCoverage] = []
+    for row in missing_batch.coverages:
+        row_payload = row.model_dump(mode="json")
+        if row.requirement_id in cross_bound_requirement_ids:
+            row_payload["coverage_state"] = "partial"
+            row_payload["evidence_ids"] = [first_record.evidence_id]
+        coverage_rows.append(RequirementCoverage.model_validate(row_payload))
+    batch = RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=0,
+        coverages=coverage_rows,
+    )
+
+    error = orchestration._coverage_business_validation(
+        batch,
+        round_index=0,
+        max_evidence_per_requirement=runtime.policy.max_evidence_per_requirement,
+        requirements=requirements,
+        provisional_entries=tuple(
+            orchestration._ledger_entry(record, accepted=True) for record in records
+        ),
+        attempted_tasks=tasks,
+        outcomes=(),
+    )
+
+    assert "invalid_coverage_evidence_ref" in error
+    assert "discard all evidence_ids from the previous row" in error
+    assert "nested bound_candidates" in error
+    assert "Never retain an ID from another requirement" in error
 
 
 def test_required_incomplete_query_shape_is_explicit_for_every_policy() -> None:
