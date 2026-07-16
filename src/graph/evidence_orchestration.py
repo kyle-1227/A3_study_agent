@@ -1727,7 +1727,7 @@ def _coverage_business_validation(
                 if not valid_staged_query:
                     raise EvidenceOrchestrationRuntimeError(
                         code="staged_gap_query_invalid",
-                        reason=reason,
+                        reason=(f"{reason}; requirement_id={coverage.requirement_id}"),
                     )
             for source_type, query in (
                 ("local_rag", coverage.suggested_local_query),

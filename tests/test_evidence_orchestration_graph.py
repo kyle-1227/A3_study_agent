@@ -386,6 +386,67 @@ def test_coverage_business_validation_rejects_evidence_over_limit() -> None:
     assert "max_evidence_per_requirement" in error
 
 
+def test_staged_coverage_error_identifies_requirement_without_query_text() -> None:
+    runtime = _runtime()
+    need = next(
+        item
+        for item in runtime.profiles.profile_for("review_doc").needs
+        if item.source_policy == "local_then_web_on_gap"
+    )
+    requirement = compile_evidence_requirement_batch(
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=[
+                EvidenceRequirementDraft(
+                    resource_type="review_doc",
+                    subject="math",
+                    topic_id="functions",
+                    profile_need_id=need.need_id,
+                    evidence_kind=need.evidence_kind,
+                    scope=need.scope,
+                    criticality=need.criticality,
+                    source_policy=need.source_policy,
+                    acceptance_criteria=need.acceptance_criteria,
+                    query_intent="math authoritative concepts",
+                )
+            ],
+        )
+    )[0]
+    secret_query = "private staged web query"
+    batch = RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=0,
+        coverages=[
+            RequirementCoverage(
+                requirement_id=requirement.requirement_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                round_index=0,
+                coverage_state="missing",
+                evidence_ids=[],
+                confidence=0.0,
+                reason="The staged evidence is incomplete.",
+                suggested_local_query="",
+                suggested_web_query=secret_query,
+            )
+        ],
+    )
+
+    error = orchestration._coverage_business_validation(
+        batch,
+        round_index=0,
+        max_evidence_per_requirement=runtime.policy.max_evidence_per_requirement,
+        requirements=(requirement,),
+        provisional_entries=(),
+        attempted_tasks=(),
+        outcomes=(),
+    )
+
+    assert "staged_gap_query_invalid" in error
+    assert f"requirement_id={requirement.requirement_id}" in error
+    assert secret_query not in error
+
+
 def test_coverage_validation_reports_all_repeated_query_bindings() -> None:
     runtime = _runtime()
     requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))

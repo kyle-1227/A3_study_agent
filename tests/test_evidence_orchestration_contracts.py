@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from src.config._rag_config import RagConfigValidationError
 from src.config.evidence_orchestration_config import (
+    EvidenceSourcePolicy,
     load_evidence_orchestration_config,
     load_resource_evidence_profiles,
 )
@@ -21,6 +22,7 @@ from src.config.evidence_orchestration_contracts import (
     EvidenceRequirementDraftBatch,
     RequirementCoverage,
     RequirementCoverageBatch,
+    RequirementCoverageValidationError,
     RetrievalTaskValidationError,
     build_retrieval_task,
     compile_evidence_requirement_batch,
@@ -61,6 +63,33 @@ def _quiz_requirements():
         ],
     )
     return profiles, compile_evidence_requirement_batch(batch)
+
+
+def _requirements_for_source_policies(
+    *source_policies: EvidenceSourcePolicy,
+):
+    return compile_evidence_requirement_batch(
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=[
+                EvidenceRequirementDraft(
+                    resource_type="quiz",
+                    subject="math",
+                    topic_id=f"math.policy_{index}",
+                    profile_need_id=f"policy_need_{index}",
+                    evidence_kind=f"policy_evidence_{index}",
+                    scope="per_subject",
+                    criticality="required",
+                    source_policy=source_policy,
+                    acceptance_criteria=(
+                        f"Supports the explicit source policy for requirement {index}."
+                    ),
+                    query_intent=f"math policy evidence {index}",
+                )
+                for index, source_policy in enumerate(source_policies)
+            ],
+        )
+    )
 
 
 def test_strict_configs_load_complete_explicit_inventory():
@@ -487,3 +516,103 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
         "blocked_insufficient_evidence",
     ]
     assert [item.resource_type for item in assignments] == ["quiz"]
+
+
+def test_coverage_reports_all_dual_source_query_shape_violations() -> None:
+    requirements = _requirements_for_source_policies(
+        "local_and_web",
+        "local_and_web",
+    )
+    secret_queries = ("private local alpha", "private web beta")
+    batch = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=requirements[0].requirement_id,
+                    resource_type="quiz",
+                    subject="math",
+                    round_index=0,
+                    coverage_state="missing",
+                    evidence_ids=[],
+                    confidence=0.0,
+                    reason="The dual-source evidence is incomplete.",
+                    suggested_local_query=secret_queries[0],
+                    suggested_web_query="",
+                ),
+                RequirementCoverage(
+                    requirement_id=requirements[1].requirement_id,
+                    resource_type="quiz",
+                    subject="math",
+                    round_index=0,
+                    coverage_state="missing",
+                    evidence_ids=[],
+                    confidence=0.0,
+                    reason="The dual-source evidence is incomplete.",
+                    suggested_local_query="",
+                    suggested_web_query=secret_queries[1],
+                ),
+            ],
+        )
+    )
+
+    with pytest.raises(RequirementCoverageValidationError) as exc_info:
+        validate_requirement_coverage(
+            batch=batch,
+            requirements=requirements,
+            entries=(),
+        )
+
+    assert exc_info.value.code == "invalid_dual_source_gap_query"
+    assert exc_info.value.reason.count("source_policy=local_and_web") == 2
+    assert "actual_shape=local_only" in exc_info.value.reason
+    assert "actual_shape=web_only" in exc_info.value.reason
+    ordered_ids = sorted(item.requirement_id for item in requirements)
+    assert exc_info.value.reason.index(ordered_ids[0]) < exc_info.value.reason.index(
+        ordered_ids[1]
+    )
+    assert all(query not in str(exc_info.value) for query in secret_queries)
+
+
+def test_coverage_uses_matrix_code_for_mixed_query_shape_violations() -> None:
+    requirements = _requirements_for_source_policies("local_only", "web_only")
+    secret_queries = (
+        "private mixed local alpha",
+        "private mixed web alpha",
+        "private mixed local beta",
+        "private mixed web beta",
+    )
+    batch = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=requirement.requirement_id,
+                    resource_type="quiz",
+                    subject="math",
+                    round_index=0,
+                    coverage_state="missing",
+                    evidence_ids=[],
+                    confidence=0.0,
+                    reason="The source-specific evidence is incomplete.",
+                    suggested_local_query=secret_queries[index * 2],
+                    suggested_web_query=secret_queries[index * 2 + 1],
+                )
+                for index, requirement in enumerate(requirements)
+            ],
+        )
+    )
+
+    with pytest.raises(RequirementCoverageValidationError) as exc_info:
+        validate_requirement_coverage(
+            batch=batch,
+            requirements=requirements,
+            entries=(),
+        )
+
+    assert exc_info.value.code == "invalid_source_gap_query_matrix"
+    assert "source_policy=local_only,actual_shape=both" in exc_info.value.reason
+    assert "source_policy=web_only,actual_shape=both" in exc_info.value.reason
+    assert all(query not in str(exc_info.value) for query in secret_queries)

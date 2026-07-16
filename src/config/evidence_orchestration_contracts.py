@@ -1072,6 +1072,7 @@ def validate_requirement_coverage(
             reason="coverage batch must contain exactly one row per requirement",
         )
     accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
+    query_shape_violations: list[tuple[str, str, str, str]] = []
     for requirement_id, coverage in coverage_by_id.items():
         requirement = requirement_by_id[requirement_id]
         if (
@@ -1093,30 +1094,59 @@ def validate_requirement_coverage(
         has_web = bool(coverage.suggested_web_query)
         if coverage.coverage_state == "complete":
             continue
+        actual_shape = (
+            "both"
+            if has_local and has_web
+            else "local_only"
+            if has_local
+            else "web_only"
+            if has_web
+            else "none"
+        )
+        violation_code = ""
         if requirement.source_policy == "local_only" and (not has_local or has_web):
-            raise RequirementCoverageValidationError(
-                code="invalid_local_only_gap_query",
-                reason="local_only gap must suggest only a local query",
-            )
+            violation_code = "invalid_local_only_gap_query"
         if requirement.source_policy == "web_only" and (has_local or not has_web):
-            raise RequirementCoverageValidationError(
-                code="invalid_web_only_gap_query",
-                reason="web_only gap must suggest only a web query",
-            )
+            violation_code = "invalid_web_only_gap_query"
         if requirement.source_policy == "local_and_web" and (
             not has_local or not has_web
         ):
-            raise RequirementCoverageValidationError(
-                code="invalid_dual_source_gap_query",
-                reason="local_and_web gap must suggest both source queries",
-            )
+            violation_code = "invalid_dual_source_gap_query"
         if requirement.source_policy == "local_then_web_on_gap" and (
             not has_local and not has_web
         ):
-            raise RequirementCoverageValidationError(
-                code="invalid_staged_source_gap_query",
-                reason="local_then_web_on_gap must suggest an eligible next query",
+            violation_code = "invalid_staged_source_gap_query"
+        if violation_code:
+            query_shape_violations.append(
+                (
+                    requirement_id,
+                    requirement.source_policy,
+                    actual_shape,
+                    violation_code,
+                )
             )
+    if query_shape_violations:
+        ordered_violations = sorted(query_shape_violations)
+        violation_codes = {item[3] for item in ordered_violations}
+        error_code = (
+            next(iter(violation_codes))
+            if len(violation_codes) == 1
+            else "invalid_source_gap_query_matrix"
+        )
+        violation_details = "; ".join(
+            (
+                f"requirement_id={requirement_id},"
+                f"source_policy={source_policy},actual_shape={actual_shape}"
+            )
+            for requirement_id, source_policy, actual_shape, _code in ordered_violations
+        )
+        raise RequirementCoverageValidationError(
+            code=error_code,
+            reason=(
+                "coverage gap query shapes violate their source policies; "
+                f"violations=[{violation_details}]"
+            ),
+        )
 
 
 def derive_resource_readiness(
