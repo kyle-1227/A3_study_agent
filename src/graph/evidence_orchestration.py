@@ -26,6 +26,7 @@ from pydantic import (
 from src.config import load_prompt
 from src.config.evidence_orchestration_config import (
     EvidenceOrchestrationConfig,
+    EvidenceSourcePolicy,
     ResourceEvidenceProfilesConfig,
 )
 from src.config.evidence_orchestration_contracts import (
@@ -1657,6 +1658,7 @@ def _judge_candidates_payload(
 def _judge_requirements_payload(
     requirements: Sequence[EvidenceRequirement],
     records: Sequence[EvidenceCandidateRecord],
+    attempted_tasks: Sequence[RetrievalTask],
 ) -> list[dict[str, object]]:
     requirement_ids = {item.requirement_id for item in requirements}
     unknown_bindings = sorted(
@@ -1667,9 +1669,18 @@ def _judge_requirements_payload(
             code="judge_candidate_requirement_binding_invalid",
             reason="judge candidates must bind the active requirement inventory",
         )
+    local_attempted_ids = {
+        task.requirement_id
+        for task in attempted_tasks
+        if task.source_type == "local_rag"
+    }
     return [
         {
             **requirement.model_dump(mode="json"),
+            "required_incomplete_query_shape": _required_incomplete_query_shape(
+                source_policy=requirement.source_policy,
+                local_attempted=requirement.requirement_id in local_attempted_ids,
+            ),
             "eligible_evidence_ids": [
                 record.evidence_id
                 for record in records
@@ -1678,6 +1689,25 @@ def _judge_requirements_payload(
         }
         for requirement in requirements
     ]
+
+
+def _required_incomplete_query_shape(
+    *,
+    source_policy: EvidenceSourcePolicy,
+    local_attempted: bool,
+) -> Literal["local_only", "web_only", "both"]:
+    if source_policy == "local_only":
+        return "local_only"
+    if source_policy == "web_only":
+        return "web_only"
+    if source_policy == "local_and_web":
+        return "both"
+    if source_policy == "local_then_web_on_gap":
+        return "web_only" if local_attempted else "local_only"
+    raise EvidenceOrchestrationRuntimeError(
+        code="unsupported_requirement_source_policy",
+        reason="judge requirement has an unsupported source policy",
+    )
 
 
 def _coverage_business_validation(
@@ -1857,7 +1887,11 @@ def make_requirement_evidence_judge_node(
                 "learning_goal": str(state.get("learning_goal") or "").strip(),
                 "round_index": round_index,
                 "requirements_json": json.dumps(
-                    _judge_requirements_payload(requirements, records),
+                    _judge_requirements_payload(
+                        requirements,
+                        records,
+                        attempted_tasks,
+                    ),
                     ensure_ascii=False,
                 ),
                 "candidates_json": json.dumps(
@@ -1889,7 +1923,10 @@ def make_requirement_evidence_judge_node(
                 SystemMessage(
                     content=(
                         "Judge every supplied requirement exactly once. "
-                        "Never declare resource readiness or invent evidence ids."
+                        "Preserve round_index on every coverage row. Every incomplete "
+                        "local_and_web row must contain both new suggested queries in "
+                        "every round. Never declare resource readiness or invent "
+                        "evidence ids."
                     )
                 ),
                 HumanMessage(content=prompt),

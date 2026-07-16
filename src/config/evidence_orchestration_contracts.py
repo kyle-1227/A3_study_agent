@@ -1073,7 +1073,7 @@ def validate_requirement_coverage(
         )
     accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
     evidence_ref_violations: list[tuple[str, int, int]] = []
-    query_shape_violations: list[tuple[str, str, str, str]] = []
+    query_shape_violations: list[tuple[str, str, str, str, str]] = []
     for requirement_id, coverage in coverage_by_id.items():
         requirement = requirement_by_id[requirement_id]
         if (
@@ -1114,24 +1114,30 @@ def validate_requirement_coverage(
             else "none"
         )
         violation_code = ""
+        required_shape = ""
         if requirement.source_policy == "local_only" and (not has_local or has_web):
             violation_code = "invalid_local_only_gap_query"
+            required_shape = "local_only"
         if requirement.source_policy == "web_only" and (has_local or not has_web):
             violation_code = "invalid_web_only_gap_query"
+            required_shape = "web_only"
         if requirement.source_policy == "local_and_web" and (
             not has_local or not has_web
         ):
             violation_code = "invalid_dual_source_gap_query"
+            required_shape = "both"
         if requirement.source_policy == "local_then_web_on_gap" and (
             not has_local and not has_web
         ):
             violation_code = "invalid_staged_source_gap_query"
+            required_shape = "eligible_next_source_only"
         if violation_code:
             query_shape_violations.append(
                 (
                     requirement_id,
                     requirement.source_policy,
                     actual_shape,
+                    required_shape,
                     violation_code,
                 )
             )
@@ -1139,9 +1145,10 @@ def validate_requirement_coverage(
     query_shape_details = "; ".join(
         (
             f"requirement_id={requirement_id},"
-            f"source_policy={source_policy},actual_shape={actual_shape}"
+            f"source_policy={source_policy},actual_shape={actual_shape},"
+            f"required_shape={required_shape}"
         )
-        for requirement_id, source_policy, actual_shape, _code in (
+        for requirement_id, source_policy, actual_shape, required_shape, _code in (
             ordered_query_shape_violations
         )
     )
@@ -1167,7 +1174,7 @@ def validate_requirement_coverage(
             reason=reason,
         )
     if ordered_query_shape_violations:
-        violation_codes = {item[3] for item in ordered_query_shape_violations}
+        violation_codes = {item[4] for item in ordered_query_shape_violations}
         error_code = (
             next(iter(violation_codes))
             if len(violation_codes) == 1

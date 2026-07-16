@@ -568,6 +568,7 @@ def test_coverage_reports_all_dual_source_query_shape_violations() -> None:
     assert exc_info.value.reason.count("source_policy=local_and_web") == 2
     assert "actual_shape=local_only" in exc_info.value.reason
     assert "actual_shape=web_only" in exc_info.value.reason
+    assert exc_info.value.reason.count("required_shape=both") == 2
     ordered_ids = sorted(item.requirement_id for item in requirements)
     assert exc_info.value.reason.index(ordered_ids[0]) < exc_info.value.reason.index(
         ordered_ids[1]
@@ -615,6 +616,8 @@ def test_coverage_uses_matrix_code_for_mixed_query_shape_violations() -> None:
     assert exc_info.value.code == "invalid_source_gap_query_matrix"
     assert "source_policy=local_only,actual_shape=both" in exc_info.value.reason
     assert "source_policy=web_only,actual_shape=both" in exc_info.value.reason
+    assert "required_shape=local_only" in exc_info.value.reason
+    assert "required_shape=web_only" in exc_info.value.reason
     assert all(query not in str(exc_info.value) for query in secret_queries)
 
 

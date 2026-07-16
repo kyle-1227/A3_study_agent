@@ -594,7 +594,7 @@ def test_judge_requirement_payload_has_exact_evidence_allowlists() -> None:
         for index, task in enumerate(tasks)
     )
 
-    payload = orchestration._judge_requirements_payload(requirements, records)
+    payload = orchestration._judge_requirements_payload(requirements, records, tasks)
     payload_by_id = {str(item["requirement_id"]): item for item in payload}
 
     assert set(payload_by_id) == {item.requirement_id for item in requirements}
@@ -604,6 +604,51 @@ def test_judge_requirement_payload_has_exact_evidence_allowlists() -> None:
             for record in records
             if record.requirement_id == requirement.requirement_id
         ]
+        expected_shape = (
+            "both" if requirement.source_policy == "local_and_web" else "local_only"
+        )
+        assert (
+            payload_by_id[requirement.requirement_id]["required_incomplete_query_shape"]
+            == expected_shape
+        )
+
+
+def test_required_incomplete_query_shape_is_explicit_for_every_policy() -> None:
+    assert (
+        orchestration._required_incomplete_query_shape(
+            source_policy="local_only",
+            local_attempted=False,
+        )
+        == "local_only"
+    )
+    assert (
+        orchestration._required_incomplete_query_shape(
+            source_policy="web_only",
+            local_attempted=False,
+        )
+        == "web_only"
+    )
+    assert (
+        orchestration._required_incomplete_query_shape(
+            source_policy="local_and_web",
+            local_attempted=True,
+        )
+        == "both"
+    )
+    assert (
+        orchestration._required_incomplete_query_shape(
+            source_policy="local_then_web_on_gap",
+            local_attempted=False,
+        )
+        == "local_only"
+    )
+    assert (
+        orchestration._required_incomplete_query_shape(
+            source_policy="local_then_web_on_gap",
+            local_attempted=True,
+        )
+        == "web_only"
+    )
 
 
 def test_joint_candidate_graph_is_explicit_and_legacy_served_graph_is_unchanged():

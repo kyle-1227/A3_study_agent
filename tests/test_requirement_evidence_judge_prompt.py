@@ -24,6 +24,11 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
         "every selected evidence_id belongs to that row's eligible_evidence_ids"
         in prompt
     )
+    assert (
+        "Copy round_index into every row; never omit it during a correction" in prompt
+    )
+    assert "required_incomplete_query_shape attached to every requirement" in prompt
+    assert "This requirement applies again in every supplement round" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:

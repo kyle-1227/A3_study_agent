@@ -17,7 +17,7 @@ Evidence requirements:
 Requirement-bound candidates:
 {candidates_json}
 
-Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. Treat eligible_evidence_ids in each requirement as the complete allowlist for that coverage row. Every evidence_id in a partial or complete row must be a subset of that same requirement's eligible_evidence_ids; never copy an evidence_id between requirements and never invent one. Each coverage row may select at most {max_evidence_per_requirement} evidence_ids. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
+Return exactly one requirement_coverage_batch_v1 object with exactly one coverage row for every requirement_id. Copy round_index into every row; never omit it during a correction. Treat eligible_evidence_ids in each requirement as the complete allowlist for that coverage row. Every evidence_id in a partial or complete row must be a subset of that same requirement's eligible_evidence_ids; never copy an evidence_id between requirements and never invent one. Each coverage row may select at most {max_evidence_per_requirement} evidence_ids. Use complete only when the cited evidence fully meets the acceptance criteria; use partial for useful but incomplete evidence; use missing when no candidate materially supports the requirement. Missing rows must use an empty evidence_ids list. Never declare resource readiness; readiness is derived by code.
 
 Set suggested_local_query and suggested_web_query with this exact matrix:
 - complete: both fields must be the empty string.
@@ -25,6 +25,8 @@ Set suggested_local_query and suggested_web_query with this exact matrix:
 - partial or missing with web_only: suggested_local_query must be the empty string and suggested_web_query must be non-empty.
 - partial or missing with local_and_web: both fields must be non-empty.
 - partial or missing with local_then_web_on_gap: inspect attempted_queries_json for the same requirement_id. If no local_rag attempt exists, suggested_local_query must be non-empty and suggested_web_query must be the empty string. If a local_rag attempt exists, suggested_local_query must be the empty string and suggested_web_query must be non-empty. Never populate both fields for local_then_web_on_gap.
+
+The required_incomplete_query_shape attached to every requirement is the authoritative per-row projection of this matrix for the current round. For every partial or missing row, match it exactly: local_only means only suggested_local_query, web_only means only suggested_web_query, and both means two non-empty queries. This requirement applies again in every supplement round.
 
 The local_and_web rule is never staged: attempted query history must not suppress either field. Every partial or missing local_and_web row must contain two non-empty, new source-bound queries even when local_rag and/or web attempts already exist. Apply the local_then_web_on_gap staging rule only to requirements whose source_policy is exactly local_then_web_on_gap.
 
