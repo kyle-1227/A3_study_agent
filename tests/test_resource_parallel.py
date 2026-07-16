@@ -1378,6 +1378,53 @@ async def test_resource_worker_failure_is_captured(monkeypatch):
     assert "quiz failed" in branch["error_message_sanitized"]
 
 
+async def test_empty_timeout_error_builds_typed_failed_resource_final(monkeypatch):
+    async def timed_out_runner(_local_state):
+        raise TimeoutError()
+
+    monkeypatch.setitem(rg.RESOURCE_RUNNERS, "review_doc", timed_out_runner)
+
+    worker_result = await resource_worker(
+        {
+            "messages": [HumanMessage(content="make a review document")],
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "resource_task": {
+                "task_id": "resource:review_doc",
+                "resource_type": "review_doc",
+            },
+        }
+    )
+
+    branch = worker_result["resource_branch_results"][0]
+    assert branch["status"] == "failed"
+    assert branch["error_type"] == "TimeoutError"
+    assert branch["error_message_sanitized"] == (
+        "Resource generation failed with TimeoutError."
+    )
+
+    final = await resource_bundle_output(
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "requested_resource_types": ["review_doc"],
+            "resource_generation_debug": {"stages": []},
+            "resource_branch_results": [branch],
+        }
+    )
+
+    assert final["resource_generation_status"] == "failed"
+    assert final["resource_final_v3"]["terminal_status"] == "failed"
+    assert final["resource_final_v3"]["errors"] == [
+        {
+            "resource_type": "review_doc",
+            "error_code": "review_doc.generation_failed",
+            "error_type": "TimeoutError",
+            "message_sanitized": "Resource generation failed with TimeoutError.",
+        }
+    ]
+
+
 async def test_study_plan_worker_fails_if_profile_gate_was_bypassed(monkeypatch):
     async def fake_study_plan_runner(_local_state):
         raise AssertionError("runner must not be called")

@@ -1105,6 +1105,13 @@ def _success_result(
 
 
 def _failed_result(resource_type: str, exc: BaseException, elapsed_ms: int) -> dict:
+    error_type = type(exc).__name__
+    error_message_sanitized = sanitize_error_message(str(exc), max_chars=1200)
+    if not error_message_sanitized:
+        # Standard exceptions such as TimeoutError may have no message. Preserve
+        # the typed failure without inventing provider details or emitting an
+        # invalid blank ResourceFinalV3 error.
+        error_message_sanitized = f"Resource generation failed with {error_type}."
     return {
         "resource_type": resource_type,
         "status": "failed",
@@ -1114,9 +1121,9 @@ def _failed_result(resource_type: str, exc: BaseException, elapsed_ms: int) -> d
         "state_updates": {},
         "message_content": "",
         "message_preview": "",
-        "error_type": type(exc).__name__,
+        "error_type": error_type,
         "error_code": f"{resource_type}.generation_failed",
-        "error_message_sanitized": sanitize_error_message(str(exc), max_chars=1200),
+        "error_message_sanitized": error_message_sanitized,
         "elapsed_ms": elapsed_ms,
         "validation": None,
     }
