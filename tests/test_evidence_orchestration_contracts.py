@@ -99,6 +99,7 @@ def test_strict_configs_load_complete_explicit_inventory():
     assert policy.max_supplement_rounds == 2
     assert policy.max_search_tasks_per_round == 6
     assert policy.max_total_search_tasks == 18
+    assert policy.max_concurrent_tasks == 1
     assert policy.web_timeout_seconds == 120.0
     assert policy.required_task_priority == "high"
     assert policy.supporting_task_priority == "medium"

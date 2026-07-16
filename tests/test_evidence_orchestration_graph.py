@@ -1366,6 +1366,49 @@ def test_direct_web_execution_distinguishes_empty_from_provider_failure(
         )
 
 
+def test_direct_web_execution_honors_single_task_concurrency(monkeypatch) -> None:
+    tasks = [
+        WebResearchTask(
+            task_id=f"task-web-{index}",
+            subject="math",
+            role=f"requirement_math_{index}",
+            purpose="Find exact evidence.",
+            search_query=f"math official evidence {index}",
+            reason="The requirement needs current evidence.",
+            priority=1.0,
+        )
+        for index in range(3)
+    ]
+    active_count = 0
+    peak_active_count = 0
+
+    async def observed_executor(**_kwargs):
+        nonlocal active_count, peak_active_count
+        active_count += 1
+        peak_active_count = max(peak_active_count, active_count)
+        try:
+            await asyncio.sleep(0.01)
+            return [], [{"status": "failed", "error_type": None}]
+        finally:
+            active_count -= 1
+
+    monkeypatch.setattr(academic, "_execute_web_research_tasks", observed_executor)
+
+    result = asyncio.run(
+        academic.execute_validated_web_research_tasks(
+            state={},
+            tasks=tasks,
+            original_user_query="math evidence",
+            timeout=5.0,
+            max_results_per_task=3,
+            max_concurrent_tasks=1,
+        )
+    )
+
+    assert result["status"] == "empty"
+    assert peak_active_count == 1
+
+
 @pytest.mark.parametrize(
     ("factory", "reason_code", "source"),
     [

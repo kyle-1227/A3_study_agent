@@ -2,7 +2,7 @@ schema_version: evidence_orchestration_config_v1
 max_supplement_rounds: 2
 max_search_tasks_per_round: 6
 max_total_search_tasks: 18
-max_concurrent_tasks: 4
+max_concurrent_tasks: 1
 max_results_per_task: 3
 max_requirements_per_request: 12
 max_ledger_entries: 54
