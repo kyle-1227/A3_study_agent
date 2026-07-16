@@ -108,7 +108,7 @@ def test_review_doc_runtime_configuration_is_explicit() -> None:
     assert config["provider"] == "deepseek_official"
     assert config["model"] == "deepseek-v4-pro"
     assert config["temperature"] == 0.2
-    assert config["timeout_seconds"] == 90
+    assert config["timeout_seconds"] == 180
     assert config["max_generation_rounds"] == 3
 
 
