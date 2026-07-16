@@ -49,13 +49,13 @@ profiles:
         scope: per_subject
         criticality: required
         source_policy: local_then_web_on_gap
-        acceptance_criteria: Supports the exact language, library, or interface semantics exercised by the task.
+        acceptance_criteria: At least one accepted source explicitly supports each central language, library, or interface operation retained in the exercise; unsupported operations must be omitted.
       - need_id: executable_patterns
         evidence_kind: implementation_patterns
         scope: per_subject
         criticality: required
         source_policy: local_and_web
-        acceptance_criteria: Provides technically compatible implementation patterns and constraints for a verifiable solution.
+        acceptance_criteria: At least one accepted source provides a technically compatible implementation pattern for a verifiable solution; the exercise scope must be constrained to that supported pattern.
   - resource_type: video_script
     needs:
       - need_id: narrative_facts

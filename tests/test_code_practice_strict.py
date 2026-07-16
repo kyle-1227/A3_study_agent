@@ -143,9 +143,9 @@ def test_code_practice_runtime_configuration_is_explicit() -> None:
         "api_key_env": "DEEPSEEK_API_KEY",
         "temperature": 0.2,
         "max_generation_rounds": 2,
-        "max_tokens": 4096,
+        "max_tokens": 3072,
         "thinking": "disabled",
-        "streaming": False,
+        "streaming": True,
     }
     assert settings["llm_outputs"]["code_practice_reviewer"]["output_mode"] == (
         "deepseek_tool_call_strict"
