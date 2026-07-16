@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -66,13 +66,39 @@ class AnimationArrowElementV1(_StrictContract):
     text: str = Field(min_length=1, max_length=160)
 
 
-AnimationElementV1 = Annotated[
-    AnimationBoxElementV1
-    | AnimationTextElementV1
-    | AnimationCircleElementV1
-    | AnimationArrowElementV1,
-    Field(discriminator="type"),
-]
+class AnimationElementV1(_StrictContract):
+    """DeepSeek-compatible uniform element with explicit type-specific fields."""
+
+    type: Literal["box", "text", "circle", "arrow"]
+    text: str = Field(max_length=240)
+    x: float = Field(ge=0, le=1200)
+    y: float = Field(ge=0, le=650)
+    width: float = Field(ge=40, le=520)
+    height: float = Field(ge=30, le=240)
+    source: str = Field(max_length=120)
+    target: str = Field(max_length=120)
+
+    @model_validator(mode="after")
+    def validate_type_fields(self) -> AnimationElementV1:
+        if not self.text.strip() or self.text != self.text.strip():
+            raise ValueError("animation element text must be non-blank and stripped")
+        if self.type == "arrow":
+            if (
+                not self.source.strip()
+                or not self.target.strip()
+                or self.source != self.source.strip()
+                or self.target != self.target.strip()
+            ):
+                raise ValueError(
+                    "arrow source and target must be non-blank and stripped"
+                )
+            if self.source == self.target:
+                raise ValueError("arrow source and target must differ")
+        elif self.source or self.target:
+            raise ValueError(
+                "box, text, and circle elements require empty source and target"
+            )
+        return self
 
 
 class AnimationResolutionV1(_StrictContract):
@@ -137,6 +163,17 @@ def validate_video_animation_spec(parsed: BaseModel) -> str:
                 f"scene {index + 1} animation_steps must contain every required step "
                 "exactly once"
             )
+        node_labels = {
+            element.text for element in scene.elements if element.type != "arrow"
+        }
+        for element in scene.elements:
+            if element.type != "arrow":
+                continue
+            if element.source not in node_labels or element.target not in node_labels:
+                return (
+                    f"scene {index + 1} arrow source and target must reference "
+                    "non-arrow element text in the same scene"
+                )
         previous_end = scene.end
     return ""
 

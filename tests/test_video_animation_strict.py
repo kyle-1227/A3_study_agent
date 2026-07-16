@@ -16,13 +16,18 @@ from src.graph.video_animation import (
     VideoAnimationGenerationError,
     VideoAnimationRenderError,
     _video_animation_model_name,
+    _planner_prompt,
     should_rewrite_video_animation,
     video_animation_agent,
     video_animation_output,
     video_animation_planner,
     video_animation_reviewer,
 )
-from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
+from src.llm.structured_output import (
+    StructuredLLMResult,
+    StructuredOutputError,
+    compile_pydantic_schema_for_deepseek_tool,
+)
 from src.tools.video_animation_contracts import (
     AnimationReviewVerdictV1,
     VideoAnimationSpecV1,
@@ -62,6 +67,8 @@ def _spec_payload() -> dict:
                         "y": 180.0,
                         "width": 260.0,
                         "height": 80.0,
+                        "source": "",
+                        "target": "",
                     }
                 ],
                 "animation_steps": list(REQUIRED_STEPS),
@@ -163,6 +170,64 @@ def test_video_animation_spec_forbids_extra_and_alias_fields() -> None:
     scene["voiceover"] = scene.pop("narration")
     with pytest.raises(ValidationError):
         VideoAnimationSpecV1.model_validate(payload)
+
+
+def test_video_animation_schema_compiles_for_deepseek_without_union() -> None:
+    compiled = compile_pydantic_schema_for_deepseek_tool(VideoAnimationSpecV1)
+
+    def assert_key_absent(value: object, key: str) -> None:
+        if isinstance(value, dict):
+            assert key not in value
+            for item in value.values():
+                assert_key_absent(item, key)
+        elif isinstance(value, list):
+            for item in value:
+                assert_key_absent(item, key)
+
+    assert_key_absent(compiled, "oneOf")
+    element_schema = compiled["$defs"]["AnimationElementV1"]
+    assert set(element_schema["required"]) == set(element_schema["properties"])
+
+
+def test_video_animation_element_type_fields_are_strict() -> None:
+    missing_field = _spec_payload()
+    missing_field["scenes"][0]["elements"][0].pop("source")
+    with pytest.raises(ValidationError, match="source"):
+        VideoAnimationSpecV1.model_validate(missing_field)
+
+    invalid_node = _spec_payload()
+    invalid_node["scenes"][0]["elements"][0]["source"] = "unexpected"
+    with pytest.raises(ValidationError, match="empty source and target"):
+        VideoAnimationSpecV1.model_validate(invalid_node)
+
+    invalid_arrow = _spec_payload()
+    invalid_arrow["scenes"][0]["elements"].append(
+        {
+            "type": "arrow",
+            "text": "transition",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 40.0,
+            "height": 30.0,
+            "source": "unknown source",
+            "target": "unknown target",
+        }
+    )
+    parsed = VideoAnimationSpecV1.model_validate(invalid_arrow)
+    assert "must reference non-arrow element text" in validate_video_animation_spec(
+        parsed
+    )
+
+
+def test_video_animation_planner_prompt_explains_uniform_element_contract() -> None:
+    prompt = _planner_prompt(_state())
+
+    assert "Every element must explicitly contain type, text, x, y" in prompt
+    assert (
+        "Box/text/circle elements require non-empty text and empty source/target"
+        in prompt
+    )
+    assert "matching non-arrow element text in the same scene" in prompt
 
 
 @pytest.mark.parametrize(

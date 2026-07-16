@@ -182,8 +182,11 @@ def _planner_prompt(state: LearningState) -> str:
         f"## Existing video script\n{existing_script[:5000] if existing_script else 'None'}\n\n"
         "Use exactly 5-8 non-overlapping scenes within 90 seconds. "
         "Every scene must contain all six animation steps exactly once. "
-        "Box/text/circle elements require text, x, y, width, and height. "
-        "Arrow elements require source, target, and non-empty text."
+        "Every element must explicitly contain type, text, x, y, width, height, "
+        "source, and target. Box/text/circle elements require non-empty text and "
+        "empty source/target. Arrow elements require non-empty text plus source "
+        "and target matching non-arrow element text in the same scene; their "
+        "numeric geometry fields remain required."
     )
 
 
@@ -195,6 +198,9 @@ def _agent_prompt(state: LearningState, draft_spec: VideoAnimationSpecV1) -> str
         f"## Draft specification\n{json.dumps(_spec_payload(draft_spec), ensure_ascii=False, indent=2)}\n\n"
         f"## Existing video script\n{str(state.get('video_script_markdown') or '')[:5000] or 'None'}\n\n"
         f"## Revision notes\n{state.get('video_animation_revision_notes', '') or 'None'}"
+        "\n\nPreserve every required element field from the strict contract. "
+        "Box/text/circle source and target stay empty; arrow source and target "
+        "must match non-arrow element text in the same scene."
     )
 
 
