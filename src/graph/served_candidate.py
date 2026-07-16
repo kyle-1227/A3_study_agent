@@ -1,4 +1,4 @@
-"""Strict production assembly for the inactive Parent-Child candidate runtime."""
+"""Strict production assembly for the active Parent-Child served runtime."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from src.rag.parent_child.provider_clients import (
     StrictEmbeddingClient,
     StrictRerankerClient,
 )
-from src.rag.parent_child.registry import GenerationRegistry
+from src.rag.parent_child.registry import DeploymentSnapshot, GenerationRegistry
 from src.rag.parent_child.runtime_loader import (
     LoadedGenerationRuntime,
     load_generation_runtime,
@@ -28,16 +28,16 @@ from src.rag.parent_child.tokenizer import ConfiguredJiebaTokenizer
 
 
 class ServedCandidateRuntimeError(RuntimeError):
-    """The explicitly selected candidate cannot be safely served internally."""
+    """The explicitly selected Parent-Child generation cannot be safely served."""
 
 
 @dataclass(frozen=True, slots=True)
 class ServedCandidateRuntime:
-    """Owned candidate resources plus the graph-facing orchestration runtime."""
+    """Owned production resources plus the graph-facing orchestration runtime."""
 
     orchestration: EvidenceOrchestrationRuntime
     generation_manifest_fingerprint: str
-    candidate_mode: Literal["inactive_canary"]
+    deployment_mode: Literal["active"]
     rollout_activation_enabled: bool
     rollout_shadow_enabled: bool
     _loaded_generation: LoadedGenerationRuntime
@@ -81,6 +81,26 @@ def _runtime_index_config(
     return RagIndexConfig.model_validate(payload)
 
 
+def _validate_production_deployment(
+    *,
+    generation_id: str,
+    deployment: DeploymentSnapshot,
+) -> None:
+    """Require one active primary with no shadow or duplicate previous pointer."""
+    if deployment.primary_generation_id != generation_id:
+        raise ServedCandidateRuntimeError(
+            "served generation must match the active registry primary"
+        )
+    if deployment.shadow_generation_id is not None:
+        raise ServedCandidateRuntimeError(
+            "active production serving requires an empty shadow pointer"
+        )
+    if deployment.previous_generation_id == generation_id:
+        raise ServedCandidateRuntimeError(
+            "active and previous generation pointers must be distinct"
+        )
+
+
 def load_served_candidate_runtime(
     *,
     project_root: Path,
@@ -92,10 +112,10 @@ def load_served_candidate_runtime(
     profiles_config_path: Path,
     rollout_config_path: Path,
 ) -> ServedCandidateRuntime:
-    """Load one exact READY-but-inactive generation for the served candidate graph.
+    """Load the exact READY generation selected as the active production primary.
 
-    The generation id is a required caller input. The deployment registry remains
-    unchanged and must not already point at the candidate in any deployment slot.
+    The generation id is a required caller input. The registry must already name it
+    as primary, and no shadow pointer may exist.
     """
 
     if not isinstance(project_root, Path):
@@ -130,9 +150,9 @@ def load_served_candidate_runtime(
         raise TypeError("index_root must be an absolute Path")
 
     rollout = load_rag_rollout_config(rollout_config_path)
-    if rollout.activation_enabled is not False or rollout.shadow_enabled is not False:
+    if rollout.activation_enabled is not True or rollout.shadow_enabled is not False:
         raise ServedCandidateRuntimeError(
-            "internal candidate serving requires activation and shadow rollout disabled"
+            "production serving requires activation enabled and shadow disabled"
         )
 
     source_config = load_rag_index_config(index_config_path)
@@ -152,14 +172,10 @@ def load_served_candidate_runtime(
     )
     try:
         deployment = registry.deployment()
-        if generation_id in {
-            deployment.primary_generation_id,
-            deployment.previous_generation_id,
-            deployment.shadow_generation_id,
-        }:
-            raise ServedCandidateRuntimeError(
-                "served candidate generation must remain outside deployment pointers"
-            )
+        _validate_production_deployment(
+            generation_id=generation_id,
+            deployment=deployment,
+        )
         record = registry.get_generation(generation_id)
         if record.state != "READY" or record.manifest_sha256 is None:
             raise ServedCandidateRuntimeError(
@@ -193,7 +209,7 @@ def load_served_candidate_runtime(
         return ServedCandidateRuntime(
             orchestration=orchestration,
             generation_manifest_fingerprint=record.manifest_sha256,
-            candidate_mode="inactive_canary",
+            deployment_mode="active",
             rollout_activation_enabled=rollout.activation_enabled,
             rollout_shadow_enabled=rollout.shadow_enabled,
             _loaded_generation=loaded,

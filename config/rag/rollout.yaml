@@ -1,5 +1,5 @@
 schema_version: rag_rollout_config_v1
-activation_enabled: false
+activation_enabled: true
 shadow_enabled: false
 primary_subjects:
   - big_data

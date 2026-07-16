@@ -30,7 +30,7 @@ from src.evaluation.evidence_rollout.contracts import (
 )
 from src.graph.resource_final_v3 import validate_resource_final_v3
 from src.schemas import (
-    HealthReadyV2,
+    HealthReadyV3,
     LearningGuidanceCatalogV1,
     OnboardResultV2,
     ThreadStatusResponse,
@@ -119,9 +119,9 @@ class ProductionCanaryExpectedGenerationV1(_StrictCanaryModel):
     parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
-class ProductionCanaryServedIdentityV1(_StrictCanaryModel):
-    schema_version: Literal["production_canary_served_identity_v1"]
-    health_ready_schema_version: Literal["health_ready_v2"]
+class ProductionCanaryServedIdentityV2(_StrictCanaryModel):
+    schema_version: Literal["production_canary_served_identity_v2"]
+    health_ready_schema_version: Literal["health_ready_v3"]
     status: Literal["ready"]
     checkpointer_type: Literal["postgres"]
     graph_version: str = Field(min_length=1, max_length=160)
@@ -130,27 +130,29 @@ class ProductionCanaryServedIdentityV1(_StrictCanaryModel):
     parent_child_generation_id: str = Field(min_length=1, max_length=160)
     parent_child_generation_manifest_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_orchestration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    candidate_mode: Literal["inactive_canary"]
-    rollout_activation_enabled: bool
-    rollout_shadow_enabled: bool
+    deployment_mode: Literal["active"]
+    rollout_activation_enabled: Literal[True]
+    rollout_shadow_enabled: Literal[False]
     identity_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_identity_fingerprint(self) -> Self:
-        if self.rollout_activation_enabled or self.rollout_shadow_enabled:
-            raise ValueError("served identity requires activation and shadow disabled")
+        if not self.rollout_activation_enabled or self.rollout_shadow_enabled:
+            raise ValueError(
+                "served identity requires active production without shadow"
+            )
         payload = self.model_dump(mode="json", exclude={"identity_fingerprint"})
         if self.identity_fingerprint != canonical_sha256(payload):
             raise ValueError("served identity fingerprint does not match identity")
         return self
 
 
-class ProductionBrowserCanaryReportV2(_StrictCanaryModel):
-    schema_version: Literal["production_browser_canary_v2"]
+class ProductionBrowserCanaryReportV3(_StrictCanaryModel):
+    schema_version: Literal["production_browser_canary_v3"]
     created_at_utc: str
     dataset_id: str = Field(min_length=1, max_length=160)
     dataset_content_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    served_identity: ProductionCanaryServedIdentityV1
+    served_identity: ProductionCanaryServedIdentityV2
     canary_binding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     readiness_observation_count: Literal[2]
     smoke_authoring_only: Literal[True]
@@ -165,7 +167,7 @@ class ProductionBrowserCanaryReportV2(_StrictCanaryModel):
             raise ValueError("case_count does not match cases")
         expected = canonical_sha256(
             {
-                "schema_version": "production_canary_binding_v1",
+                "schema_version": "production_canary_binding_v2",
                 "dataset_content_fingerprint": self.dataset_content_fingerprint,
                 "served_identity_fingerprint": (
                     self.served_identity.identity_fingerprint
@@ -177,9 +179,9 @@ class ProductionBrowserCanaryReportV2(_StrictCanaryModel):
         return self
 
 
-def _served_identity(readiness: HealthReadyV2) -> ProductionCanaryServedIdentityV1:
+def _served_identity(readiness: HealthReadyV3) -> ProductionCanaryServedIdentityV2:
     payload = {
-        "schema_version": "production_canary_served_identity_v1",
+        "schema_version": "production_canary_served_identity_v2",
         "health_ready_schema_version": readiness.schema_version,
         "status": readiness.status,
         "checkpointer_type": readiness.checkpointer_type,
@@ -195,12 +197,12 @@ def _served_identity(readiness: HealthReadyV2) -> ProductionCanaryServedIdentity
         "evidence_orchestration_fingerprint": (
             readiness.evidence_orchestration_fingerprint
         ),
-        "candidate_mode": readiness.candidate_mode,
+        "deployment_mode": readiness.deployment_mode,
         "rollout_activation_enabled": readiness.rollout_activation_enabled,
         "rollout_shadow_enabled": readiness.rollout_shadow_enabled,
     }
-    return ProductionCanaryServedIdentityV1(
-        schema_version="production_canary_served_identity_v1",
+    return ProductionCanaryServedIdentityV2(
+        schema_version="production_canary_served_identity_v2",
         health_ready_schema_version=readiness.schema_version,
         status=readiness.status,
         checkpointer_type=readiness.checkpointer_type,
@@ -216,7 +218,7 @@ def _served_identity(readiness: HealthReadyV2) -> ProductionCanaryServedIdentity
         evidence_orchestration_fingerprint=(
             readiness.evidence_orchestration_fingerprint
         ),
-        candidate_mode=readiness.candidate_mode,
+        deployment_mode=readiness.deployment_mode,
         rollout_activation_enabled=readiness.rollout_activation_enabled,
         rollout_shadow_enabled=readiness.rollout_shadow_enabled,
         identity_fingerprint=canonical_sha256(payload),
@@ -230,17 +232,17 @@ async def _fetch_served_identity(
     expected_generation: ProductionCanaryExpectedGenerationV1,
     expected_knowledge_graph_data_version: str,
     expected_knowledge_graph_artifact_fingerprint: str,
-) -> ProductionCanaryServedIdentityV1:
+) -> ProductionCanaryServedIdentityV2:
     try:
         response = await client.get(f"{backend_url}/health/ready")
         response.raise_for_status()
     except httpx.HTTPError:
         raise ProductionCanaryError("health readiness request failed") from None
     try:
-        readiness = HealthReadyV2.model_validate_json(response.content, strict=True)
+        readiness = HealthReadyV3.model_validate_json(response.content, strict=True)
     except (TypeError, ValueError, ValidationError):
         raise ProductionCanaryError(
-            "health readiness violates health_ready_v2"
+            "health readiness violates health_ready_v3"
         ) from None
     if (
         readiness.parent_child_generation_id
@@ -269,8 +271,8 @@ async def _fetch_served_identity(
 
 
 def _require_stable_served_identity(
-    before: ProductionCanaryServedIdentityV1,
-    after: ProductionCanaryServedIdentityV1,
+    before: ProductionCanaryServedIdentityV2,
+    after: ProductionCanaryServedIdentityV2,
 ) -> None:
     if before != after:
         raise ProductionCanaryError(
@@ -1023,15 +1025,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     canary_binding_fingerprint = canonical_sha256(
         {
-            "schema_version": "production_canary_binding_v1",
+            "schema_version": "production_canary_binding_v2",
             "dataset_content_fingerprint": dataset_content_fingerprint,
             "served_identity_fingerprint": served_identity.identity_fingerprint,
         }
     )
     if len(results) != len(dataset.cases):
         raise ProductionCanaryError("production browser canary cases are incomplete")
-    validated_report = ProductionBrowserCanaryReportV2(
-        schema_version="production_browser_canary_v2",
+    validated_report = ProductionBrowserCanaryReportV3(
+        schema_version="production_browser_canary_v3",
         created_at_utc=datetime.now(UTC).isoformat(),
         dataset_id=dataset.dataset_id,
         dataset_content_fingerprint=dataset_content_fingerprint,

@@ -25,7 +25,7 @@ builds while readiness is blocked.
 - Local build commands may use the ignored generated
   `config/rag/index.runtime.yaml`. Clean-checkout read-only validation of
   generation 55 must instead use the tracked, secret-free
-  `config/rag/index.production-candidate.inactive.yaml`. It is the OCR-aware,
+  `config/rag/index.production.yaml`. It is the OCR-aware,
   `reranker_top_n=20` identity sealed with generation 55. The tracked
   `config/rag/index.runtime.rerank80.yaml` is diagnostic-only and must never be
   supplied to a deployment.
@@ -58,7 +58,7 @@ $queryArgs = foreach ($id in @(
 
 python scripts/diagnose_parent_child_regressions.py `
   --project-root . `
-  --index-config config/rag/index.production-candidate.inactive.yaml `
+  --index-config config/rag/index.production.yaml `
   --gold-dataset data/evaluation/gold_dataset_v2.json `
   --candidate-generation-id pc_20260715_98336c2_55 `
   --reranker-top-n 20 `
@@ -87,38 +87,24 @@ authoring checkpoint.
 
 ## Generated portable runtime configuration
 
-### Clean Docker deployment preflight for the inactive Candidate
+### Active Docker production preflight
 
-`Dockerfile` copies the tracked inactive config into `/app/config/rag/`, so a
-clean image does not depend on an ignored workstation file. The config does
-not contain API-key values and does not resolve an active pointer. It also does
-not package the large sealed generation. Before `docker compose up --build
---wait`, the deployment owner must provide the canonical registry and
-generation through explicit read-only mounts or an image stage, provide a
-separate writable marker-owned `indexes/parent_child/.runtime_chroma` location,
-and verify all of the following against generation
-`pc_20260715_98336c2_55`:
+`Dockerfile` copies `config/rag/index.production.yaml`; it contains secret names,
+not secret values. Compose mounts the canonical Parent-Child index read-only and
+uses the separate writable `rag_runtime_chroma` volume for the validated runtime
+snapshot. Production startup is fail-closed and requires:
 
-- the strict config loads and resolves inside the project root;
-- the registry and generation directory exist and are not symlinks;
-- the registry record is exactly `READY` and its manifest digest verifies;
-- primary, previous, and shadow are all unset;
-- the sealed Chroma, BM25, Parent Store, policy, subject, embedding, and
-  collection identities match the config;
-- `reranker_top_n` is exactly `20`.
+- generation `pc_20260715_98336c2_55` is sealed `READY` and its manifest verifies;
+- registry primary equals generation 55, shadow is empty, and previous differs;
+- `PARENT_CHILD_GENERATION_ID` equals that same primary;
+- Chroma, BM25, Parent Store, policy, subject, embedding, reranker, collection,
+  KnowledgeGraph, and evidence-orchestration identities all match;
+- `activation_enabled=true`, `shadow_enabled=false`, and `reranker_top_n=20`.
 
-If any condition fails, do not start Candidate runtime and do not substitute
-the Top80 diagnostic config or legacy output as Candidate success. Keeping the
-configuration filename `inactive` is intentional: merely copying or mounting
-it never authorizes activation, Shadow, or a registry pointer change.
-
-The repository's current `docker-compose.yml` does not mount generation 55 or
-its registry, does not provide the writable snapshot location, does not run
-this preflight, and still starts the legacy-served Graph. Consequently, the
-tracked config closes the missing-config P0 but does **not** claim Candidate is
-Docker-integrated. Until the service/runtime lane adds explicit mounts,
-generation identity, and fail-fast startup validation, a missing Candidate
-artifact will not stop the legacy container from starting.
+`docker-compose.yml` provides the read-only generation/registry mount plus the
+writable runtime snapshot location and starts the resource-aware Parent-Child
+Evidence graph. Any missing artifact or identity mismatch prevents readiness;
+there is no legacy request-time fallback.
 
 Do not manually edit the ignored runtime YAML. Generate it from the tracked,
 strict local template; provider, model, endpoint, policy, and retry values are

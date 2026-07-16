@@ -12,7 +12,7 @@ from src.config.rag_index_config import CatalogConfig, load_rag_index_config
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
 _PRODUCTION_INDEX_CONFIG_PATH = (
-    _PROJECT_ROOT / "config" / "rag" / "index.production-candidate.inactive.yaml"
+    _PROJECT_ROOT / "config" / "rag" / "index.production.yaml"
 )
 
 

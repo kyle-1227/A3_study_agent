@@ -736,10 +736,7 @@ async def test_complete_four_variant_hermetic_run_is_never_activation_allowed() 
     decision = await _run(scenario)
 
     assert decision.status == "blocked"
-    assert decision.reason_codes == [
-        "non_live_execution",
-        "rollout_activation_disabled",
-    ]
+    assert decision.reason_codes == ["non_live_execution"]
     assert decision.benchmark_eligible is True
     assert decision.activation_allowed is False
     assert decision.variant_matrix_complete is True
@@ -779,7 +776,6 @@ async def test_missing_human_review_blocks_and_fail_fast_covers_remaining_slots(
     assert decision.reason_codes == [
         "human_semantic_review_inventory_mismatch",
         "non_live_execution",
-        "rollout_activation_disabled",
     ]
     assert decision.successful_execution_count == 0
     assert decision.reviewed_execution_count == 0
@@ -977,12 +973,11 @@ async def test_missing_pg_and_pr_live_adapters_form_machine_readable_blocker() -
     assert "executor_variant_inventory_mismatch" in decision.reason_codes
     assert "live_variant_adapter_missing_pg" in decision.reason_codes
     assert "live_variant_adapter_missing_pr" in decision.reason_codes
-    assert "rollout_activation_disabled" in decision.reason_codes
     assert decision.successful_execution_count == 0
     assert all(record.status == "not_executed" for record in decision.execution_records)
 
 
-async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> None:
+async def test_complete_live_protocol_passes_while_rollout_is_active() -> None:
     scenario = _scenario()
     declared_cases = dataset_case_bindings(scenario.dataset)
     adapters = []
@@ -1031,10 +1026,10 @@ async def test_complete_live_protocol_is_blocked_while_rollout_is_disabled() -> 
 
     decision = await _run(scenario, executor=executor, binding=binding)
 
-    assert decision.status == "blocked"
-    assert decision.reason_codes == ["rollout_activation_disabled"]
+    assert decision.status == "pass"
+    assert decision.reason_codes == []
     assert decision.benchmark_eligible is True
-    assert decision.activation_allowed is False
+    assert decision.activation_allowed is True
     assert decision.variant_matrix_complete is True
 
 

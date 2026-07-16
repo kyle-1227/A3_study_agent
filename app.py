@@ -177,7 +177,7 @@ from src.schemas import (
     CompiledOnboardRequestV2,
     ContinueRequest,
     HealthLiveV1,
-    HealthReadyV2,
+    HealthReadyV3,
     LearningGuidanceCatalogV1,
     OnboardRequest,
     OnboardResultV2,
@@ -761,10 +761,7 @@ async def lifespan(app: FastAPI):
             generation_id=candidate_generation_id,
             learning_guidance=learning_guidance_runtime,
             index_config_path=(
-                project_root
-                / "config"
-                / "rag"
-                / "index.production-candidate.inactive.yaml"
+                project_root / "config" / "rag" / "index.production.yaml"
             ),
             index_root=project_root / "indexes" / "parent_child",
             policy_config_path=(
@@ -902,8 +899,8 @@ async def health_live_endpoint() -> HealthLiveV1:
     return HealthLiveV1(schema_version="health_live_v1", status="live")
 
 
-@app.get("/health/ready", response_model=HealthReadyV2)
-async def health_ready_endpoint(request: Request) -> HealthReadyV2:
+@app.get("/health/ready", response_model=HealthReadyV3)
+async def health_ready_endpoint(request: Request) -> HealthReadyV3:
     state = request.app.state
     if getattr(state, "checkpointer_enabled", None) is not True:
         _readiness_unavailable("health_ready_postgres_checkpointer_required")
@@ -967,10 +964,10 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV2:
         or orchestration.learning_guidance is not guidance
     ):
         _readiness_unavailable("health_ready_orchestration_invalid")
-    if candidate_owner.candidate_mode != "inactive_canary":
-        _readiness_unavailable("health_ready_candidate_mode_invalid")
+    if candidate_owner.deployment_mode != "active":
+        _readiness_unavailable("health_ready_deployment_mode_invalid")
     if (
-        candidate_owner.rollout_activation_enabled is not False
+        candidate_owner.rollout_activation_enabled is not True
         or candidate_owner.rollout_shadow_enabled is not False
     ):
         _readiness_unavailable("health_ready_rollout_state_invalid")
@@ -1008,8 +1005,8 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV2:
     )
 
     try:
-        return HealthReadyV2(
-            schema_version="health_ready_v2",
+        return HealthReadyV3(
+            schema_version="health_ready_v3",
             status="ready",
             checkpointer_type="postgres",
             graph_version=graph_version,
@@ -1022,7 +1019,7 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV2:
             evidence_orchestration_fingerprint=(
                 orchestration.orchestration_fingerprint
             ),
-            candidate_mode=candidate_owner.candidate_mode,
+            deployment_mode=candidate_owner.deployment_mode,
             rollout_activation_enabled=(candidate_owner.rollout_activation_enabled),
             rollout_shadow_enabled=candidate_owner.rollout_shadow_enabled,
         )

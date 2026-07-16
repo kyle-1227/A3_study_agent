@@ -45,6 +45,8 @@ def test_compose_requires_secrets_and_persists_runtime_artifacts() -> None:
     assert "${COURSE_DATA_HOST_PATH:?" in compose_text
     assert "${PARENT_CHILD_INDEX_HOST_PATH:?" in compose_text
     assert "${PARENT_CHILD_GENERATION_ID:?" in compose_text
+    assert "${A3_ENV_FILE:?" in compose_text
+    assert "${A3_ENV_FILE:-" not in compose_text
     assert ":/app/indexes/parent_child:ro" in compose_text
     assert (
         "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in compose_text

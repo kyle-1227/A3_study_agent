@@ -17,7 +17,7 @@ activation decisions.
 - Retained Flat artifact: `flat_20260715_98336c2_53`
 - Legacy rollback asset: repository-root `chroma_store`
 - Tracked inactive runtime config:
-  `config/rag/index.production-candidate.inactive.yaml` (Top20)
+  `config/rag/index.production.yaml` (Top20)
 
 `READY` means sealed artifact integrity passed. It does not mean retrieval
 quality passed, and it does not route user traffic. Do not activate generation

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 import scripts.run_production_browser_canary as canary
 from scripts.run_production_browser_canary import (
-    ProductionBrowserCanaryReportV2,
+    ProductionBrowserCanaryReportV3,
     ProductionCanaryError,
     ProductionCanaryExpectedGenerationV1,
     _artifact_paths,
@@ -44,7 +44,7 @@ DIGEST_D = "d" * 64
 
 def _health_ready_payload(**updates: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema_version": "health_ready_v2",
+        "schema_version": "health_ready_v3",
         "status": "ready",
         "checkpointer_type": "postgres",
         "graph_version": "graph-v1",
@@ -53,8 +53,8 @@ def _health_ready_payload(**updates: object) -> dict[str, object]:
         "parent_child_generation_id": "pc-generation-1",
         "parent_child_generation_manifest_fingerprint": DIGEST_B,
         "evidence_orchestration_fingerprint": DIGEST_C,
-        "candidate_mode": "inactive_canary",
-        "rollout_activation_enabled": False,
+        "deployment_mode": "active",
+        "rollout_activation_enabled": True,
         "rollout_shadow_enabled": False,
     }
     payload.update(updates)
@@ -413,14 +413,14 @@ async def _identity_from_payload(
 
 
 @pytest.mark.asyncio
-async def test_fetch_served_identity_binds_exact_health_ready_v2() -> None:
+async def test_fetch_served_identity_binds_exact_health_ready_v3() -> None:
     identity = await _identity_from_payload(_health_ready_payload())
 
-    assert identity.health_ready_schema_version == "health_ready_v2"
+    assert identity.health_ready_schema_version == "health_ready_v3"
     assert identity.parent_child_generation_id == "pc-generation-1"
     assert identity.knowledge_graph_artifact_fingerprint == DIGEST_A
-    assert identity.candidate_mode == "inactive_canary"
-    assert identity.rollout_activation_enabled is False
+    assert identity.deployment_mode == "active"
+    assert identity.rollout_activation_enabled is True
     assert identity.rollout_shadow_enabled is False
     assert identity.identity_fingerprint == canary.canonical_sha256(
         identity.model_dump(mode="json", exclude={"identity_fingerprint"})
@@ -431,11 +431,11 @@ async def test_fetch_served_identity_binds_exact_health_ready_v2() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        _health_ready_payload(schema_version="health_ready_v1"),
-        _health_ready_payload(candidate_mode="active"),
-        _health_ready_payload(rollout_activation_enabled=True),
+        _health_ready_payload(schema_version="health_ready_v2"),
+        _health_ready_payload(deployment_mode="inactive_canary"),
+        _health_ready_payload(rollout_activation_enabled=False),
         _health_ready_payload(rollout_shadow_enabled=True),
-        _health_ready_payload(rollout_activation_enabled="false"),
+        _health_ready_payload(rollout_activation_enabled="true"),
         _health_ready_payload(parent_child_generation_id="different-generation"),
         _health_ready_payload(parent_child_generation_manifest_fingerprint=DIGEST_D),
         _health_ready_payload(knowledge_graph_data_version="different-kg"),
@@ -457,7 +457,7 @@ async def test_fetch_served_identity_rejects_missing_extra_and_http_failure() ->
     extra = _health_ready_payload(activation_enabled=False)
 
     for payload in (missing, extra):
-        with pytest.raises(ProductionCanaryError, match="health_ready_v2"):
+        with pytest.raises(ProductionCanaryError, match="health_ready_v3"):
             await _identity_from_payload(payload)
     with pytest.raises(ProductionCanaryError, match="request failed"):
         await _identity_from_payload(_health_ready_payload(), status_code=503)
@@ -485,20 +485,20 @@ def test_expected_generation_rejects_defaults_and_aliases() -> None:
 
 
 def test_identity_and_report_fingerprints_fail_closed() -> None:
-    readiness = canary.HealthReadyV2.model_validate(
+    readiness = canary.HealthReadyV3.model_validate(
         _health_ready_payload(),
         strict=True,
     )
     identity = _served_identity(readiness)
     binding = canary.canonical_sha256(
         {
-            "schema_version": "production_canary_binding_v1",
+            "schema_version": "production_canary_binding_v2",
             "dataset_content_fingerprint": DIGEST_D,
             "served_identity_fingerprint": identity.identity_fingerprint,
         }
     )
-    report = ProductionBrowserCanaryReportV2(
-        schema_version="production_browser_canary_v2",
+    report = ProductionBrowserCanaryReportV3(
+        schema_version="production_browser_canary_v3",
         created_at_utc="2026-07-16T00:00:00+00:00",
         dataset_id="smoke-v2",
         dataset_content_fingerprint=DIGEST_D,
@@ -525,30 +525,30 @@ def test_identity_and_report_fingerprints_fail_closed() -> None:
     invalid_binding = report.model_dump(mode="python")
     invalid_binding["canary_binding_fingerprint"] = DIGEST_A
     with pytest.raises(ValidationError):
-        ProductionBrowserCanaryReportV2.model_validate(invalid_binding, strict=True)
+        ProductionBrowserCanaryReportV3.model_validate(invalid_binding, strict=True)
 
     invalid_identity = report.model_dump(mode="python")
     invalid_identity["served_identity"]["identity_fingerprint"] = DIGEST_D
     with pytest.raises(ValidationError):
-        ProductionBrowserCanaryReportV2.model_validate(invalid_identity, strict=True)
+        ProductionBrowserCanaryReportV3.model_validate(invalid_identity, strict=True)
 
     missing_identity = report.model_dump(mode="python")
     missing_identity.pop("served_identity")
     with pytest.raises(ValidationError):
-        ProductionBrowserCanaryReportV2.model_validate(missing_identity, strict=True)
+        ProductionBrowserCanaryReportV3.model_validate(missing_identity, strict=True)
 
     extra_identity = report.model_dump(mode="python")
     extra_identity["health"] = _health_ready_payload()
     with pytest.raises(ValidationError):
-        ProductionBrowserCanaryReportV2.model_validate(extra_identity, strict=True)
+        ProductionBrowserCanaryReportV3.model_validate(extra_identity, strict=True)
 
 
 def test_stable_served_identity_rejects_pre_post_drift() -> None:
     before = _served_identity(
-        canary.HealthReadyV2.model_validate(_health_ready_payload(), strict=True)
+        canary.HealthReadyV3.model_validate(_health_ready_payload(), strict=True)
     )
     after = _served_identity(
-        canary.HealthReadyV2.model_validate(
+        canary.HealthReadyV3.model_validate(
             _health_ready_payload(graph_version="graph-v2"),
             strict=True,
         )

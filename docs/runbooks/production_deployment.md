@@ -9,19 +9,16 @@ commit `.env` values.
 - PostgreSQL is the required production checkpointer.
 - The served graph uses strict user/thread identity, structured contracts,
   journal replay, status recovery, and explicit resource terminal states.
-- Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` but is not
-  approved for activation. Registry primary, previous, and shadow pointers are
-  unset.
+- Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` and is the
+  active production primary. Registry previous and shadow pointers are unset;
+  startup rejects any generation or manifest mismatch.
 - The repository-root Flat `chroma_store` and Flat generation 53 are retained
-  rollback assets. The base Compose deployment does not select or silently
-  fall back to them; do not delete them during this release.
-- Evidence rollout activation remains disabled. The six-case dataset is a
-  smoke authoring set, not a human-sealed production benchmark.
-- The served backend used by the web canary loads
-  `config/rag/index.production-candidate.inactive.yaml` and the generation
-  fixed by `PARENT_CHILD_GENERATION_ID`; this tracked top20 configuration is
-  sealed-compatible with generation 55 and contains environment-variable
-  names, never secret values. The pin does not update a registry pointer.
+  recovery assets. Production never selects or silently falls back to them.
+- Evidence activation is enabled and shadow is disabled. PGR is the served path;
+  the six-case dataset remains smoke authoring, not a human-sealed benchmark.
+- The backend loads `config/rag/index.production.yaml`; the generation fixed by
+  `PARENT_CHILD_GENERATION_ID` must match the registry primary. The tracked
+  config contains environment-variable names, never secret values.
 
 ## 2. Required local assets
 
@@ -46,8 +43,8 @@ The sealed Chroma tree stays read-only; disposable runtime snapshots use the
 separate writable `rag_runtime_chroma` volume mounted at its designated
 subdirectory.
 
-When Compose reads a different ignored env file, set `A3_ENV_FILE` to its
-absolute path. The default is the repository-root `.env`.
+Set shell-level `A3_ENV_FILE` to the ignored env file's absolute path before
+every Compose command. Compose intentionally has no implicit `.env` fallback.
 
 ## 3. Build and start
 
@@ -56,14 +53,14 @@ Required-variable interpolation fails here without revealing the missing
 values; Docker validates the two host directories when it creates mounts:
 
 ```powershell
-docker compose config --quiet
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE config --quiet
 ```
 
 Build and wait for PostgreSQL, backend, and frontend readiness:
 
 ```powershell
-docker compose up --detach --build --wait
-docker compose ps
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --build --wait
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
 The backend image installs Chromium and ffmpeg because video animation is a
@@ -83,8 +80,8 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
 `/health/live` proves only that the API process can answer. `/health/ready`
-must return `health_ready_v2`, `status=ready`, `checkpointer_type=postgres`,
-`candidate_mode=inactive_canary`, `rollout_activation_enabled=false`, and
+must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`,
+`deployment_mode=active`, `rollout_activation_enabled=true`, and
 `rollout_shadow_enabled=false`, plus the graph version, KnowledgeGraph
 data/artifact identity, generation ID/manifest fingerprint, and evidence
 orchestration fingerprint. It also performs a bounded PostgreSQL `SELECT 1`.
@@ -102,8 +99,8 @@ Create a real thread through the web UI, record its `thread_id`, `stream_id`,
 and final event ID, then restart PostgreSQL:
 
 ```powershell
-docker compose restart postgres
-docker compose ps
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE restart postgres
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
 After PostgreSQL is healthy, verify:
@@ -162,29 +159,28 @@ python scripts/run_production_browser_canary.py `
 
 Set both expected-generation variables explicitly from the independently
 validated sealed READY record; never infer them from `/health/ready`. The
-machine-readable V2 report binds that generation, the dataset KnowledgeGraph
-identity, inactive-canary/disabled-rollout state, and matching pre/post
+machine-readable V3 report binds that generation, the dataset KnowledgeGraph
+identity, active/activation-enabled/shadow-disabled state, and matching pre/post
 readiness observations. It also contains sequence, terminal, replay, download,
 refresh, and conflict evidence only. It intentionally omits generated bodies
 and Provider payloads. Screenshots are retained separately.
 
-## 7. RAG activation and rollback
+## 7. Active deployment and recovery boundary
 
-Do not activate generation 55 from this runbook. Its engineering comparison
-regressed Recall@5 (`0.53 -> 0.41`), MRR, and latency; the top80 experiment made
-P95 worse. It may be loaded only by an explicitly pinned inactive canary or
-evaluation adapter.
+Generation 55 is the explicit production primary and shadow remains disabled.
+This direct cutover is an owner decision; the six-case suite is still production
+smoke rather than formal Gold, and the historical benchmark regressions must not
+be rewritten as a benchmark pass.
 
-Activation requires a future frozen Gold V3, two independent semantic reviews,
-the required chunk review, formal benchmark gates, and a passing page canary.
-If a later approved generation is activated, rollback must use the registry
-control-plane command explicitly. Never convert a candidate failure into a
-Flat success inside a request.
+The first activation has no previous registry generation, so `rollback` is not
+available. Preserve the pre-activation registry backup, Flat 53, root
+`chroma_store`, and the prior image for offline disaster recovery. Never convert
+a request failure into a Flat success or perform an automatic generation switch.
 
 ## 8. Shutdown and cleanup
 
 ```powershell
-docker compose down
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE down
 ```
 
 Do not pass `--volumes` during routine shutdown: it would remove PostgreSQL and

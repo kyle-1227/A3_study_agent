@@ -11,9 +11,7 @@ from src.rag.parent_child.builder import compute_embedding_fingerprint
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = (
-    PROJECT_ROOT / "config" / "rag" / "index.production-candidate.inactive.yaml"
-)
+CONFIG_PATH = PROJECT_ROOT / "config" / "rag" / "index.production.yaml"
 GENERATION_55_EMBEDDING_FINGERPRINT = (
     "d19fb0d655028fe3a3c04635bf4733a2c301014caa644059064090f007b1911e"
 )

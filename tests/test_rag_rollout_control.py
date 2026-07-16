@@ -116,7 +116,7 @@ def test_strict_rollout_config_maps_without_threshold_defaults() -> None:
         stage_id="single_subject",
     )
 
-    assert stage.activation_enabled is False
+    assert stage.activation_enabled is True
     assert stage.candidate_fraction == 0.05
     assert stage.minimum_evaluable_requests == 200
     assert stage.maximum_context_token_ratio == 1.35

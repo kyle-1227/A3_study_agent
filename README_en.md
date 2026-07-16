@@ -11,12 +11,12 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 | Web/API | Next.js + FastAPI with `agent_stream_v2` SSE, status recovery, replay, and explicit terminal events |
 | State and identity | PostgreSQL checkpoints; strict user, thread, request, dataset, and case binding |
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
-| New RAG | the served graph explicitly pins generation `pc_20260715_98336c2_55`, which is `READY` and runs in `inactive_canary` mode |
-| RAG deployment | registry primary / previous / shadow are unset; `activation_enabled=false` |
-| Evaluation | real-node P0 / PG / PR / PGR compositions; the six-case dataset is smoke authoring, not formal Gold |
+| New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
+| RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true`, `shadow_enabled=false` |
+| Evaluation | P0 / PG / PR / PGR real-node adapters are implemented evaluation variants; PGR is served, and the six-case dataset remains smoke authoring rather than formal Gold |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
-`READY` proves artifact integrity only. The current Parent-Child engineering benchmark does not meet the Recall@5, MRR, or P95 replacement gates, so activation is prohibited. `PARENT_CHILD_GENERATION_ID` is a strict inactive-canary runtime pin; it does not write or switch a registry pointer.
+`READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. A request fails fast; it never switches to Flat RAG after an error. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
 
 ## Capabilities
 
@@ -25,7 +25,7 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 - Parallel single-subject, multi-subject, and multi-resource orchestration.
 - Parent-Child Vector + BM25 + RRF + reranker + parent hydration.
 - Strict local/web requirement, judgement, and bounded-repair evidence loops.
-- P0 (no planning/no repair), PG (planning/no repair), PR (no planning/repair), and PGR (planning/repair) live evaluation adapters.
+- P0 (no planning/no repair), PG (planning/no repair), PR (no planning/repair), and PGR (planning/repair) evaluation adapters; they are not four served traffic variants.
 - Study plan, mind map, quiz, review document, code practice, video script, and video animation resources.
 - SSE `EvidenceProgress`, Last-Event-ID replay, thread-status recovery, and persistent downloads.
 
@@ -60,14 +60,16 @@ Requirements: Docker Desktop / Docker Engine, Compose v2, local course data, and
 ```powershell
 Copy-Item .env.example .env
 # Populate secrets, a strong DB password, and the two host asset paths.
+$env:A3_ENV_FILE = (Resolve-Path '.env').Path
 
-docker compose config --quiet
-docker compose up --detach --build --wait
-docker compose ps
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE config --quiet
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --build --wait
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
 Required settings:
 
+- shell selector `A3_ENV_FILE` (absolute path to the ignored env file)
 - `DEEPSEEK_API_KEY`
 - `RAG_EMBEDDING_API_KEY`
 - `RAG_RERANKER_API_KEY`
@@ -90,7 +92,7 @@ Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
 Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
-`/health/ready` must return `health_ready_v2`, `status=ready`, `checkpointer_type=postgres`, `candidate_mode=inactive_canary`, `rollout_activation_enabled=false`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
+`/health/ready` must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`, `deployment_mode=active`, `rollout_activation_enabled=true`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
 
 See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary, and rollback boundaries.
 

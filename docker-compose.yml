@@ -24,7 +24,7 @@ services:
       target: backend
     restart: unless-stopped
     env_file:
-      - path: ${A3_ENV_FILE:-.env}
+      - path: ${A3_ENV_FILE:?Set A3_ENV_FILE to an explicit env file path}
         required: true
     environment:
       CHECKPOINTER_ENABLED: "true"

@@ -7,8 +7,10 @@ Base: `5c40f20a366b6def0fccc484ff33263577ad4418`
 ## Outcome
 
 This lane implements the strict evaluation control plane for the canonical
-P0/PG/PR/PGR experiment. It does not activate rollout and does not claim a live
-four-variant result.
+P0/PG/PR/PGR experiment. The evaluation lane itself did not activate rollout and
+does not claim a live four-variant result. On 2026-07-16 the deployment owner
+separately authorized a direct PGR production cutover without a shadow period;
+that operational decision does not convert this evaluation matrix into a pass.
 
 The machine decision is fail-closed. A pass requires all expected case/variant
 slots, exact dataset/config/runtime/generation/executor fingerprints, successful
@@ -109,10 +111,10 @@ on stderr and are not silently swallowed.
 | P0 live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
 | PG live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
 | PR live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
-| PGR live adapter | implemented / unwired / unexecuted | Strict served adapter exists; no production live launcher or completed live run |
+| PGR live adapter | implemented / unwired / unexecuted | Evaluation adapter remains unwired; the separate product PGR graph is the active served path |
 | Curated evidence dataset | blocked | Six-case v2 smoke authoring draft exists but is unsealed, below activation-scale resolution, and lacks human approval |
 | Complete human semantic review bundle | missing | No reviewed output bundle exists |
-| Rollout activation | disabled | `config/rag/rollout.yaml` remains `activation_enabled: false` |
+| Rollout activation | active direct cutover | `activation_enabled: true`, `shadow_enabled: false`; explicit owner decision, not an evaluation pass |
 
 The secret-bearing `.env` remains only in the main worktree and is not copied,
 read, printed, or committed by this lane. A future live launcher must inject the
@@ -124,20 +126,17 @@ The real P0/PG/PR/PGR Provider run is therefore blocked. No Provider call was
 attempted in this lane, and no mock, QA-gold substitution, empty result, or old
 graph output is counted as live evidence.
 
-## Integration handoff
+## Evaluation follow-up
 
-The service integration lane should wire the four existing concrete adapters
-into a production live launcher, preserve each exact graph/runtime composition
-fingerprint, and construct the runtime binding only after the executor computes
-its fingerprint. It must then:
+The direct product cutover serves the PGR graph; it does not expose four traffic
+variants. A future evaluation launcher may wire the four concrete adapters while
+preserving exact graph/runtime fingerprints. It must still:
 
 1. curate and seal the dedicated dataset;
-2. execute the exact READY generation with variables injected by the safe
-   launcher;
-3. obtain complete human semantic reviews bound to exact output fingerprints;
-4. rerun/finalize the complete matrix and publish the decision bundle;
-5. keep rollout disabled until the live decision is complete and benchmark
-   eligible; activation remains a separate explicit control-plane action.
+2. execute the exact production generation through safe variable injection;
+3. obtain complete human reviews bound to exact output fingerprints;
+4. finalize the complete matrix and publish the decision bundle;
+5. report the decision independently of the already-active deployment state.
 
 The downstream activation control should require the matching decision
 fingerprint in conjunction with the existing candidate validation artifact. It
