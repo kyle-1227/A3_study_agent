@@ -15,6 +15,9 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     assert "same requirement_id and source_type" in prompt
     assert "explicit query text in attempted_queries_json" in prompt
     assert "whitespace-only or punctuation-only changes" in prompt
+    assert "local_and_web rule is never staged" in prompt
+    assert "attempted query history must not suppress either field" in prompt
+    assert "Before returning, self-check every row against its source_policy" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
