@@ -1,35 +1,34 @@
 # Parent–Child RAG 本地构建运行手册
 
-## 2026-07-17 production-close status (authoritative)
+## 2026-07-17 active production status (authoritative)
 
 This section supersedes older example IDs and any earlier wording that treats
 `gold_dataset_v1.json` as permanently formal or forbids all experimental
 builds while readiness is blocked.
 
-- Generation `pc_20260715_98336c2_55` is sealed `READY` and is the explicit
-  configured production registry primary. Previous and shadow pointers are
-  unset; `activation_enabled=true` and `shadow_enabled=false` are the expected
-  release contract. Final served state and the exact generation-manifest
-  identity must be verified from the runtime readiness and manifest responses.
+- Generation `pc_20260715_98336c2_55` is sealed `READY` and is the active
+  production registry primary. Previous and shadow pointers are unset;
+  `activation_enabled=true` and `shadow_enabled=false`.
 - The retained Flat comparison artifact is
   `artifacts/rag/flat_20260715_98336c2_53`. The existing `chroma_store` remains
-  the legacy rollback asset and must not be deleted before a successful page
-  canary and a separately approved cleanup.
+  an offline recovery asset and must not be deleted without separately approved
+  cleanup.
 - Gold V3 is not frozen. The current authoring checkpoint contains 22
   `human_directed_ai_assisted`, `draft_write_only` approvals, has zero of two
   required independent reviewers, and is not evaluation- or rollout-eligible.
   Only a future frozen V3 with two independent reviews and the 150-pair chunk
   review may be used for formal validation.
-- The direct production cutover is an explicit owner decision and does not
-  rewrite the blocked historical benchmark as a pass. New local technical
-  builds remain `experimental_only=true` and `activation_prohibited=true`;
-  they cannot replace the production primary without a separate release.
+- The active production identity does not rewrite the blocked historical
+  benchmark as a pass. New local technical builds remain
+  `experimental_only=true` and `activation_prohibited=true`; they cannot
+  replace the production primary without a separate release.
 - Evidence evaluation and adapter binding are V2-only; V1 inputs are rejected.
-  PGR is the configured served evidence path, and `KnowledgeGraphV1` supplies
-  the strict five-subject topic/resource identity.
+  PGR is the served evidence path, and `KnowledgeGraphV1` supplies the strict
+  five-subject topic/resource identity.
 - The latest complete backend gate recorded `2871 passed / 7 skipped`.
-  Semgrep and Gitleaks are not installed and were not run. The real active-PGR
-  browser canary is being rerun, so no final live-canary pass is claimed here.
+  Semgrep and Gitleaks are not installed and were not run. A real active-PGR
+  browser canary procedure exists, but this documentation update did not run it
+  and claims no live-canary pass.
 - The running deployment is a trusted local demo. Public multi-tenant
   authentication, tenant isolation, and abuse controls are not closed.
 

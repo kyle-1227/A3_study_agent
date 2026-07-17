@@ -4,18 +4,18 @@
 
 A3 Study Agent is a multi-agent learning system for university study. It combines strict learner profiles, learning paths, a curated course knowledge graph, Parent-Child RAG, web research, evidence judgement, and seven resource generators in a recoverable streaming experience.
 
-## Current production-convergence state
+## Current production state
 
 | Area | State |
 | --- | --- |
 | Web/API | Next.js + FastAPI with `agent_stream_v2` SSE, status recovery, replay, and explicit terminal events |
 | State and identity | PostgreSQL checkpoints; strict user, thread, request, dataset, and case binding |
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
-| New RAG | this release config pins sealed `READY` generation `pc_20260715_98336c2_55` and the resource-aware PGR path; final runtime verification is authoritative |
-| RAG deployment | registry primary is configured as generation 55 and previous / shadow are unset; activation, manifest, and served identity require final `health_ready_v3` / manifest verification |
+| New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
+| RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true` and `shadow_enabled=false` |
 | Evaluation | Evidence is V2-only and V1 is rejected; P0 / PG / PR / PGR real-node adapters are evaluation variants, while the six-case dataset remains smoke authoring rather than formal Gold |
 | Quality gate | the latest complete backend gate recorded `2871 passed / 7 skipped`; Semgrep and Gitleaks are not installed and were not run |
-| Live canary | the active-PGR browser canary is being rerun; final acceptance must not yet be claimed |
+| Live canary | an active-PGR browser procedure is documented; this docs change did not run it and claims no real-canary pass |
 | Deployment boundary | this is a trusted local demo; public multi-tenant authentication and tenant isolation are not closed |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
@@ -58,7 +58,7 @@ Provider, model, base URL, API-key environment name, and retry policy come from 
 
 ## One-command Docker deployment
 
-Requirements: Docker Desktop / Docker Engine, Compose v2, local course data, and the sealed Parent-Child index.
+Requirements: Docker Desktop / Docker Engine, Compose v2, separately supplied licensed course data, and the sealed Parent-Child index. A clean Git checkout is not self-contained.
 
 ```powershell
 if (-not (Test-Path -LiteralPath '.env')) {
@@ -99,7 +99,7 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 
 `/health/ready` must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`, `deployment_mode=active`, `rollout_activation_enabled=true`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
 
-See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary, and rollback boundaries.
+See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary procedure, and recovery boundaries. A documented procedure is not evidence that a real canary passed.
 
 ## Local development
 
@@ -151,7 +151,15 @@ npm run build
 Pop-Location
 ```
 
-The recorded complete backend result is `2871 passed / 7 skipped`. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. The real browser canary is still being rerun and cannot be replaced by unit-test evidence.
+The recorded complete backend result is `2871 passed / 7 skipped`. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. This documentation change did not execute or accept a real browser canary, and unit-test evidence cannot replace it.
+
+## Competition documentation
+
+- [Competition document index](docs/competition/README.md)
+- [System development specification](docs/competition/system_development.md)
+- [Test specification](docs/competition/test_report.md)
+- [Deployment specification](docs/competition/deployment_guide.md)
+- [Third-party software and AI-tool notices](docs/competition/third_party_notices.md)
 
 ## Repository layout
 
@@ -178,4 +186,4 @@ docs/runbooks/             Production and RAG operations
 
 ## License
 
-See [LICENSE](LICENSE).
+Project code: [MIT License](LICENSE). Direct dependency sources, licenses, external-service boundaries, and items requiring human distribution review are documented in [third-party notices](docs/competition/third_party_notices.md).
