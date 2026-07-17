@@ -47,7 +47,31 @@ def test_compose_requires_secrets_and_persists_runtime_artifacts() -> None:
     assert "${PARENT_CHILD_GENERATION_ID:?" in compose_text
     assert "${A3_ENV_FILE:?" in compose_text
     assert "${A3_ENV_FILE:-" not in compose_text
-    assert ":/app/indexes/parent_child:ro" in compose_text
+    backend_volumes = compose["services"]["backend"]["volumes"]
+    course_data_mount = next(
+        item
+        for item in backend_volumes
+        if isinstance(item, dict) and item.get("target") == "/app/data"
+    )
+    assert course_data_mount == {
+        "type": "bind",
+        "source": "${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}",
+        "target": "/app/data",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
+    parent_child_mount = next(
+        item
+        for item in backend_volumes
+        if isinstance(item, dict) and item.get("target") == "/app/indexes/parent_child"
+    )
+    assert parent_child_mount == {
+        "type": "bind",
+        "source": "${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}",
+        "target": "/app/indexes/parent_child",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
     assert (
         "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in compose_text
     )

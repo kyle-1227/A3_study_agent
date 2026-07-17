@@ -48,8 +48,18 @@ services:
       start_period: 30s
     volumes:
       - chroma_data:/app/chroma_store
-      - ${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}:/app/data
-      - ${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}:/app/indexes/parent_child:ro
+      - type: bind
+        source: ${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}
+        target: /app/data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}
+        target: /app/indexes/parent_child
+        read_only: true
+        bind:
+          create_host_path: false
       - rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma
       - artifacts:/app/artifacts
 
