@@ -47,6 +47,10 @@ services:
       retries: 24
       start_period: 30s
     volumes:
+      - type: volume
+        source: app_state
+        target: /app/.runtime_state
+        read_only: false
       - chroma_data:/app/chroma_store
       - type: bind
         source: ${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}
@@ -101,3 +105,4 @@ volumes:
   chroma_data:
   rag_runtime_chroma:
   artifacts:
+  app_state:

@@ -98,3 +98,60 @@ def test_backend_launcher_uses_config_and_only_explicitly_overrides_reload(monke
     assert override_values == [None, True]
     assert captured["args"] == ("app:app",)
     assert captured["kwargs"]["reload"] is True
+
+
+def _runtime_state_config(
+    directory: str = ".runtime_state",
+) -> server_runtime_config.ServerRuntimeStateConfig:
+    return server_runtime_config.ServerRuntimeStateConfig.model_validate(
+        {"directory": directory}
+    )
+
+
+def test_runtime_state_paths_use_dedicated_workspace_directory(tmp_path: Path):
+    paths = server_runtime_config.resolve_server_runtime_state_paths(
+        _runtime_state_config(),
+        workspace_root=tmp_path,
+    )
+
+    assert paths.directory == (tmp_path / ".runtime_state").resolve()
+    assert paths.profile_db_path == paths.directory / "profile.db"
+    assert paths.memory_db_path == paths.directory / "memory.db"
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [".", "./", "../outside", "/absolute", "C:\\outside", " state "],
+)
+def test_runtime_state_config_rejects_unsafe_directory(directory: str):
+    with pytest.raises(ValidationError):
+        _runtime_state_config(directory)
+
+
+@pytest.mark.parametrize("directory", ["data", "data/runtime_state"])
+def test_runtime_state_paths_reject_immutable_course_data(
+    tmp_path: Path,
+    directory: str,
+):
+    with pytest.raises(
+        RuntimeError,
+        match="runtime state directory must remain outside immutable course data",
+    ):
+        server_runtime_config.resolve_server_runtime_state_paths(
+            _runtime_state_config(directory),
+            workspace_root=tmp_path,
+        )
+
+
+def test_runtime_state_configuration_is_required(monkeypatch):
+    monkeypatch.setattr(
+        server_runtime_config,
+        "get_setting",
+        lambda _key, _default: None,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="server.runtime_state configuration is required",
+    ):
+        server_runtime_config.load_server_runtime_state_config()

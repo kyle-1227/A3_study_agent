@@ -23,6 +23,7 @@ artifacts/
 /indexes/parent_child/
 /.runtime_chroma/
 /.runtime_tools/
+/.runtime_state/
 
 # reports
 reports/*

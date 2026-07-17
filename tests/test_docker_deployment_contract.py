@@ -72,10 +72,22 @@ def test_compose_requires_secrets_and_persists_runtime_artifacts() -> None:
         "read_only": True,
         "bind": {"create_host_path": False},
     }
+    runtime_state_mount = next(
+        item
+        for item in backend_volumes
+        if isinstance(item, dict) and item.get("target") == "/app/.runtime_state"
+    )
+    assert runtime_state_mount == {
+        "type": "volume",
+        "source": "app_state",
+        "target": "/app/.runtime_state",
+        "read_only": False,
+    }
     assert (
         "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in compose_text
     )
     assert "artifacts:/app/artifacts" in compose_text
+    assert "app_state" in compose["volumes"]
     assert compose["services"]["backend"]["build"]["target"] == "backend"
     assert compose["services"]["frontend"]["build"]["target"] == "frontend"
     assert compose["services"]["backend"]["environment"]["CHECKPOINTER_ENABLED"] == (
@@ -108,6 +120,7 @@ def test_docker_context_excludes_generated_and_local_runtime_assets() -> None:
         "frontend/.next",
         "frontend/node_modules",
         "indexes/parent_child",
+        ".runtime_state",
     } <= ignored
 
 

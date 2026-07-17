@@ -275,6 +275,11 @@ class SQLiteProfileStore(ProfileStore):
     def db_path(self) -> Path:
         return self._db_path
 
+    async def initialize(self) -> None:
+        """Explicitly create the configured SQLite schema at composition time."""
+
+        await self._ensure_init()
+
     async def _ensure_init(self) -> None:
         """Lazy initialization — create table on first access."""
         if self._initialized:

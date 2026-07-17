@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -32,6 +33,31 @@ class ServerReloadConfig(BaseModel):
         return normalized
 
 
+class ServerRuntimeStateConfig(BaseModel):
+    """Validated mutable-state directory owned by ``config/settings.yaml``."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    directory: str = Field(min_length=1, max_length=160)
+
+    @field_validator("directory")
+    @classmethod
+    def validate_directory(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("runtime state directory must be normalized and stripped")
+        normalized = _normalize_relative_directory(value)
+        if normalized == ".":
+            raise ValueError("runtime state directory must not be the workspace root")
+        return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class ServerRuntimeStatePaths:
+    directory: Path
+    profile_db_path: Path
+    memory_db_path: Path
+
+
 def load_server_reload_config() -> ServerReloadConfig:
     """Load the required server reload contract without inventing defaults."""
 
@@ -39,6 +65,15 @@ def load_server_reload_config() -> ServerReloadConfig:
     if not isinstance(raw, dict):
         raise RuntimeError("server.reload configuration is required")
     return ServerReloadConfig.model_validate(raw)
+
+
+def load_server_runtime_state_config() -> ServerRuntimeStateConfig:
+    """Load the required mutable-state contract without inventing defaults."""
+
+    raw = get_setting("server.runtime_state", None)
+    if not isinstance(raw, dict):
+        raise RuntimeError("server.runtime_state configuration is required")
+    return ServerRuntimeStateConfig.model_validate(raw)
 
 
 def resolve_uvicorn_reload_options(
@@ -68,6 +103,37 @@ def resolve_uvicorn_reload_options(
         "reload_dirs": include_dirs,
         "reload_excludes": exclude_dirs,
     }
+
+
+def resolve_server_runtime_state_paths(
+    config: ServerRuntimeStateConfig,
+    *,
+    workspace_root: Path,
+) -> ServerRuntimeStatePaths:
+    """Resolve profile/memory databases inside a dedicated mutable directory."""
+
+    if not isinstance(config, ServerRuntimeStateConfig):
+        raise TypeError("config must be ServerRuntimeStateConfig")
+    if not isinstance(workspace_root, Path):
+        raise TypeError("workspace_root must be pathlib.Path")
+    root = workspace_root.resolve()
+    directory = (root / config.directory).resolve()
+    try:
+        directory.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("runtime state directory escaped the workspace") from exc
+    immutable_data_root = (root / "data").resolve()
+    if directory == immutable_data_root or directory.is_relative_to(
+        immutable_data_root
+    ):
+        raise RuntimeError(
+            "runtime state directory must remain outside immutable course data"
+        )
+    return ServerRuntimeStatePaths(
+        directory=directory,
+        profile_db_path=directory / "profile.db",
+        memory_db_path=directory / "memory.db",
+    )
 
 
 def _normalize_relative_directory(value: str) -> str:
@@ -107,6 +173,10 @@ def _resolve_directories(
 
 __all__ = [
     "ServerReloadConfig",
+    "ServerRuntimeStateConfig",
+    "ServerRuntimeStatePaths",
     "load_server_reload_config",
+    "load_server_runtime_state_config",
+    "resolve_server_runtime_state_paths",
     "resolve_uvicorn_reload_options",
 ]

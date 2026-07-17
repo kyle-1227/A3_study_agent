@@ -29,6 +29,7 @@ local_tools
 agents_context
 .runtime_chroma
 .runtime_tools
+.runtime_state
 .env
 .env.local
 .env.*.local

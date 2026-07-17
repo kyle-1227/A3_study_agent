@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 import uuid
 from collections import deque
@@ -102,6 +103,10 @@ from src.database.checkpointer import (
 )
 from src.database.assessment_lock import PostgresAssessmentExecutionLock
 from src.config import get_setting
+from src.config.server_runtime_config import (
+    load_server_runtime_state_config,
+    resolve_server_runtime_state_paths,
+)
 from src.graph.builder import get_compiled_resource_evidence_parent_child_graph
 from src.graph.evidence_orchestration import EvidenceOrchestrationRuntime
 from src.graph.served_candidate import (
@@ -671,6 +676,46 @@ def _readiness_db_timeout_seconds() -> float:
     return float(value)
 
 
+def _migrate_legacy_runtime_state_database(
+    *,
+    legacy_path: Path,
+    target_path: Path,
+) -> bool:
+    """Atomically preserve one pre-volume SQLite database without overwriting."""
+
+    if not isinstance(legacy_path, Path) or not isinstance(target_path, Path):
+        raise TypeError("runtime state migration paths must be pathlib.Path")
+    if legacy_path.resolve() == target_path.resolve():
+        raise RuntimeError("legacy and runtime state database paths must differ")
+    if target_path.is_symlink() or (target_path.exists() and not target_path.is_file()):
+        raise RuntimeError("runtime state database target must be a regular file")
+    if target_path.exists():
+        return False
+    if legacy_path.is_symlink():
+        raise RuntimeError("legacy runtime state database must not be a symlink")
+    if not legacy_path.exists():
+        return False
+    if not legacy_path.is_file():
+        raise RuntimeError("legacy runtime state database must be a regular file")
+
+    temporary_path = target_path.with_name(
+        f".{target_path.name}.{uuid.uuid4().hex}.migrating"
+    )
+    try:
+        with legacy_path.open("rb") as source, temporary_path.open("xb") as target:
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, target_path)
+    except OSError as exc:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove incomplete runtime state migration file")
+        raise RuntimeError("legacy runtime state database migration failed") from exc
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage async resources: tracing, PostgreSQL checkpointer, graph."""
@@ -735,9 +780,37 @@ async def lifespan(app: FastAPI):
         app.state.checkpointer_enabled = bool(checkpointer)
         app.state.checkpointer_type = ckp_type
         project_root = Path(__file__).resolve().parent
-        profile_db_path = project_root / "data" / "profile.db"
-        memory_db_path = project_root / "data" / "memory.db"
+        runtime_state_paths = resolve_server_runtime_state_paths(
+            load_server_runtime_state_config(),
+            workspace_root=project_root,
+        )
+        try:
+            runtime_state_paths.directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError("runtime state directory initialization failed") from exc
+        legacy_state_directory = (project_root / "data").resolve()
+        migrated_database_count = sum(
+            (
+                _migrate_legacy_runtime_state_database(
+                    legacy_path=legacy_state_directory / filename,
+                    target_path=target_path,
+                )
+                for filename, target_path in (
+                    ("profile.db", runtime_state_paths.profile_db_path),
+                    ("memory.db", runtime_state_paths.memory_db_path),
+                )
+            )
+        )
+        if migrated_database_count:
+            logger.info(
+                "Migrated %d legacy runtime state database(s)",
+                migrated_database_count,
+            )
+        profile_db_path = runtime_state_paths.profile_db_path
+        memory_db_path = runtime_state_paths.memory_db_path
+        profile_store = SQLiteProfileStore(profile_db_path)
         memory_store = SQLiteMemoryStore(memory_db_path)
+        await profile_store.initialize()
         await memory_store.initialize()
         learning_guidance_runtime = load_learning_guidance_runtime(
             config_path=project_root / "config" / "learning_guidance.yaml",
@@ -786,7 +859,6 @@ async def lifespan(app: FastAPI):
             store=memory_store,
             knowledge_graph=learning_guidance_runtime.knowledge_graph,
         )
-        profile_store = SQLiteProfileStore(profile_db_path)
         profile_writer = LearningGuidanceProfileWriterV1(
             store=profile_store,
             knowledge_graph=learning_guidance_runtime.knowledge_graph,
