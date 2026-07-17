@@ -2,8 +2,10 @@
 
 This runbook is the Docker and canary procedure for the active production
 identity. Run commands from the repository root. Never print or commit `.env`
-values. A procedure is not acceptance evidence: this documentation update did
-not execute a real Provider, Docker, or browser canary.
+values. Two final code-practice browser canaries executed against the active
+Docker/Provider path and passed their machine-readable production checks. They
+do not constitute the still-incomplete six-scenario or human-content
+acceptance.
 
 ## 1. Release state
 
@@ -13,19 +15,35 @@ not execute a real Provider, Docker, or browser canary.
 - Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` and is the
   active production registry primary. Registry previous and shadow pointers are
   unset, and startup rejects any generation or manifest mismatch.
+- The browser-tested runtime baseline is
+  `707d79806364d95fd300b21d0cb93411f592d67a`; later test/documentation-only
+  commits do not change its served graph behavior.
+- The sealed generation-manifest fingerprint is
+  `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`,
+  the KnowledgeGraph artifact fingerprint is
+  `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`, and
+  the Evidence orchestration fingerprint is
+  `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`.
 - The repository-root Flat `chroma_store` and Flat generation 53 are retained
   recovery assets. Production never selects or silently falls back to them.
 - Evidence evaluation and adapter binding are V2-only; V1 inputs are rejected.
-  PGR is the served path with activation enabled and shadow disabled. The
-  six-case dataset remains smoke authoring, not a human-sealed benchmark.
+  PGR is the served path with activation enabled and shadow disabled. Evidence
+  gaps may use the initial retrieval plus at most three supplement rounds,
+  bounded by 24 search tasks and 72 ledger entries. Required evidence must
+  still be complete; partial evidence never becomes a successful resource.
+  The six-case dataset remains smoke authoring, not a human-sealed benchmark.
 - The served course graph is strict `KnowledgeGraphV1` with five production
   subjects and source-backed topic/resource identity.
+- `code_practice` generation is streaming; its strict
+  `code_practice_reviewer` has an independent non-streaming model identity.
+  Pydantic and business validation remain mandatory in both paths.
 - The backend loads `config/rag/index.production.yaml`; the generation fixed by
   `PARENT_CHILD_GENERATION_ID` must match the registry primary. The tracked
   config contains environment-variable names, never secret values.
-- The latest complete backend gate recorded `2871 passed / 7 skipped`.
-  Semgrep and Gitleaks are not installed and were not run. The real active-PGR
-  browser canary procedure is documented, but this update claims no live pass.
+- The complete backend gate recorded `2880 passed / 7 skipped`; frontend
+  recorded 36 files and `187 passed`, with typecheck, lint, and production
+  build passing. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks
+  are not installed and were not run.
 - This deployment is a trusted local demo. Public multi-tenant authentication,
   tenant isolation, and abuse controls are not closed; do not expose it as a
   public service.
@@ -49,11 +67,13 @@ checkout is not self-contained. In `.env`, configure:
 Keep `EMBEDDING_API_KEY_ENV=RAG_EMBEDDING_API_KEY` and
 `RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY`. The two host paths may be relative
 only when authorized assets were supplied inside this checkout; do not infer
-that from Git files. Docker mounts the Parent-Child index read-only and persists
-generated downloads in a named `artifacts` volume.
-The sealed Chroma tree stays read-only; disposable runtime snapshots use the
-separate writable `rag_runtime_chroma` volume mounted at its designated
-subdirectory.
+that from Git files. Compose uses long-syntax binds for both course data and the
+Parent-Child index with `read_only: true` and
+`bind.create_host_path: false`; a missing D:/E: host path therefore fails
+instead of creating an empty directory. Generated downloads use a named
+`artifacts` volume. The sealed Chroma tree stays read-only; disposable runtime
+snapshots use the separate writable `rag_runtime_chroma` volume mounted at its
+designated subdirectory.
 
 Set shell-level `A3_ENV_FILE` to the ignored env file's absolute path before
 every Compose command. Compose intentionally has no implicit `.env` fallback.
@@ -68,11 +88,37 @@ values; Docker validates the two host directories when it creates mounts:
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE config --quiet
 ```
 
-Build both images without replacing the currently running containers:
+For a release, build both Compose-default image tags from one clean revision
+and attach the same OCI revision label. The local competition frontend must be
+compiled for `http://localhost:8000`:
 
 ```powershell
-docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE build
+$Revision = (git rev-parse HEAD).Trim()
+if (git status --porcelain) { throw 'release worktree is dirty' }
+
+docker build `
+  --file Dockerfile `
+  --target backend `
+  --label "org.opencontainers.image.revision=$Revision" `
+  --tag "a3_study_agent-backend:$Revision" `
+  --tag "a3_study_agent-backend:latest" `
+  .
+
+docker build `
+  --file Dockerfile `
+  --target frontend `
+  --build-arg "NEXT_PUBLIC_API_URL=http://localhost:8000" `
+  --label "org.opencontainers.image.revision=$Revision" `
+  --tag "a3_study_agent-frontend:$Revision" `
+  --tag "a3_study_agent-frontend:latest" `
+  .
+
+docker image inspect "a3_study_agent-backend:$Revision"
+docker image inspect "a3_study_agent-frontend:$Revision"
 ```
+
+The two inspections must expose `org.opencontainers.image.revision=$Revision`.
+Do not print image environment variables or expand the Compose model into logs.
 
 Generation 55 is already configured as the active primary. A routine rebuild or
 restart must not call `manage_rag_generation.py`, mutate the registry SQLite
@@ -145,10 +191,20 @@ Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 
 ## 6. Browser canary
 
-This section is an execution procedure, not a recorded pass. Historical,
-partial, or failed canary directories are not acceptance evidence. Do not
-report a live pass until a new complete report succeeds against the final
-runtime identities.
+Two consecutive code-practice runs against Evidence fingerprint
+`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`
+recorded `production_success=true`:
+
+- `artifacts/browser_canary/code-practice-707d798-1-20260717T155617Z/result.json`
+- `artifacts/browser_canary/code-practice-707d798-2-20260717T155922Z/result.json`
+
+Both reached `planner -> agent -> reviewer -> output`, produced downloadable
+DOCX/Markdown/Python artifacts, passed replay, request-drift, and refresh
+recovery checks, and injected 15 context items. Each also observed one transient
+thread-status 404 before the new thread existed; the terminal request still
+passed. These reports prove one repeated scenario only. Historical, partial, or
+failed directories are not acceptance evidence, and the following six-scenario
+suite remains incomplete.
 
 Use the real web page and capture screenshots plus machine-readable SSE/status
 evidence for exactly these six bounded scenarios:
@@ -209,7 +265,8 @@ asset or image, run the same `up --no-build --wait` command, and repeat all
 readiness checks. Never convert a request failure into a Flat success or
 perform an automatic generation switch. Any registry change requires a backend
 restart; the in-process readiness identity must not be treated as a live
-registry watch. This runbook records no real-canary pass.
+registry watch. This runbook records two repeated code-practice passes, not a
+complete six-scenario or human-content acceptance.
 
 ## 8. Shutdown and cleanup
 

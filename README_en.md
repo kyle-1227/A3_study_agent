@@ -13,13 +13,14 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
 | New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
 | RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true` and `shadow_enabled=false` |
+| Runtime identity | manifest `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`; KG artifact `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`; Evidence `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01` |
 | Evaluation | Evidence is V2-only and V1 is rejected; P0 / PG / PR / PGR real-node adapters are evaluation variants, while the six-case dataset remains smoke authoring rather than formal Gold |
-| Quality gate | the latest complete backend gate recorded `2871 passed / 7 skipped`; Semgrep and Gitleaks are not installed and were not run |
-| Live canary | an active-PGR browser procedure is documented; this docs change did not run it and claims no real-canary pass |
+| Quality gate | backend `2880 passed / 7 skipped`; frontend 36 files and `187 passed`, with typecheck, lint, and production build passing; Import Linter `3/3` |
+| Live canary | two consecutive code-practice browser requests under the same Evidence identity returned `production_success=true`; the full six-scenario and human-content acceptance remain incomplete |
 | Deployment boundary | this is a trusted local demo; public multi-tenant authentication and tenant isolation are not closed |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
-`READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. A request fails fast; it never switches to Flat RAG after an error. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
+`READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. Evidence gaps may use the initial retrieval plus at most three bounded supplement rounds within the same PGR path; required evidence must still be complete and partial results are never published as success. Errors never switch Provider, model, generation, or Flat RAG. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
 
 ## Capabilities
 
@@ -27,9 +28,10 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 - Learning-path planning validated against source-backed KnowledgeGraph topics.
 - Parallel single-subject, multi-subject, and multi-resource orchestration.
 - Parent-Child Vector + BM25 + RRF + reranker + parent hydration.
-- Strict local/web requirement, judgement, and bounded-repair evidence loops.
+- Strict local/web requirement, judgement, and bounded-repair evidence loops with bounded search-task and ledger budgets.
 - P0 (no planning/no repair), PG (planning/no repair), PR (no planning/repair), and PGR (planning/repair) evaluation adapters; they are not four served traffic variants.
 - Study plan, mind map, quiz, review document, code practice, video script, and video animation resources.
+- Streaming code-practice generation with an independently configured non-streaming strict reviewer; structured and business validation remain mandatory.
 - SSE `EvidenceProgress`, Last-Event-ID replay, thread-status recovery, and persistent downloads.
 
 ## Architecture
@@ -151,7 +153,7 @@ npm run build
 Pop-Location
 ```
 
-The recorded complete backend result is `2871 passed / 7 skipped`. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. This documentation change did not execute or accept a real browser canary, and unit-test evidence cannot replace it.
+The complete backend result is `2880 passed / 7 skipped`. Frontend tests passed in 36 files with `187 passed`; typecheck, lint, and the production build with explicit `NEXT_PUBLIC_API_URL=http://localhost:8000` also passed. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. Two final code-practice browser canaries passed, but they do not replace the incomplete six-scenario or human-content acceptance.
 
 ## Competition documentation
 

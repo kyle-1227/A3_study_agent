@@ -3,8 +3,11 @@
 ## 1. 文档范围
 
 本文面向比赛评审、演示人员和工程维护者，说明需求到实现的映射、关键设计、开发与集成方式以及现实生产边界。审阅基线为
-`679ed49cc82c01e6dfeea92b9fe6e5359e72cb20`；生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
-`2026.07.15-source-groups-v1` 和密封 generation `pc_20260715_98336c2_55`。
+`707d79806364d95fd300b21d0cb93411f592d67a`；生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
+`2026.07.15-source-groups-v1` 和密封 generation `pc_20260715_98336c2_55`。精确 manifest、KG artifact 与 Evidence fingerprint 分别为
+`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、
+`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和
+`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
 
 ## 2. 需求分析
 
@@ -70,12 +73,14 @@ flowchart LR
 | Supervisor | 识别 QA 或资源请求，编排单/多学科、多资源工作 | 路由或合同不合法时显式失败 |
 | Profile / history | 读取严格绑定的画像、历史和 assessment | 不使用其他用户或线程状态 |
 | Learner path planner | 将目标、进度和画像映射到 source-backed KG topic 和顺序 | topic 身份不匹配时拒绝 |
-| Resource evidence planner | 为资源类型生成证据需求和检索计划 | 不使用无界检索计划 |
+| Resource evidence planner | 为资源类型生成证据需求和检索计划 | 初始轮后最多 3 轮补搜，总任务 24、ledger 72 |
 | Local retrieval | Vector + BM25 + RRF + reranker + parent hydration | generation/manifest/阶段失败即停止 |
 | Web research | 对允许的网页来源补充证据 | 网络或安全校验失败不伪造成成功 |
-| Requirement evidence judge | 逐项判断证据充分性并触发有限次数修复 | 超出修复预算后给出 blocked 终态 |
-| Resource generators | 按资源合同并行生成并保存 artifact | 不完整资源不发布下载 |
+| Requirement evidence judge | 逐项判断证据充分性并触发有限次数修复 | required evidence 不完整或超出预算后给出 blocked 终态 |
+| Resource generators | 按资源合同并行生成并保存 artifact | 不完整资源不发布下载；partial 不转为成功 |
 | QA tutor | 提供即时文字辅导并保持线程状态 | 与资源终态、用户身份严格区分 |
+
+`code_practice` 生成节点使用流式配置；严格 `code_practice_reviewer` 使用独立 non-streaming 配置。reviewer 的 Pydantic 合同和业务验证不可由文本生成成功替代。
 
 [网页研究实现](../../src/graph/web_research.py)和[证据编排实现](../../src/graph/evidence.py)体现了来源、需求、裁判和修复边界。
 
@@ -102,7 +107,7 @@ flowchart LR
 ## 8. 防幻觉、内容安全与失败闭合
 
 - topic 和本地资料必须绑定 `KnowledgeGraphV1` 及 source identity。
-- 本地与网页证据按资源需求分项收集，裁判不通过时只进行有界修复。
+- 本地与网页证据按资源需求分项收集，裁判不通过时只在同一 PGR 路径内进行有界补搜；最多 3 个补充轮次、24 个 search task、72 条 ledger entry，且 required evidence 完整性门槛不降低。
 - LLM 结构化输出经 Pydantic 与业务校验；不通过时不会通过别名归一化或默认值伪造合法结果。
 - 请求过程中不自动切换 Provider、模型、Flat RAG 或其他检索实现。
 - generation、registry primary、manifest、KG 和 evidence orchestration 身份任一不一致都会阻止 readiness。
@@ -119,7 +124,7 @@ flowchart LR
 
 ## 10. 开发、集成与优化
 
-仓库采用严格配置、结构化合同、聚焦测试和静态门禁。Provider、模型、base URL、API-key 环境变量名和 retry 策略来自配置；业务节点不硬编码。P0、PG、PR、PGR 仅用于离线消融评估：PGR 是唯一 served path，其他变体不能被描述为生产灰度或 fallback。
+仓库采用严格配置、结构化合同、聚焦测试和静态门禁。Provider、模型、base URL、API-key 环境变量名和 retry 策略来自配置；业务节点不硬编码。P0、PG、PR、PGR 仅用于离线消融评估：PGR 是唯一 served path，其他变体不能被描述为生产灰度或 fallback。有界 Evidence 补搜是同一路径内的质量修复，不是 Provider、模型、generation 或 RAG 降级。
 
 性能优化主要来自并行资源编排、分阶段进度、父文档 hydration、持久化状态和可恢复 SSE，而不是隐藏超时。多模态任务可用更长时间完成，但必须持续给出可验证状态。
 
@@ -129,7 +134,7 @@ flowchart LR
 
 当前实现适合作为功能完整、严格失败、可恢复的可信本地比赛演示；以下条件未闭合前不应表述为公共 SaaS 生产就绪：
 
-- 真实 Provider、Docker、浏览器 canary 和人工内容验收尚未由本次文档提交执行；
+- Docker/Provider/浏览器链路已连续完成两轮 code-practice，完整六场景、最终 PostgreSQL 重启回归和人工内容验收仍未闭合；
 - 多租户身份认证、租户隔离、滥用/速率控制和正式告警值守未形成完整证据；
 - 干净 checkout 不包含获授权课程资料和密封索引；
 - PyMuPDF、课程资料、模型服务及网页来源的许可/条款需要人工批准；

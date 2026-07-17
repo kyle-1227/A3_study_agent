@@ -4,7 +4,7 @@
 
 项目支持 Docker Compose 统一构建并启动 PostgreSQL、FastAPI 后端和 Next.js 前端。这里的“一键部署”是**满足外部资产和私密配置前置条件后的单命令启动**，不是纯 Git checkout 开箱即用。
 
-本次纯文档提交没有读取真实 `.env`，也没有执行 Docker、Provider 请求或真实浏览器 canary，因此不构成已部署或已验收证明。
+当前 active Docker/Provider/浏览器链路已连续完成两轮 code-practice 真实 canary；最终镜像重建、PostgreSQL-only restart、完整六场景与人工内容验收仍须分别核验。本文不读取或展示真实 `.env`。
 
 ## 2. 环境与外部资产
 
@@ -20,7 +20,10 @@
 2. 已密封的 Parent–Child 索引目录，其中 registry primary 指向
    `pc_20260715_98336c2_55`，shadow 为空；
 3. 与该 generation 一致的 manifest、`KnowledgeGraphV1` 和
-   `2026.07.15-source-groups-v1` 身份；
+   `2026.07.15-source-groups-v1` 身份，精确 fingerprint 为：
+   - manifest：`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`；
+   - KG artifact：`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`；
+   - Evidence orchestration：`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`；
 4. 仅存放在忽略文件或部署平台 secret store 中的私密配置。
 
 课程资料和密封索引可能因版权、体积与敏感性不进入 Git。部署负责人应通过受控渠道交付，校验来源和完整性；不得用空目录、旧 Flat 索引或临时生成内容冒充。
@@ -65,7 +68,11 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --de
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
-第二条命令是准备完成后的统一启动入口。Compose 将密封索引只读挂载，把运行时 Chroma 快照放入独立可写 volume，并把生成 artifact 放入持久化 volume。后端镜像包含 Chromium 和 ffmpeg，以支持视频动画资源。
+第二条命令是准备完成后的统一启动入口。Compose 对课程资料和密封索引都使用 long-syntax 只读 bind，并设置 `bind.create_host_path=false`；D:/E: 路径不存在时必须失败，不能自动创建空目录。运行时 Chroma 快照使用独立可写 volume，生成 artifact 使用持久化 volume。后端镜像包含 Chromium 和 ffmpeg，以支持视频动画资源。
+
+正式比赛镜像还应从干净 HEAD 重建，并在 backend/frontend 镜像上写入同一
+`org.opencontainers.image.revision` 标签。精确命令与标签检查见
+[生产部署运行手册](../runbooks/production_deployment.md)。
 
 任何缺失变量、宿主路径、generation/manifest/KG 身份或 PostgreSQL readiness 都应使部署失败。不得为了“启动成功”改用静默默认值、旧 RAG、其他 Provider 或其他模型。
 
@@ -90,9 +97,14 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 - `rollout_shadow_enabled=false`；
 - 与 production config 一致的 graph、KnowledgeGraph、generation manifest 和 evidence orchestration 身份。
 
+当前实测身份必须精确匹配 generation 55、manifest
+`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、KG
+`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和 Evidence
+`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
+
 `/subjects` 只应暴露五个生产学科：大数据、计算机、机器学习、数学和 Python；内部目录不能被当作学科。
 
-以上仍只是 readiness。最终比赛/部署验收还要按[生产部署运行手册](../runbooks/production_deployment.md)执行六场景真实网页 canary、PostgreSQL 重启、Last-Event-ID 回放、刷新恢复、请求漂移冲突和 artifact 下载检查，并人工抽检学术内容。未执行时必须写“未执行”，不能写“通过”。
+以上仍只是 readiness。两轮最终 code-practice 已验证 Last-Event-ID 回放、刷新恢复、请求漂移冲突和 DOCX/Markdown/Python 下载，但最终比赛/部署验收还要按[生产部署运行手册](../runbooks/production_deployment.md)完成 PostgreSQL 重启、其余六场景覆盖并人工抽检学术内容。未覆盖项必须写“未完成”，不能由单一场景外推为通过。
 
 ## 6. 停止与恢复
 
