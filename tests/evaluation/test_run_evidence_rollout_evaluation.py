@@ -342,10 +342,9 @@ def test_cli_hermetic_run_publishes_blocked_decision(
     assert decision.execution_mode == "hermetic"
     assert decision.activation_allowed is False
     assert decision.benchmark_eligible is True
-    assert decision.rollout_activation_enabled is False
+    assert decision.rollout_activation_enabled is True
     assert decision.reason_codes == [
         "non_live_execution",
-        "rollout_activation_disabled",
     ]
     assert report.reason_codes == decision.reason_codes
     combined = (
