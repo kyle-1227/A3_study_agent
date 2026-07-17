@@ -32,6 +32,11 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     )
     assert "required_incomplete_query_shape attached to every requirement" in prompt
     assert "This requirement applies again in every supplement round" in prompt
+    assert "against the union of the selected bound candidates" in prompt
+    assert "Different selected evidence items may support different clauses" in prompt
+    assert "Do not require one candidate to contain an integrated example" in prompt
+    assert "unless the acceptance criteria explicitly impose" in prompt
+    assert "when any acceptance-criteria clause or operation still lacks" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
