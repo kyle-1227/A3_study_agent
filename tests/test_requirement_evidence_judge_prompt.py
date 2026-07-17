@@ -37,6 +37,25 @@ def test_requirement_evidence_judge_prompt_has_exact_gap_query_matrix() -> None:
     assert "Do not require one candidate to contain an integrated example" in prompt
     assert "unless the acceptance criteria explicitly impose" in prompt
     assert "when any acceptance-criteria clause or operation still lacks" in prompt
+    assert (
+        "requested resource format is not an extra acceptance-criteria clause" in prompt
+    )
+    assert "does not mean one cited source must already contain" in prompt
+    assert "evaluate those operations separately" in prompt
+    assert (
+        "related sibling operations that the scoped query intent did not retain"
+        in prompt
+    )
+
+
+def test_resource_evidence_planner_prompt_preserves_requested_scope() -> None:
+    prompt = load_prompt("resource_evidence_planner", reload=True)
+
+    assert "Scope fidelity rule" in prompt
+    assert "may restate only concepts and operations explicitly required" in prompt
+    assert "Do not broaden one concept into sibling operations" in prompt
+    assert '"list iteration" must not automatically add both' in prompt
+    assert "do not invent an integrated-example or single-source condition" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
