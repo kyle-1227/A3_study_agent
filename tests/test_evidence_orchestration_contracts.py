@@ -96,9 +96,10 @@ def test_strict_configs_load_complete_explicit_inventory():
     policy = load_evidence_orchestration_config(POLICY_PATH)
     profiles = load_resource_evidence_profiles(PROFILES_PATH)
 
-    assert policy.max_supplement_rounds == 2
+    assert policy.max_supplement_rounds == 3
     assert policy.max_search_tasks_per_round == 6
-    assert policy.max_total_search_tasks == 18
+    assert policy.max_total_search_tasks == 24
+    assert policy.max_ledger_entries == 72
     assert policy.max_concurrent_tasks == 1
     assert policy.web_timeout_seconds == 120.0
     assert policy.required_task_priority == "high"
