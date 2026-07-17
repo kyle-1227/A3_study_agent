@@ -87,6 +87,15 @@ structured_output:
 checkpointer:
   enabled: true                         # Enable LangGraph state snapshots for SSE final state
   type: memory                          # memory for local/demo; set postgres with DB_URI for persistence
+  postgres_pool:
+    min_size: 1
+    max_size: 8
+    timeout_seconds: 10
+    max_waiting: 64
+    max_lifetime_seconds: 1800
+    max_idle_seconds: 300
+    reconnect_timeout_seconds: 30
+    num_workers: 2
 
 graph:
   execution_recursion_limit: 96         # Explicit bounded superstep ceiling for the served graph

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
-from unittest.mock import MagicMock
 
 from src.graph.builder import get_compiled_graph
 
@@ -121,6 +121,137 @@ class TestCheckpointerModule:
                 checkpointer_module.graph_recursion_limit()
 
 
+class TestPostgresPoolContract:
+    """Tests for strict pool configuration and saver lifecycle."""
+
+    @staticmethod
+    def _valid_settings() -> dict[str, object]:
+        return {
+            "min_size": 1,
+            "max_size": 8,
+            "timeout_seconds": 10,
+            "max_waiting": 64,
+            "max_lifetime_seconds": 1800,
+            "max_idle_seconds": 300,
+            "reconnect_timeout_seconds": 30,
+            "num_workers": 2,
+        }
+
+    def test_pool_config_requires_exact_valid_settings(self, monkeypatch):
+        from src.database import checkpointer as checkpointer_module
+
+        settings = self._valid_settings()
+        monkeypatch.setattr(
+            checkpointer_module,
+            "get_setting",
+            lambda key: settings if key == "checkpointer.postgres_pool" else None,
+        )
+
+        config = checkpointer_module.postgres_pool_config()
+
+        assert config == checkpointer_module.PostgresPoolConfig(
+            min_size=1,
+            max_size=8,
+            timeout_seconds=10.0,
+            max_waiting=64,
+            max_lifetime_seconds=1800.0,
+            max_idle_seconds=300.0,
+            reconnect_timeout_seconds=30.0,
+            num_workers=2,
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("min_size", 0),
+            ("max_size", True),
+            ("timeout_seconds", 0),
+            ("max_waiting", 0),
+            ("max_lifetime_seconds", 300),
+            ("max_idle_seconds", float("inf")),
+            ("reconnect_timeout_seconds", -1),
+            ("num_workers", 17),
+        ],
+    )
+    def test_pool_config_rejects_invalid_values(self, monkeypatch, field, value):
+        from src.database import checkpointer as checkpointer_module
+
+        settings = self._valid_settings()
+        settings[field] = value
+        monkeypatch.setattr(
+            checkpointer_module,
+            "get_setting",
+            lambda key: settings if key == "checkpointer.postgres_pool" else None,
+        )
+
+        with pytest.raises(ValueError, match="checkpointer.postgres_pool"):
+            checkpointer_module.postgres_pool_config()
+
+    @pytest.mark.anyio
+    async def test_open_checkpointer_uses_health_checked_pool(self, monkeypatch):
+        from src.database import checkpointer as checkpointer_module
+
+        events: list[str] = []
+
+        class FakePool:
+            last: "FakePool | None" = None
+
+            def __init__(self, conninfo, **kwargs):
+                self.conninfo = conninfo
+                self.kwargs = kwargs
+                FakePool.last = self
+
+            @staticmethod
+            async def check_connection(_connection):
+                return None
+
+            async def __aenter__(self):
+                events.append("pool_enter")
+                return self
+
+            async def __aexit__(self, *_args):
+                events.append("pool_exit")
+                return False
+
+            async def wait(self, *, timeout):
+                events.append(f"pool_wait:{timeout:g}")
+
+        class FakeSaver:
+            def __init__(self, pool):
+                assert pool is FakePool.last
+                events.append("saver_init")
+
+            async def setup(self):
+                events.append("saver_setup")
+
+        monkeypatch.setattr(checkpointer_module, "AsyncConnectionPool", FakePool)
+        monkeypatch.setattr(checkpointer_module, "AsyncPostgresSaver", FakeSaver)
+        monkeypatch.setattr(
+            checkpointer_module,
+            "postgres_pool_config",
+            lambda: checkpointer_module.PostgresPoolConfig(**self._valid_settings()),
+        )
+
+        async with checkpointer_module.open_postgres_checkpointer(
+            "postgresql://user:pass@localhost:5432/a3"
+        ) as saver:
+            assert isinstance(saver, FakeSaver)
+
+        pool = FakePool.last
+        assert pool is not None
+        assert pool.kwargs["open"] is False
+        assert pool.kwargs["check"] is FakePool.check_connection
+        assert pool.kwargs["kwargs"]["autocommit"] is True
+        assert pool.kwargs["kwargs"]["prepare_threshold"] == 0
+        assert events == [
+            "pool_enter",
+            "pool_wait:10",
+            "saver_init",
+            "saver_setup",
+            "pool_exit",
+        ]
+
+
 class TestAppLifespanCheckpointer:
     """Tests app lifespan checkpointer selection without real database access."""
 
@@ -151,21 +282,11 @@ class TestAppLifespanCheckpointer:
         monkeypatch,
     ):
         import app as app_module
-        import langgraph.checkpoint.postgres.aio as postgres_aio
 
-        class FailingPostgresSaver:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return False
-
-            async def setup(self):
-                raise RuntimeError("setup failed")
-
-            @classmethod
-            def from_conn_string(cls, _db_uri):
-                return cls()
+        @asynccontextmanager
+        async def failing_checkpointer(_db_uri):
+            raise RuntimeError("setup failed")
+            yield
 
         fake_app = SimpleNamespace(state=SimpleNamespace())
         monkeypatch.setattr(app_module, "checkpointer_enabled", lambda: True)
@@ -176,9 +297,9 @@ class TestAppLifespanCheckpointer:
             lambda: "postgresql://user:pass@localhost:5432/a3",
         )
         monkeypatch.setattr(
-            postgres_aio,
-            "AsyncPostgresSaver",
-            FailingPostgresSaver,
+            app_module,
+            "open_postgres_checkpointer",
+            failing_checkpointer,
         )
         get_graph = MagicMock()
         monkeypatch.setattr(

@@ -98,6 +98,7 @@ from src.database.checkpointer import (
     checkpointer_type,
     get_db_uri,
     make_thread_config,
+    open_postgres_checkpointer,
 )
 from src.database.assessment_lock import PostgresAssessmentExecutionLock
 from src.config import get_setting
@@ -713,12 +714,9 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError(
                     "PostgreSQL checkpointer requires DB_URI when CHECKPOINTER_TYPE=postgres"
                 )
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
             checkpointer = await stack.enter_async_context(
-                AsyncPostgresSaver.from_conn_string(db_uri)
+                open_postgres_checkpointer(db_uri)
             )
-            await checkpointer.setup()
             logger.info("PostgreSQL checkpointer initialized")
         elif enabled and ckp_type == "memory":
             from langgraph.checkpoint.memory import MemorySaver
