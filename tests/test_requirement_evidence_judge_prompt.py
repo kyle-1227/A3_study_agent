@@ -56,6 +56,10 @@ def test_resource_evidence_planner_prompt_preserves_requested_scope() -> None:
     assert "Do not broaden one concept into sibling operations" in prompt
     assert '"list iteration" must not automatically add both' in prompt
     assert "do not invent an integrated-example or single-source condition" in prompt
+    assert "Keep broad learner concepts broad" in prompt
+    assert "must not add parameters, arguments, return values" in prompt
+    assert "unless a supplied input explicitly requires them" in prompt
+    assert "over an invented enumeration of related language features" in prompt
 
 
 def test_requirement_evidence_judge_prompt_renders_evidence_limit() -> None:
