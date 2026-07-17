@@ -665,7 +665,16 @@ def _validate_requirement_topic_bindings(
             topic.topic_id for topic in subject_node.topics
         )
     path_topic_by_resource: dict[ResourceType, str] | None = None
+    path_subject: str | None = None
     if learner_path_projection.status == "available":
+        path_subject = learner_path_projection.subject
+        if path_subject is None or path_subject not in topics_by_subject:
+            raise EvidenceOrchestrationContractError(
+                code="learner_path_subject_not_requested",
+                reason=(
+                    "available learner path subject must be one of the requested subjects"
+                ),
+            )
         path_topic_by_resource = {}
         for step in learner_path_projection.steps:
             for resource_type in step.recommended_resource_types:
@@ -686,7 +695,7 @@ def _validate_requirement_topic_bindings(
                 code="requirement_topic_not_in_knowledge_graph",
                 reason="requirement topic must exactly match its curated subject",
             )
-        if path_topic_by_resource is not None:
+        if path_topic_by_resource is not None and requirement.subject == path_subject:
             expected_topic_id = path_topic_by_resource.get(requirement.resource_type)
             if expected_topic_id is None:
                 raise EvidenceOrchestrationContractError(
@@ -852,7 +861,13 @@ def make_resource_evidence_planner_node(
                     SystemMessage(
                         content=(
                             "Return only the strict evidence requirement schema. "
-                            "Configured profile fields are immutable input contracts."
+                            "Configured profile fields are immutable input contracts. "
+                            "An available learner path constrains only requirements "
+                            "whose subject exactly matches the projection subject. "
+                            "Every other selected subject must still include every "
+                            "configured profile slot using a topic from that subject's "
+                            "curated knowledge graph; never copy a path topic across "
+                            "subjects."
                         )
                     ),
                     HumanMessage(content=prompt),

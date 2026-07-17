@@ -150,6 +150,48 @@ def _runtime() -> orchestration.EvidenceOrchestrationRuntime:
     )
 
 
+def _multisubject_runtime() -> orchestration.EvidenceOrchestrationRuntime:
+    base = _runtime()
+    graph_payload = _knowledge_graph().model_dump(mode="python")
+    subjects = list(graph_payload["subjects"])
+    graph_payload["subjects"] = subjects
+    subjects.append(
+        {
+            "subject_id": "computer",
+            "title": "Computer Science",
+            "topics": [
+                {
+                    "topic_id": "computer.systems",
+                    "title": "Computer Systems",
+                    "difficulty": 0.5,
+                    "estimated_hours": 2.0,
+                    "prerequisite_topic_ids": [],
+                    "knowledge_points": ["Computer system foundations"],
+                    "resources": [
+                        {
+                            "resource_id": "computer_systems_quiz",
+                            "resource_type": "quiz",
+                            "title": "Computer systems quiz",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    knowledge_graph = KnowledgeGraphV1.model_validate(graph_payload)
+    return replace(
+        base,
+        parent_child=replace(
+            base.parent_child,
+            available_subjects=("computer", "math"),
+        ),
+        learning_guidance=replace(
+            base.learning_guidance,
+            knowledge_graph=knowledge_graph,
+        ),
+    )
+
+
 def _quiz_draft_batch(runtime: orchestration.EvidenceOrchestrationRuntime):
     profile = runtime.profiles.profile_for("quiz")
     return EvidenceRequirementDraftBatch(
@@ -167,6 +209,37 @@ def _quiz_draft_batch(runtime: orchestration.EvidenceOrchestrationRuntime):
                 acceptance_criteria=need.acceptance_criteria,
                 query_intent=f"math {need.evidence_kind} initial evidence",
             )
+            for need in profile.needs
+        ],
+    )
+
+
+def _multisubject_quiz_draft_batch(
+    runtime: orchestration.EvidenceOrchestrationRuntime,
+    *,
+    include_computer: bool = True,
+    computer_topic_id: str = "computer.systems",
+) -> EvidenceRequirementDraftBatch:
+    profile = runtime.profiles.profile_for("quiz")
+    subject_topics = [("math", "functions")]
+    if include_computer:
+        subject_topics.append(("computer", computer_topic_id))
+    return EvidenceRequirementDraftBatch(
+        schema_version="evidence_requirement_draft_batch_v1",
+        requirements=[
+            EvidenceRequirementDraft(
+                resource_type="quiz",
+                subject=subject,
+                topic_id=topic_id,
+                profile_need_id=need.need_id,
+                evidence_kind=need.evidence_kind,
+                scope=need.scope,
+                criticality=need.criticality,
+                source_policy=need.source_policy,
+                acceptance_criteria=need.acceptance_criteria,
+                query_intent=f"{subject} {topic_id} {need.evidence_kind} evidence",
+            )
+            for subject, topic_id in subject_topics
             for need in profile.needs
         ],
     )
@@ -220,6 +293,58 @@ def _planner_state():
             "steps": [],
         },
     }
+
+
+def _multisubject_planner_state() -> dict:
+    guidance = _learning_guidance_runtime()
+    state = {
+        **_planner_state(),
+        "user_id": "learner-math-1",
+        "learner_path_planner_output": {
+            "schema_version": "learner_path_planner_output_v1",
+            "runtime_fingerprint": guidance.runtime_fingerprint,
+            "provider_projection_policy_fingerprint": (
+                guidance.provider_projection_policy_fingerprint
+            ),
+            "provider_projection_max_steps": (guidance.provider_projection_max_steps),
+            "provider_projection_max_chars": (guidance.provider_projection_max_chars),
+            "request_id": "request-evidence-1",
+            "status": "unavailable",
+            "unavailable_reason": "unsupported_subject_scope",
+            "user_id": "learner-math-1",
+            "subject": "math",
+            "plan": None,
+        },
+        "learner_path_provider_projection": {
+            "schema_version": "learner_path_provider_projection_v1",
+            "status": "unavailable",
+            "unavailable_reason": "unsupported_subject_scope",
+            "subject": "math",
+            "summary": None,
+            "steps": [],
+        },
+    }
+    state["retrieval_plan"] = [
+        {
+            "subject": "math",
+            "role": "core_concept",
+            "local_retrieval_query": "math functions course concepts",
+            "web_research_seed_query": "math functions official tutorial",
+            "purpose": "support the requested quiz",
+            "priority": 1.0,
+            "_parent_child_priority_explicit": True,
+        },
+        {
+            "subject": "computer",
+            "role": "supporting_context",
+            "local_retrieval_query": "computer systems course concepts",
+            "web_research_seed_query": "computer systems official tutorial",
+            "purpose": "support the requested quiz context",
+            "priority": 0.7,
+            "_parent_child_priority_explicit": True,
+        },
+    ]
+    return state
 
 
 def _available_math_path_output() -> dict:
@@ -282,6 +407,23 @@ def _available_math_path_provider_projection() -> dict:
             }
         ],
     }
+
+
+def _available_math_projection(
+    runtime: orchestration.EvidenceOrchestrationRuntime,
+):
+    state = {
+        **_planner_state(),
+        "user_id": "learner-math-1",
+        "learner_path_planner_output": _available_math_path_output(),
+        "learner_path_provider_projection": (
+            _available_math_path_provider_projection()
+        ),
+    }
+    return orchestration.learner_path_provider_projection_for_runtime_from_state(
+        state,
+        runtime=runtime.learning_guidance,
+    )
 
 
 def _missing_coverage(requirements, *, round_index: int, suffix: str):
@@ -1074,6 +1216,99 @@ def test_requirement_evidence_judge_receives_attempted_query_text(monkeypatch):
         assert f'"source_type": "{task.source_type}"' in prompt
         assert f'"query": "{task.query}"' in prompt
         assert f'"query_fingerprint": "{task.query_fingerprint}"' in prompt
+
+
+def test_multisubject_planner_keeps_all_slots_and_scopes_available_path(monkeypatch):
+    runtime = _multisubject_runtime()
+    batch = _multisubject_quiz_draft_batch(runtime)
+    captured: dict[str, object] = {}
+
+    async def fake_planner(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(parsed=batch)
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_planner)
+    planned = asyncio.run(
+        orchestration.make_resource_evidence_planner_node(runtime)(
+            _multisubject_planner_state()
+        )
+    )
+
+    requirements = planned["evidence_requirements"]
+    assert {
+        (
+            requirement["subject"],
+            requirement["topic_id"],
+            requirement["profile_need_id"],
+        )
+        for requirement in requirements
+    } == {
+        ("math", "functions", need.need_id)
+        for need in runtime.profiles.profile_for("quiz").needs
+    } | {
+        ("computer", "computer.systems", need.need_id)
+        for need in runtime.profiles.profile_for("quiz").needs
+    }
+    available_projection = _available_math_projection(runtime)
+    assert (
+        orchestration._planner_business_validation(
+            batch,
+            resources=("quiz",),
+            subjects=("math", "computer"),
+            learner_path_projection=available_projection,
+            runtime=runtime,
+        )
+        == ""
+    )
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert "constrains only requirements" in messages[0].content
+    assert "never copy a path topic across subjects" in messages[0].content
+    assert "Subject-scope rule" in messages[1].content
+    assert "Every other selected subject is still mandatory" in messages[1].content
+
+
+def test_planner_reask_diagnostic_names_missing_supporting_subject_slots():
+    runtime = _multisubject_runtime()
+    projection = _available_math_projection(runtime)
+    incomplete = _multisubject_quiz_draft_batch(
+        runtime,
+        include_computer=False,
+    )
+
+    feedback = orchestration._planner_business_validation(
+        incomplete,
+        resources=("quiz",),
+        subjects=("math", "computer"),
+        learner_path_projection=projection,
+        runtime=runtime,
+    )
+
+    assert feedback.startswith("requirement_inventory_mismatch:")
+    for need in runtime.profiles.profile_for("quiz").needs:
+        assert (
+            f"resource_type=quiz|subject=computer|profile_need_id={need.need_id}"
+        ) in feedback
+    assert "unexpected_slots=[]" in feedback
+
+
+def test_planner_rejects_copying_path_topic_to_supporting_subject():
+    runtime = _multisubject_runtime()
+    projection = _available_math_projection(runtime)
+    invalid = _multisubject_quiz_draft_batch(
+        runtime,
+        computer_topic_id="functions",
+    )
+
+    feedback = orchestration._planner_business_validation(
+        invalid,
+        resources=("quiz",),
+        subjects=("math", "computer"),
+        learner_path_projection=projection,
+        runtime=runtime,
+    )
+
+    assert feedback.startswith("requirement_topic_not_in_knowledge_graph:")
 
 
 def test_evidence_planner_injects_only_provider_safe_learner_path(monkeypatch):

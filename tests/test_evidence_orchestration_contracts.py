@@ -229,7 +229,7 @@ def test_requirement_inventory_exactly_covers_profile_slots():
     with pytest.raises(
         EvidenceRequirementValidationError,
         match="requirement_inventory_mismatch",
-    ):
+    ) as exc_info:
         validate_requirement_inventory(
             requested_resource_types=("quiz",),
             requested_subjects=("math",),
@@ -238,6 +238,57 @@ def test_requirement_inventory_exactly_covers_profile_slots():
             profiles=profiles,
             config=policy,
         )
+
+    missing = requirements[1]
+    message = str(exc_info.value)
+    assert (
+        "missing_slots=[resource_type=quiz|subject=math|"
+        f"profile_need_id={missing.profile_need_id}]"
+    ) in message
+    assert "unexpected_slots=[]" in message
+
+
+def test_requirement_inventory_reports_missing_and_unexpected_slots():
+    policy = load_evidence_orchestration_config(POLICY_PATH)
+    profiles, requirements = _quiz_requirements()
+    replaced = requirements[1]
+    unexpected = compile_evidence_requirement_batch(
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=[
+                EvidenceRequirementDraft(
+                    resource_type=replaced.resource_type,
+                    subject="physics",
+                    topic_id="physics.mechanics",
+                    profile_need_id=replaced.profile_need_id,
+                    evidence_kind=replaced.evidence_kind,
+                    scope=replaced.scope,
+                    criticality=replaced.criticality,
+                    source_policy=replaced.source_policy,
+                    acceptance_criteria=replaced.acceptance_criteria,
+                    query_intent="physics mechanics profile evidence",
+                )
+            ],
+        )
+    )[0]
+
+    with pytest.raises(EvidenceRequirementValidationError) as unexpected_exc:
+        validate_requirement_inventory(
+            requested_resource_types=("quiz",),
+            requested_subjects=("math",),
+            canonical_subjects={"math", "physics"},
+            requirements=(requirements[0], unexpected),
+            profiles=profiles,
+            config=policy,
+        )
+
+    message = str(unexpected_exc.value)
+    expected_slot = f"profile_need_id={replaced.profile_need_id}"
+    assert f"missing_slots=[resource_type=quiz|subject=math|{expected_slot}]" in message
+    assert (
+        f"unexpected_slots=[resource_type=quiz|subject=physics|{expected_slot}]"
+        in message
+    )
 
 
 def test_retrieval_task_validation_rejects_illegal_source_and_repeat():

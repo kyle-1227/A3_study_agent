@@ -29,5 +29,9 @@ Configured resource evidence profiles:
 Maximum requirements:
 {max_requirements}
 
+Subject-scope rule: an available learner path constrains only requirements whose subject exactly equals learner_path_provider_projection.subject.
+Every other selected subject is still mandatory and must include every configured profile slot using one topic from that subject's own curated catalog.
+Never copy a learner-path topic across subjects. The learner-path topic rule below applies only to the projection subject, not to supporting subjects.
+
 Return exactly one evidence_requirement_draft_batch_v1 object. Create exactly one requirement for every requested resource, selected subject, and configured profile need. For each resource+subject pair choose exactly one topic_id and repeat that exact topic_id across all of its profile needs. topic_id must be copied from the curated catalog. When the learner path is available, copy topic_id from the unique path step whose recommended_resource_types contains the current resource_type; do not bind that resource to any other path topic. Copy resource_type, profile_need_id, evidence_kind, scope, criticality, source_policy, and acceptance_criteria exactly from the supplied profiles. Never rename, merge, omit, or invent a profile slot. query_intent must be a concise, requirement-specific search query suitable for both local course retrieval and web search; it must include the subject, target topic, and evidence need, and must not contain a URL. Use exact schema keys only.
 ]]></prompt>

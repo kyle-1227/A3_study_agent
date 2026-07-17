@@ -873,9 +873,25 @@ def validate_requirement_inventory(
             )
         topic_by_resource_subject[resource_subject] = requirement.topic_id
     if set(actual) != set(expected):
+        missing_slots = sorted(set(expected) - set(actual))
+        unexpected_slots = sorted(set(actual) - set(expected))
+
+        def format_slots(slots: Sequence[tuple[str, str, str]]) -> str:
+            return ",".join(
+                (
+                    f"resource_type={resource_type}|subject={subject}|"
+                    f"profile_need_id={profile_need_id}"
+                )
+                for resource_type, subject, profile_need_id in slots
+            )
+
         raise EvidenceRequirementValidationError(
             code="requirement_inventory_mismatch",
-            reason="requirements must exactly cover requested resource profile needs",
+            reason=(
+                "requirements must exactly cover requested resource profile needs; "
+                f"missing_slots=[{format_slots(missing_slots)}]; "
+                f"unexpected_slots=[{format_slots(unexpected_slots)}]"
+            ),
         )
 
     for actual_slot, requirement in actual.items():
