@@ -49,7 +49,9 @@ class LocalEvidenceRef(_StrictFrozenModel):
     vector_rank: int | None
     bm25_rank: int | None
     rrf_score: float = Field(gt=0)
-    rerank_score: float = Field(ge=0.0, le=1.0)
+    ranking_mode: Literal["reranked", "rrf_only"]
+    ranking_score: float = Field(ge=0.0, le=1.0)
+    rerank_score: float | None = Field(default=None, ge=0.0, le=1.0)
     content_preview: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -70,6 +72,13 @@ class LocalEvidenceRef(_StrictFrozenModel):
             )
         if len(self.content_preview) > self.child_chars:
             raise ValueError("child preview cannot exceed child content length")
+        if self.ranking_mode == "reranked":
+            if self.rerank_score is None:
+                raise ValueError("reranked local evidence requires reranker score")
+            if self.ranking_score != self.rerank_score:
+                raise ValueError("local ranking score must equal reranker score")
+        elif self.rerank_score is not None:
+            raise ValueError("RRF-only local evidence cannot carry reranker score")
         return self
 
     def graph_candidate_payload(
@@ -125,6 +134,8 @@ class LocalEvidenceRef(_StrictFrozenModel):
                 "vector_rank": self.vector_rank,
                 "bm25_rank": self.bm25_rank,
                 "rrf_score": self.rrf_score,
+                "ranking_mode": self.ranking_mode,
+                "ranking_score": self.ranking_score,
             },
         }
 
@@ -183,6 +194,8 @@ def _local_ref_from_hit(
         vector_rank=hit.vector_rank,
         bm25_rank=hit.bm25_rank,
         rrf_score=hit.rrf_score,
+        ranking_mode=hit.ranking_mode,
+        ranking_score=hit.ranking_score,
         rerank_score=hit.rerank_score,
         content_preview=hit.document.content[:preview_max_chars],
     )
@@ -256,11 +269,11 @@ def build_multi_local_evidence_refs(
                     "branches returned conflicting content for one child ID"
                 )
             if existing is None or (
-                hit.rerank_score,
+                hit.ranking_score,
                 -hit.final_rank,
                 hit.rrf_score,
             ) > (
-                existing.rerank_score,
+                existing.ranking_score,
                 -existing.final_rank,
                 existing.rrf_score,
             ):
@@ -278,7 +291,7 @@ def build_multi_local_evidence_refs(
             sorted(
                 parent_hits.values(),
                 key=lambda hit: (
-                    -hit.rerank_score,
+                    -hit.ranking_score,
                     hit.final_rank,
                     hit.document.metadata.child_id,
                 ),

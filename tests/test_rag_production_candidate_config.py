@@ -27,6 +27,7 @@ def test_inactive_production_candidate_config_matches_generation_55_identity() -
     assert not config.storage.index_root.is_absolute()
     assert not config.storage.registry_path.is_absolute()
     assert config.retrieval.reranker_top_n == 20
+    assert config.retrieval.reranker_transport_fallback_mode == "rrf_only"
     assert compute_embedding_fingerprint(config) == (
         GENERATION_55_EMBEDDING_FINGERPRINT
     )

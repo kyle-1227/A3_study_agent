@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config._rag_config import resolve_required_secret
 from src.config.rag_index_config import EmbeddingConfig, RerankerConfig, RetryConfig
-from src.rag.parent_child.retrieval import RerankCandidate, RerankScore
+from src.rag.parent_child.retrieval import (
+    RerankCandidate,
+    RerankerTransportExhaustedError,
+    RerankScore,
+)
 
 
 class ProviderClientError(RuntimeError):
@@ -20,7 +24,18 @@ class ProviderClientError(RuntimeError):
 
 
 class ProviderTransportError(ProviderClientError):
-    """The configured endpoint failed after its explicit retry policy."""
+    """A transport failure with explicit retry eligibility and exhaustion state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        attempts_exhausted: bool,
+    ) -> None:
+        self.retryable = retryable
+        self.attempts_exhausted = attempts_exhausted
+        super().__init__(message)
 
 
 class ProviderReportedError(ProviderTransportError):
@@ -36,7 +51,11 @@ class ProviderReportedError(ProviderTransportError):
         self.code = code
         self.retryable = retryable
         self.attempts_exhausted = attempts_exhausted
-        super().__init__("provider returned an explicit error envelope")
+        super().__init__(
+            "provider returned an explicit error envelope",
+            retryable=retryable,
+            attempts_exhausted=attempts_exhausted,
+        )
 
 
 class ProviderProtocolError(ProviderClientError):
@@ -245,11 +264,15 @@ class _StrictJsonHttpClient:
                     )
                     if not retryable:
                         raise ProviderTransportError(
-                            f"provider request failed: {last_reason}"
+                            f"provider request failed: {last_reason}",
+                            retryable=False,
+                            attempts_exhausted=False,
                         )
             if not retryable or attempt == self._retry.max_attempts:
                 raise ProviderTransportError(
-                    "provider request exhausted explicit retry policy: " + last_reason
+                    "provider request exhausted explicit retry policy: " + last_reason,
+                    retryable=retryable,
+                    attempts_exhausted=(attempt == self._retry.max_attempts),
                 )
             self._sleep(backoff)
             backoff = min(
@@ -458,7 +481,14 @@ class StrictRerankerClient:
                 "order": list(provider_routing.order),
                 "allow_fallbacks": provider_routing.allow_fallbacks,
             }
-        raw = self._http.post_json(payload)
+        try:
+            raw = self._http.post_json(payload)
+        except ProviderTransportError as exc:
+            if exc.retryable and exc.attempts_exhausted:
+                raise RerankerTransportExhaustedError(
+                    "reranker transport exhausted its explicit retry policy"
+                ) from exc
+            raise
         try:
             if self._config.protocol == "ranked_index_scores_v1":
                 response = _RerankerResponse.model_validate(raw)

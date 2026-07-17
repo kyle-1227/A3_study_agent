@@ -554,6 +554,7 @@ class RetrievalConfig(StrictRagConfigModel):
     rrf_k: PositiveInt
     vector_weight: PositiveFloat
     bm25_weight: PositiveFloat
+    reranker_transport_fallback_mode: Literal["disabled", "rrf_only"]
     reranker_top_n: PositiveInt
     unique_parent_top_k: PositiveInt
     max_children_per_parent: PositiveInt

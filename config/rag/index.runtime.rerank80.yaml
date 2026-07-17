@@ -253,6 +253,7 @@ retrieval:
   multi_subject_max_parents: 10
   multi_subject_per_subject_top_k: 3
   parent_support_lambda: 0.25
+  reranker_transport_fallback_mode: disabled
   reranker_top_n: 80
   rrf_k: 60
   subject_coverage_quota: 1

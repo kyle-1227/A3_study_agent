@@ -171,12 +171,16 @@ class _FakeGraphRetriever:
             vector_raw_score=0.1,
             bm25_raw_score=None,
             rrf_score=0.05,
+            ranking_mode="reranked",
+            ranking_score=0.9,
             rerank_score=0.9,
         )
         branch_results = tuple(
             HybridChildRetrievalResult(
                 schema_version="hybrid_child_retrieval_result_v1",
                 status="ok",
+                ranking_mode="reranked",
+                fallback_reason_code=None,
                 request=branch.request,
                 retrieval_fingerprint="f" * 64,
                 ranked_children=(hit,),
@@ -284,12 +288,16 @@ class _TwoBranchGraphRetriever:
                 vector_raw_score=0.1,
                 bm25_raw_score=None,
                 rrf_score=0.05,
+                ranking_mode="reranked",
+                ranking_score=0.9,
                 rerank_score=0.9,
             )
             branch_results.append(
                 HybridChildRetrievalResult(
                     schema_version="hybrid_child_retrieval_result_v1",
                     status="ok",
+                    ranking_mode="reranked",
+                    fallback_reason_code=None,
                     request=branch.request,
                     retrieval_fingerprint="f" * 64,
                     ranked_children=(hit,),

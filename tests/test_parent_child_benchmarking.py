@@ -188,6 +188,8 @@ def _candidate_result(
     return HybridRetrievalResult(
         schema_version="hybrid_retrieval_result_v1",
         status="ok",
+        ranking_mode="reranked",
+        fallback_reason_code=None,
         request=request,
         retrieval_fingerprint=CANDIDATE_RETRIEVAL_SHA,
         ranked_children=(
@@ -200,6 +202,8 @@ def _candidate_result(
                 vector_raw_score=0.1,
                 bm25_raw_score=None,
                 rrf_score=0.1,
+                ranking_mode="reranked",
+                ranking_score=0.9,
                 rerank_score=0.9,
             ),
         ),

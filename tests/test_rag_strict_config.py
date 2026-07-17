@@ -198,6 +198,7 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "rrf_k": 60,
             "vector_weight": 1.0,
             "bm25_weight": 1.0,
+            "reranker_transport_fallback_mode": "disabled",
             "reranker_top_n": 20,
             "unique_parent_top_k": 5,
             "max_children_per_parent": 2,

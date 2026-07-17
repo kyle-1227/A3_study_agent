@@ -246,6 +246,8 @@ def _arguments(project_root: Path, policy_path: Path) -> list[str]:
         "1.0",
         "--bm25-weight",
         "1.0",
+        "--reranker-transport-fallback-mode",
+        "disabled",
         "--reranker-top-n",
         "20",
         "--unique-parent-top-k",

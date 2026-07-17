@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Callable
+from typing import Callable, Literal
 
 import pytest
 
@@ -24,6 +24,7 @@ from src.rag.parent_child.retrieval import (
     RetrievalChannelError,
     RetrievalInvariantError,
     RetrievalProtocolError,
+    RerankerTransportExhaustedError,
     RerankCandidate,
     RerankScore,
     WeightedHybridBranch,
@@ -124,7 +125,9 @@ def _search_candidate(child: ChildDocument, raw_score: float) -> ChildSearchCand
     )
 
 
-def _policy() -> HybridRetrievalPolicy:
+def _policy(
+    *, fallback_mode: Literal["disabled", "rrf_only"] = "rrf_only"
+) -> HybridRetrievalPolicy:
     return HybridRetrievalPolicy(
         schema_version="hybrid_retrieval_policy_v1",
         generation_manifest_sha256="a" * 64,
@@ -137,6 +140,7 @@ def _policy() -> HybridRetrievalPolicy:
         bm25_rrf_weight=1.0,
         rrf_k=20,
         reranker_top_n=5,
+        reranker_transport_fallback_mode=fallback_mode,
         unique_parent_top_k=2,
         max_children_per_parent=2,
         max_parents_per_source=1,
@@ -222,6 +226,21 @@ class _RawReranker:
         del query
         self.calls += 1
         return self.output_factory(candidates)
+
+
+class _UnavailableReranker:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        candidates: tuple[RerankCandidate, ...],
+    ) -> tuple[RerankScore, ...]:
+        del query, candidates
+        self.calls += 1
+        raise RerankerTransportExhaustedError("fixture transport exhausted")
 
 
 class _Hydrator:
@@ -396,6 +415,54 @@ def test_hybrid_retrieval_merges_reranks_caps_and_hydrates_exact_windows() -> No
     assert first_context.windows[0].content == parent_one.content[7:25]
     assert second_context.expansion_mode == "full_parent"
     assert second_context.windows[0].content == parent_three.content
+
+
+def test_reranker_transport_exhaustion_uses_explicit_rrf_only_ranking() -> None:
+    parent = _parent(
+        40,
+        content="# RRF\n0123456789",
+        source_relpath="math/rrf.md",
+        section_title="RRF",
+    )
+    child = _child(40, parent, 6, 11, child_id=None)
+    reranker = _UnavailableReranker()
+    result, trace = ParentChildHybridRetriever(
+        policy=_policy(),
+        vector_search=_Search((_search_candidate(child, 0.9),), None),
+        bm25_search=_Search((_search_candidate(child, 3.0),), None),
+        reranker=reranker,
+        parent_hydrator=_Hydrator({parent.parent_id: parent}, None),
+    ).retrieve_with_diagnostics(_request())
+
+    assert reranker.calls == 1
+    assert result.ranking_mode == "rrf_only"
+    assert result.fallback_reason_code == "reranker_transport_exhausted"
+    assert trace.ranking_mode == "rrf_only"
+    assert trace.fallback_reason_code == "reranker_transport_exhausted"
+    hit = result.ranked_children[0]
+    assert hit.ranking_mode == "rrf_only"
+    assert hit.ranking_score == 1.0
+    assert hit.rerank_score is None
+    assert trace.children[0].submitted_to_reranker is False
+    assert trace.children[0].reranker_score is None
+
+
+def test_reranker_transport_exhaustion_stays_typed_when_fallback_disabled() -> None:
+    parent = _parent(
+        44,
+        content="# Disabled\n0123456789",
+        source_relpath="math/disabled.md",
+        section_title="Disabled",
+    )
+    child = _child(44, parent, 11, 16, child_id=None)
+    with pytest.raises(RetrievalChannelError, match="transport exhausted"):
+        ParentChildHybridRetriever(
+            policy=_policy(fallback_mode="disabled"),
+            vector_search=_Search((_search_candidate(child, 0.9),), None),
+            bm25_search=_Search((), None),
+            reranker=_UnavailableReranker(),
+            parent_hydrator=_MustNotHydrate(),
+        ).retrieve_children(_request())
 
 
 def test_diagnostic_retrieval_reuses_pipeline_without_query_or_body_leakage() -> None:

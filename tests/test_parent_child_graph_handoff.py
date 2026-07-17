@@ -33,6 +33,8 @@ def _ref() -> LocalEvidenceRef:
         vector_rank=1,
         bm25_rank=None,
         rrf_score=0.1,
+        ranking_mode="reranked",
+        ranking_score=0.9,
         rerank_score=0.9,
         content_preview="0123456789",
     )
