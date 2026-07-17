@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any, Literal, Self
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import httpx
@@ -515,6 +515,14 @@ def _refresh_projection_mode(
     )
 
 
+def _matching_artifact_paths(
+    artifact_paths: Sequence[str], hrefs: Sequence[str]
+) -> tuple[str, ...]:
+    expected_paths = {unquote(urlparse(path).path) for path in artifact_paths}
+    rendered_paths = {unquote(urlparse(href).path) for href in hrefs}
+    return tuple(sorted(expected_paths & rendered_paths))
+
+
 async def _verify_refreshed_ui(
     *,
     page: Page,
@@ -537,18 +545,22 @@ async def _verify_refreshed_ui(
     timeout_ms = timeout_seconds * 1_000
     if mode == "artifact_download":
         links = page.locator("main a[download]")
-        await links.first.wait_for(timeout=timeout_ms)
-        hrefs = await links.evaluate_all(
-            "elements => elements.map((element) => element.href)"
-        )
-        rendered_paths = {
-            urlparse(href).path for href in hrefs if isinstance(href, str)
-        }
-        matching_paths = set(artifact_paths) & rendered_paths
-        if not matching_paths:
-            raise ProductionCanaryError(
-                "browser refresh did not restore a referenced artifact card"
+        deadline = time.monotonic() + timeout_seconds
+        matching_paths: tuple[str, ...] = ()
+        while not matching_paths:
+            hrefs = await links.evaluate_all(
+                "elements => elements.map((element) => element.href)"
             )
+            matching_paths = _matching_artifact_paths(artifact_paths, hrefs)
+            if matching_paths:
+                break
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise ProductionCanaryError(
+                    "browser refresh did not restore a referenced artifact card"
+                )
+            await page.wait_for_timeout(min(250.0, remaining_seconds * 1_000))
+
         return {
             "mode": mode,
             "matching_artifact_link_count": len(matching_paths),

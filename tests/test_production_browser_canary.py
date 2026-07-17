@@ -15,6 +15,7 @@ from scripts.run_production_browser_canary import (
     ProductionCanaryError,
     ProductionCanaryExpectedGenerationV1,
     _artifact_paths,
+    _matching_artifact_paths,
     _fetch_served_identity,
     _parse_sse_text,
     _refresh_projection_mode,
@@ -24,6 +25,7 @@ from scripts.run_production_browser_canary import (
     _validate_stream_events,
     _verify_downloads,
     _verify_replay,
+    _verify_refreshed_ui,
 )
 from src.graph.resource_final_v3 import (
     ResourceFinalV3ResourceValidation,
@@ -312,6 +314,85 @@ def test_parse_sse_text_and_artifact_paths_are_bounded() -> None:
             ]
         }
     ) == ("/artifacts/review-docs/id/file.docx",)
+
+
+def test_matching_artifact_paths_decodes_browser_urls_and_rejects_other_paths() -> None:
+    expected = "/artifacts/code-practice/id/\u5b66\u751f\u6210\u7ee9.md"
+    encoded_href = (
+        "http://localhost:8000/artifacts/code-practice/id/"
+        "%E5%AD%A6%E7%94%9F%E6%88%90%E7%BB%A9.md"
+    )
+
+    spaced_expected = "/artifacts/code-practice/id/student scores.py"
+    spaced_href = "http://localhost:8000/artifacts/code-practice/id/student%20scores.py"
+    assert _matching_artifact_paths((spaced_expected,), (spaced_href,)) == (
+        spaced_expected,
+    )
+
+    assert _matching_artifact_paths((expected,), (encoded_href,)) == (expected,)
+    assert (
+        _matching_artifact_paths(
+            (expected,),
+            ("http://localhost:8000/artifacts/code-practice/id/other.md",),
+        )
+        == ()
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_refreshed_ui_waits_for_target_artifact_link() -> None:
+    expected = "/artifacts/code-practice/id/\u5b66\u751f\u6210\u7ee9.md"
+    href_batches = iter(
+        (
+            ("http://localhost:8000/artifacts/code-practice/id/old.md",),
+            (
+                "http://localhost:8000/artifacts/code-practice/id/"
+                "%E5%AD%A6%E7%94%9F%E6%88%90%E7%BB%A9.md",
+            ),
+        )
+    )
+    wait_calls: list[float] = []
+
+    async def no_op(*_args, **_kwargs) -> None:
+        return None
+
+    async def restored_thread(*_args, **_kwargs) -> str:
+        return THREAD_ID
+
+    async def evaluate_all(*_args, **_kwargs) -> tuple[str, ...]:
+        return next(href_batches)
+
+    async def wait_for_timeout(value: float) -> None:
+        wait_calls.append(value)
+
+    def locator(selector: str) -> SimpleNamespace:
+        if selector == "main textarea":
+            return SimpleNamespace(wait_for=no_op)
+        assert selector == "main a[download]"
+        return SimpleNamespace(evaluate_all=evaluate_all)
+
+    page = SimpleNamespace(
+        reload=no_op,
+        locator=locator,
+        evaluate=restored_thread,
+        wait_for_timeout=wait_for_timeout,
+    )
+    projection = await _verify_refreshed_ui(
+        page=page,
+        thread_id=THREAD_ID,
+        terminal={
+            "resources": [{"resource_type": "code_practice"}],
+            "blocked_resources": [],
+        },
+        artifact_paths=(expected,),
+        timeout_seconds=1.0,
+    )
+
+    assert projection == {
+        "mode": "artifact_download",
+        "matching_artifact_link_count": 1,
+    }
+    assert len(wait_calls) == 1
 
 
 def test_refresh_projection_mode_requires_visible_ready_or_blocked_state() -> None:
