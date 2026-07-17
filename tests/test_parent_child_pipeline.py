@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -385,6 +386,38 @@ def test_unclosed_fence_does_not_protect_the_rest_of_a_document(tmp_path: Path) 
     assert protected == ()
     assert bundle.parents
     assert bundle.children
+
+
+def test_parent_store_readonly_hydrates_from_worker_threads(tmp_path: Path) -> None:
+    bundle = _text_bundle(tmp_path)
+    generation_root = tmp_path / "generation-threaded"
+    create_parent_store(
+        generation_root,
+        "parents.sqlite",
+        bundle.parents,
+        store_schema_version="parent_store_v1",
+        expected_generation_id=bundle.generation_id,
+        busy_timeout_seconds=1.0,
+    )
+    expected = (bundle.parents[0],)
+    with ParentStore.open_readonly(
+        generation_root,
+        "parents.sqlite",
+        expected_schema_version="parent_store_v1",
+        expected_generation_id=bundle.generation_id,
+        busy_timeout_seconds=1.0,
+    ) as store:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = tuple(
+                executor.submit(
+                    store.get_many,
+                    [bundle.parents[0].parent_id],
+                )
+                for _ in range(8)
+            )
+            hydrated = tuple(future.result() for future in futures)
+
+    assert hydrated == (expected,) * 8
 
 
 def test_parent_store_and_bm25_artifact_round_trip(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from types import TracebackType
 from typing import Sequence
 from uuid import uuid4
@@ -190,6 +191,7 @@ class ParentStore:
         self._expected_schema_version = expected_schema_version
         self._expected_generation_id = expected_generation_id
         self._closed = False
+        self._lock = RLock()
 
     @classmethod
     def open_readonly(
@@ -215,6 +217,7 @@ class ParentStore:
             f"{store_path.as_uri()}?mode=ro&immutable=1",
             uri=True,
             timeout=timeout,
+            check_same_thread=False,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
@@ -263,6 +266,12 @@ class ParentStore:
     def verify_integrity(self) -> None:
         """Run SQLite and record-level integrity checks without mutating the store."""
 
+        with self._lock:
+            self._verify_integrity_locked()
+
+    def _verify_integrity_locked(self) -> None:
+        """Verify the immutable store while holding the connection lock."""
+
         self._ensure_open()
         result = self._connection.execute("PRAGMA integrity_check").fetchall()
         if [tuple(row) for row in result] != [("ok",)]:
@@ -309,6 +318,15 @@ class ParentStore:
     def get_many(self, parent_ids: Sequence[str]) -> tuple[ParentRecord, ...]:
         """Hydrate all requested parents in request order or fail explicitly."""
 
+        with self._lock:
+            return self._get_many_locked(parent_ids)
+
+    def _get_many_locked(
+        self,
+        parent_ids: Sequence[str],
+    ) -> tuple[ParentRecord, ...]:
+        """Hydrate parents while serializing access to the shared connection."""
+
         self._ensure_open()
         requested = tuple(parent_ids)
         if any(not parent_id for parent_id in requested):
@@ -344,13 +362,15 @@ class ParentStore:
     def close(self) -> None:
         """Close the read-only SQLite connection."""
 
-        if not self._closed:
-            self._connection.close()
-            self._closed = True
+        with self._lock:
+            if not self._closed:
+                self._connection.close()
+                self._closed = True
 
     def __enter__(self) -> ParentStore:
-        self._ensure_open()
-        return self
+        with self._lock:
+            self._ensure_open()
+            return self
 
     def __exit__(
         self,
