@@ -91,7 +91,10 @@ import {
   type EvidenceProgressTimeline,
 } from "@/lib/evidence-progress"
 import {
+  finishThreadContextWindowV3Update,
+  markThreadContextWindowV3Updating,
   parseThreadContextWindowV3,
+  threadContextWindowV3ForSelection,
   type ThreadContextWindowV3,
 } from "@/lib/thread-context-window-v3"
 import {
@@ -563,9 +566,7 @@ export default function Home() {
   const beginRequestStream = useCallback((requestId: string) => {
     liveTurnRef.current = null
     setLiveTurn(null)
-    setThreadContextWindowV3((current) =>
-      current ? { ...current, updating: true } : null,
-    )
+    setThreadContextWindowV3(markThreadContextWindowV3Updating)
     setActiveRequestId(requestId)
   }, [setActiveRequestId])
 
@@ -867,6 +868,7 @@ export default function Home() {
     cancelActiveAssessment()
     const chat = chatHistory.find((item) => item.id === id || item.threadId === id)
     const threadId = chat?.threadId || id
+    const activeThreadId = threadIdRef.current
     const restored = normalizeMessages(
       readJSON<unknown>(messageStorageKey(threadId), []),
     )
@@ -876,7 +878,9 @@ export default function Home() {
     setEvidenceProgress(emptyEvidenceProgressTimeline())
     setContextUsageState(EMPTY_CONTEXT_USAGE_STATE)
     setBackgroundContextWindow(null)
-    setThreadContextWindowV3(null)
+    setThreadContextWindowV3((current) =>
+      threadContextWindowV3ForSelection(current, activeThreadId, threadId),
+    )
     liveTurnRef.current = null
     setLiveTurn(null)
     setActiveRequestId("")
@@ -1747,37 +1751,45 @@ export default function Home() {
 
   /** Fetch helper with shared HTTP error handling. Returns response body or null on handled error. */
   const fetchWithErrorHandling = useCallback(async (url: string, init: RequestInit): Promise<ReadableStream<Uint8Array> | null> => {
-    const response = await fetch(url, init)
+    let streamEstablished = false
+    try {
+      const response = await fetch(url, init)
 
-    if (response.status === 429) {
-      setMessages((prev) => [
-        ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "服务繁忙，请稍后重试。" },
-      ])
-      setLogs((prev) => [
-        ...prev,
-        { type: "warning", message: "[WARN] 429 Too Many Requests", ts: timestamp() },
-      ])
-      return null
+      if (response.status === 429) {
+        setMessages((prev) => [
+          ...prev,
+          { id: (Date.now() + 1).toString(), role: "assistant", content: "服务繁忙，请稍后重试。" },
+        ])
+        setLogs((prev) => [
+          ...prev,
+          { type: "warning", message: "[WARN] 429 Too Many Requests", ts: timestamp() },
+        ])
+        return null
+      }
+
+      if (response.status === 401) {
+        setMessages((prev) => [
+          ...prev,
+          { id: (Date.now() + 1).toString(), role: "assistant", content: "访问未授权，请检查访问令牌。" },
+        ])
+        setLogs((prev) => [
+          ...prev,
+          { type: "error", message: "[ERROR] 401 未授权：访问令牌缺失或无效", ts: timestamp() },
+        ])
+        if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
+        return null
+      }
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      if (!response.body) throw new Error("No response body")
+
+      streamEstablished = true
+      return response.body
+    } finally {
+      if (!streamEstablished) {
+        setThreadContextWindowV3(finishThreadContextWindowV3Update)
+      }
     }
-
-    if (response.status === 401) {
-      setMessages((prev) => [
-        ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: "访问未授权，请检查访问令牌。" },
-      ])
-      setLogs((prev) => [
-        ...prev,
-        { type: "error", message: "[ERROR] 401 未授权：访问令牌缺失或无效", ts: timestamp() },
-      ])
-      if (typeof window !== "undefined") localStorage.removeItem("demo_access_token")
-      return null
-    }
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-    if (!response.body) throw new Error("No response body")
-
-    return response.body
   }, [])
 
   const refreshThreadStatus = useCallback(async (threadId: string) => {

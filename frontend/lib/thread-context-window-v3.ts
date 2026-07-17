@@ -60,6 +60,35 @@ export class ThreadContextWindowV3Error extends Error {
   }
 }
 
+export function markThreadContextWindowV3Updating(
+  current: ThreadContextWindowV3 | null,
+): ThreadContextWindowV3 | null {
+  if (current === null || current.updating) return current
+  return { ...current, updating: true }
+}
+
+export function finishThreadContextWindowV3Update(
+  current: ThreadContextWindowV3 | null,
+): ThreadContextWindowV3 | null {
+  if (current === null || !current.updating) return current
+  return { ...current, updating: false }
+}
+
+export function threadContextWindowV3ForSelection(
+  current: ThreadContextWindowV3 | null,
+  activeThreadId: string | null,
+  selectedThreadId: string,
+): ThreadContextWindowV3 | null {
+  if (
+    current === null ||
+    activeThreadId !== selectedThreadId ||
+    current.threadId !== selectedThreadId
+  ) {
+    return null
+  }
+  return current
+}
+
 export function parseThreadContextWindowV3(value: unknown): ThreadContextWindowV3 {
   const data = record(value, "thread_context_window_v3")
   exactKeys(data, [

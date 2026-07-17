@@ -1417,8 +1417,9 @@ def test_evidence_planner_rejects_path_from_changed_guidance_runtime(monkeypatch
         asyncio.run(orchestration.make_resource_evidence_planner_node(changed)(state))
 
 
-def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypatch):
+def test_repair_schedules_third_supplement_then_rejects_beyond_budget(monkeypatch):
     runtime = _runtime()
+    assert runtime.policy.max_supplement_rounds == 3
     batch = _quiz_draft_batch(runtime)
 
     async def fake_planner(**_kwargs):
@@ -1477,6 +1478,41 @@ def test_repair_can_schedule_third_search_round_and_reject_exact_repeat(monkeypa
         RetrievalTask.model_validate(item).round_index == 2
         for item in round_two["evidence_current_tasks"]
     )
+
+    third_missing = _missing_coverage(
+        requirements,
+        round_index=2,
+        suffix="repair three",
+    )
+    round_three_state = {
+        **round_one_state,
+        **round_one,
+        **round_two,
+        "evidence_coverage": compile_requirement_coverage_batch(
+            third_missing
+        ).model_dump(mode="json"),
+        "resource_evidence_readiness": readiness,
+    }
+    round_three = orchestration.make_evidence_repair_planner_node(runtime)(
+        round_three_state
+    )
+
+    assert round_three["evidence_current_round"] == 3
+    assert all(
+        RetrievalTask.model_validate(item).round_index == 3
+        for item in round_three["evidence_current_tasks"]
+    )
+
+    with pytest.raises(orchestration.EvidenceBudgetExceededError) as exc_info:
+        orchestration.make_evidence_repair_planner_node(runtime)(
+            {
+                **round_three_state,
+                **round_three,
+                "resource_evidence_readiness": readiness,
+            }
+        )
+
+    assert exc_info.value.code == "repair_round_budget_exceeded"
 
     repeated = _missing_coverage(
         requirements,
