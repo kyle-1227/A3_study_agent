@@ -1087,6 +1087,16 @@ llm:
     max_tokens: 3072
     thinking: disabled
     streaming: true
+  code_practice_reviewer:
+    provider: deepseek_official
+    model: "deepseek-v4-pro"
+    base_url: "https://api.deepseek.com"
+    beta_base_url: "https://api.deepseek.com/beta"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 1024
+    thinking: disabled
+    streaming: false
   web_research_planner:
     provider: deepseek_official
     model: "deepseek-v4-pro"

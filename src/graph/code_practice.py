@@ -382,6 +382,15 @@ def _code_practice_model_name() -> str:
     return configured_model.strip()
 
 
+def _code_practice_reviewer_model_name() -> str:
+    configured_model = get_setting("llm.code_practice_reviewer.model", None)
+    if not isinstance(configured_model, str) or not configured_model.strip():
+        raise ValueError(
+            "llm.code_practice_reviewer.model must be explicitly configured"
+        )
+    return configured_model.strip()
+
+
 def _code_practice_temperature() -> float:
     configured_temperature = get_setting("llm.code_practice.temperature", None)
     if isinstance(configured_temperature, bool) or not isinstance(
@@ -582,13 +591,13 @@ async def code_practice_reviewer(state: LearningState) -> dict:
             "code_practice_local_check": local_check,
         }
 
-    model_name = _code_practice_model_name()
+    model_name = _code_practice_reviewer_model_name()
     with traced_llm_call(
         model_name=model_name, node_name="code_practice_reviewer", temperature=0.0
     ):
         structured_result = await invoke_structured_llm(
             node_name="code_practice_reviewer",
-            llm_node="code_practice",
+            llm_node="code_practice_reviewer",
             schema=CodePracticeReviewVerdict,
             messages=[
                 SystemMessage(

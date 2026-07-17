@@ -20,6 +20,7 @@ from src.graph.code_practice import (
     CodePracticeReviewError,
     CodePracticeReviewVerdict,
     _code_practice_model_name,
+    _code_practice_reviewer_model_name,
     code_practice_agent,
     code_practice_output,
     code_practice_reviewer,
@@ -105,7 +106,7 @@ def _failed_result() -> StructuredLLMResult:
         success=False,
         parsed=None,
         node_name="code_practice_reviewer",
-        llm_node="code_practice",
+        llm_node="code_practice_reviewer",
         schema_name="CodePracticeReviewVerdict",
         provider="test",
         model="test",
@@ -134,11 +135,20 @@ def test_code_practice_model_requires_explicit_config() -> None:
         _code_practice_model_name()
 
 
+def test_code_practice_reviewer_model_requires_explicit_config() -> None:
+    with (
+        patch("src.graph.code_practice.get_setting", return_value=None),
+        pytest.raises(ValueError, match="explicitly configured"),
+    ):
+        _code_practice_reviewer_model_name()
+
+
 def test_code_practice_runtime_configuration_is_explicit() -> None:
     settings = load_settings(reload=True)
-    config = settings["llm"]["code_practice"]
+    generation_config = settings["llm"]["code_practice"]
+    reviewer_config = settings["llm"]["code_practice_reviewer"]
 
-    assert config == {
+    assert generation_config == {
         "provider": "deepseek_official",
         "model": "deepseek-v4-pro",
         "base_url": "https://api.deepseek.com",
@@ -149,6 +159,17 @@ def test_code_practice_runtime_configuration_is_explicit() -> None:
         "max_tokens": 3072,
         "thinking": "disabled",
         "streaming": True,
+    }
+    assert reviewer_config == {
+        "provider": "deepseek_official",
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com",
+        "beta_base_url": "https://api.deepseek.com/beta",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "temperature": 0.0,
+        "max_tokens": 1024,
+        "thinking": "disabled",
+        "streaming": False,
     }
     assert settings["llm_outputs"]["code_practice_reviewer"]["output_mode"] == (
         "deepseek_tool_call_strict"
@@ -267,11 +288,12 @@ async def test_code_practice_reviewer_preserves_real_reject() -> None:
     with patch(
         "src.graph.code_practice.invoke_structured_llm",
         return_value=SimpleNamespace(success=True, parsed=verdict),
-    ):
+    ) as reviewer:
         result = await code_practice_reviewer(_state())
 
     assert result["code_practice_review_verdict"] == "reject"
     assert result["code_practice_revision_notes"] == verdict.reason
+    assert reviewer.await_args.kwargs["llm_node"] == "code_practice_reviewer"
 
 
 @pytest.mark.anyio
