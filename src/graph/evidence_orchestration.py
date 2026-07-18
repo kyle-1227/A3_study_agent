@@ -809,6 +809,34 @@ def make_resource_evidence_planner_node(
     async def resource_evidence_planner(state: LearningState) -> dict:
         resources = _requested_resources(state)
         subjects = _requested_subjects(state, runtime)
+        scope_requirement_count = len(subjects) * sum(
+            len(runtime.profiles.profile_for(resource).needs) for resource in resources
+        )
+        if scope_requirement_count > runtime.policy.max_requirements_per_request:
+            error = EvidenceBudgetExceededError(
+                code="requirement_scope_budget_exceeded",
+                reason=(
+                    f"exact profile scope requires {scope_requirement_count} "
+                    "requirements, exceeding max_requirements_per_request="
+                    f"{runtime.policy.max_requirements_per_request}"
+                ),
+            )
+            emit_evidence_trace(
+                logger,
+                {
+                    "schema_version": EVIDENCE_TRACE_SCHEMA_VERSION,
+                    "stage": "evidence_orchestration.failed",
+                    "status": "failed",
+                    "round_index": 0,
+                    "source": "orchestration",
+                    "error_type": type(error).__name__,
+                    "reason_code": error.code,
+                    "budget_used_tasks": 0,
+                    "budget_remaining_tasks": (runtime.policy.max_total_search_tasks),
+                },
+                state=state,
+            )
+            raise error
         question = _last_human_query(state)
         learner_path_projection = (
             learner_path_provider_projection_for_runtime_from_state(

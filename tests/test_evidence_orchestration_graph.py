@@ -18,6 +18,7 @@ from src.config.evidence_orchestration_config import (
 )
 from src.config.evidence_orchestration_contracts import (
     DuplicateRetrievalSignatureError,
+    EvidenceBudgetExceededError,
     EvidenceLedgerEntry,
     EvidenceRequirementDraft,
     EvidenceRequirementDraftBatch,
@@ -1156,6 +1157,49 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
         item["requirement_id"]
         for item in planned["evidence_requirements"]
         if item["criticality"] == "required"
+    )
+
+
+def test_planner_scope_budget_preflight_blocks_before_provider(monkeypatch):
+    runtime = _runtime()
+    policy_payload = runtime.policy.model_dump(mode="python")
+    policy_payload["max_requirements_per_request"] = 1
+    runtime = replace(
+        runtime,
+        policy=type(runtime.policy).model_validate(policy_payload),
+    )
+    provider_called = False
+    events: list[dict[str, object]] = []
+
+    async def forbidden_planner(**_kwargs):
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("scope preflight must run before the Provider")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", forbidden_planner)
+    token = set_trace_event_sink(events)
+    try:
+        with pytest.raises(EvidenceBudgetExceededError) as exc_info:
+            asyncio.run(
+                orchestration.make_resource_evidence_planner_node(runtime)(
+                    _planner_state()
+                )
+            )
+    finally:
+        reset_trace_event_sink(token)
+
+    assert exc_info.value.code == "requirement_scope_budget_exceeded"
+    assert provider_called is False
+    failures = [
+        event
+        for event in events
+        if event.get("stage") == "evidence_orchestration.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason_code"] == "requirement_scope_budget_exceeded"
+    assert failures[0]["error_type"] == "EvidenceBudgetExceededError"
+    assert not any(
+        event.get("stage") == "evidence_orchestration.plan.accepted" for event in events
     )
 
 
