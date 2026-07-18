@@ -88,7 +88,6 @@ def retrieval_policy_from_generation(
         vector_rrf_weight=retrieval.vector_weight,
         bm25_rrf_weight=retrieval.bm25_weight,
         rrf_k=retrieval.rrf_k,
-        reranker_transport_fallback_mode=(retrieval.reranker_transport_fallback_mode),
         reranker_top_n=retrieval.reranker_top_n,
         unique_parent_top_k=retrieval.unique_parent_top_k,
         max_children_per_parent=retrieval.max_children_per_parent,

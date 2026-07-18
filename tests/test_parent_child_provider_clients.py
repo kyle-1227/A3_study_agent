@@ -13,10 +13,7 @@ from src.rag.parent_child.provider_clients import (
     StrictEmbeddingClient,
     StrictRerankerClient,
 )
-from src.rag.parent_child.retrieval import (
-    RerankCandidate,
-    RerankerTransportExhaustedError,
-)
+from src.rag.parent_child.retrieval import RerankCandidate
 
 
 def _retry(max_attempts: int = 2) -> RetryConfig:
@@ -418,36 +415,6 @@ def test_openrouter_embedding_protocol_rejects_wrong_provider_or_input_type() ->
     kwargs["input_type_field"] = "input_type"
     with pytest.raises(ValueError, match="requires input_type_field"):
         EmbeddingConfig(**kwargs)
-
-
-def test_reranker_retryable_transport_exhaustion_is_explicitly_recoverable() -> None:
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(503)
-
-    client = StrictRerankerClient(
-        config=_reranker_config(),
-        api_key=_auth_sentinel(handler),
-        transport=httpx.MockTransport(handler),
-        sleep=lambda _seconds: None,
-    )
-    candidates = (
-        RerankCandidate(
-            schema_version="rerank_candidate_v1",
-            child_id="child-a",
-            content="alpha",
-        ),
-    )
-    try:
-        with pytest.raises(RerankerTransportExhaustedError):
-            client.rerank(query="query", candidates=candidates)
-    finally:
-        client.close()
-
-    assert calls == _reranker_config().retry.max_attempts
 
 
 def test_reranker_requires_complete_unique_index_set() -> None:

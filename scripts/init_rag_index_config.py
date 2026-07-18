@@ -456,11 +456,6 @@ def _parser() -> argparse.ArgumentParser:
     retrieval.add_argument("--rrf-k", type=int, required=True)
     retrieval.add_argument("--vector-weight", type=float, required=True)
     retrieval.add_argument("--bm25-weight", type=float, required=True)
-    retrieval.add_argument(
-        "--reranker-transport-fallback-mode",
-        choices=("disabled", "rrf_only"),
-        required=True,
-    )
     retrieval.add_argument("--reranker-top-n", type=int, required=True)
     retrieval.add_argument("--unique-parent-top-k", type=int, required=True)
     retrieval.add_argument("--max-children-per-parent", type=int, required=True)
@@ -584,7 +579,6 @@ def _retrieval_from_args(args: argparse.Namespace) -> RetrievalConfig:
         vector_weight=args.vector_weight,
         bm25_weight=args.bm25_weight,
         reranker_top_n=args.reranker_top_n,
-        reranker_transport_fallback_mode=(args.reranker_transport_fallback_mode),
         unique_parent_top_k=args.unique_parent_top_k,
         max_children_per_parent=args.max_children_per_parent,
         max_parents_per_source=args.max_parents_per_source,

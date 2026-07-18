@@ -1,9 +1,8 @@
 """Strict hybrid child retrieval with authoritative parent hydration.
 
-The candidate path is intentionally isolated from the legacy retriever.
-Vector and BM25 channels are always required. A configured reranker
-transport/capacity outage may retain their validated RRF order, while provider
-protocol, identity, generation, hydration, and evidence failures remain fatal.
+The candidate path is intentionally isolated from the legacy retriever.  Both
+configured child-search channels are required, every provider payload is
+validated, and no exception activates a substitute channel or result.
 """
 
 from __future__ import annotations
@@ -28,10 +27,6 @@ class HybridRetrievalError(RuntimeError):
 
 class RetrievalChannelError(HybridRetrievalError):
     """Raised when a required vector, BM25, or reranker call fails."""
-
-
-class RerankerTransportExhaustedError(HybridRetrievalError):
-    """A reranker transport/capacity failure exhausted its bounded retries."""
 
 
 class RetrievalProtocolError(HybridRetrievalError):
@@ -64,7 +59,6 @@ class HybridRetrievalPolicy(_StrictFrozenModel):
     bm25_rrf_weight: float = Field(gt=0)
     rrf_k: int = Field(gt=0)
     reranker_top_n: int = Field(gt=0)
-    reranker_transport_fallback_mode: Literal["disabled", "rrf_only"]
     unique_parent_top_k: int = Field(gt=0)
     max_children_per_parent: int = Field(gt=0)
     max_parents_per_source: int = Field(gt=0)
@@ -156,7 +150,7 @@ class RerankScore(_StrictFrozenModel):
 
 
 class ChildEvidenceHit(_StrictFrozenModel):
-    """One provenance-preserving child hit with an explicit ranking mode."""
+    """One fully provenance-preserving, reranked child hit."""
 
     schema_version: Literal["child_evidence_hit_v1"]
     final_rank: int = Field(gt=0)
@@ -166,15 +160,12 @@ class ChildEvidenceHit(_StrictFrozenModel):
     vector_raw_score: float | None
     bm25_raw_score: float | None
     rrf_score: float = Field(gt=0)
-    ranking_mode: Literal["reranked", "rrf_only"]
-    ranking_score: float = Field(ge=0, le=1)
-    rerank_score: float | None = Field(default=None, ge=0, le=1)
+    rerank_score: float = Field(ge=0, le=1)
 
     @field_validator(
         "vector_raw_score",
         "bm25_raw_score",
         "rrf_score",
-        "ranking_score",
         "rerank_score",
     )
     @classmethod
@@ -199,13 +190,6 @@ class ChildEvidenceHit(_StrictFrozenModel):
             raise ValueError("vector rank must be positive")
         if self.bm25_rank is not None and self.bm25_rank <= 0:
             raise ValueError("BM25 rank must be positive")
-        if self.ranking_mode == "reranked":
-            if self.rerank_score is None:
-                raise ValueError("reranked hits require a real reranker score")
-            if self.ranking_score != self.rerank_score:
-                raise ValueError("reranked ranking score must equal reranker score")
-        elif self.rerank_score is not None:
-            raise ValueError("RRF-only hits cannot carry a reranker score")
         return self
 
 
@@ -483,8 +467,6 @@ class HybridRetrievalDiagnosticTrace(_StrictFrozenModel):
 
     schema_version: Literal["hybrid_retrieval_diagnostic_trace_v1"]
     status: Literal["ok", "empty"]
-    ranking_mode: Literal["reranked", "rrf_only"]
-    fallback_reason_code: Literal["reranker_transport_exhausted"] | None
     request_id: str = Field(min_length=1)
     subject: str = Field(min_length=1)
     generation_id: str = Field(min_length=1)
@@ -496,11 +478,6 @@ class HybridRetrievalDiagnosticTrace(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_trace(self) -> Self:
-        if self.ranking_mode == "rrf_only":
-            if self.fallback_reason_code != "reranker_transport_exhausted":
-                raise ValueError("RRF-only trace requires its explicit reason code")
-        elif self.fallback_reason_code is not None:
-            raise ValueError("reranked trace cannot carry a fallback reason code")
         if self.status == "empty":
             if self.children or self.parents or self.hydrated_parents:
                 raise ValueError("empty diagnostic trace cannot contain coordinates")
@@ -558,8 +535,6 @@ class HybridRetrievalResult(_StrictFrozenModel):
 
     schema_version: Literal["hybrid_retrieval_result_v1"]
     status: Literal["ok", "empty"]
-    ranking_mode: Literal["reranked", "rrf_only"]
-    fallback_reason_code: Literal["reranker_transport_exhausted"] | None
     request: HybridRetrievalRequest
     retrieval_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     ranked_children: tuple[ChildEvidenceHit, ...]
@@ -569,21 +544,12 @@ class HybridRetrievalResult(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_result_contract(self) -> Self:
-        if self.ranking_mode == "rrf_only":
-            if self.fallback_reason_code != "reranker_transport_exhausted":
-                raise ValueError("RRF-only result requires its explicit reason code")
-        elif self.fallback_reason_code is not None:
-            raise ValueError("reranked result cannot carry a fallback reason code")
         if self.status == "empty":
-            if self.ranking_mode != "reranked":
-                raise ValueError("empty result cannot claim a ranking fallback")
             if self.ranked_children or self.ranked_parents or self.hydrated_parents:
                 raise ValueError("empty retrieval result cannot contain hits")
             return self
         if not self.ranked_children or not self.ranked_parents:
             raise ValueError("successful retrieval requires child and parent hits")
-        if any(hit.ranking_mode != self.ranking_mode for hit in self.ranked_children):
-            raise ValueError("child hit ranking modes must match the result")
         if tuple(hit.final_rank for hit in self.ranked_children) != tuple(
             range(1, len(self.ranked_children) + 1)
         ):
@@ -610,31 +576,18 @@ class HybridChildRetrievalResult(_StrictFrozenModel):
     status: Literal["ok", "empty"]
     request: HybridRetrievalRequest
     retrieval_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    ranking_mode: Literal["reranked", "rrf_only"]
-    fallback_reason_code: Literal["reranker_transport_exhausted"] | None
     ranked_children: tuple[ChildEvidenceHit, ...]
     ranked_parents: tuple[ParentAggregate, ...]
     timings: RetrievalTimings
 
     @model_validator(mode="after")
     def validate_child_result(self) -> Self:
-        if self.ranking_mode == "rrf_only":
-            if self.fallback_reason_code != "reranker_transport_exhausted":
-                raise ValueError(
-                    "RRF-only child result requires its explicit reason code"
-                )
-        elif self.fallback_reason_code is not None:
-            raise ValueError("reranked child result cannot carry a fallback reason")
         if self.status == "empty":
-            if self.ranking_mode != "reranked":
-                raise ValueError("empty child result cannot claim a ranking fallback")
             if self.ranked_children or self.ranked_parents:
                 raise ValueError("empty child retrieval result cannot contain hits")
             return self
         if not self.ranked_children or not self.ranked_parents:
             raise ValueError("successful child retrieval requires children and parents")
-        if any(hit.ranking_mode != self.ranking_mode for hit in self.ranked_children):
-            raise ValueError("child hit ranking modes must match the child result")
         if tuple(hit.final_rank for hit in self.ranked_children) != tuple(
             range(1, len(self.ranked_children) + 1)
         ):
@@ -1184,45 +1137,10 @@ def _build_child_hits(
             bm25_rank=item.bm25_rank,
             vector_raw_score=item.vector_raw_score,
             bm25_raw_score=item.bm25_raw_score,
-            ranking_mode="reranked",
-            ranking_score=reranker_scores[item.document.metadata.child_id],
             rrf_score=item.rrf_score,
             rerank_score=reranker_scores[item.document.metadata.child_id],
         )
         for final_rank, item in enumerate(ranked, start=1)
-    )
-
-
-def _build_rrf_only_child_hits(
-    fused: tuple[_MergedCandidate, ...],
-) -> tuple[ChildEvidenceHit, ...]:
-    """Preserve fused order and expose normalized RRF without fake reranker scores."""
-
-    max_rrf_score = max(item.rrf_score for item in fused)
-    return tuple(
-        ChildEvidenceHit(
-            schema_version="child_evidence_hit_v1",
-            final_rank=final_rank,
-            document=item.document,
-            vector_rank=item.vector_rank,
-            bm25_rank=item.bm25_rank,
-            vector_raw_score=item.vector_raw_score,
-            bm25_raw_score=item.bm25_raw_score,
-            rrf_score=item.rrf_score,
-            ranking_mode="rrf_only",
-            ranking_score=item.rrf_score / max_rrf_score,
-            rerank_score=None,
-        )
-        for final_rank, item in enumerate(
-            sorted(
-                fused,
-                key=lambda candidate: (
-                    candidate.fused_rank,
-                    candidate.document.metadata.child_id,
-                ),
-            ),
-            start=1,
-        )
     )
 
 
@@ -1233,7 +1151,6 @@ def _diagnostic_child_coordinates(
     reranked = {
         hit.document.metadata.child_id: (hit.final_rank, hit.rerank_score)
         for hit in child_hits
-        if hit.rerank_score is not None
     }
     coordinates: list[RetrievalDiagnosticChildCoordinate] = []
     for candidate in fused:
@@ -1300,7 +1217,7 @@ def _select_parent_aggregates_with_diagnostics(
                 subject=first_metadata.subject,
                 source_relpath=first_metadata.source_relpath,
                 parent_score=aggregate_parent_score(
-                    tuple(hit.ranking_score for hit in selected_hits),
+                    tuple(hit.rerank_score for hit in selected_hits),
                     support_lambda=policy.parent_support_lambda,
                 ),
                 best_child_rank=selected_hits[0].final_rank,
@@ -1615,8 +1532,6 @@ class ParentChildHybridRetriever:
                 HybridChildRetrievalResult(
                     schema_version="hybrid_child_retrieval_result_v1",
                     status="empty",
-                    ranking_mode="reranked",
-                    fallback_reason_code=None,
                     request=request,
                     retrieval_fingerprint=self._retrieval_fingerprint,
                     ranked_children=(),
@@ -1652,30 +1567,16 @@ class ParentChildHybridRetriever:
                 query=request.query,
                 candidates=rerank_candidates,
             )
-        except RerankerTransportExhaustedError as exc:
-            reranker_ms = _elapsed_ms(reranker_start)
-            if self._policy.reranker_transport_fallback_mode == "disabled":
-                raise RetrievalChannelError(
-                    "required reranker transport exhausted"
-                ) from exc
-            ranking_mode: Literal["reranked", "rrf_only"] = "rrf_only"
-            fallback_reason_code: Literal["reranker_transport_exhausted"] | None = (
-                "reranker_transport_exhausted"
-            )
-            child_hits = _build_rrf_only_child_hits(fused)
         except Exception as exc:
             raise RetrievalChannelError(
                 "required reranker failed: " + type(exc).__name__
             ) from exc
-        else:
-            reranker_ms = _elapsed_ms(reranker_start)
-            reranker_scores = _validate_reranker_results(
-                raw_reranker,
-                submitted_child_ids=tuple(item.child_id for item in rerank_candidates),
-            )
-            ranking_mode = "reranked"
-            fallback_reason_code = None
-            child_hits = _build_child_hits(fused, reranker_scores)
+        reranker_ms = _elapsed_ms(reranker_start)
+        reranker_scores = _validate_reranker_results(
+            raw_reranker,
+            submitted_child_ids=tuple(item.child_id for item in rerank_candidates),
+        )
+        child_hits = _build_child_hits(fused, reranker_scores)
         parent_start = perf_counter_ns()
         parent_aggregates, diagnostic_parents = (
             _select_parent_aggregates_with_diagnostics(child_hits, self._policy)
@@ -1683,15 +1584,13 @@ class ParentChildHybridRetriever:
         parent_aggregation_ms = _elapsed_ms(parent_start)
         if not parent_aggregates:
             raise RetrievalInvariantError(
-                "non-empty ranked children produced no selectable parents"
+                "non-empty reranked children produced no selectable parents"
             )
 
         return (
             HybridChildRetrievalResult(
                 schema_version="hybrid_child_retrieval_result_v1",
                 status="ok",
-                ranking_mode=ranking_mode,
-                fallback_reason_code=fallback_reason_code,
                 request=request,
                 retrieval_fingerprint=self._retrieval_fingerprint,
                 ranked_children=child_hits,
@@ -1765,9 +1664,7 @@ class ParentChildHybridRetriever:
             )
             if not supporting:
                 continue
-            scores = tuple(
-                hits_by_id[child_id].ranking_score for child_id in supporting
-            )
+            scores = tuple(hits_by_id[child_id].rerank_score for child_id in supporting)
             selected_aggregates.append(
                 ParentAggregate(
                     schema_version="parent_aggregate_v1",
@@ -1855,11 +1752,11 @@ class ParentChildHybridRetriever:
                         "branches returned conflicting content for one child ID"
                     )
                 if existing is None or (
-                    hit.ranking_score,
+                    hit.rerank_score,
                     -hit.final_rank,
                     hit.rrf_score,
                 ) > (
-                    existing.ranking_score,
+                    existing.rerank_score,
                     -existing.final_rank,
                     existing.rrf_score,
                 ):
@@ -1926,8 +1823,7 @@ class ParentChildHybridRetriever:
                     source_relpath=cross_parent.source_relpath,
                     parent_score=aggregate_parent_score(
                         tuple(
-                            hits_by_id[child_id].ranking_score
-                            for child_id in supporting
+                            hits_by_id[child_id].rerank_score for child_id in supporting
                         ),
                         support_lambda=self._policy.parent_support_lambda,
                     ),
@@ -1993,8 +1889,6 @@ class ParentChildHybridRetriever:
             result = HybridRetrievalResult(
                 schema_version="hybrid_retrieval_result_v1",
                 status="empty",
-                ranking_mode=child_result.ranking_mode,
-                fallback_reason_code=child_result.fallback_reason_code,
                 request=request,
                 retrieval_fingerprint=child_result.retrieval_fingerprint,
                 ranked_children=(),
@@ -2005,8 +1899,6 @@ class ParentChildHybridRetriever:
             trace = HybridRetrievalDiagnosticTrace(
                 schema_version="hybrid_retrieval_diagnostic_trace_v1",
                 status="empty",
-                ranking_mode=child_result.ranking_mode,
-                fallback_reason_code=child_result.fallback_reason_code,
                 request_id=request.request_id,
                 subject=request.subject,
                 generation_id=request.generation_id,
@@ -2040,8 +1932,6 @@ class ParentChildHybridRetriever:
         result = HybridRetrievalResult(
             schema_version="hybrid_retrieval_result_v1",
             status="ok",
-            ranking_mode=child_result.ranking_mode,
-            fallback_reason_code=child_result.fallback_reason_code,
             request=request,
             retrieval_fingerprint=self._retrieval_fingerprint,
             ranked_children=child_result.ranked_children,
@@ -2059,8 +1949,6 @@ class ParentChildHybridRetriever:
         trace = HybridRetrievalDiagnosticTrace(
             schema_version="hybrid_retrieval_diagnostic_trace_v1",
             status="ok",
-            ranking_mode=child_result.ranking_mode,
-            fallback_reason_code=child_result.fallback_reason_code,
             request_id=request.request_id,
             subject=request.subject,
             generation_id=request.generation_id,
