@@ -37,7 +37,6 @@ Do not skip this skill for "small" code changes. For pure read-only analysis, co
    - Acceptance criteria
 5. Name any additional required skills:
    - structured_output_contract for schemas, Pydantic models, structured LLM parsing, retries, or business validators.
-   - no_fallback_no_hardcode_guard for LLM provider/model/base_url/api_key/config work.
    - architecture_boundary for cross-package imports or dependency direction.
    - type_contract for src/llm, src/config, src/graph/web_research.py, src/graph/evidence.py, or src/profile.
    - security_secret for secrets, trace bodies, API keys, auth, shell execution, file paths, or network data.
@@ -48,7 +47,8 @@ Do not skip this skill for "small" code changes. For pure read-only analysis, co
 
 - Do not edit files before producing the mini-spec.
 - Do not expand scope because nearby code looks messy.
-- Do not introduce fallback, silent defaults, alias normalization, or validation bypasses as a convenience.
+- Do not introduce unplanned, implicit, unbounded, cross-identity, or validation-bypassing fallback.
+- Do not introduce silent defaults or alias normalization as a convenience.
 - Do not remove real business logic to make tests pass.
 - Do not change src/llm/structured_output.py, src/graph/*.py, or src/profile/*.py unless the user explicitly asks for that runtime change.
 - Do not install third-party skills or execute unknown third-party scripts.
@@ -88,14 +88,16 @@ Get-Content -Raw .\src\config\config_manager.py
 
 - The requested change conflicts with AGENTS.md or A3-specific rules.
 - The user requests broad refactoring without an explicit plan.
-- The change requires adding fallback, silent defaults, provider hardcoding, or validation bypasses.
+- A proposed fallback cannot be explicitly configured, given a finite budget, typed and observed, kept on the same provider/model/runtime identity, and passed through the complete Pydantic and business validation path.
+- The change requires silent defaults, provider hardcoding, or validation bypasses.
 - The current worktree has user changes in files that must be edited and the safe merge path is unclear.
 - Required tests or tools are unavailable and the change is high-risk.
 
 ## A3_study_agent-specific rules
 
-- No new fallback.
-- No new silent default.
+- Production fallback must be explicitly configured, finite-budget, typed, observable, and identity-preserving.
+- Fallback output may succeed only after normal Pydantic and business validation; partial, empty, guessed, or stale output stays degraded or blocked.
+- No silent default, cross-provider/model fallback, legacy-chain switch, or validation bypass.
 - No Pydantic validation bypass.
 - No business validation bypass.
 - No automatic alias normalization to make Pydantic pass.

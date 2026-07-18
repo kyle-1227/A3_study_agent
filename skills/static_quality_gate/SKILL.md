@@ -37,7 +37,8 @@ Use after every code, test, config, CI, script, or process change. For docs-only
 
 - Do not skip tests because they are inconvenient.
 - Do not delete or weaken tests to pass the gate.
-- Do not add fallback or silent defaults to satisfy tests.
+- Do not add or broaden fallback merely to satisfy tests; any authorized fallback must remain explicit, finite-budget, typed, observable, identity-preserving, and pass the normal Pydantic and business validation path.
+- Do not add silent defaults to satisfy tests.
 - Do not run a different command and claim the required command passed.
 - Do not hide missing tools as "passed".
 - Do not leave generated caches or unrelated formatting churn.
@@ -96,7 +97,7 @@ PY
 ## A3_study_agent-specific rules
 
 - Related tests often live in tests/test_config.py, tests/test_deepseek_structured_output.py, tests/test_structured_retry.py, tests/test_security.py, tests/test_profile.py, and graph-specific tests.
-- For LLM/provider/config changes, include no_fallback_no_hardcode_guard checks.
+- For LLM/provider/config changes, run `semgrep_rules/a3_no_fallback_no_hardcode.yml` when Semgrep is available; use it to detect unsafe fallback and hardcoding patterns without treating a separate skill as required.
 - For structured-output changes, include structured_output_contract checks.
 - For import changes, include architecture_boundary checks.
 - For protected modules, include type_contract checks when type tools are available.

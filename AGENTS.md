@@ -11,7 +11,6 @@ Required skill routing:
 - Use `skills/spec_first_change/SKILL.md` before every code, test, config, CI, script, or process modification.
 - Use `skills/static_quality_gate/SKILL.md` after every modification.
 - Use `skills/structured_output_contract/SKILL.md` for structured output, Pydantic schemas, LLM JSON parsing, business validators, graph outputs, and profile extraction.
-- Use `skills/no_fallback_no_hardcode_guard/SKILL.md` for LLM provider/model/base_url/api_key/config, retries, fallback, defaults, OpenRouter, DeepSeek, or validation error handling.
 - Use `skills/architecture_boundary/SKILL.md` for imports, package boundaries, helper placement, and dependency direction.
 - Use `skills/type_contract/SKILL.md` for `src/llm`, `src/config`, `src/graph/web_research.py`, `src/graph/evidence.py`, and `src/profile`.
 - Use `skills/security_secret/SKILL.md` for secrets, trace bodies, auth headers, DB URIs, network calls, subprocesses, and security tests.
@@ -19,8 +18,9 @@ Required skill routing:
 
 ## Hard Rules
 
-- Do not add fallback.
-- Do not add silent defaults.
+- Production fallback is allowed only when its mini-spec and strict configuration define a finite call/time/retry budget, typed reason and status, sanitized observability, and the same provider/model/runtime identity.
+- A fallback result may be treated as success only after the normal Pydantic and business validators pass; partial, empty, guessed, or stale results must remain explicitly degraded or blocked.
+- Do not add silent defaults, cross-provider/model routing, legacy-chain switching, validation bypasses, or fallback-derived success without validated evidence.
 - Do not bypass Pydantic validation.
 - Do not bypass business validation.
 - Do not automatically alias-normalize structured output to make Pydantic pass.

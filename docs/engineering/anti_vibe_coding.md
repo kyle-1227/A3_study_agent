@@ -17,8 +17,9 @@ A3_study_agent has high-risk surfaces around LLM providers, structured output, g
 
 ## Strong Rules
 
-- No new fallback.
-- No new silent default.
+- Production fallback must be explicitly planned and configured with a finite budget, typed status and reason, sanitized observability, and the same provider/model/runtime identity.
+- Fallback output may succeed only after normal Pydantic and business validation; partial, empty, guessed, or stale output remains degraded or blocked.
+- No silent default, cross-provider/model fallback, legacy-chain switch, or validation bypass.
 - No Pydantic validation bypass.
 - No business validation bypass.
 - No automatic alias normalization.
@@ -31,12 +32,13 @@ A3_study_agent has high-risk surfaces around LLM providers, structured output, g
 
 - `skills/spec_first_change/SKILL.md`: pre-change mini-spec.
 - `skills/static_quality_gate/SKILL.md`: post-change checks.
-- `skills/no_fallback_no_hardcode_guard/SKILL.md`: fallback and hardcoding guard.
 - `skills/structured_output_contract/SKILL.md`: schema and validation integrity.
 - `skills/architecture_boundary/SKILL.md`: import and ownership boundaries.
 - `skills/type_contract/SKILL.md`: protected type surfaces.
 - `skills/security_secret/SKILL.md`: secret and Python security baseline.
 - `skills/dead_code_and_diff_risk/SKILL.md`: report-only dead-code and cleanup risk.
+
+Controlled fallback and no-hardcode policy is defined in `AGENTS.md`; unsafe fallback and hardcoding patterns remain covered by the repository Semgrep rules.
 
 ## Reference Patterns
 
