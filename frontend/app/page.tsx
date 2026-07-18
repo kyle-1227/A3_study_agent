@@ -85,7 +85,14 @@ import { mergeSafeFailureContent } from "@/lib/assistant-failure"
 import {
   type AgentStreamEventV2,
 } from "@/lib/agent-stream-contracts"
-import { consumeAgentStreamV2 } from "@/lib/agent-stream-client"
+import {
+  AgentStreamReplayRecoveryError,
+  classifyAgentStreamThreadStatusRecovery,
+  consumeAgentStreamV2,
+  type AgentStreamRecoveryIdentity,
+  type AgentStreamStatusRecoveryResult,
+  validateAgentStreamThreadStatusIdentity,
+} from "@/lib/agent-stream-client"
 import {
   emptyEvidenceProgressTimeline,
   type EvidenceProgressTimeline,
@@ -1725,30 +1732,6 @@ export default function Home() {
     processSSEEvent({ type: event.type, ...event.data })
   }, [processSSEEvent, setActiveRequestId])
 
-  /** Read, validate, replay-dedupe, and reconnect an agent_stream_v2 response. */
-  const consumeSSEStream = useCallback(async (
-    initialBody: ReadableStream<Uint8Array>,
-    signal?: AbortSignal,
-  ) => {
-    streamLifecycleRef.current = beginStreamLifecycle()
-    setContextUsageState((current) => beginContextUsageUpdate(current))
-    await consumeAgentStreamV2({
-      initialBody,
-      onEvent: processAgentStreamEvent,
-      signal,
-      reconnect: async (streamId, lastEventId, reconnectSignal) => {
-        const response = await fetch(`${API_BASE_URL}/streams/${encodeURIComponent(streamId)}`, {
-          headers: { "Last-Event-ID": lastEventId, ...getAuthHeaders() },
-          signal: reconnectSignal,
-        })
-        if (!response.ok || !response.body) {
-          throw new Error(`Stream replay failed: HTTP ${response.status}`)
-        }
-        return response.body
-      },
-    })
-  }, [processAgentStreamEvent])
-
   /** Fetch helper with shared HTTP error handling. Returns response body or null on handled error. */
   const fetchWithErrorHandling = useCallback(async (url: string, init: RequestInit): Promise<ReadableStream<Uint8Array> | null> => {
     let streamEstablished = false
@@ -1792,17 +1775,31 @@ export default function Home() {
     }
   }, [])
 
-  const refreshThreadStatus = useCallback(async (threadId: string) => {
+  const refreshThreadStatus = useCallback(async (
+    threadId: string,
+    recoveryIdentity?: AgentStreamRecoveryIdentity,
+    signal?: AbortSignal,
+  ): Promise<AgentStreamStatusRecoveryResult | undefined> => {
     try {
       const response = await fetch(`${API_BASE_URL}/threads/${encodeURIComponent(threadId)}/status`, {
         headers: { ...getAuthHeaders() },
+        signal,
       })
       if (response.status === 404) {
         setCanContinue(false)
+        if (recoveryIdentity) {
+          throw new Error("authoritative thread status was not found")
+        }
         return
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const status = await response.json()
+      if (!status || typeof status !== "object" || Array.isArray(status)) {
+        throw new Error("thread status response is not an object")
+      }
+      validateAgentStreamThreadStatusIdentity(
+        status.thread_id, threadId, recoveryIdentity,
+      )
       try {
         const report =
           status.context_usage_report && Object.keys(status.context_usage_report).length > 0
@@ -1810,6 +1807,7 @@ export default function Home() {
             : null
         setContextUsageState(restoreContextUsageReport(report))
       } catch (error) {
+        if (recoveryIdentity) throw error
         setContextUsageState((current) =>
           applyContextUsageError(current, contextUsageContractFailure(error)),
         )
@@ -1821,6 +1819,7 @@ export default function Home() {
             : null
         setBackgroundContextWindow(background)
       } catch (error) {
+        if (recoveryIdentity) throw error
         setBackgroundContextWindow(null)
         setLogs((current) => [
           ...current,
@@ -1836,6 +1835,7 @@ export default function Home() {
           parseThreadContextWindowV3(status.thread_context_window_v3),
         )
       } catch (error) {
+        if (recoveryIdentity) throw error
         setThreadContextWindowV3(null)
         setLogs((current) => [
           ...current,
@@ -1846,8 +1846,13 @@ export default function Home() {
           },
         ])
       }
+      let latestActivityRequestId = ""
       try {
         const parsedTimeline = parseActivityTimeline(status.activity_timeline ?? [])
+        latestActivityRequestId = parsedTimeline.items.at(-1)?.requestId ?? ""
+        if (recoveryIdentity && parsedTimeline.rejectedCount > 0) {
+          throw new Error("thread status recovery activity timeline is invalid")
+        }
         setActivityTimeline(parsedTimeline.items)
         setMessages((current) =>
           restoreActivitiesToMessages(current, parsedTimeline.items, threadId),
@@ -1864,6 +1869,7 @@ export default function Home() {
           ])
         }
       } catch (error) {
+        if (recoveryIdentity) throw error
         setActivityTimeline([])
         setLogs((current) => [
           ...current,
@@ -1938,6 +1944,14 @@ export default function Home() {
         }
       }
       setCanContinue(Boolean(status.resume_available && pendingInterruptType === "user_stop"))
+      if (recoveryIdentity) {
+        return classifyAgentStreamThreadStatusRecovery(
+          status,
+          recoveryIdentity,
+          userId,
+          latestActivityRequestId,
+        )
+      }
       if (status.schema_version === "legacy") {
         setLogs((prev) => [
           ...prev,
@@ -1950,8 +1964,61 @@ export default function Home() {
         ...prev,
         { type: "warning", message: `[RUN] Status unavailable: ${error.message}`, ts: timestamp() },
       ])
+      if (recoveryIdentity) throw error
     }
-  }, [attachRecommendationFinalToAssistant, attachResourceFinalToAssistant, fetchGraphManifest, updateAssistantResourceStatus])
+  }, [attachRecommendationFinalToAssistant, attachResourceFinalToAssistant, fetchGraphManifest, updateAssistantResourceStatus, userId])
+
+  /** Read, validate, replay-dedupe, and recover an agent_stream_v2 response. */
+  const consumeSSEStream = useCallback(async (
+    initialBody: ReadableStream<Uint8Array>,
+    signal?: AbortSignal,
+  ) => {
+    streamLifecycleRef.current = beginStreamLifecycle()
+    setContextUsageState((current) => beginContextUsageUpdate(current))
+    await consumeAgentStreamV2({
+      initialBody,
+      onEvent: processAgentStreamEvent,
+      signal,
+      recoveryUserId: userId,
+      reconnect: async (streamId, lastEventId, reconnectSignal) => {
+        let response: Response
+        try {
+          response = await fetch(`${API_BASE_URL}/streams/${encodeURIComponent(streamId)}`, {
+            headers: { "Last-Event-ID": lastEventId, ...getAuthHeaders() },
+            signal: reconnectSignal,
+          })
+        } catch (error) {
+          if (reconnectSignal?.aborted) throw error
+          throw new AgentStreamReplayRecoveryError("transport")
+        }
+        if (response.status === 410) {
+          throw new AgentStreamReplayRecoveryError("expired")
+        }
+        if (!response.ok || !response.body) {
+          throw new Error(`Stream replay failed: HTTP ${response.status}`)
+        }
+        return response.body
+      },
+      recoverStatus: async (identity, recoverySignal) => {
+        const result = await refreshThreadStatus(
+          identity.threadId,
+          identity,
+          recoverySignal,
+        )
+        if (!result) {
+          throw new Error("authoritative thread status recovery is unavailable")
+        }
+        if (result.status === "failed") {
+          streamHadErrorRef.current = true
+        }
+        liveTurnRef.current = null
+        setLiveTurn(null)
+        setIsLoading(false)
+        setContextUsageState((current) => finishContextUsageUpdate(current))
+        return result
+      },
+    })
+  }, [processAgentStreamEvent, refreshThreadStatus, userId])
 
   useEffect(() => {
     if (!storageReady || !currentThreadId) return

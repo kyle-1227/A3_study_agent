@@ -10,10 +10,128 @@ export type AgentStreamReplay = (
   signal?: AbortSignal,
 ) => Promise<ReadableStream<Uint8Array>>
 
+export type AgentStreamReplayRecoveryReason = "transport" | "expired"
+
+export class AgentStreamReplayRecoveryError extends Error {
+  readonly reason: AgentStreamReplayRecoveryReason
+
+  constructor(reason: AgentStreamReplayRecoveryReason) {
+    super(`agent stream replay ${reason}`)
+    this.name = "AgentStreamReplayRecoveryError"
+    this.reason = reason
+  }
+}
+
+export interface AgentStreamRecoveryIdentity {
+  userId: string
+  streamId: string
+  requestId: string
+  threadId: string
+  lastEventId: string
+}
+
+export type AgentStreamTerminalStatus = "completed" | "failed" | "stopped"
+
+export interface AgentStreamStatusRecoveryResult
+  extends AgentStreamRecoveryIdentity {
+  status: AgentStreamTerminalStatus
+}
+
+export type AgentStreamStatusRecovery = (
+  identity: AgentStreamRecoveryIdentity,
+  signal?: AbortSignal,
+) => Promise<AgentStreamStatusRecoveryResult>
+
+export function validateAgentStreamThreadStatusIdentity(
+  statusThreadId: unknown,
+  requestedThreadId: string,
+  recoveryIdentity?: AgentStreamRecoveryIdentity,
+): void {
+  if (
+    !requestedThreadId ||
+    statusThreadId !== requestedThreadId ||
+    (recoveryIdentity !== undefined &&
+      recoveryIdentity.threadId !== requestedThreadId)
+  ) {
+    throw new Error("thread status identity mismatch")
+  }
+}
+
+export function validateAgentStreamRecoveryIdentity(
+  observed: {
+    readonly userId: unknown
+    readonly threadId: unknown
+    readonly requestId: unknown
+  },
+  expected: Pick<
+    AgentStreamRecoveryIdentity,
+    "userId" | "threadId" | "requestId"
+  >,
+): void {
+  if (
+    !expected.userId ||
+    !expected.threadId ||
+    !expected.requestId ||
+    observed.userId !== expected.userId ||
+    observed.threadId !== expected.threadId ||
+    observed.requestId !== expected.requestId
+  ) {
+    throw new Error("thread status recovery identity mismatch")
+  }
+}
+
+export function classifyAgentStreamThreadStatusRecovery(
+  statusPayload: unknown,
+  identity: AgentStreamRecoveryIdentity,
+  currentUserId: unknown,
+  latestActivityRequestId: string,
+): AgentStreamStatusRecoveryResult {
+  if (
+    !statusPayload ||
+    typeof statusPayload !== "object" ||
+    Array.isArray(statusPayload)
+  ) {
+    throw new Error("thread status recovery contract is invalid")
+  }
+  const status = statusPayload as Record<string, unknown>
+  if (status.schema_version !== "run_control_v1") {
+    throw new Error("thread status recovery schema is invalid")
+  }
+  validateAgentStreamThreadStatusIdentity(
+    status.thread_id,
+    identity.threadId,
+    identity,
+  )
+  validateAgentStreamRecoveryIdentity(
+    {
+      userId: currentUserId,
+      threadId: status.thread_id,
+      requestId: latestActivityRequestId,
+    },
+    identity,
+  )
+  if (
+    status.run_status !== "completed" &&
+    status.run_status !== "failed" &&
+    status.run_status !== "stopped"
+  ) {
+    if (typeof status.run_status !== "string") {
+      throw new Error("thread status recovery run status is invalid")
+    }
+    throw new Error("thread status recovery is not terminal")
+  }
+  return {
+    ...identity,
+    status: status.run_status,
+  }
+}
+
 export interface ConsumeAgentStreamOptions {
   initialBody: ReadableStream<Uint8Array>
   onEvent: (event: AgentStreamEventV2) => void
   reconnect: AgentStreamReplay
+  recoverStatus?: AgentStreamStatusRecovery
+  recoveryUserId?: string | null
   signal?: AbortSignal
 }
 
@@ -21,6 +139,8 @@ export async function consumeAgentStreamV2({
   initialBody,
   onEvent,
   reconnect,
+  recoverStatus,
+  recoveryUserId,
   signal,
 }: ConsumeAgentStreamOptions): Promise<void> {
   let body = initialBody
@@ -31,6 +151,7 @@ export async function consumeAgentStreamV2({
   let requestId = ""
   let threadId = ""
   let lastSequence = 0
+  let statusRecoveryAttempted = false
   const seenEvents = new Map<number, string>()
 
   const dispatchFrames = (frames: SSEFrame[]) => {
@@ -103,7 +224,58 @@ export async function consumeAgentStreamV2({
       throw new Error("stream ended before replay identity was established")
     }
     await waitForReconnect(retryMs, signal)
-    body = await reconnect(streamId, lastEventId, signal)
+    try {
+      body = await reconnect(streamId, lastEventId, signal)
+    } catch (error) {
+      if (
+        signal?.aborted ||
+        !(error instanceof AgentStreamReplayRecoveryError) ||
+        !recoverStatus ||
+        statusRecoveryAttempted
+      ) {
+        throw error
+      }
+      statusRecoveryAttempted = true
+      if (
+        typeof recoveryUserId !== "string" ||
+        recoveryUserId.length === 0 ||
+        recoveryUserId.trim() !== recoveryUserId
+      ) {
+        throw new Error("agent stream status recovery user identity is unavailable")
+      }
+      const identity: AgentStreamRecoveryIdentity = {
+        userId: recoveryUserId,
+        streamId,
+        requestId,
+        threadId,
+        lastEventId,
+      }
+      const recovery = await recoverStatus(identity, signal)
+      validateStatusRecovery(recovery, identity)
+      return
+    }
+  }
+}
+
+function validateStatusRecovery(
+  recovery: AgentStreamStatusRecoveryResult,
+  identity: AgentStreamRecoveryIdentity,
+): void {
+  if (
+    !recovery ||
+    typeof recovery !== "object" ||
+    (recovery.status !== "completed" &&
+      recovery.status !== "failed" &&
+      recovery.status !== "stopped")
+  ) {
+    throw new Error("thread status recovery contract is invalid")
+  }
+  validateAgentStreamRecoveryIdentity(recovery, identity)
+  if (
+    recovery.streamId !== identity.streamId ||
+    recovery.lastEventId !== identity.lastEventId
+  ) {
+    throw new Error("thread status recovery identity mismatch")
   }
 }
 
