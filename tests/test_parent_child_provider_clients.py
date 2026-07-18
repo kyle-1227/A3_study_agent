@@ -10,6 +10,8 @@ from src.rag.parent_child.provider_clients import (
     ProviderEmbeddingDimensionError,
     ProviderProtocolError,
     ProviderReportedError,
+    RerankerContractError,
+    RerankerRecoveryBudgetError,
     StrictEmbeddingClient,
     StrictRerankerClient,
 )
@@ -85,6 +87,14 @@ def _reranker_config() -> RerankerConfig:
         timeout_seconds=5.0,
         retry=_retry(),
         batch_size=4,
+        batch_recovery={
+            "schema_version": "reranker_batch_recovery_v1",
+            "mode": "strict_bisect_v1",
+            "max_total_requests": 9,
+            "max_split_depth": 2,
+            "min_batch_size": 1,
+            "max_response_bytes": 4096,
+        },
         protocol="ranked_index_scores_v1",
         score_min=0.0,
         score_max=1.0,
@@ -103,6 +113,14 @@ def _openrouter_reranker_config() -> RerankerConfig:
         timeout_seconds=5.0,
         retry=_retry(),
         batch_size=4,
+        batch_recovery={
+            "schema_version": "reranker_batch_recovery_v1",
+            "mode": "strict_bisect_v1",
+            "max_total_requests": 9,
+            "max_split_depth": 2,
+            "min_batch_size": 1,
+            "max_response_bytes": 4096,
+        },
         protocol="openrouter_ranked_index_scores_v1",
         score_min=0.0,
         score_max=1.0,
@@ -422,7 +440,12 @@ def test_reranker_requires_complete_unique_index_set() -> None:
         assert "provider" not in json.loads(request.content)
         return httpx.Response(
             200,
-            json={"results": [{"index": 0, "relevance_score": 0.9}]},
+            json={
+                "results": [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.8},
+                ]
+            },
         )
 
     client = StrictRerankerClient(
@@ -444,8 +467,9 @@ def test_reranker_requires_complete_unique_index_set() -> None:
         ),
     )
     try:
-        with pytest.raises(ProviderProtocolError, match="indices"):
+        with pytest.raises(RerankerContractError) as exc_info:
             client.rerank(query="query", candidates=candidates)
+        assert exc_info.value.reason_code == "duplicate_scores"
     finally:
         client.close()
 
@@ -506,3 +530,229 @@ def test_openrouter_reranker_protocol_requires_declared_metadata_and_identity() 
 
     assert tuple(score.child_id for score in scores) == ("child-a", "child-b")
     assert tuple(score.score for score in scores) == (0.9, 0.1)
+
+
+def _rerank_candidates(count: int = 4) -> tuple[RerankCandidate, ...]:
+    return tuple(
+        RerankCandidate(
+            schema_version="rerank_candidate_v1",
+            child_id=f"child-{index}",
+            content=f"body-{index}",
+        )
+        for index in range(count)
+    )
+
+
+def _complete_results(count: int) -> list[dict[str, int | float]]:
+    return [
+        {"index": index, "relevance_score": (count - index) / (count + 1)}
+        for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "reason_code", "expected_request_count"),
+    [
+        ("timeout", "timeout", 4),
+        ("response_too_large", "response_too_large", 3),
+        ("batch_protocol_failure", "batch_protocol_failure", 3),
+        ("batch_incomplete", "batch_incomplete", 3),
+    ],
+)
+def test_reranker_bisects_recoverable_batches_and_returns_every_real_score(
+    failure_mode: str,
+    reason_code: str,
+    expected_request_count: int,
+) -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        count = len(payload["documents"])
+        calls.append(count)
+        if count > 2 and failure_mode == "timeout":
+            raise httpx.ReadTimeout("fixture timeout", request=request)
+        if count > 2 and failure_mode == "response_too_large":
+            content = json.dumps({"results": _complete_results(count)}).encode()
+            return httpx.Response(200, content=content + b" " * 2048)
+        if count > 2 and failure_mode == "batch_protocol_failure":
+            return httpx.Response(
+                200,
+                json={"results": "invalid-batch-envelope"},
+            )
+        if count > 2 and failure_mode == "batch_incomplete":
+            return httpx.Response(
+                200,
+                json={"results": _complete_results(count - 1)},
+            )
+        return httpx.Response(
+            200,
+            json={"results": _complete_results(count)},
+        )
+
+    config_payload = _reranker_config().model_dump(mode="python")
+    config_payload["batch_recovery"]["max_response_bytes"] = 1024
+    config = RerankerConfig.model_validate(config_payload)
+    auth_sentinel = _auth_sentinel(handler)
+    client = StrictRerankerClient(
+        config=config,
+        api_key=auth_sentinel,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+    try:
+        scores = client.rerank(
+            query="query-sensitive",
+            candidates=_rerank_candidates(),
+        )
+        trace = client.last_recovery_trace
+    finally:
+        client.close()
+
+    assert tuple(score.child_id for score in scores) == tuple(
+        f"child-{index}" for index in range(4)
+    )
+    assert all(0.0 <= score.score <= 1.0 for score in scores)
+    assert trace is not None
+    assert trace.candidate_count == 4
+    assert trace.scored_candidate_count == 4
+    assert trace.provider_request_count == expected_request_count
+    assert trace.split_count == 1
+    assert trace.reason_codes == (reason_code,)
+    serialized_trace = trace.model_dump_json()
+    for forbidden in (
+        "query-sensitive",
+        "body-0",
+        "child-0",
+        auth_sentinel,
+        "results",
+    ):
+        assert forbidden not in serialized_trace
+
+
+@pytest.mark.parametrize(
+    ("results", "reason_code"),
+    [
+        (
+            [
+                {"index": 0, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.8},
+            ],
+            "duplicate_scores",
+        ),
+        (
+            [
+                {"index": 0, "relevance_score": 1.5},
+                {"index": 1, "relevance_score": 0.2},
+            ],
+            "score_invalid",
+        ),
+        (
+            [
+                {"index": 0, "relevance_score": 0.9},
+                {"index": 9, "relevance_score": 0.2},
+            ],
+            "index_invalid",
+        ),
+    ],
+)
+def test_reranker_never_splits_ambiguous_or_illegal_scores(
+    results: list[dict[str, int | float]],
+    reason_code: str,
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"results": results})
+
+    client = StrictRerankerClient(
+        config=_reranker_config(),
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+    try:
+        with pytest.raises(RerankerContractError) as exc_info:
+            client.rerank(query="query", candidates=_rerank_candidates(2))
+    finally:
+        client.close()
+
+    assert exc_info.value.reason_code == reason_code
+    assert calls == 1
+
+
+def test_reranker_request_budget_exhaustion_is_typed_and_returns_no_partial_scores() -> (
+    None
+):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("fixture timeout", request=request)
+
+    payload = _reranker_config().model_dump(mode="python")
+    payload["batch_recovery"]["max_total_requests"] = 3
+    config = RerankerConfig.model_validate(payload)
+    client = StrictRerankerClient(
+        config=config,
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+    try:
+        with pytest.raises(RerankerRecoveryBudgetError) as exc_info:
+            client.rerank(query="query", candidates=_rerank_candidates())
+    finally:
+        client.close()
+
+    assert exc_info.value.reason_code == "budget_exhausted"
+    assert exc_info.value.trace.provider_request_count == 3
+    assert exc_info.value.trace.scored_candidate_count == 0
+    assert calls == 3
+
+
+def test_openrouter_reranker_rejects_candidate_echo_identity_drift() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "id": "rerank-request-id",
+                "model": "configured-reranker-response",
+                "provider": "configured-openrouter-provider",
+                "results": [
+                    {
+                        "index": 0,
+                        "relevance_score": 0.9,
+                        "document": {"text": "different-body"},
+                    },
+                    {
+                        "index": 1,
+                        "relevance_score": 0.1,
+                        "document": {"text": "body-1"},
+                    },
+                ],
+                "usage": {"cost": 0, "total_tokens": 2},
+            },
+        )
+
+    client = StrictRerankerClient(
+        config=_openrouter_reranker_config(),
+        api_key=_auth_sentinel(handler),
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _seconds: None,
+    )
+    try:
+        with pytest.raises(RerankerContractError) as exc_info:
+            client.rerank(query="query", candidates=_rerank_candidates(2))
+    finally:
+        client.close()
+
+    assert exc_info.value.reason_code == "candidate_identity_mismatch"
+    assert calls == 1

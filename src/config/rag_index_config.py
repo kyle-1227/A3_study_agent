@@ -248,6 +248,17 @@ class EmbeddingConfig(StrictRagConfigModel):
         return self
 
 
+class RerankerBatchRecoveryConfig(StrictRagConfigModel):
+    """Hard-bounded same-provider reranker batch recovery policy."""
+
+    schema_version: Literal["reranker_batch_recovery_v1"]
+    mode: Literal["strict_bisect_v1"]
+    max_total_requests: Annotated[int, Field(ge=3, le=64)]
+    max_split_depth: Annotated[int, Field(ge=1, le=8)]
+    min_batch_size: PositiveInt
+    max_response_bytes: Annotated[int, Field(ge=1024, le=16 * 1024 * 1024)]
+
+
 class RerankerConfig(StrictRagConfigModel):
     """Provider-neutral reranker endpoint and response contract."""
 
@@ -263,6 +274,7 @@ class RerankerConfig(StrictRagConfigModel):
     timeout_seconds: PositiveFloat
     retry: RetryConfig
     batch_size: PositiveInt
+    batch_recovery: RerankerBatchRecoveryConfig
     protocol: NonBlankStr
     score_min: float
     score_max: float
@@ -272,6 +284,14 @@ class RerankerConfig(StrictRagConfigModel):
     def _validate_score_contract(self) -> "RerankerConfig":
         if self.score_min != 0.0 or self.score_max != 1.0:
             raise ValueError("reranker score contract must be exactly [0.0, 1.0]")
+        if self.batch_size < 2 * self.batch_recovery.min_batch_size:
+            raise ValueError(
+                "reranker batch_size must allow one configured recovery split"
+            )
+        if self.batch_recovery.max_total_requests <= self.retry.max_attempts:
+            raise ValueError(
+                "reranker recovery request budget must exceed per-batch retry attempts"
+            )
         if self.protocol == "openrouter_ranked_index_scores_v1":
             if self.provider != "openrouter":
                 raise ValueError(
@@ -841,6 +861,7 @@ __all__ = [
     "PageAssemblyPolicyConfig",
     "ProviderRoutingConfig",
     "RagIndexConfig",
+    "RerankerBatchRecoveryConfig",
     "RecursiveChunkConfig",
     "RerankerConfig",
     "RetryConfig",

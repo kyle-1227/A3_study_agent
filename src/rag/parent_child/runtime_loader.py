@@ -50,6 +50,8 @@ def compute_reranker_fingerprint(config: RagIndexConfig) -> str:
         canonical_json_bytes(
             {
                 "base_url": reranker.base_url,
+                "batch_recovery": reranker.batch_recovery.model_dump(mode="json"),
+                "batch_size": reranker.batch_size,
                 "endpoint_path": reranker.endpoint_path,
                 "model": reranker.model,
                 "protocol": reranker.protocol,
@@ -62,8 +64,10 @@ def compute_reranker_fingerprint(config: RagIndexConfig) -> str:
                         "order": reranker.provider_routing.order,
                     }
                 ),
+                "retry": reranker.retry.model_dump(mode="json"),
                 "score_max": reranker.score_max,
                 "score_min": reranker.score_min,
+                "timeout_seconds": reranker.timeout_seconds,
             }
         )
     )

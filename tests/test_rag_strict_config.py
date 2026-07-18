@@ -179,6 +179,14 @@ def _index_payload(tmp_path: Path) -> dict[str, object]:
             "timeout_seconds": 20.0,
             "retry": _retry_payload(),
             "batch_size": 80,
+            "batch_recovery": {
+                "schema_version": "reranker_batch_recovery_v1",
+                "mode": "strict_bisect_v1",
+                "max_total_requests": 15,
+                "max_split_depth": 4,
+                "min_batch_size": 5,
+                "max_response_bytes": 1048576,
+            },
             "protocol": "ranked_index_scores_v1",
             "score_min": 0.0,
             "score_max": 1.0,
@@ -242,6 +250,32 @@ def test_reranker_batch_must_cover_all_flat_baseline_candidates(
         match=r"batch_size must cover vector_top_k \+ bm25_top_k",
     ):
         RagIndexConfig.model_validate(payload)
+
+
+def test_reranker_batch_recovery_is_required_and_hard_bounded(
+    tmp_path: Path,
+) -> None:
+    missing_payload = _index_payload(tmp_path)
+    missing_reranker = missing_payload["reranker"]
+    assert isinstance(missing_reranker, dict)
+    missing_reranker.pop("batch_recovery")
+    with pytest.raises(ValidationError, match="batch_recovery"):
+        RagIndexConfig.model_validate(missing_payload)
+
+    bounded_payload = _index_payload(tmp_path)
+    bounded_reranker = bounded_payload["reranker"]
+    assert isinstance(bounded_reranker, dict)
+    recovery = bounded_reranker["batch_recovery"]
+    assert isinstance(recovery, dict)
+    recovery["max_total_requests"] = 3
+    retry = bounded_reranker["retry"]
+    assert isinstance(retry, dict)
+    retry["max_attempts"] = 3
+    with pytest.raises(
+        ValidationError,
+        match="request budget must exceed per-batch retry attempts",
+    ):
+        RagIndexConfig.model_validate(bounded_payload)
 
 
 def _candidate_grid_payload() -> dict[str, object]:

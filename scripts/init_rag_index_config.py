@@ -22,6 +22,7 @@ from src.config.rag_index_config import (  # noqa: E402
     ChunkPolicyConfig,
     EmbeddingConfig,
     RagIndexConfig,
+    RerankerBatchRecoveryConfig,
     RerankerConfig,
     RetrievalConfig,
     RetryConfig,
@@ -413,6 +414,21 @@ def _parser() -> argparse.ArgumentParser:
     reranker.add_argument("--reranker-retry-multiplier", type=float, required=True)
     reranker.add_argument("--reranker-batch-size", type=int, required=True)
     reranker.add_argument(
+        "--reranker-recovery-mode",
+        choices=("strict_bisect_v1",),
+        required=True,
+    )
+    reranker.add_argument(
+        "--reranker-recovery-max-total-requests", type=int, required=True
+    )
+    reranker.add_argument(
+        "--reranker-recovery-max-split-depth", type=int, required=True
+    )
+    reranker.add_argument("--reranker-recovery-min-batch-size", type=int, required=True)
+    reranker.add_argument(
+        "--reranker-recovery-max-response-bytes", type=int, required=True
+    )
+    reranker.add_argument(
         "--reranker-protocol",
         choices=(
             "ranked_index_scores_v1",
@@ -564,6 +580,14 @@ def _reranker_from_args(args: argparse.Namespace) -> RerankerConfig:
         timeout_seconds=args.reranker_timeout_seconds,
         retry=_retry_from_args(args, "reranker"),
         batch_size=args.reranker_batch_size,
+        batch_recovery=RerankerBatchRecoveryConfig(
+            schema_version="reranker_batch_recovery_v1",
+            mode=args.reranker_recovery_mode,
+            max_total_requests=args.reranker_recovery_max_total_requests,
+            max_split_depth=args.reranker_recovery_max_split_depth,
+            min_batch_size=args.reranker_recovery_min_batch_size,
+            max_response_bytes=args.reranker_recovery_max_response_bytes,
+        ),
         protocol=args.reranker_protocol,
         score_min=args.reranker_score_min,
         score_max=args.reranker_score_max,

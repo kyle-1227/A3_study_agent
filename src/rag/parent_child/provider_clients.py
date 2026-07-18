@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+import hashlib
+import json
 import math
 import time
 from typing import Literal
@@ -11,8 +14,26 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config._rag_config import resolve_required_secret
-from src.config.rag_index_config import EmbeddingConfig, RerankerConfig, RetryConfig
+from src.config.rag_index_config import (
+    EmbeddingConfig,
+    RerankerConfig,
+    RetryConfig,
+)
 from src.rag.parent_child.retrieval import RerankCandidate, RerankScore
+
+
+RerankerReasonCode = Literal[
+    "timeout",
+    "response_too_large",
+    "batch_protocol_failure",
+    "batch_incomplete",
+    "duplicate_scores",
+    "index_invalid",
+    "score_invalid",
+    "candidate_identity_mismatch",
+    "provider_identity_mismatch",
+    "budget_exhausted",
+]
 
 
 class ProviderClientError(RuntimeError):
@@ -21,6 +42,52 @@ class ProviderClientError(RuntimeError):
 
 class ProviderTransportError(ProviderClientError):
     """The configured endpoint failed after its explicit retry policy."""
+
+
+class ProviderTimeoutError(ProviderTransportError):
+    """The configured endpoint timed out after its explicit HTTP retry policy."""
+
+
+class ProviderResponseTooLargeError(ProviderClientError):
+    """A provider response exceeded the configured reranker byte ceiling."""
+
+
+class RerankerRecoveryTrace(BaseModel):
+    """Body-free counters and fingerprints for one reranker invocation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["reranker_recovery_trace_v1"]
+    candidate_count: int = Field(gt=0)
+    scored_candidate_count: int = Field(ge=0)
+    provider_request_count: int = Field(ge=0)
+    split_count: int = Field(ge=0)
+    max_split_depth_observed: int = Field(ge=0)
+    candidate_identity_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recovery_policy_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason_codes: tuple[RerankerReasonCode, ...]
+
+
+class RerankerRecoveryError(ProviderClientError):
+    """A bounded recovery could not prove a complete score set."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: RerankerReasonCode,
+        trace: RerankerRecoveryTrace,
+    ) -> None:
+        self.reason_code = reason_code
+        self.trace = trace
+        super().__init__(f"reranker recovery failed: {reason_code}")
+
+
+class RerankerRecoveryBudgetError(RerankerRecoveryError):
+    """The explicit total provider-request budget was exhausted."""
+
+
+class RerankerRecoveryExhaustedError(RerankerRecoveryError):
+    """The configured split depth or minimum batch size was exhausted."""
 
 
 class ProviderReportedError(ProviderTransportError):
@@ -41,6 +108,14 @@ class ProviderReportedError(ProviderTransportError):
 
 class ProviderProtocolError(ProviderClientError):
     """The configured endpoint returned a response outside its strict schema."""
+
+
+class RerankerContractError(ProviderProtocolError):
+    """A reranker response cannot preserve score or candidate identity."""
+
+    def __init__(self, reason_code: RerankerReasonCode) -> None:
+        self.reason_code = reason_code
+        super().__init__(f"reranker contract failed: {reason_code}")
 
 
 class ProviderEmbeddingDimensionError(ProviderProtocolError):
@@ -143,6 +218,62 @@ class _OpenRouterRerankerResponse(_StrictResponse):
     usage: _OpenRouterRerankerUsage
 
 
+class _RecoverableBatchError(RuntimeError):
+    def __init__(self, reason_code: RerankerReasonCode) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+class _RequestBudgetExhausted(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _RerankerRecoveryState:
+    candidate_ids: tuple[str, ...]
+    max_total_requests: int
+    policy_fingerprint: str
+    provider_request_count: int = 0
+    split_count: int = 0
+    max_split_depth_observed: int = 0
+    scored_candidate_ids: set[str] = field(default_factory=set)
+    reason_codes: list[RerankerReasonCode] = field(default_factory=list)
+
+    def consume_request(self) -> None:
+        if self.provider_request_count >= self.max_total_requests:
+            self.note("budget_exhausted")
+            raise _RequestBudgetExhausted
+        self.provider_request_count += 1
+
+    def note(self, reason_code: RerankerReasonCode) -> None:
+        if reason_code not in self.reason_codes:
+            self.reason_codes.append(reason_code)
+
+    def trace(self) -> RerankerRecoveryTrace:
+        return RerankerRecoveryTrace(
+            schema_version="reranker_recovery_trace_v1",
+            candidate_count=len(self.candidate_ids),
+            scored_candidate_count=len(self.scored_candidate_ids),
+            provider_request_count=self.provider_request_count,
+            split_count=self.split_count,
+            max_split_depth_observed=self.max_split_depth_observed,
+            candidate_identity_fingerprint=_fingerprint(self.candidate_ids),
+            recovery_policy_fingerprint=self.policy_fingerprint,
+            reason_codes=tuple(self.reason_codes),
+        )
+
+
+def _fingerprint(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 _RETRYABLE_PROVIDER_ERROR_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
@@ -202,19 +333,41 @@ class _StrictJsonHttpClient:
     def close(self) -> None:
         self._client.close()
 
-    def post_json(self, payload: dict[str, object]) -> object:
+    def post_json(
+        self,
+        payload: dict[str, object],
+        *,
+        before_attempt: Callable[[], None] | None = None,
+        max_response_bytes: int | None = None,
+    ) -> object:
         backoff = self._retry.initial_backoff_seconds
         last_reason = "unknown"
         for attempt in range(1, self._retry.max_attempts + 1):
             retryable = False
             try:
+                if before_attempt is not None:
+                    before_attempt()
                 response = self._client.post(self._url, json=payload)
+            except httpx.TimeoutException:
+                last_reason = "timeout"
+                retryable = True
             except httpx.TransportError as exc:
                 last_reason = type(exc).__name__
                 retryable = True
             else:
                 self._last_http_status = response.status_code
+                if response.status_code == 413:
+                    raise ProviderResponseTooLargeError(
+                        "provider rejected an oversized reranker batch"
+                    )
                 if 200 <= response.status_code < 300:
+                    if (
+                        max_response_bytes is not None
+                        and len(response.content) > max_response_bytes
+                    ):
+                        raise ProviderResponseTooLargeError(
+                            "provider response exceeded configured byte ceiling"
+                        )
                     try:
                         decoded = response.json()
                     except ValueError as exc:
@@ -224,6 +377,10 @@ class _StrictJsonHttpClient:
                     provider_error_code = _strict_provider_error_code(decoded)
                     if provider_error_code is None:
                         return decoded
+                    if provider_error_code == 413:
+                        raise ProviderResponseTooLargeError(
+                            "provider reported an oversized reranker batch"
+                        )
                     last_reason = f"provider_error_{provider_error_code}"
                     retryable = provider_error_code in _RETRYABLE_PROVIDER_ERROR_CODES
                     if not retryable:
@@ -248,6 +405,10 @@ class _StrictJsonHttpClient:
                             f"provider request failed: {last_reason}"
                         )
             if not retryable or attempt == self._retry.max_attempts:
+                if last_reason == "timeout":
+                    raise ProviderTimeoutError(
+                        "provider timed out after explicit retry policy"
+                    )
                 raise ProviderTransportError(
                     "provider request exhausted explicit retry policy: " + last_reason
                 )
@@ -400,6 +561,18 @@ class StrictRerankerClient:
             transport=transport,
             sleep=sleep,
         )
+        self._last_recovery_trace: RerankerRecoveryTrace | None = None
+        self._recovery_policy_fingerprint = _fingerprint(
+            {
+                "schema_version": "reranker_recovery_identity_v1",
+                "provider": config.provider,
+                "model": config.model,
+                "response_model": config.response_model,
+                "protocol": config.protocol,
+                "endpoint": f"{config.base_url.rstrip('/')}{config.endpoint_path}",
+                "batch_recovery": config.batch_recovery.model_dump(mode="json"),
+            }
+        )
 
     @classmethod
     def from_environment(
@@ -429,11 +602,119 @@ class StrictRerankerClient:
 
         return self._http.last_http_status
 
+    @property
+    def last_recovery_trace(self) -> RerankerRecoveryTrace | None:
+        """Return only body-free counters and fingerprints for the latest call."""
+
+        return self._last_recovery_trace
+
     def rerank(
         self,
         *,
         query: str,
         candidates: tuple[RerankCandidate, ...],
+    ) -> tuple[RerankScore, ...]:
+        if not query or not candidates:
+            raise ProviderProtocolError("reranker query and candidates are required")
+        if len(candidates) > self._config.batch_size:
+            raise ProviderProtocolError("reranker candidate count exceeds batch_size")
+        child_ids = tuple(candidate.child_id for candidate in candidates)
+        if len(child_ids) != len(set(child_ids)):
+            raise ProviderProtocolError("reranker candidate child IDs must be unique")
+        state = _RerankerRecoveryState(
+            candidate_ids=child_ids,
+            max_total_requests=self._config.batch_recovery.max_total_requests,
+            policy_fingerprint=self._recovery_policy_fingerprint,
+        )
+        try:
+            scores = self._rerank_partition(
+                query=query,
+                candidates=candidates,
+                depth=0,
+                state=state,
+            )
+        except _RequestBudgetExhausted as exc:
+            self._last_recovery_trace = state.trace()
+            raise RerankerRecoveryBudgetError(
+                reason_code="budget_exhausted",
+                trace=self._last_recovery_trace,
+            ) from exc
+        except Exception:
+            self._last_recovery_trace = state.trace()
+            raise
+        returned_ids = tuple(score.child_id for score in scores)
+        if len(returned_ids) != len(set(returned_ids)):
+            state.note("duplicate_scores")
+            self._last_recovery_trace = state.trace()
+            raise RerankerContractError("duplicate_scores")
+        if returned_ids != child_ids or state.scored_candidate_ids != set(child_ids):
+            state.note("batch_incomplete")
+            self._last_recovery_trace = state.trace()
+            raise RerankerContractError("batch_incomplete")
+        self._last_recovery_trace = state.trace()
+        return scores
+
+    def _rerank_partition(
+        self,
+        *,
+        query: str,
+        candidates: tuple[RerankCandidate, ...],
+        depth: int,
+        state: _RerankerRecoveryState,
+    ) -> tuple[RerankScore, ...]:
+        state.max_split_depth_observed = max(
+            state.max_split_depth_observed,
+            depth,
+        )
+        try:
+            return self._rerank_once(
+                query=query,
+                candidates=candidates,
+                state=state,
+            )
+        except ProviderTimeoutError as exc:
+            reason_code: RerankerReasonCode = "timeout"
+            cause: Exception = exc
+        except ProviderResponseTooLargeError as exc:
+            reason_code = "response_too_large"
+            cause = exc
+        except _RecoverableBatchError as exc:
+            reason_code = exc.reason_code
+            cause = exc
+        state.note(reason_code)
+        recovery = self._config.batch_recovery
+        midpoint = len(candidates) // 2
+        can_split = (
+            depth < recovery.max_split_depth
+            and midpoint >= recovery.min_batch_size
+            and len(candidates) - midpoint >= recovery.min_batch_size
+        )
+        if not can_split:
+            raise RerankerRecoveryExhaustedError(
+                reason_code=reason_code,
+                trace=state.trace(),
+            ) from cause
+        state.split_count += 1
+        left = self._rerank_partition(
+            query=query,
+            candidates=candidates[:midpoint],
+            depth=depth + 1,
+            state=state,
+        )
+        right = self._rerank_partition(
+            query=query,
+            candidates=candidates[midpoint:],
+            depth=depth + 1,
+            state=state,
+        )
+        return left + right
+
+    def _rerank_once(
+        self,
+        *,
+        query: str,
+        candidates: tuple[RerankCandidate, ...],
+        state: _RerankerRecoveryState,
     ) -> tuple[RerankScore, ...]:
         if not query or not candidates:
             raise ProviderProtocolError("reranker query and candidates are required")
@@ -458,29 +739,49 @@ class StrictRerankerClient:
                 "order": list(provider_routing.order),
                 "allow_fallbacks": provider_routing.allow_fallbacks,
             }
-        raw = self._http.post_json(payload)
+        raw = self._http.post_json(
+            payload,
+            before_attempt=state.consume_request,
+            max_response_bytes=self._config.batch_recovery.max_response_bytes,
+        )
         try:
             if self._config.protocol == "ranked_index_scores_v1":
                 response = _RerankerResponse.model_validate(raw)
             elif self._config.protocol == "openrouter_ranked_index_scores_v1":
                 response = _OpenRouterRerankerResponse.model_validate(raw)
                 if response.model != self._config.response_model:
-                    raise ProviderProtocolError(
-                        "reranker response model identity mismatch"
-                    )
+                    state.note("provider_identity_mismatch")
+                    raise RerankerContractError("provider_identity_mismatch")
             else:
                 raise AssertionError("RerankerConfig must validate protocol")
         except ValidationError as exc:
-            raise ProviderProtocolError(
-                "reranker response failed strict schema validation"
-            ) from exc
+            locations = tuple(error["loc"] for error in exc.errors())
+            if any(
+                location and location[-1] == "relevance_score" for location in locations
+            ):
+                state.note("score_invalid")
+                raise RerankerContractError("score_invalid") from exc
+            if any(location and location[-1] == "index" for location in locations):
+                state.note("index_invalid")
+                raise RerankerContractError("index_invalid") from exc
+            raise _RecoverableBatchError("batch_protocol_failure") from exc
         indices = tuple(result.index for result in response.results)
-        if len(indices) != len(set(indices)) or set(indices) != set(
-            range(len(candidates))
-        ):
-            raise ProviderProtocolError("reranker response indices are invalid")
+        if len(indices) != len(set(indices)):
+            state.note("duplicate_scores")
+            raise RerankerContractError("duplicate_scores")
+        expected_indices = set(range(len(candidates)))
+        if not set(indices).issubset(expected_indices):
+            state.note("index_invalid")
+            raise RerankerContractError("index_invalid")
+        if set(indices) != expected_indices:
+            raise _RecoverableBatchError("batch_incomplete")
+        if isinstance(response, _OpenRouterRerankerResponse):
+            for result in response.results:
+                if result.document.text != candidates[result.index].content:
+                    state.note("candidate_identity_mismatch")
+                    raise RerankerContractError("candidate_identity_mismatch")
         by_index = {result.index: result.relevance_score for result in response.results}
-        return tuple(
+        scores = tuple(
             RerankScore(
                 schema_version="rerank_score_v1",
                 child_id=candidate.child_id,
@@ -488,6 +789,8 @@ class StrictRerankerClient:
             )
             for index, candidate in enumerate(candidates)
         )
+        state.scored_candidate_ids.update(score.child_id for score in scores)
+        return scores
 
 
 __all__ = [
@@ -495,7 +798,15 @@ __all__ = [
     "ProviderEmbeddingDimensionError",
     "ProviderProtocolError",
     "ProviderReportedError",
+    "ProviderResponseTooLargeError",
+    "ProviderTimeoutError",
     "ProviderTransportError",
+    "RerankerContractError",
+    "RerankerReasonCode",
+    "RerankerRecoveryBudgetError",
+    "RerankerRecoveryError",
+    "RerankerRecoveryExhaustedError",
+    "RerankerRecoveryTrace",
     "StrictEmbeddingClient",
     "StrictRerankerClient",
 ]
