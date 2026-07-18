@@ -72,6 +72,15 @@ class RetrievalPriorityWeights(StrictRagConfigModel):
         return {"high": self.high, "medium": self.medium, "low": self.low}[priority]
 
 
+class EvidenceJudgePartitionReaskConfig(StrictRagConfigModel):
+    """Explicit bounded recovery policy for the Evidence Judge."""
+
+    schema_version: Literal["evidence_judge_partition_reask_v1"]
+    strategy: Literal["resource_subject_partition_v1"]
+    max_partition_calls: PositiveInt
+    incomplete_partition_policy: Literal["block_resource"]
+
+
 class EvidenceOrchestrationConfig(StrictRagConfigModel):
     """Bounded orchestration policy with explicit failure behavior."""
 
@@ -85,6 +94,7 @@ class EvidenceOrchestrationConfig(StrictRagConfigModel):
     max_ledger_entries: PositiveInt
     max_evidence_per_requirement: PositiveInt
     max_consecutive_no_progress_rounds: PositiveInt
+    judge_partition_reask: EvidenceJudgePartitionReaskConfig
     web_timeout_seconds: PositiveFloat
     required_task_priority: RetrievalPriority
     supporting_task_priority: RetrievalPriority
@@ -208,6 +218,7 @@ def load_resource_evidence_profiles(
 __all__ = [
     "CANONICAL_RESOURCE_TYPES",
     "EvidenceCriticality",
+    "EvidenceJudgePartitionReaskConfig",
     "EvidenceNeedScope",
     "EvidenceOrchestrationConfig",
     "EvidenceSourcePolicy",

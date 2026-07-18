@@ -50,6 +50,11 @@ from src.graph.web_research import WebResearchTask
 from src.graph.state import LearningState, initial_request_reset_transient_state
 from src.learning_guidance.runtime import LearningGuidanceRuntime
 from src.learning_guidance.knowledge_graph import KnowledgeGraphV1
+from src.llm.structured_output import (
+    StructuredLLMAttempt,
+    StructuredLLMResult,
+    StructuredOutputError,
+)
 from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_sink
 from src.observability.node_registry import get_node_runtime_metadata
 
@@ -1260,6 +1265,355 @@ def test_requirement_evidence_judge_receives_attempted_query_text(monkeypatch):
         assert f'"source_type": "{task.source_type}"' in prompt
         assert f'"query": "{task.query}"' in prompt
         assert f'"query_fingerprint": "{task.query_fingerprint}"' in prompt
+
+
+def _partition_structured_error() -> StructuredOutputError:
+    attempts = [
+        StructuredLLMAttempt(
+            output_mode="native_json_schema_pydantic",
+            failure_phase="business_validation",
+            error_type="ValidationError",
+            error_message="private-judge-content-marker",
+            provider_error_body="provider-body-marker",
+        )
+        for _ in range(2)
+    ]
+    return StructuredOutputError(
+        StructuredLLMResult(
+            success=False,
+            parsed=None,
+            node_name="requirement_evidence_judge",
+            llm_node="evidence_judge",
+            schema_name="RequirementCoverageBatch",
+            provider="test-provider",
+            model="test-model",
+            output_mode="native_json_schema_pydantic",
+            attempts=attempts,
+            raw_output="private-judge-content-marker",
+            provider_error_body="provider-body-marker",
+            failure_phase="business_validation",
+            error_type="ValidationError",
+        )
+    )
+
+
+def _partition_judge_fixture(runtime):
+    resource_types = ("quiz", "code_practice")
+    drafts = EvidenceRequirementDraftBatch(
+        schema_version="evidence_requirement_draft_batch_v1",
+        requirements=[
+            EvidenceRequirementDraft(
+                resource_type=resource_type,
+                subject="math",
+                topic_id="functions",
+                profile_need_id=need.need_id,
+                evidence_kind=need.evidence_kind,
+                scope=need.scope,
+                criticality=need.criticality,
+                source_policy=need.source_policy,
+                acceptance_criteria=need.acceptance_criteria,
+                query_intent=f"math {resource_type} {need.evidence_kind} evidence",
+            )
+            for resource_type in resource_types
+            for need in runtime.profiles.profile_for(resource_type).needs
+        ],
+    )
+    requirements = compile_evidence_requirement_batch(drafts)
+    tasks = orchestration._build_initial_tasks(requirements, runtime)
+    records = tuple(
+        orchestration._candidate_record(
+            candidate=EvidenceCandidate(
+                evidence_id=f"raw-partition-candidate-{index}",
+                source_type=task.source_type,
+                provider="test-provider",
+                subject=requirement.subject,
+                role=requirement.requirement_id,
+                title=f"Partition candidate {index}",
+                source=f"partition-source-{index}",
+                content_preview=f"Private partition evidence body {index}.",
+                metadata={"source_id": f"partition-source-{index}"},
+            ),
+            original={"content": f"Private original evidence body {index}."},
+            task=task,
+        )
+        for index, requirement in enumerate(requirements)
+        for task in (
+            next(
+                item
+                for item in tasks
+                if item.requirement_id == requirement.requirement_id
+            ),
+        )
+    )
+    base_state = _planner_state()
+    state = {
+        **base_state,
+        "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
+        "evidence_current_round": 0,
+        "evidence_requested_resource_types": list(resource_types),
+        "evidence_requirements": [
+            requirement.model_dump(mode="json") for requirement in requirements
+        ],
+        "evidence_current_tasks": [task.model_dump(mode="json") for task in tasks],
+        "evidence_all_tasks": [task.model_dump(mode="json") for task in tasks],
+        "evidence_candidate_records": [
+            record.model_dump(mode="json") for record in records
+        ],
+        "evidence_source_outcomes": [],
+        "evidence_coverage": {},
+        "evidence_ledger": [],
+        "evidence_consecutive_no_progress_rounds": 0,
+    }
+    return requirements, records, state
+
+
+def _complete_partition_batch(requirements, records) -> RequirementCoverageBatch:
+    record_by_requirement = {record.requirement_id: record for record in records}
+    return RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=0,
+        coverages=[
+            RequirementCoverage(
+                requirement_id=requirement.requirement_id,
+                resource_type=requirement.resource_type,
+                subject=requirement.subject,
+                round_index=0,
+                coverage_state="complete",
+                evidence_ids=[
+                    record_by_requirement[requirement.requirement_id].evidence_id
+                ],
+                confidence=0.9,
+                reason="The bound candidate satisfies the configured requirement.",
+                suggested_local_query="",
+                suggested_web_query="",
+            )
+            for requirement in requirements
+        ],
+    )
+
+
+def test_judge_partition_reask_recovers_all_partitions_with_same_contract(
+    monkeypatch,
+):
+    runtime = _runtime()
+    requirements, records, state = _partition_judge_fixture(runtime)
+    quiz_requirements = tuple(
+        item for item in requirements if item.resource_type == "quiz"
+    )
+    code_requirements = tuple(
+        item for item in requirements if item.resource_type == "code_practice"
+    )
+    batches = (
+        _complete_partition_batch(quiz_requirements, records),
+        _complete_partition_batch(code_requirements, records),
+    )
+    calls: list[dict] = []
+
+    async def fake_judge(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise _partition_structured_error()
+        return SimpleNamespace(parsed=batches[len(calls) - 2])
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_judge)
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        result = asyncio.run(
+            orchestration.make_requirement_evidence_judge_node(runtime)(state)
+        )
+    finally:
+        reset_trace_event_sink(token)
+
+    assert len(calls) == 3
+    assert all(call["node_name"] == "requirement_evidence_judge" for call in calls)
+    assert all(call["llm_node"] == "evidence_judge" for call in calls)
+    assert all(call["schema"] is RequirementCoverageBatch for call in calls)
+    assert all(call["sensitive_trace"] is True for call in calls)
+    assert len({call["output_mode"] for call in calls}) == 1
+    assert result["evidence_terminal_status"] == "sufficient"
+    assert {
+        item["resource_type"] for item in result["resource_evidence_readiness"]
+    } == {"quiz", "code_practice"}
+    assert all(
+        item["readiness_state"] == "ready"
+        for item in result["resource_evidence_readiness"]
+    )
+    partition_trace = next(
+        event
+        for event in sink
+        if event.get("stage") == "evidence_orchestration.judge.partition_reask"
+    )
+    assert partition_trace["reason_code"] == "partition_reask_complete"
+    assert partition_trace["logical_call_count"] == 3
+    assert partition_trace["judged_requirement_count"] == len(requirements)
+    assert partition_trace["unjudged_requirement_count"] == 0
+
+
+def test_judge_partition_reask_blocks_only_failed_resource_and_is_trace_safe(
+    monkeypatch,
+):
+    runtime = _runtime()
+    requirements, records, state = _partition_judge_fixture(runtime)
+    quiz_requirements = tuple(
+        item for item in requirements if item.resource_type == "quiz"
+    )
+    quiz_batch = _complete_partition_batch(quiz_requirements, records)
+    calls: list[dict] = []
+
+    async def fake_judge(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            return SimpleNamespace(parsed=quiz_batch)
+        raise _partition_structured_error()
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_judge)
+    sink: list[dict] = []
+    token = set_trace_event_sink(sink)
+    try:
+        result = asyncio.run(
+            orchestration.make_requirement_evidence_judge_node(runtime)(state)
+        )
+    finally:
+        reset_trace_event_sink(token)
+
+    assert len(calls) == 3
+    assert result["evidence_orchestration_route"] == "terminal"
+    assert result["evidence_terminal_status"] == "partial_resources_ready"
+    assert (
+        result["evidence_terminal_reason_code"]
+        == "partition_structured_output_exhausted"
+    )
+    assert {
+        row["resource_type"] for row in result["evidence_coverage"]["coverages"]
+    } == {"quiz"}
+    readiness = {
+        row["resource_type"]: row["readiness_state"]
+        for row in result["resource_evidence_readiness"]
+    }
+    assert readiness == {
+        "quiz": "ready",
+        "code_practice": "blocked_insufficient_evidence",
+    }
+    assigned = orchestration.make_resource_evidence_assignment_node(runtime)(
+        {**state, **result}
+    )
+    assert assigned["ready_resource_types"] == ["quiz"]
+    assert assigned["blocked_resource_types"] == ["code_practice"]
+
+    partition_trace = next(
+        event
+        for event in sink
+        if event.get("stage") == "evidence_orchestration.judge.partition_reask"
+    )
+    assert partition_trace["successful_partition_count"] == 1
+    assert partition_trace["unjudged_partition_count"] == 1
+    assert partition_trace["unjudged_requirement_count"] == 2
+    serialized_trace = repr(partition_trace)
+    for forbidden in (
+        "private-judge-content-marker",
+        "provider-body-marker",
+        "Private partition evidence body",
+        "partition-source-",
+        "http://",
+        "https://",
+    ):
+        assert forbidden not in serialized_trace
+    assert all(record.evidence_id not in serialized_trace for record in records)
+
+
+def test_judge_partition_reask_enforces_total_partition_call_budget(monkeypatch):
+    runtime = _runtime()
+    policy_payload = runtime.policy.model_dump(mode="python")
+    policy_payload["judge_partition_reask"]["max_partition_calls"] = 1
+    bounded_runtime = replace(
+        runtime,
+        policy=type(runtime.policy).model_validate(policy_payload),
+    )
+    requirements, records, state = _partition_judge_fixture(bounded_runtime)
+    quiz_requirements = tuple(
+        item for item in requirements if item.resource_type == "quiz"
+    )
+    quiz_batch = _complete_partition_batch(quiz_requirements, records)
+    calls: list[dict] = []
+
+    async def fake_judge(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise _partition_structured_error()
+        if len(calls) == 2:
+            return SimpleNamespace(parsed=quiz_batch)
+        raise AssertionError("partition call budget must prevent a third call")
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_judge)
+    result = asyncio.run(
+        orchestration.make_requirement_evidence_judge_node(bounded_runtime)(state)
+    )
+
+    assert len(calls) == 2
+    assert result["evidence_orchestration_route"] == "terminal"
+    assert result["evidence_terminal_reason_code"] == "partition_call_budget_exhausted"
+    assert {
+        row["resource_type"] for row in result["evidence_coverage"]["coverages"]
+    } == {"quiz"}
+
+
+def test_judge_partition_reask_rejects_cross_partition_evidence_binding(
+    monkeypatch,
+):
+    runtime = _runtime()
+    requirements, records, state = _partition_judge_fixture(runtime)
+    quiz_requirements = tuple(
+        item for item in requirements if item.resource_type == "quiz"
+    )
+    code_record = next(
+        record for record in records if record.resource_type == "code_practice"
+    )
+    payload = _complete_partition_batch(
+        quiz_requirements,
+        records,
+    ).model_dump(mode="python")
+    payload["coverages"][0]["evidence_ids"] = [code_record.evidence_id]
+    invalid_batch = RequirementCoverageBatch.model_validate(payload)
+    calls = 0
+
+    async def fake_judge(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _partition_structured_error()
+        return SimpleNamespace(parsed=invalid_batch)
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", fake_judge)
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match="coverage_business_validation_failed",
+    ):
+        asyncio.run(orchestration.make_requirement_evidence_judge_node(runtime)(state))
+
+    assert calls == 2
+
+
+def test_judge_partition_reask_all_failures_are_typed_and_never_succeed(
+    monkeypatch,
+):
+    runtime = _runtime()
+    _requirements, _records, state = _partition_judge_fixture(runtime)
+    calls = 0
+
+    async def failed_judge(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise _partition_structured_error()
+
+    monkeypatch.setattr(orchestration, "invoke_structured_llm", failed_judge)
+    with pytest.raises(
+        orchestration.EvidenceOrchestrationRuntimeError,
+        match="judge_partition_recovery_empty",
+    ):
+        asyncio.run(orchestration.make_requirement_evidence_judge_node(runtime)(state))
+
+    assert calls == 3
 
 
 def test_multisubject_planner_keeps_all_slots_and_scopes_available_path(monkeypatch):

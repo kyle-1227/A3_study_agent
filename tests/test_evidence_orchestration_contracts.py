@@ -101,6 +101,12 @@ def test_strict_configs_load_complete_explicit_inventory():
     assert policy.max_total_search_tasks == 24
     assert policy.max_ledger_entries == 72
     assert policy.max_concurrent_tasks == 1
+    assert policy.judge_partition_reask.model_dump(mode="json") == {
+        "schema_version": "evidence_judge_partition_reask_v1",
+        "strategy": "resource_subject_partition_v1",
+        "max_partition_calls": 4,
+        "incomplete_partition_policy": "block_resource",
+    }
     assert policy.web_timeout_seconds == 120.0
     assert policy.required_task_priority == "high"
     assert policy.supporting_task_priority == "medium"
@@ -133,6 +139,30 @@ def test_strict_config_rejects_extra_field_without_defaulting():
 
     assert any(
         location == "unexpected_field"
+        for location, _error_type in exc_info.value.validation_errors
+    )
+
+
+def test_strict_config_requires_partition_reask_policy():
+    invalid = Path("invalid-evidence-partition-reask.yaml")
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        """judge_partition_reask:
+  schema_version: evidence_judge_partition_reask_v1
+  strategy: resource_subject_partition_v1
+  max_partition_calls: 4
+  incomplete_partition_policy: block_resource
+""",
+        "",
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    assert any(
+        location == "judge_partition_reask"
         for location, _error_type in exc_info.value.validation_errors
     )
 

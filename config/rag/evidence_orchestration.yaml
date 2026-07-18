@@ -8,6 +8,11 @@ max_requirements_per_request: 12
 max_ledger_entries: 72
 max_evidence_per_requirement: 4
 max_consecutive_no_progress_rounds: 1
+judge_partition_reask:
+  schema_version: evidence_judge_partition_reask_v1
+  strategy: resource_subject_partition_v1
+  max_partition_calls: 4
+  incomplete_partition_policy: block_resource
 web_timeout_seconds: 120.0
 required_task_priority: high
 supporting_task_priority: medium

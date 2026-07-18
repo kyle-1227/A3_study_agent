@@ -39,6 +39,7 @@ from src.config.evidence_orchestration_contracts import (
     EvidenceRequirement,
     EvidenceRequirementDraftBatch,
     EvidenceSourceType,
+    RequirementCoverage,
     RequirementCoverageBatch,
     RESOURCE_EVIDENCE_CONTRACT_VERSION,
     ResourceReadiness,
@@ -73,6 +74,7 @@ from src.llm.structured_output import (
     get_llm_output_mode,
     get_max_raw_chars,
     invoke_structured_llm,
+    StructuredOutputError,
 )
 from src.learning_guidance.contracts import (
     LearnerPathPlannerOutputV1,
@@ -80,8 +82,10 @@ from src.learning_guidance.contracts import (
     ResourceRecommendationOutputV1,
 )
 from src.learning_guidance.runtime import LearningGuidanceRuntime
+from src.observability.a3_trace import emit_a3_trace
 from src.observability.evidence_trace import (
     EVIDENCE_TRACE_SCHEMA_VERSION,
+    EVIDENCE_TRACE_ENV_FLAG,
     emit_evidence_trace,
 )
 from src.rag.course_catalog import get_available_subjects_from_data
@@ -1909,6 +1913,458 @@ def _previous_coverage_counts(
     return _coverage_counts(parsed)
 
 
+_JudgePartitionReason = Literal[
+    "partition_reask_complete",
+    "partition_call_budget_exhausted",
+    "partition_structured_output_exhausted",
+    "partition_reask_incomplete",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceJudgePartition:
+    resource_type: ResourceType
+    subject: str
+    requirements: tuple[EvidenceRequirement, ...]
+
+    @property
+    def requirement_ids(self) -> tuple[str, ...]:
+        return tuple(item.requirement_id for item in self.requirements)
+
+
+class _EvidenceJudgePartitionRecoveryResult(BaseModel):
+    """Strict internal result for terminal-safe partition recovery."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["evidence_judge_partition_recovery_v1"]
+    round_index: int = Field(ge=0)
+    partition_count: int = Field(ge=1)
+    attempted_partition_count: int = Field(ge=0)
+    successful_partition_count: int = Field(ge=1)
+    expected_requirement_ids: tuple[str, ...] = Field(min_length=1)
+    judged_requirement_ids: tuple[str, ...] = Field(min_length=1)
+    unjudged_requirement_ids: tuple[str, ...]
+    coverage: CompiledRequirementCoverageBatch
+    partition_plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason_code: _JudgePartitionReason
+
+    @model_validator(mode="after")
+    def validate_partition_inventory(
+        self,
+    ) -> "_EvidenceJudgePartitionRecoveryResult":
+        for field_name in (
+            "expected_requirement_ids",
+            "judged_requirement_ids",
+            "unjudged_requirement_ids",
+        ):
+            values = getattr(self, field_name)
+            if any(not value.strip() for value in values):
+                raise ValueError(f"{field_name} must contain non-blank ids")
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field_name} must not contain duplicate ids")
+        expected = set(self.expected_requirement_ids)
+        judged = set(self.judged_requirement_ids)
+        unjudged = set(self.unjudged_requirement_ids)
+        if judged & unjudged or judged | unjudged != expected:
+            raise ValueError(
+                "judged and unjudged requirement ids must exactly partition expected"
+            )
+        coverage_ids = {coverage.requirement_id for coverage in self.coverage.coverages}
+        if coverage_ids != judged:
+            raise ValueError(
+                "coverage inventory must exactly match judged requirements"
+            )
+        if self.coverage.round_index != self.round_index:
+            raise ValueError("partition recovery coverage round mismatch")
+        if not (
+            self.successful_partition_count
+            <= self.attempted_partition_count
+            <= self.partition_count
+        ):
+            raise ValueError("partition call counts are inconsistent")
+        if bool(unjudged) == (self.reason_code == "partition_reask_complete"):
+            raise ValueError("partition reason code does not match unjudged inventory")
+        return self
+
+
+class _EvidenceJudgePartitionTrace(BaseModel):
+    """Content-free trace payload for one bounded partition recovery."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["evidence_judge_partition_trace_v1"]
+    round_index: int = Field(ge=0)
+    full_batch_attempt_count: int = Field(ge=0)
+    logical_call_count: int = Field(ge=1)
+    logical_call_budget: int = Field(ge=2)
+    partition_count: int = Field(ge=1)
+    attempted_partition_count: int = Field(ge=0)
+    successful_partition_count: int = Field(ge=0)
+    unjudged_partition_count: int = Field(ge=0)
+    expected_requirement_count: int = Field(ge=1)
+    judged_requirement_count: int = Field(ge=0)
+    unjudged_requirement_count: int = Field(ge=0)
+    partition_plan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    coverage_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason_code: _JudgePartitionReason
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> "_EvidenceJudgePartitionTrace":
+        if self.logical_call_count != self.attempted_partition_count + 1:
+            raise ValueError("logical call count must include the full-batch call")
+        if self.logical_call_count > self.logical_call_budget:
+            raise ValueError("logical call count exceeds its explicit budget")
+        if not (
+            self.successful_partition_count
+            <= self.attempted_partition_count
+            <= self.partition_count
+        ):
+            raise ValueError("partition trace call counts are inconsistent")
+        if (
+            self.successful_partition_count + self.unjudged_partition_count
+            != self.partition_count
+        ):
+            raise ValueError("partition trace result counts must cover every partition")
+        if (
+            self.judged_requirement_count + self.unjudged_requirement_count
+            != self.expected_requirement_count
+        ):
+            raise ValueError("partition trace requirement counts must be complete")
+        if bool(self.unjudged_requirement_count) == (
+            self.reason_code == "partition_reask_complete"
+        ):
+            raise ValueError("partition trace reason does not match its result counts")
+        return self
+
+
+def _evidence_judge_partitions(
+    requirements: tuple[EvidenceRequirement, ...],
+) -> tuple[_EvidenceJudgePartition, ...]:
+    grouped: dict[tuple[ResourceType, str], list[EvidenceRequirement]] = {}
+    order: list[tuple[ResourceType, str]] = []
+    for requirement in requirements:
+        key = (requirement.resource_type, requirement.subject)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(requirement)
+    partitions = tuple(
+        _EvidenceJudgePartition(
+            resource_type=resource_type,
+            subject=subject,
+            requirements=tuple(grouped[(resource_type, subject)]),
+        )
+        for resource_type, subject in order
+    )
+    if not partitions:
+        raise EvidenceOrchestrationRuntimeError(
+            code="empty_judge_partition_plan",
+            reason="partition recovery requires at least one evidence requirement",
+        )
+    return partitions
+
+
+def _judge_partition_reason(
+    *,
+    partition_count: int,
+    attempted_partition_count: int,
+    successful_partition_count: int,
+) -> _JudgePartitionReason:
+    budget_skipped = partition_count - attempted_partition_count
+    structured_failed = attempted_partition_count - successful_partition_count
+    if not budget_skipped and not structured_failed:
+        return "partition_reask_complete"
+    if budget_skipped and structured_failed:
+        return "partition_reask_incomplete"
+    if budget_skipped:
+        return "partition_call_budget_exhausted"
+    return "partition_structured_output_exhausted"
+
+
+def _partition_plan_fingerprint(
+    partitions: tuple[_EvidenceJudgePartition, ...],
+) -> str:
+    return _digest(
+        {
+            "schema_version": "evidence_judge_partition_plan_v1",
+            "partitions": [
+                {
+                    "resource_type": partition.resource_type,
+                    "subject": partition.subject,
+                    "requirement_ids": list(partition.requirement_ids),
+                }
+                for partition in partitions
+            ],
+        }
+    )
+
+
+async def _invoke_requirement_coverage_batch(
+    *,
+    state: LearningState,
+    runtime: EvidenceOrchestrationRuntime,
+    round_index: int,
+    requirements: tuple[EvidenceRequirement, ...],
+    records: tuple[EvidenceCandidateRecord, ...],
+    attempted_tasks: tuple[RetrievalTask, ...],
+    outcomes: tuple[EvidenceSourceOutcome, ...],
+    partitioned: bool,
+) -> RequirementCoverageBatch:
+    provisional_entries = tuple(
+        _ledger_entry(record, accepted=True) for record in records
+    )
+    prompt = _render_prompt(
+        "requirement_evidence_judge",
+        {
+            "question": _last_human_query(state),
+            "learning_goal": str(state.get("learning_goal") or "").strip(),
+            "round_index": round_index,
+            "requirements_json": json.dumps(
+                _judge_requirements_payload(
+                    requirements,
+                    records,
+                    attempted_tasks,
+                ),
+                ensure_ascii=False,
+            ),
+            "max_evidence_per_requirement": (
+                runtime.policy.max_evidence_per_requirement
+            ),
+            "attempted_queries_json": json.dumps(
+                [
+                    {
+                        "requirement_id": task.requirement_id,
+                        "source_type": task.source_type,
+                        "query": task.query,
+                        "query_fingerprint": task.query_fingerprint,
+                    }
+                    for task in attempted_tasks
+                ],
+                ensure_ascii=False,
+            ),
+        },
+    )
+    partition_instruction = (
+        "This is one deterministic resource-and-subject partition after the "
+        "full-batch strict output budget was exhausted. Judge only the supplied "
+        "requirements and return every supplied requirement exactly once. "
+        if partitioned
+        else ""
+    )
+    structured = await invoke_structured_llm(
+        node_name="requirement_evidence_judge",
+        llm_node="evidence_judge",
+        schema=RequirementCoverageBatch,
+        messages=[
+            SystemMessage(
+                content=(
+                    partition_instruction
+                    + "Preserve round_index on every coverage row. Every incomplete "
+                    "local_and_web row must contain both new suggested queries in "
+                    "every round. Evaluate only the bound_candidates nested under "
+                    "the same requirement_id. Never declare resource readiness, "
+                    "invent evidence ids, or copy them between requirements."
+                )
+            ),
+            HumanMessage(content=prompt),
+        ],
+        output_mode=get_llm_output_mode("requirement_evidence_judge"),
+        business_validator=lambda parsed: _coverage_business_validation(
+            parsed,
+            round_index=round_index,
+            max_evidence_per_requirement=(runtime.policy.max_evidence_per_requirement),
+            requirements=requirements,
+            provisional_entries=provisional_entries,
+            attempted_tasks=attempted_tasks,
+            outcomes=outcomes,
+        ),
+        state=state,
+        max_raw_chars=get_max_raw_chars("requirement_evidence_judge"),
+        sensitive_trace=True,
+    )
+    parsed = structured.parsed
+    if not isinstance(parsed, RequirementCoverageBatch):
+        raise TypeError("judge result is not RequirementCoverageBatch")
+    validation_error = _coverage_business_validation(
+        parsed,
+        round_index=round_index,
+        max_evidence_per_requirement=runtime.policy.max_evidence_per_requirement,
+        requirements=requirements,
+        provisional_entries=provisional_entries,
+        attempted_tasks=attempted_tasks,
+        outcomes=outcomes,
+    )
+    if validation_error:
+        raise EvidenceOrchestrationRuntimeError(
+            code="coverage_business_validation_failed",
+            reason=validation_error,
+        )
+    return parsed
+
+
+def _emit_partition_reask_trace(
+    *,
+    state: LearningState,
+    trace: _EvidenceJudgePartitionTrace,
+) -> None:
+    emit_a3_trace(
+        logger,
+        "evidence_orchestration.judge.partition_reask",
+        trace.model_dump(mode="json"),
+        state={
+            "request_id": state.get("request_id"),
+            "session_id": state.get("session_id"),
+            "thread_id": state.get("thread_id"),
+        },
+        env_flag=EVIDENCE_TRACE_ENV_FLAG,
+        level="info",
+    )
+
+
+async def _recover_requirement_coverage_by_partition(
+    *,
+    state: LearningState,
+    runtime: EvidenceOrchestrationRuntime,
+    round_index: int,
+    requirements: tuple[EvidenceRequirement, ...],
+    records: tuple[EvidenceCandidateRecord, ...],
+    attempted_tasks: tuple[RetrievalTask, ...],
+    outcomes: tuple[EvidenceSourceOutcome, ...],
+    full_batch_error: StructuredOutputError,
+) -> _EvidenceJudgePartitionRecoveryResult:
+    partitions = _evidence_judge_partitions(requirements)
+    plan_fingerprint = _partition_plan_fingerprint(partitions)
+    call_budget = runtime.policy.judge_partition_reask.max_partition_calls
+    attempted_partition_count = 0
+    successful_partition_count = 0
+    judged_requirement_ids: list[str] = []
+    unjudged_requirement_ids: list[str] = []
+    coverage_rows: list[RequirementCoverage] = []
+
+    for partition in partitions:
+        if attempted_partition_count >= call_budget:
+            unjudged_requirement_ids.extend(partition.requirement_ids)
+            continue
+        attempted_partition_count += 1
+        requirement_id_set = set(partition.requirement_ids)
+        partition_records = tuple(
+            record for record in records if record.requirement_id in requirement_id_set
+        )
+        partition_tasks = tuple(
+            task
+            for task in attempted_tasks
+            if task.requirement_id in requirement_id_set
+        )
+        partition_outcomes = tuple(
+            outcome
+            for outcome in outcomes
+            if outcome.requirement_id in requirement_id_set
+        )
+        try:
+            partition_batch = await _invoke_requirement_coverage_batch(
+                state=state,
+                runtime=runtime,
+                round_index=round_index,
+                requirements=partition.requirements,
+                records=partition_records,
+                attempted_tasks=partition_tasks,
+                outcomes=partition_outcomes,
+                partitioned=True,
+            )
+        except StructuredOutputError:
+            unjudged_requirement_ids.extend(partition.requirement_ids)
+            continue
+        coverage_rows.extend(partition_batch.coverages)
+        judged_requirement_ids.extend(partition.requirement_ids)
+        successful_partition_count += 1
+
+    reason_code = _judge_partition_reason(
+        partition_count=len(partitions),
+        attempted_partition_count=attempted_partition_count,
+        successful_partition_count=successful_partition_count,
+    )
+    coverage_fingerprint = _digest(
+        {
+            "schema_version": "evidence_judge_partition_coverage_v1",
+            "coverages": [
+                coverage.model_dump(mode="json") for coverage in coverage_rows
+            ],
+            "unjudged_requirement_ids": list(unjudged_requirement_ids),
+        }
+    )
+    trace = _EvidenceJudgePartitionTrace(
+        schema_version="evidence_judge_partition_trace_v1",
+        round_index=round_index,
+        full_batch_attempt_count=len(full_batch_error.result.attempts),
+        logical_call_count=attempted_partition_count + 1,
+        logical_call_budget=call_budget + 1,
+        partition_count=len(partitions),
+        attempted_partition_count=attempted_partition_count,
+        successful_partition_count=successful_partition_count,
+        unjudged_partition_count=len(partitions) - successful_partition_count,
+        expected_requirement_count=len(requirements),
+        judged_requirement_count=len(judged_requirement_ids),
+        unjudged_requirement_count=len(unjudged_requirement_ids),
+        partition_plan_fingerprint=plan_fingerprint,
+        coverage_fingerprint=coverage_fingerprint,
+        reason_code=reason_code,
+    )
+    if not coverage_rows:
+        _emit_partition_reask_trace(state=state, trace=trace)
+        raise EvidenceOrchestrationRuntimeError(
+            code="judge_partition_recovery_empty",
+            reason="no partition produced a validated coverage decision",
+        )
+
+    _emit_partition_reask_trace(state=state, trace=trace)
+    aggregate_batch = RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=round_index,
+        coverages=coverage_rows,
+    )
+    compiled = compile_requirement_coverage_batch(aggregate_batch)
+    judged_id_set = set(judged_requirement_ids)
+    judged_requirements = tuple(
+        requirement
+        for requirement in requirements
+        if requirement.requirement_id in judged_id_set
+    )
+    provisional_entries = tuple(
+        _ledger_entry(record, accepted=True) for record in records
+    )
+    validation_error = _coverage_business_validation(
+        aggregate_batch,
+        round_index=round_index,
+        max_evidence_per_requirement=runtime.policy.max_evidence_per_requirement,
+        requirements=judged_requirements,
+        provisional_entries=provisional_entries,
+        attempted_tasks=attempted_tasks,
+        outcomes=outcomes,
+    )
+    if validation_error:
+        raise EvidenceOrchestrationRuntimeError(
+            code="partition_coverage_aggregation_invalid",
+            reason=validation_error,
+        )
+    recovery = _EvidenceJudgePartitionRecoveryResult(
+        schema_version="evidence_judge_partition_recovery_v1",
+        round_index=round_index,
+        partition_count=len(partitions),
+        attempted_partition_count=attempted_partition_count,
+        successful_partition_count=successful_partition_count,
+        expected_requirement_ids=tuple(
+            requirement.requirement_id for requirement in requirements
+        ),
+        judged_requirement_ids=tuple(judged_requirement_ids),
+        unjudged_requirement_ids=tuple(unjudged_requirement_ids),
+        coverage=compiled,
+        partition_plan_fingerprint=plan_fingerprint,
+        reason_code=reason_code,
+    )
+    return recovery
+
+
 def make_requirement_evidence_judge_node(
     runtime: EvidenceOrchestrationRuntime,
 ) -> Callable[[LearningState], Awaitable[dict]]:
@@ -1938,90 +2394,35 @@ def make_requirement_evidence_judge_node(
                 code="missing_requirements_at_judge",
                 reason="coverage judge requires the compiled requirement inventory",
             )
-        provisional_entries = tuple(
-            _ledger_entry(record, accepted=True) for record in records
-        )
-        prompt = _render_prompt(
-            "requirement_evidence_judge",
-            {
-                "question": _last_human_query(state),
-                "learning_goal": str(state.get("learning_goal") or "").strip(),
-                "round_index": round_index,
-                "requirements_json": json.dumps(
-                    _judge_requirements_payload(
-                        requirements,
-                        records,
-                        attempted_tasks,
-                    ),
-                    ensure_ascii=False,
-                ),
-                "max_evidence_per_requirement": (
-                    runtime.policy.max_evidence_per_requirement
-                ),
-                "attempted_queries_json": json.dumps(
-                    [
-                        {
-                            "requirement_id": task.requirement_id,
-                            "source_type": task.source_type,
-                            "query": task.query,
-                            "query_fingerprint": task.query_fingerprint,
-                        }
-                        for task in attempted_tasks
-                    ],
-                    ensure_ascii=False,
-                ),
-            },
-        )
-        structured = await invoke_structured_llm(
-            node_name="requirement_evidence_judge",
-            llm_node="evidence_judge",
-            schema=RequirementCoverageBatch,
-            messages=[
-                SystemMessage(
-                    content=(
-                        "Judge every supplied requirement exactly once. "
-                        "Preserve round_index on every coverage row. Every incomplete "
-                        "local_and_web row must contain both new suggested queries in "
-                        "every round. Evaluate only the bound_candidates nested under "
-                        "the same requirement_id. Never declare resource readiness, "
-                        "invent evidence ids, or copy them between requirements."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ],
-            output_mode=get_llm_output_mode("requirement_evidence_judge"),
-            business_validator=lambda parsed: _coverage_business_validation(
-                parsed,
+        recovery: _EvidenceJudgePartitionRecoveryResult | None = None
+        try:
+            parsed = await _invoke_requirement_coverage_batch(
+                state=state,
+                runtime=runtime,
                 round_index=round_index,
-                max_evidence_per_requirement=(
-                    runtime.policy.max_evidence_per_requirement
-                ),
                 requirements=requirements,
-                provisional_entries=provisional_entries,
+                records=records,
                 attempted_tasks=attempted_tasks,
                 outcomes=outcomes,
-            ),
-            state=state,
-            max_raw_chars=get_max_raw_chars("requirement_evidence_judge"),
-        )
-        parsed = structured.parsed
-        if not isinstance(parsed, RequirementCoverageBatch):
-            raise TypeError("judge result is not RequirementCoverageBatch")
-        compiled = compile_requirement_coverage_batch(parsed)
-        validation_error = _coverage_business_validation(
-            parsed,
-            round_index=round_index,
-            max_evidence_per_requirement=(runtime.policy.max_evidence_per_requirement),
-            requirements=requirements,
-            provisional_entries=provisional_entries,
-            attempted_tasks=attempted_tasks,
-            outcomes=outcomes,
-        )
-        if validation_error:
-            raise EvidenceOrchestrationRuntimeError(
-                code="coverage_business_validation_failed",
-                reason=validation_error,
+                partitioned=False,
             )
+            compiled = compile_requirement_coverage_batch(parsed)
+        except StructuredOutputError as exc:
+            recovery = await _recover_requirement_coverage_by_partition(
+                state=state,
+                runtime=runtime,
+                round_index=round_index,
+                requirements=requirements,
+                records=records,
+                attempted_tasks=attempted_tasks,
+                outcomes=outcomes,
+                full_batch_error=exc,
+            )
+            compiled = recovery.coverage
+
+        unjudged_requirement_ids = (
+            recovery.unjudged_requirement_ids if recovery is not None else ()
+        )
 
         accepted_ids = {
             evidence_id
@@ -2046,7 +2447,41 @@ def make_requirement_evidence_judge_node(
             requirements=requirements,
             batch=compiled,
         )
+        coverage_requirement_ids = {
+            coverage.requirement_id for coverage in compiled.coverages
+        }
+        unjudged_requirement_id_set = set(unjudged_requirement_ids)
+        unjudged_resource_types = {
+            requirement.resource_type
+            for requirement in requirements
+            if requirement.requirement_id in unjudged_requirement_id_set
+        }
+        ready_resource_types = {
+            row.resource_type for row in readiness if row.readiness_state == "ready"
+        }
+        if ready_resource_types & unjudged_resource_types:
+            raise EvidenceOrchestrationRuntimeError(
+                code="unjudged_resource_marked_ready",
+                reason="a resource with unjudged requirements cannot be ready",
+            )
+        for row in readiness:
+            if row.readiness_state != "ready":
+                continue
+            resource_requirement_ids = {
+                requirement.requirement_id
+                for requirement in requirements
+                if requirement.resource_type == row.resource_type
+            }
+            if not resource_requirement_ids.issubset(coverage_requirement_ids):
+                raise EvidenceOrchestrationRuntimeError(
+                    code="ready_resource_coverage_incomplete",
+                    reason=(
+                        "every requirement for a ready resource must have a "
+                        "validated coverage decision"
+                    ),
+                )
         counts = _coverage_counts(compiled)
+        counts["missing"] += len(unjudged_requirement_ids)
         previous_counts = _previous_coverage_counts(state, len(requirements))
         previous_coverage = state.get("evidence_coverage")
         if not isinstance(previous_coverage, dict):
@@ -2074,7 +2509,20 @@ def make_requirement_evidence_judge_node(
         )
         ready_count = sum(row.readiness_state == "ready" for row in readiness)
         all_ready = ready_count == len(readiness)
-        if all_ready:
+        if unjudged_requirement_ids:
+            route = "terminal"
+            terminal_status = (
+                "partial_resources_ready"
+                if ready_count
+                else "blocked_insufficient_evidence"
+            )
+            if recovery is None:
+                raise EvidenceOrchestrationRuntimeError(
+                    code="missing_partition_recovery_state",
+                    reason="unjudged requirements require explicit recovery state",
+                )
+            terminal_reason = recovery.reason_code
+        elif all_ready:
             route = "terminal"
             terminal_status = "sufficient"
             terminal_reason = "all_required_evidence_complete"
@@ -2117,7 +2565,12 @@ def make_requirement_evidence_judge_node(
                 "partial_count": counts["partial"],
                 "missing_count": counts["missing"],
                 "accepted_evidence_count": len(accepted_ids),
-                "coverage_fingerprint": _digest(compiled.model_dump(mode="json")),
+                "coverage_fingerprint": _digest(
+                    {
+                        "coverage": compiled.model_dump(mode="json"),
+                        "unjudged_requirement_ids": list(unjudged_requirement_ids),
+                    }
+                ),
             },
             state=state,
         )
