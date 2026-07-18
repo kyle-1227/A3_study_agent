@@ -9,16 +9,18 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 | Area | State |
 | --- | --- |
 | Web/API | Next.js + FastAPI with `agent_stream_v2` SSE, status recovery, replay, and explicit terminal events |
-| State and identity | PostgreSQL checkpoints; strict user, thread, request, dataset, and case binding |
+| State and identity | PostgreSQL checkpoints use a health-checked reconnecting pool; strict user, thread, request, dataset, and case binding |
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
 | New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
 | RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true` and `shadow_enabled=false` |
 | Runtime identity | manifest `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`; KG artifact `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`; Evidence `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01` |
 | Evaluation | Evidence is V2-only and V1 is rejected; P0 / PG / PR / PGR real-node adapters are evaluation variants, while the six-case dataset remains smoke authoring rather than formal Gold |
-| Quality gate | backend `2880 passed / 7 skipped`; frontend 36 files and `187 passed`, with typecheck, lint, and production build passing; Import Linter `3/3` |
+| Quality gate | backend `2880 passed / 7 skipped`; frontend 36 files and `208 passed`, with typecheck, lint, and production build passing; Import Linter `3/3` |
 | Live canary | two consecutive code-practice browser requests under the same Evidence identity returned `production_success=true`; the full six-scenario and human-content acceptance remain incomplete |
 | Deployment boundary | this is a trusted local demo; public multi-tenant authentication and tenant isolation are not closed |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
+
+Release state is layered: `main` has been published at `b8f9504`. Pending integration candidates are SSE `eed2139` (the complete frontend gate passed 36 files / 208 tests, ESLint, typecheck, and production build), Evidence `4a91f68` (64 passed), and RAG `f53a710` (controller 48 passed / 1 skipped; lane 50 passed / 1 skipped). There is no final integration SHA until governance and the final Docker rebuild finish; these candidate results do not prove six-scenario or human educational-effect acceptance.
 
 `READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. Evidence gaps may use the initial retrieval plus at most three bounded supplement rounds within the same PGR path; required evidence must still be complete and partial results are never published as success. Errors never switch Provider, model, generation, or Flat RAG. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
 
@@ -87,7 +89,9 @@ Required settings:
 - `PARENT_CHILD_INDEX_HOST_PATH`
 - `PARENT_CHILD_GENERATION_ID`
 
-Compose supervises backend, frontend, and PostgreSQL separately. The sealed Parent-Child index is mounted read-only, `.runtime_chroma` has a dedicated writable volume, and generated downloads use the persistent `artifacts` volume. Chromium and ffmpeg are included for real video-animation output.
+Compose supervises backend, frontend, and PostgreSQL separately. The sealed Parent-Child index is mounted read-only, `.runtime_chroma` has a dedicated writable volume, and generated downloads use the persistent `artifacts` volume. Chromium and ffmpeg are included for real video-animation output. The backend checkpointer uses a strictly configured `AsyncConnectionPool`; health checks replace dead connections instead of switching to `MemorySaver`.
+Course material remains read-only. Mutable profile and memory SQLite state uses the dedicated persistent volume `app_state:/app/.runtime_state`. Startup atomically migrates legacy `/app/data/profile.db` and `memory.db` only when the new target is absent, never overwrites new state, and aborts if schema initialization fails.
+
 
 Verify startup:
 
@@ -99,9 +103,11 @@ Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
 Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 ```
 
-`/health/ready` must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`, `deployment_mode=active`, `rollout_activation_enabled=true`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment.
+`/health/ready` must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`, `deployment_mode=active`, `rollout_activation_enabled=true`, and `rollout_shadow_enabled=false`, together with the graph, KnowledgeGraph, generation-manifest, and evidence-orchestration identities. Any missing or mismatched identity is a failed deployment. Recovery of readiness proves only that a newly borrowed PostgreSQL connection works; a database-only restart must also preserve the backend/frontend container IDs and pass historical-thread, SSE, Context, and artifact checks.
+Production-grade controlled recovery must preserve result quality: Evidence `4a91f68` performs a bounded reask only for a failed resource+subject partition with the same Provider/model, retains full structured and business validation, and does not itself decide blocked; RAG `f53a710` performs bounded batch splitting against the same rerank endpoint and requires a complete score for every candidate, forbidding RRF-only and partial scores; SSE `eed2139` performs one authoritative same-user/thread/request status read only after transport failure or HTTP 410 and never resubmits the Graph. Pending, legacy, sequence gaps, identity drift, and contract errors remain explicit failures.
 
-See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL restart/replay, the six-scenario Playwright canary procedure, and recovery boundaries. A documented procedure is not evidence that a real canary passed.
+
+See the [production deployment runbook](docs/runbooks/production_deployment.md) for PostgreSQL-only restart/replay, the six-scenario Playwright canary procedure, and recovery boundaries. A documented procedure is not evidence that a real canary passed.
 
 ## Local development
 
@@ -153,7 +159,7 @@ npm run build
 Pop-Location
 ```
 
-The complete backend result is `2880 passed / 7 skipped`. Frontend tests passed in 36 files with `187 passed`; typecheck, lint, and the production build with explicit `NEXT_PUBLIC_API_URL=http://localhost:8000` also passed. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. Two final code-practice browser canaries passed, but they do not replace the incomplete six-scenario or human-content acceptance.
+The complete backend result is `2880 passed / 7 skipped`. SSE `eed2139` passed the complete frontend gate in 36 files with `208 passed`; typecheck, lint, and the production build with explicit `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` also passed. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. The two code-practice browser canaries prove only their historical runtime and do not replace the incomplete six-scenario, human-content, or post-integration Docker acceptance.
 
 ## Competition documentation
 

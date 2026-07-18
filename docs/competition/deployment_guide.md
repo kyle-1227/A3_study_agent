@@ -4,7 +4,7 @@
 
 项目支持 Docker Compose 统一构建并启动 PostgreSQL、FastAPI 后端和 Next.js 前端。这里的“一键部署”是**满足外部资产和私密配置前置条件后的单命令启动**，不是纯 Git checkout 开箱即用。
 
-当前 active Docker/Provider/浏览器链路已连续完成两轮 code-practice 真实 canary；最终镜像重建、PostgreSQL-only restart、完整六场景与人工内容验收仍须分别核验。本文不读取或展示真实 `.env`。
+`main` 已发布到 `b8f9504`；两轮 code-practice 真实 canary 只证明其历史 runtime。SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 仍待治理和最终 Docker 重建，因而当前没有最终 integration SHA；PostgreSQL-only restart、完整六场景与人工内容验收仍未完成。本文不读取或展示真实 `.env`。
 
 ## 2. 环境与外部资产
 
@@ -69,6 +69,8 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ```
 
 第二条命令是准备完成后的统一启动入口。Compose 对课程资料和密封索引都使用 long-syntax 只读 bind，并设置 `bind.create_host_path=false`；D:/E: 路径不存在时必须失败，不能自动创建空目录。运行时 Chroma 快照使用独立可写 volume，生成 artifact 使用持久化 volume。后端镜像包含 Chromium 和 ffmpeg，以支持视频动画资源。
+课程资料和密封索引都保持只读；`app_state` 持久卷专门保存 `/app/.runtime_state` 下的画像与记忆 SQLite。启动迁移不会覆盖已存在的新数据库，迁移或 schema 初始化失败会直接阻断 backend readiness。
+
 
 正式比赛镜像还应从干净 HEAD 重建，并在 backend/frontend 镜像上写入同一
 `org.opencontainers.image.revision` 标签。精确命令与标签检查见
@@ -102,9 +104,13 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和 Evidence
 `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
 
+生产 checkpointer 必须保持 PostgreSQL-only：连接池会在借出连接前做健康检查并在预算内替换失效连接，初始化或重连失败必须显式暴露，不能转用内存状态。readiness 恢复只是第一层检查；数据库单独重启时 backend/frontend 容器 ID 必须保持不变，并继续验证历史 thread/status、SSE journal、Context 注入和 artifact 下载。
+三条生产级受控恢复均须单独验收且不得降低质量：Evidence `4a91f68` 只以同一 Provider/模型对失败的 resource+subject partition 有界 reask，并且不自行判断 blocked；RAG `f53a710` 只在同一 endpoint 做 complete-score batch split，禁止 RRF-only 与 partial scores；SSE `eed2139` 只在 transport 或 HTTP 410 后读取一次身份匹配的权威终态。任一路径都不能切 Provider、模型、generation 或旧 Flat RAG，也不能把 partial evidence 或 pending status 写成成功。
+
+
 `/subjects` 只应暴露五个生产学科：大数据、计算机、机器学习、数学和 Python；内部目录不能被当作学科。
 
-以上仍只是 readiness。两轮最终 code-practice 已验证 Last-Event-ID 回放、刷新恢复、请求漂移冲突和 DOCX/Markdown/Python 下载，但最终比赛/部署验收还要按[生产部署运行手册](../runbooks/production_deployment.md)完成 PostgreSQL 重启、其余六场景覆盖并人工抽检学术内容。未覆盖项必须写“未完成”，不能由单一场景外推为通过。
+以上仍只是 readiness。两轮历史 code-practice 已验证 Last-Event-ID 回放、刷新恢复、请求漂移冲突和 DOCX/Markdown/Python 下载，但最终比赛/部署验收还要按[生产部署运行手册](../runbooks/production_deployment.md)完成 PostgreSQL-only restart、其余六场景覆盖并人工抽检学术内容。未覆盖项必须写“未完成”，不能由单一场景外推为通过。
 
 ## 6. 停止与恢复
 

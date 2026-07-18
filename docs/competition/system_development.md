@@ -3,7 +3,7 @@
 ## 1. 文档范围
 
 本文面向比赛评审、演示人员和工程维护者，说明需求到实现的映射、关键设计、开发与集成方式以及现实生产边界。审阅基线为
-`707d79806364d95fd300b21d0cb93411f592d67a`；生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
+`b8f9504`；`707d79806364d95fd300b21d0cb93411f592d67a` 仅是两轮历史浏览器实测证据。SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 尚待治理和最终 Docker 重建，因此没有最终 integration SHA。生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
 `2026.07.15-source-groups-v1` 和密封 generation `pc_20260715_98336c2_55`。精确 manifest、KG artifact 与 Evidence fingerprint 分别为
 `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、
 `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和
@@ -110,6 +110,9 @@ flowchart LR
 - 本地与网页证据按资源需求分项收集，裁判不通过时只在同一 PGR 路径内进行有界补搜；最多 3 个补充轮次、24 个 search task、72 条 ledger entry，且 required evidence 完整性门槛不降低。
 - LLM 结构化输出经 Pydantic 与业务校验；不通过时不会通过别名归一化或默认值伪造合法结果。
 - 请求过程中不自动切换 Provider、模型、Flat RAG 或其他检索实现。
+- Evidence `4a91f68` 的 bounded reask 只重问失败的 resource+subject partition，保持同一 Provider/模型并重走完整结构化、业务、预算与身份校验；它不自行判断 blocked。
+- RAG `f53a710` 只在同一 rerank endpoint 拆分批次，并要求每个候选都有完整 score；RRF-only、partial scores、协议漂移或身份错误均失败。
+- SSE `eed2139` 只在 transport 或 HTTP 410 后执行一次同用户/线程/请求的权威 status recovery，不重提请求；pending、legacy、sequence gap、identity drift 和合同错误显式失败。
 - generation、registry primary、manifest、KG 和 evidence orchestration 身份任一不一致都会阻止 readiness。
 - 日志、SSE、报告和截图不得暴露 API key、Authorization、完整数据库 URI 或 Provider body。
 - 资源 blocked 是合法、可见的严格终态；前端不得为 blocked 资源生成虚假下载卡。
@@ -118,9 +121,9 @@ flowchart LR
 
 ## 9. 流式体验、恢复与可观测性
 
-核心交互通过 `agent_stream_v2` SSE 提供事件序号、`EvidenceProgress`、资源状态、权威终态和 `stream_done`。Last-Event-ID 支持保留窗口内的增量回放，thread status 用于刷新恢复；PostgreSQL checkpoint 保留跨进程状态。前端以 Markdown、进度和资源卡片展示长任务，避免长时间白屏。
+核心交互通过 `agent_stream_v2` SSE 提供事件序号、`EvidenceProgress`、资源状态、权威终态和 `stream_done`。Last-Event-ID 支持保留窗口内的增量回放，thread status 用于刷新恢复；PostgreSQL checkpoint 保留跨进程状态。`AsyncPostgresSaver` 由严格配置、借出前健康检查的重连连接池提供，数据库连接失效不会触发 `MemorySaver` 降级；启动或重连失败仍显式失败。前端以 Markdown、进度和资源卡片展示长任务，避免长时间白屏。
 
-生产验收必须同时检查连续序号、唯一权威终态、终态与 status 一致、刷新恢复、请求漂移冲突和下载 artifact 身份，不能只看页面“有内容”。
+生产验收必须同时检查连续序号、唯一权威终态、终态与 status 一致、刷新恢复、请求漂移冲突和下载 artifact 身份，不能只看页面“有内容”。PostgreSQL-only restart 还必须保持 backend/frontend 容器身份不变，并复核重启前的历史线程；readiness 恢复不能替代状态恢复证据。
 
 ## 10. 开发、集成与优化
 

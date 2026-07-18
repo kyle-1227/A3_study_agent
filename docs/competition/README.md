@@ -1,7 +1,7 @@
 # A3 Study Agent 比赛最终文档索引
 
-本目录是赛题提交、演示验收和生产化复核的统一入口。文档以代码提交
-`707d79806364d95fd300b21d0cb93411f592d67a` 为浏览器实测 runtime 基线；其后的测试/文档提交不改变 served graph 行为。本文只把可复核证据写成已完成事实。
+本目录是赛题提交、演示验收和生产化复核的统一入口。`main` 已发布基线为 `b8f9504`；`707d79806364d95fd300b21d0cb93411f592d67a` 仅保留为两轮浏览器历史实测证据。
+待集成候选为 SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710`。治理和最终 Docker 重建前不声明最终 integration SHA，也不把候选测试写成六场景或人工教育效果验收。本文只把可复核证据写成已完成事实。
 
 ## 文档清单
 
@@ -28,7 +28,8 @@
 
 ## 当前生产身份
 
-- 浏览器实测 runtime 基线：`707d79806364d95fd300b21d0cb93411f592d67a`。
+- 已发布 `main` 基线：`b8f9504`；浏览器历史实测 runtime：`707d79806364d95fd300b21d0cb93411f592d67a`。
+- 待集成候选：SSE `eed2139`（36 files / 208 tests，ESLint/typecheck/build 通过）、Evidence `4a91f68`（64 passed）、RAG `f53a710`（总控 48 passed / 1 skipped；车道 50 passed / 1 skipped）。
 - 唯一对外服务的检索/证据路径：resource-aware PGR。
 - 密封 generation：`pc_20260715_98336c2_55`。
 - generation manifest：`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`。
@@ -38,6 +39,11 @@
 - Evidence orchestration：`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
 - Evidence 补充策略为初始检索加最多 3 轮补搜，总任务 24、ledger 72；required evidence 仍须完整，partial 不会转为成功。
 - code-practice 生成流式运行，严格 reviewer 使用独立 non-streaming 配置并保留结构化与业务校验。
+- PostgreSQL checkpointer 使用严格配置、健康检查和重连预算明确的连接池；启动失败仍 fail-closed，运行中不会降级到 `MemorySaver`。
+- 可变画像/记忆状态使用独立 `app_state:/app/.runtime_state` 卷；旧 `/app/data/*.db` 仅在新目标不存在时原子迁移，课程资料仍只读。
+- Evidence `4a91f68` 仅用同一 Provider/模型对失败的 resource+subject partition 做有界 reask，继续执行完整校验，且 reask 不自行判断 blocked；聚焦测试 64 passed。
+- RAG `f53a710` 仅对同一 rerank endpoint 做有界 complete-score batch split；所有候选必须有完整 score，RRF-only 与 partial scores 均禁止。
+- SSE `eed2139` 仅在 transport 或 HTTP 410 后恢复一次同用户/线程/请求的权威 `completed`、`failed` 或 `stopped`；pending、legacy、identity drift、sequence gap 与合同错误显式失败，也不重新调度 Graph。
 - P0、PG、PR、PGR 是离线评估变体，不是四条生产流量路径。
 - 六场景数据是 smoke authoring，不是正式 Gold，也不代表完成人工评审。
 - 真实 Docker/Provider/浏览器链路已连续完成两轮 code-practice，均为 `production_success=true`；完整六场景与人工学术/教育效果验收仍未完成。

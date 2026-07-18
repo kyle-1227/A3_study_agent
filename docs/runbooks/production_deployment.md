@@ -2,22 +2,28 @@
 
 This runbook is the Docker and canary procedure for the active production
 identity. Run commands from the repository root. Never print or commit `.env`
-values. Two final code-practice browser canaries executed against the active
-Docker/Provider path and passed their machine-readable production checks. They
-do not constitute the still-incomplete six-scenario or human-content
-acceptance.
+values. Two historical code-practice browser canaries executed against the
+active Docker/Provider path and passed their machine-readable checks. They do
+not prove the still-incomplete six-scenario, human-content, or post-integration
+Docker acceptance.
 
 ## 1. Release state
 
-- PostgreSQL is the required production checkpointer.
+- PostgreSQL is the required production checkpointer. A strictly configured,
+  health-checked `AsyncConnectionPool` supplies `AsyncPostgresSaver`; dead
+  connections are replaced within the reconnect budget, while setup failure
+  still aborts startup and never selects an in-memory saver.
 - The served graph uses strict user/thread identity, structured contracts,
   journal replay, status recovery, and explicit resource terminal states.
 - Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` and is the
   active production registry primary. Registry previous and shadow pointers are
   unset, and startup rejects any generation or manifest mismatch.
-- The browser-tested runtime baseline is
-  `707d79806364d95fd300b21d0cb93411f592d67a`; later test/documentation-only
-  commits do not change its served graph behavior.
+- The published `main` baseline is `b8f9504`.
+- Browser canaries at `707d79806364d95fd300b21d0cb93411f592d67a` are
+  historical runtime evidence only.
+- SSE `eed2139`, Evidence `4a91f68`, and RAG `f53a710` remain integration
+  candidates. Governance and the final Docker rebuild must finish before a
+  final integration SHA is declared.
 - The sealed generation-manifest fingerprint is
   `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`,
   the KnowledgeGraph artifact fingerprint is
@@ -41,9 +47,11 @@ acceptance.
   `PARENT_CHILD_GENERATION_ID` must match the registry primary. The tracked
   config contains environment-variable names, never secret values.
 - The complete backend gate recorded `2880 passed / 7 skipped`; frontend
-  recorded 36 files and `187 passed`, with typecheck, lint, and production
-  build passing. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks
-  are not installed and were not run.
+  SSE `eed2139` recorded 36 files and `208 passed`, with ESLint, typecheck,
+  and production build passing. Evidence `4a91f68` recorded 64 passed. RAG
+  `f53a710` recorded 48 passed / 1 skipped in the controller gate and
+  50 passed / 1 skipped in its lane. Import Linter kept all `3/3` contracts.
+  Semgrep and Gitleaks are not installed and were not run.
 - This deployment is a trusted local demo. Public multi-tenant authentication,
   tenant isolation, and abuse controls are not closed; do not expose it as a
   public service.
@@ -126,6 +134,14 @@ file, or repeat activation. Preserve verified registry/index backups and
 recovery images. Startup fails closed if the registry, configured generation,
 manifest, KnowledgeGraph, or evidence identity drifts.
 
+Mutable runtime state is separate from read-only course material. Compose mounts
+`app_state` at `/app/.runtime_state`; profile and memory SQLite schemas are
+initialized before startup succeeds. Legacy `/app/data/profile.db` and
+`memory.db` are atomically migrated only when the new target is absent. A
+migration or schema failure is fatal, and existing state is never overwritten.
+After image replacement, create and read a profile and perform a memory/history
+writer round trip before declaring the volume healthy.
+
 Start only from the images already built, then wait for PostgreSQL, backend,
 and frontend readiness:
 
@@ -136,7 +152,9 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 
 The backend image installs Chromium and ffmpeg because video animation is a
 production resource type. Backend and frontend run as separate supervised
-containers; either service failure is visible to Compose.
+containers; either service failure is visible to Compose. The reconnecting
+checkpointer pool is a backend runtime property, so a database-only restart
+test is invalid if Compose also recreates or restarts backend/frontend.
 
 ## 4. Service checks
 
@@ -157,21 +175,51 @@ must return `health_ready_v3`, `status=ready`, `checkpointer_type=postgres`,
 data/artifact identity, generation ID/manifest fingerprint, and evidence
 orchestration fingerprint. It also performs a bounded PostgreSQL `SELECT 1`.
 Only the typed, redacted 503 code may be recorded when readiness fails; never
-print the DB URI.
+print the DB URI. A recovered readiness probe proves that a newly borrowed pool
+connection works; it does not by itself prove that historical checkpoint and
+journal state remained readable.
 
 The subject response must expose only the five production subjects. Internal
 directories such as `evaluation`, `_needs_ocr`, and `unclassified` are invalid.
 The graph manifest and runtime status must expose explicit graph, contract, KG,
 and RAG identities; an absent or mismatched identity is a failed deployment.
 
+### 4.1 Bounded recovery quality floors
+
+- Evidence `4a91f68` may perform a bounded reask only for the failed resource+subject
+  partition with the same Provider/model. Structured, business, inventory,
+  topic, budget, and identity checks remain mandatory, and the reask does not
+  itself decide `blocked`; its focused gate recorded 64 passed.
+- RAG `f53a710` may split a rerank batch only against the same endpoint and
+  must return a complete score for every candidate. RRF-only and partial-score
+  results are forbidden; the controller gate recorded 48 passed / 1 skipped,
+  and the RAG lane recorded 50 passed / 1 skipped.
+- SSE `eed2139` may perform one same-request status read only after transport
+  failure or HTTP 410. Only matching `completed`, `failed`, or `stopped`
+  status is authoritative. Pending, legacy, sequence-gap, contract-drift, or
+  identity mismatch remains a failure, and the client never resubmits the Graph.
+
+No recovery may change provider, model, generation, KnowledgeGraph, or Flat RAG,
+and no partial evidence, pending state, empty object, or unreviewed draft may be
+reported as success.
+
 ## 5. PostgreSQL restart and replay
 
-Create a real thread through the web UI, record its `thread_id`, `stream_id`,
-and final event ID, then restart PostgreSQL:
+Use at least two completed real threads and record their `thread_id`,
+`stream_id`, terminal payload hash, Context injection count, artifact URL set,
+and final event ID. Capture the backend/frontend container IDs, then restart
+PostgreSQL only:
 
 ```powershell
+$BackendBefore = docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps --quiet backend
+$FrontendBefore = docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps --quiet frontend
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE restart postgres
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
+$BackendAfter = docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps --quiet backend
+$FrontendAfter = docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps --quiet frontend
+if ($BackendBefore -ne $BackendAfter -or $FrontendBefore -ne $FrontendAfter) {
+  throw 'PostgreSQL-only restart recreated an application container'
+}
 ```
 
 After PostgreSQL is healthy, verify:
@@ -180,14 +228,23 @@ After PostgreSQL is healthy, verify:
 Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 ```
 
-1. `GET /threads/{thread_id}/status` returns the same authoritative terminal
-   resource or QA result.
+1. `GET /threads/{thread_id}/status` for both historical threads returns the
+   same authoritative terminal resource or QA result, payload hash, Context
+   injection count, and artifact URL set.
 2. `GET /streams/{stream_id}` with `Last-Event-ID` replays only later events
    while the journal retention window remains valid.
 3. Reusing a request ID with a different payload returns an explicit conflict;
    it must not return the first request's result.
 4. A browser refresh restores completed status and download cards for the same
    user/thread namespace.
+5. Every referenced artifact is downloaded again with HTTP 200, an attachment
+   disposition, and a non-empty body. For the two recorded code-practice
+   canaries this means six files in total and `injection_count=15` per thread.
+
+The test fails if readiness stays unavailable after the configured reconnect
+budget, any application container ID changes, any historical identity drifts,
+or the backend is manually restarted to recover. Do not diagnose a pass by
+restarting the application after PostgreSQL.
 
 ## 6. Browser canary
 
