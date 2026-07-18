@@ -2509,6 +2509,7 @@ def make_requirement_evidence_judge_node(
         )
         ready_count = sum(row.readiness_state == "ready" for row in readiness)
         all_ready = ready_count == len(readiness)
+        terminal_reason: str
         if unjudged_requirement_ids:
             route = "terminal"
             terminal_status = (
