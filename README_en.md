@@ -13,14 +13,16 @@ A3 Study Agent is a multi-agent learning system for university study. It combine
 | Course graph | `KnowledgeGraphV1`, five subjects, source-backed topic/resource identity |
 | New RAG | the active served graph pins sealed `READY` generation `pc_20260715_98336c2_55` and runs the resource-aware PGR path |
 | RAG deployment | registry primary is generation 55; previous / shadow are unset; `activation_enabled=true` and `shadow_enabled=false` |
-| Runtime identity | manifest `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`; KG artifact `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`; Evidence `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01` |
+| Runtime identity | manifest `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`; KG artifact `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`; Evidence `9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b` |
 | Evaluation | Evidence is V2-only and V1 is rejected; P0 / PG / PR / PGR real-node adapters are evaluation variants, while the six-case dataset remains smoke authoring rather than formal Gold |
 | Quality gate | backend `2880 passed / 7 skipped`; frontend 36 files and `208 passed`, with typecheck, lint, and production build passing; Import Linter `3/3` |
 | Live canary | two consecutive code-practice browser requests under the same Evidence identity returned `production_success=true`; the full six-scenario and human-content acceptance remain incomplete |
 | Deployment boundary | this is a trusted local demo; public multi-tenant authentication and tenant isolation are not closed |
 | Rollback | repository-root `chroma_store` and Flat 53 must remain in this release; later cleanup requires separate approval |
 
-Release state is layered: `main` has been published at `b8f9504`. Pending integration candidates are SSE `eed2139` (the complete frontend gate passed 36 files / 208 tests, ESLint, typecheck, and production build), Evidence `4a91f68` (64 passed), and RAG `f53a710` (controller 48 passed / 1 skipped; lane 50 passed / 1 skipped). There is no final integration SHA until governance and the final Docker rebuild finish; these candidate results do not prove six-scenario or human educational-effect acceptance.
+Release integration is complete: the competition-demo runtime source is `ca3960a`, and `main` contains and publishes it. The original lane commits SSE `eed2139`, Evidence `4a91f68`, and RAG `f53a710` were integrated as `d7f5802`, `cde3e59`, and `fa0f2dc`; controlled-fallback governance was integrated as `9cb929c`. Runtime images retain OCI revision `ca3960a`, their actual code source; later docs-only `main` commits do not change that image identity. These engineering results still do not prove six-scenario or human educational-effect acceptance.
+
+The 2026-07-18 final Docker verification used backend image `sha256:6f7108ce1af9d5124c1e39a1c241d50eea7b55cb591ef784bc965bfe97247d48` and frontend image `sha256:a650fd112b6469236def418b4ea136d702b46dbd572a3b389e829b4bf547de5e`. Frontend, backend, and PostgreSQL were all `healthy`; `/`, `/onboarding`, and `/health/ready` returned HTTP 200.
 
 `READY` proves artifact integrity only. Production startup additionally requires the registry primary and `PARENT_CHILD_GENERATION_ID` to name the same generation, an empty shadow pointer, and the exact manifest identity. Evidence gaps may use the initial retrieval plus at most three bounded supplement rounds within the same PGR path; required evidence must still be complete and partial results are never published as success. Errors never switch Provider, model, generation, or Flat RAG. Flat 53 and the root `chroma_store` remain offline recovery assets, not request-time fallbacks.
 
@@ -159,7 +161,7 @@ npm run build
 Pop-Location
 ```
 
-The complete backend result is `2880 passed / 7 skipped`. SSE `eed2139` passed the complete frontend gate in 36 files with `208 passed`; typecheck, lint, and the production build with explicit `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` also passed. Import Linter kept all `3/3` contracts. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. The two code-practice browser canaries prove only their historical runtime and do not replace the incomplete six-scenario, human-content, or post-integration Docker acceptance.
+The complete backend result is `2880 passed / 7 skipped`. SSE `eed2139` passed the complete frontend gate in 36 files with `208 passed`; typecheck, lint, and the production build with explicit `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` also passed. Import Linter kept all `3/3` contracts, and the final `ca3960a` frontend/backend images, three-container health, and HTTP/readiness verification passed. Semgrep and Gitleaks are not installed and were not run, so they must not be reported as passing. The two code-practice browser canaries prove only their historical runtime and do not replace the incomplete six-scenario or human-content acceptance.
 
 ## Competition documentation
 

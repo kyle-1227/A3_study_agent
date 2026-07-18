@@ -4,7 +4,7 @@
 
 项目支持 Docker Compose 统一构建并启动 PostgreSQL、FastAPI 后端和 Next.js 前端。这里的“一键部署”是**满足外部资产和私密配置前置条件后的单命令启动**，不是纯 Git checkout 开箱即用。
 
-`main` 已发布到 `b8f9504`；两轮 code-practice 真实 canary 只证明其历史 runtime。SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 仍待治理和最终 Docker 重建，因而当前没有最终 integration SHA；PostgreSQL-only restart、完整六场景与人工内容验收仍未完成。本文不读取或展示真实 `.env`。
+比赛演示 runtime source / integration 为 `ca3960a`，已由 `main` 包含并发布；两轮 code-practice 真实 canary 只证明其历史 runtime。SSE、Evidence、RAG 与受控 fallback 治理均已集成，最终 backend/frontend 镜像和三容器健康、HTTP/readiness 复验已完成；PostgreSQL-only restart、完整六场景与人工内容验收仍未完成。本文不读取或展示真实 `.env`。
 
 ## 2. 环境与外部资产
 
@@ -23,7 +23,7 @@
    `2026.07.15-source-groups-v1` 身份，精确 fingerprint 为：
    - manifest：`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`；
    - KG artifact：`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`；
-   - Evidence orchestration：`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`；
+   - Evidence orchestration：`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`；
 4. 仅存放在忽略文件或部署平台 secret store 中的私密配置。
 
 课程资料和密封索引可能因版权、体积与敏感性不进入 Git。部署负责人应通过受控渠道交付，校验来源和完整性；不得用空目录、旧 Flat 索引或临时生成内容冒充。
@@ -102,7 +102,7 @@ Invoke-WebRequest http://localhost:3000 -UseBasicParsing
 当前实测身份必须精确匹配 generation 55、manifest
 `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、KG
 `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和 Evidence
-`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
+`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`。
 
 生产 checkpointer 必须保持 PostgreSQL-only：连接池会在借出连接前做健康检查并在预算内替换失效连接，初始化或重连失败必须显式暴露，不能转用内存状态。readiness 恢复只是第一层检查；数据库单独重启时 backend/frontend 容器 ID 必须保持不变，并继续验证历史 thread/status、SSE journal、Context 注入和 artifact 下载。
 三条生产级受控恢复均须单独验收且不得降低质量：Evidence `4a91f68` 只以同一 Provider/模型对失败的 resource+subject partition 有界 reask，并且不自行判断 blocked；RAG `f53a710` 只在同一 endpoint 做 complete-score batch split，禁止 RRF-only 与 partial scores；SSE `eed2139` 只在 transport 或 HTTP 410 后读取一次身份匹配的权威终态。任一路径都不能切 Provider、模型、generation 或旧 Flat RAG，也不能把 partial evidence 或 pending status 写成成功。

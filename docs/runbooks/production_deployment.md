@@ -2,10 +2,11 @@
 
 This runbook is the Docker and canary procedure for the active production
 identity. Run commands from the repository root. Never print or commit `.env`
-values. Two historical code-practice browser canaries executed against the
-active Docker/Provider path and passed their machine-readable checks. They do
-not prove the still-incomplete six-scenario, human-content, or post-integration
-Docker acceptance.
+values. The final `ca3960a` runtime images passed three-container health and
+HTTP/readiness verification. Two historical code-practice browser canaries
+executed against the active Docker/Provider path and passed their
+machine-readable checks. These results do not prove the still-incomplete
+six-scenario or human-content acceptance.
 
 ## 1. Release state
 
@@ -18,18 +19,25 @@ Docker acceptance.
 - Parent-Child generation `pc_20260715_98336c2_55` is sealed `READY` and is the
   active production registry primary. Registry previous and shadow pointers are
   unset, and startup rejects any generation or manifest mismatch.
-- The published `main` baseline is `b8f9504`.
+- The competition-demo runtime source is `ca3960a`, and published `main`
+  contains it. Later docs-only commits do not change the runtime image source.
 - Browser canaries at `707d79806364d95fd300b21d0cb93411f592d67a` are
   historical runtime evidence only.
-- SSE `eed2139`, Evidence `4a91f68`, and RAG `f53a710` remain integration
-  candidates. Governance and the final Docker rebuild must finish before a
-  final integration SHA is declared.
+- SSE `eed2139`, Evidence `4a91f68`, and RAG `f53a710` were integrated as
+  `d7f5802`, `cde3e59`, and `fa0f2dc`; controlled-fallback governance was
+  integrated as `9cb929c`.
+- Final backend image
+  `sha256:6f7108ce1af9d5124c1e39a1c241d50eea7b55cb591ef784bc965bfe97247d48`
+  and frontend image
+  `sha256:a650fd112b6469236def418b4ea136d702b46dbd572a3b389e829b4bf547de5e`
+  both carry OCI revision `ca3960a`. Frontend, backend, and PostgreSQL were
+  healthy; `/`, `/onboarding`, and `/health/ready` returned HTTP 200.
 - The sealed generation-manifest fingerprint is
   `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`,
   the KnowledgeGraph artifact fingerprint is
   `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`, and
   the Evidence orchestration fingerprint is
-  `6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`.
+  `9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`.
 - The repository-root Flat `chroma_store` and Flat generation 53 are retained
   recovery assets. Production never selects or silently falls back to them.
 - Evidence evaluation and adapter binding are V2-only; V1 inputs are rejected.
@@ -254,6 +262,10 @@ recorded `production_success=true`:
 
 - `artifacts/browser_canary/code-practice-707d798-1-20260717T155617Z/result.json`
 - `artifacts/browser_canary/code-practice-707d798-2-20260717T155922Z/result.json`
+
+These result files are historical local evidence and are not present in the
+current tracked or production checkout. Do not present the paths as shipped,
+independently reviewable artifacts.
 
 Both reached `planner -> agent -> reviewer -> output`, produced downloadable
 DOCX/Markdown/Python artifacts, passed replay, request-drift, and refresh

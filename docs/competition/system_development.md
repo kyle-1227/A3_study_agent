@@ -2,12 +2,12 @@
 
 ## 1. 文档范围
 
-本文面向比赛评审、演示人员和工程维护者，说明需求到实现的映射、关键设计、开发与集成方式以及现实生产边界。审阅基线为
-`b8f9504`；`707d79806364d95fd300b21d0cb93411f592d67a` 仅是两轮历史浏览器实测证据。SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 尚待治理和最终 Docker 重建，因此没有最终 integration SHA。生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
+本文面向比赛评审、演示人员和工程维护者，说明需求到实现的映射、关键设计、开发与集成方式以及现实生产边界。比赛演示 runtime source / integration 为
+`ca3960a`，已由 `main` 包含并发布；`707d79806364d95fd300b21d0cb93411f592d67a` 仅是两轮历史浏览器实测证据。SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 已分别以 `d7f5802`、`cde3e59`、`fa0f2dc` 集成，最终 Docker 基础复验已完成。生产身份为 resource-aware PGR、`KnowledgeGraphV1`、知识图谱数据版本
 `2026.07.15-source-groups-v1` 和密封 generation `pc_20260715_98336c2_55`。精确 manifest、KG artifact 与 Evidence fingerprint 分别为
 `db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、
 `c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和
-`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
+`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`。
 
 ## 2. 需求分析
 

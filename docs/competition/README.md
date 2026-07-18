@@ -1,7 +1,7 @@
 # A3 Study Agent 比赛最终文档索引
 
-本目录是赛题提交、演示验收和生产化复核的统一入口。`main` 已发布基线为 `b8f9504`；`707d79806364d95fd300b21d0cb93411f592d67a` 仅保留为两轮浏览器历史实测证据。
-待集成候选为 SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710`。治理和最终 Docker 重建前不声明最终 integration SHA，也不把候选测试写成六场景或人工教育效果验收。本文只把可复核证据写成已完成事实。
+本目录是赛题提交、演示验收和生产化复核的统一入口。比赛演示 runtime source / integration 为 `ca3960a`，已由 `main` 包含并发布；`707d79806364d95fd300b21d0cb93411f592d67a` 仅保留为两轮浏览器历史实测证据。
+SSE `eed2139`、Evidence `4a91f68` 与 RAG `f53a710` 已分别以 `d7f5802`、`cde3e59`、`fa0f2dc` 集成，受控 fallback 治理以 `9cb929c` 集成。最终 Docker 镜像与基础 readiness 已复验；完整六场景和人工教育效果仍未验收。本文只把可复核证据写成已完成事实。
 
 ## 文档清单
 
@@ -28,15 +28,16 @@
 
 ## 当前生产身份
 
-- 已发布 `main` 基线：`b8f9504`；浏览器历史实测 runtime：`707d79806364d95fd300b21d0cb93411f592d67a`。
-- 待集成候选：SSE `eed2139`（36 files / 208 tests，ESLint/typecheck/build 通过）、Evidence `4a91f68`（64 passed）、RAG `f53a710`（总控 48 passed / 1 skipped；车道 50 passed / 1 skipped）。
+- 已发布比赛演示 runtime source / integration：`ca3960a`；`main` 已包含该提交；浏览器历史实测 runtime：`707d79806364d95fd300b21d0cb93411f592d67a`。
+- 已集成车道：SSE `eed2139 -> d7f5802`（36 files / 208 tests，ESLint/typecheck/build 通过）、Evidence `4a91f68 -> cde3e59`（64 passed）、RAG `f53a710 -> fa0f2dc`（总控 48 passed / 1 skipped；车道 50 passed / 1 skipped）。
 - 唯一对外服务的检索/证据路径：resource-aware PGR。
 - 密封 generation：`pc_20260715_98336c2_55`。
 - generation manifest：`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`。
 - 课程知识图谱：`KnowledgeGraphV1`。
 - 知识图谱数据版本：`2026.07.15-source-groups-v1`。
 - 知识图谱 artifact：`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`。
-- Evidence orchestration：`6274c8ac2b0e70828d7e5f64f72ed8f2b9ab36ae8683adcf0b274d60df277b01`。
+- Evidence orchestration：`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`。
+- 最终 Docker：backend `sha256:6f7108ce1af9d5124c1e39a1c241d50eea7b55cb591ef784bc965bfe97247d48`、frontend `sha256:a650fd112b6469236def418b4ea136d702b46dbd572a3b389e829b4bf547de5e`；三容器 `healthy`，`/`、`/onboarding`、`/health/ready` 均为 HTTP 200。
 - Evidence 补充策略为初始检索加最多 3 轮补搜，总任务 24、ledger 72；required evidence 仍须完整，partial 不会转为成功。
 - code-practice 生成流式运行，严格 reviewer 使用独立 non-streaming 配置并保留结构化与业务校验。
 - PostgreSQL checkpointer 使用严格配置、健康检查和重连预算明确的连接池；启动失败仍 fail-closed，运行中不会降级到 `MemorySaver`。
