@@ -750,7 +750,10 @@ async def test_resume_profile_completion_sends_profile_command():
     graph.aget_state = AsyncMock(
         side_effect=[
             _snapshot(
-                values={"schema_version": "run_control_v1"},
+                values={
+                    "schema_version": "run_control_v1",
+                    "request_id": "request-at-profile-interrupt",
+                },
                 interrupt_value={
                     "type": "profile_completion_required",
                     "profile_completion_request": {
@@ -777,6 +780,7 @@ async def test_resume_profile_completion_sends_profile_command():
             "current_foundation": "Python",
             "daily_study_time": "2 hours",
         },
+        graph_version="graph:v1:profile-resume-test",
     ):
         collected.append(sse)
 
@@ -790,8 +794,65 @@ async def test_resume_profile_completion_sends_profile_command():
             "daily_study_time": "2 hours",
         },
     }
-    assert payloads[0]["run_status"] == "continuing"
+    assert getattr(resume_input, "update")["request_id"] == (
+        "request-at-profile-interrupt"
+    )
+    stream_context = next(
+        payload for payload in payloads if payload.get("type") == "stream_context"
+    )
+    assert stream_context["request_id"] == "request-at-profile-interrupt"
+    assert (
+        next(payload for payload in payloads if payload.get("type") == "run_status")[
+            "run_status"
+        ]
+        == "continuing"
+    )
     assert not [payload for payload in payloads if payload.get("type") == "stream_done"]
+
+
+@pytest.mark.anyio
+async def test_resume_profile_completion_requires_checkpoint_request_id():
+    from app import generate_resume_stream_drafts
+
+    graph = MagicMock()
+    graph.astream_events = MagicMock(return_value=AsyncIteratorMock([]))
+    graph.aget_state = AsyncMock(
+        return_value=_snapshot(
+            values={"schema_version": "run_control_v1"},
+            interrupt_value={
+                "type": "profile_completion_required",
+                "profile_completion_request": {
+                    "title": "Complete profile",
+                    "fields": [],
+                },
+            },
+            next_nodes=("study_plan_profile_gate_main",),
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+
+    collected = []
+    async for sse in generate_resume_stream_drafts(
+        "",
+        None,
+        graph,
+        "thread-1",
+        profile_completion={"learning_goal": "Master ML"},
+    ):
+        collected.append(sse)
+
+    assert _payloads(collected) == [
+        {
+            "type": "stream_error",
+            "error_type": "profile_completion_request_id_unavailable",
+            "message": "profile_completion_request_id_unavailable",
+            "thread_id": "thread-1",
+            "pending_interrupt_type": "profile_completion_required",
+            "resume_available": False,
+            "recoverable": False,
+        }
+    ]
+    graph.astream_events.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -816,7 +877,10 @@ async def test_profile_completion_interrupt_keeps_canonical_checkpoint_resumable
     }
     state = {
         "snapshot": _snapshot(
-            values={"schema_version": "run_control_v1"},
+            values={
+                "schema_version": "run_control_v1",
+                "request_id": "request-at-profile-interrupt",
+            },
             interrupt_value=interrupt_value,
             next_nodes=("study_plan_profile_gate_main",),
         )
@@ -843,7 +907,9 @@ async def test_profile_completion_interrupt_keeps_canonical_checkpoint_resumable
     graph.aupdate_state = AsyncMock(side_effect=update_state)
     graph.astream_events = MagicMock(side_effect=stream_events)
 
-    async for _ in generate_stream_drafts("build a study plan", graph, thread_id=thread_id):
+    async for _ in generate_stream_drafts(
+        "build a study plan", graph, thread_id=thread_id
+    ):
         pass
 
     # Initial run setup is persisted, but the profile interrupt is not

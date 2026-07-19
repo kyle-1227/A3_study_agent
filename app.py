@@ -5529,25 +5529,71 @@ async def _generate_resume_stream_drafts_impl(
     else:
         resume_value = edited_plan
 
+    status_values = _state_values(state_snapshot)
+    graph_request_id = resume_request_id
+    if profile_completion is not None:
+        checkpoint_request_id = status_values.get("request_id")
+        if (
+            not isinstance(checkpoint_request_id, str)
+            or not checkpoint_request_id.strip()
+            or checkpoint_request_id != checkpoint_request_id.strip()
+        ):
+            payload = {
+                "type": "error",
+                "error_type": "profile_completion_request_id_unavailable",
+                "message": "profile_completion_request_id_unavailable",
+                "thread_id": thread_id,
+                "pending_interrupt_type": pending_type,
+                "resume_available": False,
+                "recoverable": False,
+            }
+            emit_a3_trace(
+                logger,
+                "profile_completion.resume_failed",
+                {
+                    "thread_id": thread_id,
+                    "pending_interrupt_type": pending_type,
+                    "error_type": "profile_completion_request_id_unavailable",
+                },
+                state={"thread_id": thread_id, "session_id": thread_id},
+                env_flag="LOG_A3_TRACE",
+            )
+            finish_active_run(
+                thread_id,
+                {
+                    "run_status": RUN_STATUS_ERROR,
+                    "resume_available": False,
+                    "pending_interrupt_type": "",
+                    "error_type": "profile_completion_request_id_unavailable",
+                },
+            )
+            yield _stream_draft(
+                "stream_error",
+                {key: value for key, value in payload.items() if key != "type"},
+            )
+            return
+        # Profile completion resumes the same logical graph request. Existing
+        # learner-path and resource outputs are strictly bound to this ID.
+        graph_request_id = checkpoint_request_id
+
     resume_input = Command(
         resume=resume_value,
-        update={"request_id": resume_request_id, "thread_id": thread_id},
+        update={"request_id": graph_request_id, "thread_id": thread_id},
     )
     _emit_graph_config_trace(
         graph,
         config,
         {
-            "request_id": resume_request_id,
+            "request_id": graph_request_id,
             "session_id": thread_id,
             "thread_id": thread_id,
         },
     )
-    status_values = _state_values(state_snapshot)
     request_context_window, thread_context_window = _context_window_status(
         status_values
     )
     if not request_context_window.get("current_request_id"):
-        request_context_window["current_request_id"] = resume_request_id
+        request_context_window["current_request_id"] = graph_request_id
     start_active_run(
         thread_id,
         {
@@ -5603,7 +5649,7 @@ async def _generate_resume_stream_drafts_impl(
     )
 
     stream_context_payload = _stream_context_payload(
-        request_id=resume_request_id,
+        request_id=graph_request_id,
         thread_id=thread_id,
         graph_version=graph_version,
     )
@@ -5638,7 +5684,7 @@ async def _generate_resume_stream_drafts_impl(
         resume_input,
         config,
         thread_id,
-        request_id=resume_request_id,
+        request_id=graph_request_id,
         preserve_context_history=True,
     ):
         yield chunk
