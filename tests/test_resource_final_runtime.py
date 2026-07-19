@@ -43,26 +43,31 @@ def _validation(
     }
 
 
-def _mindmap_branch_result(*, status: str = "success") -> dict:
+def _linear_mindmap_tree(depth: int) -> dict:
+    node: dict = {"title": f"Level {depth}", "children": []}
+    for level in range(depth - 1, 0, -1):
+        node = {"title": f"Level {level}", "children": [node]}
+    return node
+
+
+def _mindmap_branch_result(
+    *, status: str = "success", tree: dict | None = None
+) -> dict:
+    resolved_tree = tree or {
+        "title": "Machine Learning",
+        "children": [{"title": "Models"}],
+    }
     return {
         "resource_type": "mindmap",
         "status": status,
         "title": "Machine Learning Map",
         "artifact": {
             "title": "Machine Learning Map",
-            "tree": {
-                "title": "Machine Learning",
-                "children": [{"title": "Models"}],
-            },
+            "tree": resolved_tree,
             "xmind_url": "/artifacts/mindmaps/map-1/map.xmind",
         },
         "artifacts": [],
-        "state_updates": {
-            "mindmap_tree": {
-                "title": "Machine Learning",
-                "children": [{"title": "Models"}],
-            }
-        },
+        "state_updates": {"mindmap_tree": resolved_tree},
         "message_content": "A validated machine learning concept map is ready.",
         "validation": _validation("mindmap", status=status),
     }
@@ -120,6 +125,46 @@ def test_runtime_builds_stable_success_and_validates_persisted_json_shape():
     assert first.resources[0].kind == "mindmap"
     restored = validate_resource_final_v3(first.model_dump(mode="json"))
     assert restored == first
+
+
+def test_runtime_accepts_a_seven_level_mindmap_payload():
+    tree = _linear_mindmap_tree(7)
+
+    result = _build(
+        terminal_status="success",
+        requested=["mindmap"],
+        results=[_mindmap_branch_result(tree=tree)],
+    )
+
+    payload = result.resources[0].payload
+    assert payload["mindmap_tree"] == tree
+    assert payload["mindmap"]["tree"] == tree
+
+
+def test_runtime_keeps_generic_payload_depth_limit_for_other_resources():
+    nested: dict = {"value": "bounded"}
+    for level in range(9):
+        nested = {f"level_{level}": nested}
+    review_doc = {
+        "resource_type": "review_doc",
+        "status": "success",
+        "title": "Bounded review document",
+        "artifact": nested,
+        "artifacts": [],
+        "state_updates": {},
+        "message_content": "A validated review document is ready.",
+        "validation": _validation("review_doc"),
+    }
+
+    with pytest.raises(
+        ResourceFinalRuntimeError,
+        match="resource payload exceeds maximum nesting depth",
+    ):
+        _build(
+            terminal_status="success",
+            requested=["review_doc"],
+            results=[review_doc],
+        )
 
 
 def test_runtime_preserves_real_partial_success_and_typed_failure():

@@ -7,6 +7,13 @@ import zipfile
 from src.tools.mindmap_tool import create_xmind_artifact, normalize_mindmap_tree
 
 
+def _linear_tree(depth: int) -> dict:
+    node: dict = {"title": f"Level {depth}", "children": []}
+    for level in range(depth - 1, 0, -1):
+        node = {"title": f"Level {level}", "children": [node]}
+    return node
+
+
 def test_normalize_tree_fills_empty_titles_and_limits_depth():
     tree = {
         "title": "",
@@ -14,7 +21,10 @@ def test_normalize_tree_fills_empty_titles_and_limits_depth():
             {
                 "title": "A",
                 "children": [
-                    {"title": "B", "children": [{"title": "C", "children": [{"title": "D"}]}]},
+                    {
+                        "title": "B",
+                        "children": [{"title": "C", "children": [{"title": "D"}]}],
+                    },
                 ],
             },
         ],
@@ -24,6 +34,20 @@ def test_normalize_tree_fills_empty_titles_and_limits_depth():
 
     assert normalized["title"] == "未命名知识点"
     assert normalized["children"][0]["children"][0]["children"] == []
+
+
+def test_normalize_tree_allows_seven_levels_and_truncates_the_eighth():
+    normalized = normalize_mindmap_tree(_linear_tree(8))
+
+    node = normalized
+    for level in range(1, 8):
+        assert node["title"] == f"Level {level}"
+        children = node["children"]
+        if level == 7:
+            assert children == []
+        else:
+            assert len(children) == 1
+            node = children[0]
 
 
 def test_normalize_tree_limits_node_count():

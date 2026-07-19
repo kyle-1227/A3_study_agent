@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
-MAX_MINDMAP_DEPTH = 5
+MAX_MINDMAP_DEPTH = 7
 MAX_MINDMAP_NODES = 80
 DEFAULT_ARTIFACT_DIR = Path(tempfile.gettempdir()) / "a3_study_agent_mindmaps"
 
@@ -77,7 +77,9 @@ def normalize_mindmap_tree(
     return visit(tree, 1) or {"title": "知识点思维导图", "children": []}
 
 
-def create_xmind_artifact(tree: dict[str, Any], title: str | None = None) -> dict[str, str]:
+def create_xmind_artifact(
+    tree: dict[str, Any], title: str | None = None
+) -> dict[str, str]:
     """Generate an .xmind file and return public artifact metadata."""
     normalized = normalize_mindmap_tree(tree)
     artifact_id = uuid.uuid4().hex
@@ -155,7 +157,11 @@ def _topic_xml(node: dict[str, Any]) -> str:
     note = escape(node.get("note", ""))
     notes = f"<notes><plain>{note}</plain></notes>" if note else ""
     children = "".join(_topic_xml(child) for child in node.get("children", []))
-    children_xml = f"<children><topics type=\"attached\">{children}</topics></children>" if children else ""
+    children_xml = (
+        f'<children><topics type="attached">{children}</topics></children>'
+        if children
+        else ""
+    )
     return f'<topic id="{uuid.uuid4().hex}"><title>{title}</title>{notes}{children_xml}</topic>'
 
 

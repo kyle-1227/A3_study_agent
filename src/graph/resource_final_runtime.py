@@ -46,6 +46,9 @@ _RESOURCE_KINDS = frozenset(_RESOURCE_ORDER)
 _MAX_MAPPING_ITEMS = 80
 _MAX_SEQUENCE_ITEMS = 80
 _MAX_PAYLOAD_DEPTH = 8
+# A seven-level mindmap uses alternating object/list layers beneath both
+# ``mindmap.tree`` and ``mindmap_tree`` in the public payload.
+_MAX_MINDMAP_PAYLOAD_DEPTH = 15
 _MAX_SHORT_TEXT = 1_200
 _MAX_RENDER_TEXT = 12_000
 _RENDER_TEXT_KEYS = frozenset(
@@ -296,7 +299,14 @@ def _resource_from_success_result(
         artifacts=artifacts,
         state_updates=state_updates,
     )
-    safe_payload = _sanitize_payload(payload)
+    safe_payload = _sanitize_payload(
+        payload,
+        max_depth=(
+            _MAX_MINDMAP_PAYLOAD_DEPTH
+            if resource_type == "mindmap"
+            else _MAX_PAYLOAD_DEPTH
+        ),
+    )
     return build_resource_final_v3_resource(
         thread_id=thread_id,
         request_id=request_id,
@@ -542,8 +552,12 @@ def _bounded_required_text(
     )
 
 
-def _sanitize_payload(value: Mapping[str, Any]) -> dict[str, JsonValue]:
-    sanitized = _sanitize_json_value(value, depth=0, key="")
+def _sanitize_payload(
+    value: Mapping[str, Any],
+    *,
+    max_depth: int = _MAX_PAYLOAD_DEPTH,
+) -> dict[str, JsonValue]:
+    sanitized = _sanitize_json_value(value, depth=0, key="", max_depth=max_depth)
     if not isinstance(sanitized, dict) or not sanitized:
         raise ResourceFinalRuntimeError("resource payload is empty after sanitization")
     return sanitized
@@ -554,8 +568,9 @@ def _sanitize_json_value(
     *,
     depth: int,
     key: str,
+    max_depth: int,
 ) -> JsonValue | _DropValue:
-    if depth > _MAX_PAYLOAD_DEPTH:
+    if depth > max_depth:
         raise ResourceFinalRuntimeError(
             "resource payload exceeds maximum nesting depth"
         )
@@ -576,6 +591,7 @@ def _sanitize_json_value(
                 raw_item,
                 depth=depth + 1,
                 key=raw_key,
+                max_depth=max_depth,
             )
             if not isinstance(safe_item, _DropValue):
                 output[raw_key] = safe_item
@@ -585,7 +601,12 @@ def _sanitize_json_value(
             raise ResourceFinalRuntimeError("resource payload array exceeds item limit")
         items: list[JsonValue] = []
         for item in value:
-            safe_item = _sanitize_json_value(item, depth=depth + 1, key=key)
+            safe_item = _sanitize_json_value(
+                item,
+                depth=depth + 1,
+                key=key,
+                max_depth=max_depth,
+            )
             if not isinstance(safe_item, _DropValue):
                 items.append(safe_item)
         return items
