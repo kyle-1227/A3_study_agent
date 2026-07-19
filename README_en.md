@@ -62,7 +62,7 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --de
 Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 ~~~
 
-Required inputs include RAG_EMBEDDING_API_KEY, RAG_RERANKER_API_KEY, POSTGRES_PASSWORD, COURSE_DATA_HOST_PATH, and PARENT_CHILD_INDEX_HOST_PATH. Compose does not mount /app/chroma_store; mutable Chroma snapshots use the separate rag_runtime_chroma volume.
+Required inputs include RAG_EMBEDDING_API_KEY, RAG_RERANKER_API_KEY, POSTGRES_PASSWORD, COURSE_DATA_HOST_PATH, and PARENT_CHILD_INDEX_HOST_PATH. `PARENT_CHILD_INDEX_HOST_PATH` must point to the `indexes/parent_child` root that contains `primary`, not to `primary` itself. Compose mounts only the active `primary` directory read-only and never mounts /app/chroma_store; mutable Chroma snapshots use the separate sibling rag_runtime_chroma volume.
 
 Readiness must return health_ready_v4 with parent_child_primary_revision, parent_child_primary_updated_at, and parent_child_primary_config_fingerprint. The browser Canary fetches readiness twice and rejects any primary identity drift.
 

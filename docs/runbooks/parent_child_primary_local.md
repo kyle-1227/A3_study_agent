@@ -65,9 +65,11 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 ~~~
 
-Compose mounts course data and indexes/parent_child read-only. It does not mount
-/app/chroma_store. The backend creates disposable runtime Chroma snapshots in
-the dedicated rag_runtime_chroma volume.
+`PARENT_CHILD_INDEX_HOST_PATH` must name the `indexes/parent_child` root that
+contains `primary`; Compose mounts only that active
+`indexes/parent_child/primary` directory read-only. It does not mount
+`/app/chroma_store`. The backend creates disposable runtime Chroma snapshots in
+the sibling dedicated `rag_runtime_chroma` volume.
 
 The first primary cold start copies the byte-verified Chroma snapshot into that
 writable volume and can take several minutes; the 420-second wait allowance is

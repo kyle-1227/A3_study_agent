@@ -72,7 +72,6 @@ checkout is not self-contained. In `.env`, configure:
 
 - `COURSE_DATA_HOST_PATH`
 - `PARENT_CHILD_INDEX_HOST_PATH`
-- `PARENT_CHILD_GENERATION_ID`
 - `POSTGRES_PASSWORD`
 - `NEXT_PUBLIC_API_URL`
 - `DEEPSEEK_API_KEY`
@@ -83,13 +82,15 @@ checkout is not self-contained. In `.env`, configure:
 Keep `EMBEDDING_API_KEY_ENV=RAG_EMBEDDING_API_KEY` and
 `RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY`. The two host paths may be relative
 only when authorized assets were supplied inside this checkout; do not infer
-that from Git files. Compose uses long-syntax binds for both course data and the
-Parent-Child index with `read_only: true` and
+that from Git files. `PARENT_CHILD_INDEX_HOST_PATH` names the
+`indexes/parent_child` root that contains `primary`, not the `primary` directory
+itself. Compose uses long-syntax binds for both course data and the active
+Parent-Child `primary` directory with `read_only: true` and
 `bind.create_host_path: false`; a missing D:/E: host path therefore fails
 instead of creating an empty directory. Generated downloads use a named
-`artifacts` volume. The sealed Chroma tree stays read-only; disposable runtime
-snapshots use the separate writable `rag_runtime_chroma` volume mounted at its
-designated subdirectory.
+`artifacts` volume. The active primary Chroma tree stays read-only; disposable
+runtime snapshots use the separate writable `rag_runtime_chroma` sibling
+volume.
 
 Set shell-level `A3_ENV_FILE` to the ignored env file's absolute path before
 every Compose command. Compose intentionally has no implicit `.env` fallback.

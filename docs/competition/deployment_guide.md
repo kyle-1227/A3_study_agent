@@ -62,9 +62,11 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --de
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
 ~~~
 
-Compose uses separate backend, frontend, and PostgreSQL services. It mounts
-course data and indexes/parent_child read-only, keeps runtime Chroma snapshots
-in a separate writable volume, and does not mount /app/chroma_store.
+Compose uses separate backend, frontend, and PostgreSQL services.
+`PARENT_CHILD_INDEX_HOST_PATH` names the `indexes/parent_child` root that
+contains `primary`; Compose mounts only its active `primary` directory
+read-only, keeps runtime Chroma snapshots in a separate writable sibling volume,
+and does not mount /app/chroma_store.
 
 The first primary cold start copies and validates the byte-verified Chroma
 snapshot in that writable volume; allow the documented 420-second wait window.

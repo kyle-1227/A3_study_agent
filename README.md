@@ -62,7 +62,7 @@ docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --de
 Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
 ~~~
 
-必要变量包括 RAG_EMBEDDING_API_KEY、RAG_RERANKER_API_KEY、POSTGRES_PASSWORD、COURSE_DATA_HOST_PATH 和 PARENT_CHILD_INDEX_HOST_PATH。Compose 不挂载 /app/chroma_store；运行时 Chroma 快照位于独立的 rag_runtime_chroma 卷。
+必要变量包括 RAG_EMBEDDING_API_KEY、RAG_RERANKER_API_KEY、POSTGRES_PASSWORD、COURSE_DATA_HOST_PATH 和 PARENT_CHILD_INDEX_HOST_PATH。`PARENT_CHILD_INDEX_HOST_PATH` 必须指向包含 `primary` 的 `indexes/parent_child` 根目录，而不是 `primary` 本身。Compose 只读挂载 active `primary` 目录，不挂载 /app/chroma_store；运行时 Chroma 快照位于同级独立的 rag_runtime_chroma 卷。
 
 /health/ready 必须返回 health_ready_v4，并包含 parent_child_primary_revision、parent_child_primary_updated_at 和 parent_child_primary_config_fingerprint。浏览器 Canary 会在交互前后读取两次该端点，拒绝 primary 身份漂移。
 

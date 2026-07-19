@@ -57,8 +57,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}
-        target: /app/indexes/parent_child
+        source: ${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}/primary
+        target: /app/indexes/parent_child/primary
         read_only: true
         bind:
           create_host_path: false
