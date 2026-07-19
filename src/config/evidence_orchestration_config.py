@@ -81,10 +81,40 @@ class EvidenceJudgePartitionReaskConfig(StrictRagConfigModel):
     incomplete_partition_policy: Literal["block_resource"]
 
 
+class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
+    """Explicit, bounded delivery policy for evidence-limited resources."""
+
+    schema_version: Literal["evidence_fallback_delivery_v1"]
+    eligible_resource_types: Annotated[
+        tuple[ResourceType, ...],
+        BeforeValidator(_freeze_sequence),
+        Field(min_length=1),
+    ]
+    minimum_accepted_evidence_per_resource: PositiveInt
+    max_resource_generation_attempts: Literal[1]
+    max_delivery_seconds: PositiveFloat
+    additional_retrieval_task_budget: Literal[0]
+    runtime_identity_policy: Literal["inherit_normal_resource_runtime"]
+    evidence_binding_policy: Literal["accepted_bound_only"]
+    validation_policy: Literal["normal_pydantic_and_business_validators"]
+    no_evidence_policy: Literal["block_resource"]
+    validation_failure_policy: Literal["block_resource"]
+    terminal_status: Literal["partial_success"]
+
+    @model_validator(mode="after")
+    def _validate_complete_resource_coverage(self) -> "EvidenceFallbackDeliveryConfig":
+        if self.eligible_resource_types != CANONICAL_RESOURCE_TYPES:
+            raise ValueError(
+                "fallback delivery must cover every canonical resource exactly once "
+                "in canonical order"
+            )
+        return self
+
+
 class EvidenceOrchestrationConfig(StrictRagConfigModel):
     """Bounded orchestration policy with explicit failure behavior."""
 
-    schema_version: Literal["evidence_orchestration_config_v1"]
+    schema_version: Literal["evidence_orchestration_config_v2"]
     max_supplement_rounds: NonNegativeInt
     max_search_tasks_per_round: PositiveInt
     max_total_search_tasks: PositiveInt
@@ -95,6 +125,7 @@ class EvidenceOrchestrationConfig(StrictRagConfigModel):
     max_evidence_per_requirement: PositiveInt
     max_consecutive_no_progress_rounds: PositiveInt
     judge_partition_reask: EvidenceJudgePartitionReaskConfig
+    fallback_delivery: EvidenceFallbackDeliveryConfig
     web_timeout_seconds: PositiveFloat
     required_task_priority: RetrievalPriority
     supporting_task_priority: RetrievalPriority
@@ -218,6 +249,7 @@ def load_resource_evidence_profiles(
 __all__ = [
     "CANONICAL_RESOURCE_TYPES",
     "EvidenceCriticality",
+    "EvidenceFallbackDeliveryConfig",
     "EvidenceJudgePartitionReaskConfig",
     "EvidenceNeedScope",
     "EvidenceOrchestrationConfig",

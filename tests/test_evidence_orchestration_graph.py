@@ -438,6 +438,9 @@ def _missing_coverage(requirements, *, round_index: int, suffix: str):
         if requirement["source_policy"] == "local_only":
             local_query = f"math assessable facts {suffix}"
             web_query = ""
+        elif requirement["source_policy"] == "local_then_web_on_gap":
+            local_query = ""
+            web_query = f"math assessable facts official evidence {suffix}"
         elif requirement["source_policy"] == "web_only":
             local_query = ""
             web_query = f"math official evidence {suffix}"
@@ -763,7 +766,11 @@ def test_judge_requirement_payload_has_exact_evidence_allowlists() -> None:
             requirement.requirement_id
         }
         expected_shape = (
-            "both" if requirement.source_policy == "local_and_web" else "local_only"
+            "both"
+            if requirement.source_policy == "local_and_web"
+            else "web_only"
+            if requirement.source_policy == "local_then_web_on_gap"
+            else "local_only"
         )
         assert requirement_payload["required_incomplete_query_shape"] == expected_shape
 
@@ -1149,7 +1156,12 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
     assert judged["evidence_terminal_status"] == ""
 
     repaired = orchestration.make_evidence_repair_planner_node(runtime)(
-        {**_planner_state(), **planned, **judged}
+        {
+            **_planner_state(),
+            **planned,
+            **judged,
+            "evidence_source_outcomes": outcomes,
+        }
     )
     repair_tasks = [
         RetrievalTask.model_validate(item)
@@ -1157,7 +1169,7 @@ def test_planner_compiles_profile_slots_and_first_repair_round(monkeypatch):
     ]
     assert repaired["evidence_current_round"] == 1
     assert len(repair_tasks) == 1
-    assert repair_tasks[0].source_type == "local_rag"
+    assert repair_tasks[0].source_type == "web"
     assert repair_tasks[0].requirement_id == next(
         item["requirement_id"]
         for item in planned["evidence_requirements"]
@@ -1522,6 +1534,95 @@ def test_judge_partition_reask_blocks_only_failed_resource_and_is_trace_safe(
     assert all(record.evidence_id not in serialized_trace for record in records)
 
 
+def test_terminal_assignment_enables_fallback_only_after_two_no_progress_rounds():
+    runtime = _runtime()
+    requirements = compile_evidence_requirement_batch(_quiz_draft_batch(runtime))
+    required = next(
+        item for item in requirements if item.criticality == "required"
+    )
+    task = next(
+        item
+        for item in orchestration._build_initial_tasks(requirements, runtime)
+        if item.requirement_id == required.requirement_id
+        and item.source_type == "local_rag"
+    )
+    record = orchestration._candidate_record(
+        candidate=EvidenceCandidate(
+            evidence_id="raw-fallback-candidate",
+            source_type="local_rag",
+            provider="test-provider",
+            subject="math",
+            role=required.requirement_id,
+            title="Fallback candidate",
+            source="fallback-source",
+            content_preview="Accepted bounded evidence.",
+            metadata={"source_id": "fallback-source"},
+        ),
+        original={"content": "Accepted bounded evidence."},
+        task=task,
+    )
+    coverage = RequirementCoverageBatch(
+        schema_version="requirement_coverage_batch_v1",
+        round_index=2,
+        coverages=[
+            RequirementCoverage(
+                requirement_id=item.requirement_id,
+                resource_type="quiz",
+                subject="math",
+                round_index=2,
+                coverage_state="partial" if item == required else "missing",
+                evidence_ids=[record.evidence_id] if item == required else [],
+                confidence=0.5 if item == required else 0.0,
+                reason="Accepted evidence remains limited.",
+                suggested_local_query="" if item == required else "math distractor repair",
+                suggested_web_query=(
+                    "math assessable official repair"
+                    if item == required
+                    else "math distractor official repair"
+                ),
+            )
+            for item in requirements
+        ],
+    )
+    state = {
+        **_planner_state(),
+        "evidence_orchestration_fingerprint": runtime.orchestration_fingerprint,
+        "evidence_current_round": 2,
+        "evidence_consecutive_no_progress_rounds": 2,
+        "evidence_requested_resource_types": ["quiz"],
+        "evidence_requirements": [
+            item.model_dump(mode="json") for item in requirements
+        ],
+        "evidence_coverage": compile_requirement_coverage_batch(coverage).model_dump(
+            mode="json"
+        ),
+        "evidence_ledger": [
+            orchestration._ledger_entry(record, accepted=True).model_dump(mode="json")
+        ],
+        "evidence_all_tasks": [task.model_dump(mode="json")],
+        "evidence_terminal_status": "insufficient_no_progress",
+        "evidence_terminal_reason_code": "no_measurable_coverage_progress",
+    }
+
+    assigned = orchestration.make_resource_evidence_assignment_node(runtime)(state)
+
+    assert assigned["ready_resource_types"] == []
+    assert assigned["fallback_resource_types"] == ["quiz"]
+    assert assigned["blocked_resource_types"] == []
+    assert assigned["requested_resource_types"] == ["quiz"]
+    assert assigned["resource_generation_status"] == "preflight"
+    assert assigned["resource_evidence_assignments"][0]["delivery_mode"] == "fallback"
+    assert assigned["resource_evidence_assignments"][0]["evidence_ids"] == [
+        record.evidence_id
+    ]
+
+    blocked_before_threshold = orchestration.make_resource_evidence_assignment_node(
+        runtime
+    )({**state, "evidence_consecutive_no_progress_rounds": 1})
+    assert blocked_before_threshold["fallback_resource_types"] == []
+    assert blocked_before_threshold["blocked_resource_types"] == ["quiz"]
+
+
 def test_judge_partition_reask_enforces_total_partition_call_budget(monkeypatch):
     runtime = _runtime()
     policy_payload = runtime.policy.model_dump(mode="python")
@@ -1847,6 +1948,17 @@ def test_repair_schedules_third_supplement_then_rejects_beyond_budget(monkeypatc
     round_one_state = {
         **_planner_state(),
         **planned,
+        "evidence_source_outcomes": [
+            {
+                "round_index": task["round_index"],
+                "task_id": task["task_id"],
+                "requirement_id": task["requirement_id"],
+                "source_type": task["source_type"],
+                "status": "empty",
+                "candidate_count": 0,
+            }
+            for task in planned["evidence_current_tasks"]
+        ],
         "evidence_coverage": compile_requirement_coverage_batch(
             first_missing
         ).model_dump(mode="json"),

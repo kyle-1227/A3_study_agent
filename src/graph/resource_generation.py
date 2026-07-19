@@ -7,7 +7,9 @@ worker reuses the existing resource-generation node functions.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -89,6 +91,7 @@ from src.graph.resource_final_v3 import (
     ResourceFinalV3TerminalStatus,
 )
 from src.graph.resource_validation import (
+    ResourceValidationResultV1,
     validate_renderable_resource_result,
 )
 from src.graph.state import LearningState, RESOURCE_RESULTS_CLEAR
@@ -326,6 +329,21 @@ def _candidate_resource_assignments_from_state(
     return assignments
 
 
+def _fallback_delivery_timeout_seconds(state: LearningState) -> float:
+    raw_timeout = state.get("resource_fallback_delivery_max_seconds")
+    if (
+        isinstance(raw_timeout, bool)
+        or not isinstance(raw_timeout, (int, float))
+        or not math.isfinite(float(raw_timeout))
+        or raw_timeout <= 0
+    ):
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_delivery_timeout",
+            reason="fallback worker requires a positive finite delivery timeout",
+        )
+    return float(raw_timeout)
+
+
 def _resource_plan_from_state(state: LearningState) -> list[dict]:
     assignments = _candidate_resource_assignments_from_state(
         state,
@@ -368,17 +386,22 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
                 ),
             )
         tasks: list[dict[str, object]] = []
+        fallback_timeout_seconds: float | None = None
         for resource_type in resources:
             assignment = assignment_by_resource[resource_type]
-            tasks.append(
-                {
-                    "task_id": f"resource:{resource_type}",
-                    "resource_type": resource_type,
-                    "subjects": list(assignment.subjects),
-                    "topic_ids": list(assignment.topic_ids),
-                    "status": "pending",
-                }
-            )
+            task: dict[str, object] = {
+                "task_id": f"resource:{resource_type}",
+                "resource_type": resource_type,
+                "subjects": list(assignment.subjects),
+                "topic_ids": list(assignment.topic_ids),
+                "delivery_mode": assignment.delivery_mode,
+                "status": "pending",
+            }
+            if assignment.delivery_mode == "fallback":
+                if fallback_timeout_seconds is None:
+                    fallback_timeout_seconds = _fallback_delivery_timeout_seconds(state)
+                task["fallback_delivery_timeout_seconds"] = fallback_timeout_seconds
+            tasks.append(task)
         return tasks
     resources = normalize_requested_resource_types(
         state.get("requested_resource_types") or [],
@@ -456,6 +479,74 @@ def _resource_assignment_for_worker(
             "resource-aware worker assignment resolved to an empty approved context"
         )
     return assignment, scoped_context
+
+
+_FALLBACK_EVIDENCE_SCOPE_CONSTRAINT = (
+    "Use only claims explicitly supported by the accepted evidence below. "
+    "Omit unsupported extensions, examples, or prerequisites."
+)
+_FALLBACK_EVIDENCE_SCOPE_WARNING = "evidence_scope_limited"
+
+
+def _constrain_fallback_context(context: list[dict]) -> list[dict]:
+    """Keep accepted evidence intact while surfacing the fallback scope boundary."""
+
+    constrained: list[dict] = []
+    for item in context:
+        updated = dict(item)
+        content = updated.get("content")
+        if isinstance(content, str) and content.strip():
+            updated["content"] = f"{_FALLBACK_EVIDENCE_SCOPE_CONSTRAINT}\n\n{content}"
+        constrained.append(updated)
+    return constrained
+
+
+def _fallback_delivery_timeout_from_task(task: dict) -> float:
+    raw_timeout = task.get("fallback_delivery_timeout_seconds")
+    if (
+        isinstance(raw_timeout, bool)
+        or not isinstance(raw_timeout, (int, float))
+        or not math.isfinite(float(raw_timeout))
+        or raw_timeout <= 0
+    ):
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_delivery_timeout",
+            reason="fallback resource task requires a positive finite timeout",
+        )
+    return float(raw_timeout)
+
+
+def _mark_fallback_result_partial_success(result: dict) -> dict:
+    """Revalidate an already-renderable result before exposing limited delivery."""
+
+    raw_validation = result.get("validation")
+    if not isinstance(raw_validation, dict):
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_validation",
+            reason="fallback delivery requires a serialized resource validation",
+        )
+    validation = ResourceValidationResultV1.model_validate_json(
+        json.dumps(raw_validation, ensure_ascii=False)
+    )
+    if not validation.valid:
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_validation",
+            reason="fallback delivery requires a successful normal resource validation",
+        )
+    warnings = tuple(
+        dict.fromkeys((_FALLBACK_EVIDENCE_SCOPE_WARNING, *validation.warnings))
+    )[:24]
+    limited_validation = ResourceValidationResultV1.model_validate(
+        {
+            **validation.model_dump(mode="python"),
+            "terminal_status": "partial_success",
+            "warnings": warnings,
+        }
+    )
+    limited_result = dict(result)
+    limited_result["status"] = "partial_success"
+    limited_result["validation"] = limited_validation.model_dump(mode="json")
+    return limited_result
 
 
 def _debug_base(state: LearningState, tasks: list[dict]) -> dict:
@@ -1162,6 +1253,8 @@ async def resource_worker(state: LearningState) -> dict:
         local_state = dict(state)
         local_state["requested_resource_type"] = resource_type
         local_state["requested_resource_types"] = [resource_type]
+        local_state["resource_delivery_mode"] = "strict"
+        local_state["resource_evidence_scope_constraint"] = ""
         assignment_result = _resource_assignment_for_worker(
             state,
             resource_type,
@@ -1183,20 +1276,45 @@ async def resource_worker(state: LearningState) -> dict:
                     code="resource_task_assignment_mismatch",
                     reason="resource task topic binding differs from its assignment",
                 )
+            task_delivery_mode = task.get("delivery_mode")
+            if task_delivery_mode not in (None, assignment.delivery_mode):
+                raise LearningGuidanceContractError(
+                    code="resource_task_delivery_mode_mismatch",
+                    reason="resource task delivery mode differs from its assignment",
+                )
             local_state["resource_evidence_assignment"] = assignment.model_dump(
                 mode="json"
             )
-            local_state["context"] = scoped_context
+            local_state["resource_delivery_mode"] = assignment.delivery_mode
+            if assignment.delivery_mode == "fallback":
+                local_state["resource_evidence_scope_constraint"] = (
+                    _FALLBACK_EVIDENCE_SCOPE_CONSTRAINT
+                )
+                local_state["context"] = _constrain_fallback_context(scoped_context)
+            else:
+                local_state["context"] = scoped_context
             local_state["graded_evidence"] = scoped_context
         if resource_type == "study_plan":
             _assert_study_plan_profile_complete(local_state)
-        message_content = await RESOURCE_RUNNERS[resource_type](local_state)
+        if assignment_result is not None and assignment.delivery_mode == "fallback":
+            message_content = await asyncio.wait_for(
+                RESOURCE_RUNNERS[resource_type](local_state),
+                timeout=_fallback_delivery_timeout_from_task(task),
+            )
+        else:
+            message_content = await RESOURCE_RUNNERS[resource_type](local_state)
         result = _success_result(
             resource_type,
             local_state,
             message_content,
             int((time.perf_counter() - start) * 1000),
         )
+        if (
+            assignment_result is not None
+            and assignment.delivery_mode == "fallback"
+            and result["status"] != "failed"
+        ):
+            result = _mark_fallback_result_partial_success(result)
         if assignment_result is not None:
             result["subjects"] = list(task_subjects)
             result["topic_ids"] = list(task_topic_ids)
@@ -1222,6 +1340,7 @@ async def resource_worker(state: LearningState) -> dict:
                 "elapsed_ms": result["elapsed_ms"],
                 "message_chars": len(message_content),
                 "terminal_status": result["status"],
+                "delivery_mode": local_state["resource_delivery_mode"],
                 "renderable_count": (
                     (result.get("validation") or {}).get("renderable_count", 0)
                 ),

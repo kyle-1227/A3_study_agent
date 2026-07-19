@@ -23,6 +23,7 @@ function payloadHash(seed: string): string {
 function resourceValidation(
   resourceType: "mindmap" | "quiz" | "review_doc",
   terminalStatus: "success" | "partial_success" = "success",
+  warnings: string[] = [],
 ): Record<string, unknown> {
   return {
     schema_version: "resource_validation_v1",
@@ -34,7 +35,7 @@ function resourceValidation(
     verified_local_count: 1,
     remote_unverified_count: 0,
     failure_reason: "",
-    warnings: [],
+    warnings,
   }
 }
 
@@ -79,6 +80,7 @@ function quizResource(
 
 function mindmapResource(
   terminalStatus: "success" | "partial_success" = "success",
+  warnings: string[] = [],
 ): Record<string, unknown> {
   return {
     kind: "mindmap",
@@ -98,7 +100,7 @@ function mindmapResource(
       },
     },
     artifact_refs: { xmind_url: "/artifacts/map.xmind" },
-    validation: resourceValidation("mindmap", terminalStatus),
+    validation: resourceValidation("mindmap", terminalStatus, warnings),
   }
 }
 
@@ -341,6 +343,29 @@ describe("Resource Final V3 contract helpers", () => {
     expect(resourceFinalOutcome(partial)?.state).toBe("partial_success")
     expect(resourceFinalOutcome(failed)?.state).toBe("failed")
     expect(resourceFinalOutcome(controlledStop)?.state).toBe("controlled_stop")
+  })
+
+  it("shows a friendly scope notice only for evidence-limited partial resources", () => {
+    const event = parseResourceFinalEvent(
+      rawEvent({
+        terminal_status: "partial_success",
+        resources: [mindmapResource("partial_success", ["evidence_scope_limited"])],
+        validation: finalValidation({ success_count: 0, partial_success_count: 1 }),
+      }),
+    )
+    const merged = mergeResourceFinalIntoMessage(
+      {
+        id: "assistant-scope",
+        role: "assistant",
+        content: "",
+        threadId: "thread-1",
+        requestId: "request-1",
+      },
+      event,
+      "http://api.test",
+    )
+
+    expect(merged.resourceScopeNotice).toBe(true)
   })
 
   it("rejects count tampering and inconsistent terminal truth", () => {

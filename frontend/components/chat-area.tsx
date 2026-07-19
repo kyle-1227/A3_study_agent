@@ -66,6 +66,7 @@ export interface Message {
   videoScript?: VideoScriptResult
   videoAnimation?: VideoAnimationResult
   studyPlan?: StudyPlanResult
+  resourceScopeNotice?: boolean
   resourceFinalPayload?: Record<string, unknown>
   resourceFinalDedupeKey?: string
   qaFinal?: QAFinalEventV1
@@ -566,6 +567,7 @@ function MessageBubble({
       message.videoScript ||
       message.videoAnimation ||
       message.studyPlan ||
+      message.resourceScopeNotice ||
       message.recommendationFinal,
   )
 
@@ -595,6 +597,14 @@ function MessageBubble({
               <LiveTurnProgress progress={streamingProgress} />
             ) : null}
             {message.resourceStatus && <ResourceGenerationStatusPanel status={message.resourceStatus} />}
+            {message.resourceScopeNotice ? (
+              <p
+                role="note"
+                className="rounded-md border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-3 py-2 text-sm text-foreground"
+              >
+                <span className="font-medium">基础版：</span>内容仅覆盖当前资料范围。
+              </p>
+            ) : null}
             {message.activities?.length ? <ActivityStream activities={message.activities} /> : null}
             {message.reviewDocs?.length
               ? message.reviewDocs.map((doc) => (

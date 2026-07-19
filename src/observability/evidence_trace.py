@@ -186,21 +186,42 @@ class EvidenceResourceAssignedTrace(_EvidenceTraceBase):
     stage: Literal["evidence_orchestration.resource.assigned"]
     round_index: RoundIndex
     resource_type: SafeResourceType
-    status: Literal["ready", "blocked"]
+    status: Literal["ready", "fallback", "blocked"]
     requirement_count: BoundedCount
     assigned_evidence_count: BoundedCount
     missing_requirement_count: BoundedCount
     assignment_fingerprint: Sha256Digest
-    assignment_contract_version: Literal["resource_evidence_assignment_v1"]
+    assignment_contract_version: Literal[
+        "resource_evidence_assignment_v1",
+        "resource_evidence_assignment_v2",
+    ]
+    delivery_mode: Literal["strict", "fallback"] | None = None
+    reason_code: SafeCode | None = None
 
     @model_validator(mode="after")
     def validate_readiness(self) -> "EvidenceResourceAssignedTrace":
         if self.status == "ready" and self.missing_requirement_count != 0:
             raise ValueError("ready resource cannot have missing requirements")
+        if self.status == "fallback":
+            if self.missing_requirement_count == 0:
+                raise ValueError("fallback resource requires missing requirements")
+            if self.assigned_evidence_count == 0:
+                raise ValueError("fallback resource requires accepted evidence")
         if self.status == "blocked" and self.missing_requirement_count == 0:
             raise ValueError("blocked resource requires a missing requirement")
         if self.missing_requirement_count > self.requirement_count:
             raise ValueError("missing requirements cannot exceed requirement_count")
+        if self.assignment_contract_version == "resource_evidence_assignment_v2":
+            if self.reason_code is None:
+                raise ValueError("v2 assignment trace requires a reason code")
+            if self.status == "ready" and self.delivery_mode != "strict":
+                raise ValueError("ready v2 assignment trace requires strict mode")
+            if self.status == "fallback" and self.delivery_mode != "fallback":
+                raise ValueError("fallback trace requires fallback delivery mode")
+            if self.status == "blocked" and self.delivery_mode is not None:
+                raise ValueError(
+                    "blocked v2 assignment trace cannot have delivery mode"
+                )
         return self
 
 

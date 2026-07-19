@@ -19,6 +19,7 @@ from src.config._rag_config import NonBlankStr, StrictRagConfigModel
 from src.config.evidence_orchestration_config import (
     CANONICAL_RESOURCE_TYPES,
     EvidenceCriticality,
+    EvidenceFallbackDeliveryConfig,
     EvidenceNeedScope,
     EvidenceOrchestrationConfig,
     EvidenceSourcePolicy,
@@ -36,8 +37,10 @@ Sha256Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 EvidenceSourceType = Literal["local_rag", "web"]
 RetrievalPriority = Literal["high", "medium", "low"]
 CoverageState = Literal["complete", "partial", "missing"]
-ReadinessState = Literal["ready", "blocked_insufficient_evidence"]
-RESOURCE_EVIDENCE_CONTRACT_VERSION = "resource_evidence_assignment_v1"
+ReadinessState = Literal["ready", "fallback_eligible", "blocked_insufficient_evidence"]
+ResourceDeliveryMode = Literal["strict", "fallback"]
+RESOURCE_EVIDENCE_CONTRACT_VERSION = "resource_evidence_assignment_v2"
+LEGACY_RESOURCE_EVIDENCE_CONTRACT_VERSION = "resource_evidence_assignment_v1"
 
 
 def _freeze_sequence(value: object) -> object:
@@ -708,28 +711,34 @@ def make_resource_assignment_fingerprint(
     topic_ids: Sequence[str],
     requirement_ids: Sequence[str],
     evidence_ids: Sequence[str],
+    delivery_mode: ResourceDeliveryMode,
+    unmet_requirement_ids: Sequence[str],
 ) -> str:
     """Fingerprint the exact evidence bundle assigned to one resource."""
     return _canonical_json_digest(
         {
-            "algorithm": "resource_evidence_assignment_v1",
+            "algorithm": "resource_evidence_assignment_v2",
             "resource_type": resource_type,
             "subjects": list(subjects),
             "topic_ids": list(topic_ids),
             "requirement_ids": list(requirement_ids),
             "evidence_ids": list(evidence_ids),
+            "delivery_mode": delivery_mode,
+            "unmet_requirement_ids": list(unmet_requirement_ids),
         }
     )
 
 
 class ResourceEvidenceAssignment(StrictRagConfigModel):
-    """Approved evidence references assigned to one ready resource."""
+    """Fingerprint-bound strict or evidence-limited resource assignment."""
 
     resource_type: ResourceType
     subjects: NonBlankStrTuple
     topic_ids: NonBlankStrTuple
     requirement_ids: NonBlankStrTuple
     evidence_ids: NonBlankStrTuple
+    delivery_mode: ResourceDeliveryMode
+    unmet_requirement_ids: NonBlankStrTuple
     assignment_fingerprint: Sha256Digest
 
     @model_validator(mode="after")
@@ -749,12 +758,22 @@ class ResourceEvidenceAssignment(StrictRagConfigModel):
             raise ValueError(
                 "subjects and topic_ids must form an ordered one-to-one binding"
             )
+        requirement_ids = set(self.requirement_ids)
+        unmet_requirement_ids = set(self.unmet_requirement_ids)
+        if not unmet_requirement_ids.issubset(requirement_ids):
+            raise ValueError("unmet_requirement_ids must be bound to requirement_ids")
+        if self.delivery_mode == "strict" and self.unmet_requirement_ids:
+            raise ValueError("strict assignment cannot have unmet requirement ids")
+        if self.delivery_mode == "fallback" and not self.unmet_requirement_ids:
+            raise ValueError("fallback assignment requires unmet requirement ids")
         expected = make_resource_assignment_fingerprint(
             resource_type=self.resource_type,
             subjects=self.subjects,
             topic_ids=self.topic_ids,
             requirement_ids=self.requirement_ids,
             evidence_ids=self.evidence_ids,
+            delivery_mode=self.delivery_mode,
+            unmet_requirement_ids=self.unmet_requirement_ids,
         )
         if self.assignment_fingerprint != expected:
             raise ValueError("assignment_fingerprint does not match the assignment")
@@ -796,6 +815,12 @@ class ResourceReadiness(StrictRagConfigModel):
             if blocked or self.reason_code:
                 raise ValueError(
                     "ready resource must have no blocked ids or reason code"
+                )
+        elif self.readiness_state == "fallback_eligible":
+            if not blocked or not self.evidence_ids or not self.reason_code:
+                raise ValueError(
+                    "fallback-eligible resource requires accepted evidence, "
+                    "blocked ids, and a reason code"
                 )
         else:
             if not blocked or not self.reason_code:
@@ -1210,11 +1235,19 @@ def derive_resource_readiness(
     requested_resource_types: Sequence[ResourceType],
     requirements: Sequence[EvidenceRequirement],
     batch: CompiledRequirementCoverageBatch,
+    entries: Sequence[EvidenceLedgerEntry],
+    fallback_delivery: EvidenceFallbackDeliveryConfig,
+    fallback_allowed: bool,
 ) -> tuple[ResourceReadiness, ...]:
     """Derive readiness in code; LLM coverage cannot declare global readiness."""
     if not isinstance(batch, CompiledRequirementCoverageBatch):
         raise TypeError("batch must be CompiledRequirementCoverageBatch")
+    if not isinstance(fallback_delivery, EvidenceFallbackDeliveryConfig):
+        raise TypeError("fallback_delivery must be EvidenceFallbackDeliveryConfig")
+    if not isinstance(fallback_allowed, bool):
+        raise TypeError("fallback_allowed must be bool")
     coverage_by_id = {item.requirement_id: item for item in batch.coverages}
+    accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
     readiness_rows: list[ResourceReadiness] = []
     for raw_resource_type in requested_resource_types:
         if raw_resource_type not in CANONICAL_RESOURCE_TYPES:
@@ -1247,28 +1280,59 @@ def derive_resource_readiness(
             for requirement_id in required_ids
             if requirement_id not in set(complete_ids)
         )
+        evidence_pairs = tuple(
+            (requirement.requirement_id, evidence_id)
+            for requirement in resource_requirements
+            if requirement.requirement_id in coverage_by_id
+            for evidence_id in coverage_by_id[requirement.requirement_id].evidence_ids
+        )
+        for requirement_id, evidence_id in evidence_pairs:
+            entry = accepted_by_id.get(evidence_id)
+            if (
+                entry is None
+                or entry.resource_type != resource_type
+                or entry.requirement_id != requirement_id
+            ):
+                raise ResourceEvidenceAssignmentError(
+                    code="invalid_readiness_evidence_ref",
+                    reason=(
+                        "readiness may use only accepted evidence bound to its "
+                        "resource and requirement"
+                    ),
+                )
         evidence_ids = _unique_preserving_order(
-            tuple(
-                evidence_id
-                for requirement in resource_requirements
-                if requirement.requirement_id in coverage_by_id
-                for evidence_id in coverage_by_id[
-                    requirement.requirement_id
-                ].evidence_ids
-            )
+            tuple(evidence_id for _, evidence_id in evidence_pairs)
         )
         is_ready = not blocked_ids
+        is_fallback_eligible = (
+            not is_ready
+            and fallback_allowed
+            and resource_type in fallback_delivery.eligible_resource_types
+            and len(evidence_ids)
+            >= fallback_delivery.minimum_accepted_evidence_per_resource
+        )
+        if is_ready:
+            readiness_state: ReadinessState = "ready"
+            reason_code = ""
+        elif is_fallback_eligible:
+            readiness_state = "fallback_eligible"
+            reason_code = "required_evidence_incomplete"
+        else:
+            readiness_state = "blocked_insufficient_evidence"
+            reason_code = (
+                "fallback_not_activated"
+                if evidence_ids
+                else "insufficient_accepted_evidence"
+            )
         readiness_rows.append(
             ResourceReadiness(
                 resource_type=resource_type,
-                readiness_state=(
-                    "ready" if is_ready else "blocked_insufficient_evidence"
-                ),
+                readiness_state=readiness_state,
                 required_requirement_ids=required_ids,
                 complete_requirement_ids=complete_ids,
                 blocked_requirement_ids=blocked_ids,
                 evidence_ids=evidence_ids,
-                reason_code="" if is_ready else "required_evidence_incomplete",
+                reason_code=reason_code,
             )
         )
     return tuple(readiness_rows)
@@ -1281,14 +1345,14 @@ def derive_resource_evidence_assignments(
     batch: CompiledRequirementCoverageBatch,
     entries: Sequence[EvidenceLedgerEntry],
 ) -> tuple[ResourceEvidenceAssignment, ...]:
-    """Assign accepted evidence only to resources whose required needs are ready."""
+    """Assign accepted evidence only to strict or fallback-eligible resources."""
     if not isinstance(batch, CompiledRequirementCoverageBatch):
         raise TypeError("batch must be CompiledRequirementCoverageBatch")
     accepted_by_id = {entry.evidence_id: entry for entry in entries if entry.accepted}
     coverage_by_id = {item.requirement_id: item for item in batch.coverages}
     assignments: list[ResourceEvidenceAssignment] = []
     for row in readiness:
-        if row.readiness_state != "ready":
+        if row.readiness_state not in {"ready", "fallback_eligible"}:
             continue
         resource_requirements = tuple(
             item for item in requirements if item.resource_type == row.resource_type
@@ -1299,36 +1363,53 @@ def derive_resource_evidence_assignments(
         topic_ids = _unique_preserving_order(
             tuple(item.topic_id for item in resource_requirements)
         )
-        requirement_ids = tuple(
-            item.requirement_id
-            for item in resource_requirements
-            if coverage_by_id[item.requirement_id].evidence_ids
+        requirement_ids = tuple(item.requirement_id for item in resource_requirements)
+        evidence_pairs = tuple(
+            (requirement_id, evidence_id)
+            for requirement_id in requirement_ids
+            for evidence_id in coverage_by_id[requirement_id].evidence_ids
         )
         evidence_ids = _unique_preserving_order(
-            tuple(
-                evidence_id
-                for requirement_id in requirement_ids
-                for evidence_id in coverage_by_id[requirement_id].evidence_ids
-            )
+            tuple(evidence_id for _, evidence_id in evidence_pairs)
         )
         if not evidence_ids:
             raise ResourceEvidenceAssignmentError(
                 code="ready_resource_without_evidence",
                 reason="ready resource must have accepted assigned evidence",
             )
-        for evidence_id in evidence_ids:
+        if evidence_ids != row.evidence_ids:
+            raise ResourceEvidenceAssignmentError(
+                code="readiness_assignment_evidence_mismatch",
+                reason="assignment evidence must exactly match its readiness evidence",
+            )
+        for requirement_id, evidence_id in evidence_pairs:
             entry = accepted_by_id.get(evidence_id)
-            if entry is None or entry.resource_type != row.resource_type:
+            if (
+                entry is None
+                or entry.resource_type != row.resource_type
+                or entry.requirement_id != requirement_id
+            ):
                 raise ResourceEvidenceAssignmentError(
                     code="invalid_assignment_evidence_ref",
-                    reason="assignment may use only accepted evidence for its resource",
+                    reason=(
+                        "assignment may use only accepted evidence bound to its "
+                        "resource and requirement"
+                    ),
                 )
+        delivery_mode: ResourceDeliveryMode = (
+            "strict" if row.readiness_state == "ready" else "fallback"
+        )
+        unmet_requirement_ids = (
+            () if delivery_mode == "strict" else row.blocked_requirement_ids
+        )
         fingerprint = make_resource_assignment_fingerprint(
             resource_type=row.resource_type,
             subjects=subjects,
             topic_ids=topic_ids,
             requirement_ids=requirement_ids,
             evidence_ids=evidence_ids,
+            delivery_mode=delivery_mode,
+            unmet_requirement_ids=unmet_requirement_ids,
         )
         assignments.append(
             ResourceEvidenceAssignment(
@@ -1337,6 +1418,8 @@ def derive_resource_evidence_assignments(
                 topic_ids=topic_ids,
                 requirement_ids=requirement_ids,
                 evidence_ids=evidence_ids,
+                delivery_mode=delivery_mode,
+                unmet_requirement_ids=unmet_requirement_ids,
                 assignment_fingerprint=fingerprint,
             )
         )
@@ -1351,6 +1434,7 @@ __all__ = [
     "EvidenceBudgetExceededError",
     "EvidenceLedgerEntry",
     "EvidenceLedgerValidationError",
+    "LEGACY_RESOURCE_EVIDENCE_CONTRACT_VERSION",
     "EvidenceOrchestrationContractError",
     "EvidenceRepairPlan",
     "EvidenceRequirement",
@@ -1364,6 +1448,7 @@ __all__ = [
     "RESOURCE_EVIDENCE_CONTRACT_VERSION",
     "ResourceEvidenceAssignment",
     "ResourceEvidenceAssignmentError",
+    "ResourceDeliveryMode",
     "ResourceReadiness",
     "RetrievalPriority",
     "RetrievalTask",

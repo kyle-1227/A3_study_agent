@@ -71,7 +71,10 @@ class AssessmentHistorySourceV1(_StrictHistoryContract):
             r"[0-9a-f]{4}-[0-9a-f]{12}$"
         )
     )
-    assignment_contract_version: Literal["resource_evidence_assignment_v1"]
+    assignment_contract_version: Literal[
+        "resource_evidence_assignment_v1",
+        "resource_evidence_assignment_v2",
+    ]
     assignment_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

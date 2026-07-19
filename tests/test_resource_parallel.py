@@ -28,6 +28,7 @@ from src.graph.resource_final_v3 import (
     ResourceFinalV3,
     ResourceFinalV3ResourceValidation,
 )
+from src.graph.resource_validation import ResourceValidationResultV1
 from src.graph.resource_generation import (
     dispatch_resource_workers,
     dispatch_resource_workers_to_recommendation_aggregator,
@@ -97,12 +98,16 @@ def _candidate_assignment(resource_type: ResourceType) -> dict[str, object]:
         "topic_ids": list(topic_ids),
         "requirement_ids": list(requirement_ids),
         "evidence_ids": list(evidence_ids),
+        "delivery_mode": "strict",
+        "unmet_requirement_ids": [],
         "assignment_fingerprint": make_resource_assignment_fingerprint(
             resource_type=resource_type,
             subjects=subjects,
             topic_ids=topic_ids,
             requirement_ids=requirement_ids,
             evidence_ids=evidence_ids,
+            delivery_mode="strict",
+            unmet_requirement_ids=(),
         ),
     }
 
@@ -123,6 +128,89 @@ def _candidate_evidence_state(
             _candidate_assignment(resource_type) for resource_type in assigned
         ],
     }
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    (
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+    ),
+)
+def test_every_resource_type_schedules_a_bounded_fallback_task(
+    resource_type: ResourceType,
+) -> None:
+    state = _candidate_evidence_state(resource_type)
+    assignment = dict(state["resource_evidence_assignments"][0])
+    requirement_ids = tuple(assignment["requirement_ids"])
+    evidence_ids = tuple(assignment["evidence_ids"])
+    subjects = tuple(assignment["subjects"])
+    topic_ids = tuple(assignment["topic_ids"])
+    assignment.update(
+        {
+            "delivery_mode": "fallback",
+            "unmet_requirement_ids": list(requirement_ids),
+            "assignment_fingerprint": make_resource_assignment_fingerprint(
+                resource_type=resource_type,
+                subjects=subjects,
+                topic_ids=topic_ids,
+                requirement_ids=requirement_ids,
+                evidence_ids=evidence_ids,
+                delivery_mode="fallback",
+                unmet_requirement_ids=requirement_ids,
+            ),
+        }
+    )
+    state.update(
+        {
+            "resource_evidence_assignments": [assignment],
+            "requested_resource_type": resource_type,
+            "requested_resource_types": [resource_type],
+            "resource_fallback_delivery_max_seconds": 120.0,
+        }
+    )
+
+    tasks = rg._resource_plan_from_state(state)
+
+    assert tasks == [
+        {
+            "task_id": f"resource:{resource_type}",
+            "resource_type": resource_type,
+            "subjects": ["math"],
+            "topic_ids": ["functions"],
+            "delivery_mode": "fallback",
+            "fallback_delivery_timeout_seconds": 120.0,
+            "status": "pending",
+        }
+    ]
+
+
+def test_fallback_result_is_revalidated_and_never_promoted_to_success() -> None:
+    validation = ResourceValidationResultV1(
+        schema_version="resource_validation_v1",
+        resource_type="mindmap",
+        valid=True,
+        terminal_status="success",
+        renderable_count=1,
+        downloadable_count=0,
+        verified_local_count=0,
+        remote_unverified_count=0,
+        failure_reason="",
+        warnings=(),
+    )
+
+    result = rg._mark_fallback_result_partial_success(
+        {"status": "success", "validation": validation.model_dump(mode="json")}
+    )
+
+    assert result["status"] == "partial_success"
+    assert result["validation"]["terminal_status"] == "partial_success"
+    assert result["validation"]["warnings"] == ["evidence_scope_limited"]
 
 
 GUIDANCE_RUNTIME = LearningGuidanceRuntime(
@@ -480,6 +568,7 @@ async def test_candidate_orchestrator_preserves_exact_assignment_binding():
             "resource_type": "mindmap",
             "subjects": ["math"],
             "topic_ids": ["functions"],
+            "delivery_mode": "strict",
             "status": "pending",
         }
     ]

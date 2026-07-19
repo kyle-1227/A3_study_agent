@@ -20,7 +20,7 @@ profiles:
         evidence_kind: concept_relationships
         scope: per_subject
         criticality: required
-        source_policy: local_only
+        source_policy: local_then_web_on_gap
         acceptance_criteria: Establishes the named concepts and explicit hierarchical or causal relationships between them.
       - need_id: hierarchy_crosscheck
         evidence_kind: structural_crosscheck
@@ -34,7 +34,7 @@ profiles:
         evidence_kind: assessable_claims
         scope: per_subject
         criticality: required
-        source_policy: local_only
+        source_policy: local_then_web_on_gap
         acceptance_criteria: Supports unambiguous facts or procedures from which answerable questions can be derived.
       - need_id: misconception_distractors
         evidence_kind: misconception_boundaries
@@ -90,7 +90,7 @@ profiles:
         evidence_kind: prerequisite_structure
         scope: per_subject
         criticality: required
-        source_policy: local_only
+        source_policy: local_then_web_on_gap
         acceptance_criteria: Establishes prerequisite dependencies and a defensible learning sequence for the requested scope.
       - need_id: current_learning_resources
         evidence_kind: current_resource_guidance

@@ -23,6 +23,7 @@ from src.config.evidence_orchestration_contracts import (
     RequirementCoverage,
     RequirementCoverageBatch,
     RequirementCoverageValidationError,
+    ResourceEvidenceAssignmentError,
     RetrievalTaskValidationError,
     build_retrieval_task,
     compile_evidence_requirement_batch,
@@ -101,6 +102,30 @@ def test_strict_configs_load_complete_explicit_inventory():
     assert policy.max_total_search_tasks == 24
     assert policy.max_ledger_entries == 72
     assert policy.max_concurrent_tasks == 1
+    assert policy.schema_version == "evidence_orchestration_config_v2"
+    assert policy.max_consecutive_no_progress_rounds == 2
+    assert policy.fallback_delivery.model_dump(mode="json") == {
+        "schema_version": "evidence_fallback_delivery_v1",
+        "eligible_resource_types": [
+            "review_doc",
+            "mindmap",
+            "quiz",
+            "code_practice",
+            "video_script",
+            "video_animation",
+            "study_plan",
+        ],
+        "minimum_accepted_evidence_per_resource": 1,
+        "max_resource_generation_attempts": 1,
+        "max_delivery_seconds": 120.0,
+        "additional_retrieval_task_budget": 0,
+        "runtime_identity_policy": "inherit_normal_resource_runtime",
+        "evidence_binding_policy": "accepted_bound_only",
+        "validation_policy": "normal_pydantic_and_business_validators",
+        "no_evidence_policy": "block_resource",
+        "validation_failure_policy": "block_resource",
+        "terminal_status": "partial_success",
+    }
     assert policy.judge_partition_reask.model_dump(mode="json") == {
         "schema_version": "evidence_judge_partition_reask_v1",
         "strategy": "resource_subject_partition_v1",
@@ -125,6 +150,11 @@ def test_strict_configs_load_complete_explicit_inventory():
         "study_plan",
     )
     assert all(profile.needs for profile in profiles.profiles)
+    assert all(
+        need.source_policy != "local_only"
+        for profile in profiles.profiles
+        for need in profile.needs
+    )
 
 
 def test_strict_config_rejects_extra_field_without_defaulting():
@@ -165,6 +195,187 @@ def test_strict_config_requires_partition_reask_policy():
         location == "judge_partition_reask"
         for location, _error_type in exc_info.value.validation_errors
     )
+
+
+def test_strict_config_requires_explicit_fallback_delivery_policy():
+    invalid = Path("invalid-evidence-fallback-delivery.yaml")
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        "fallback_delivery:",
+        "fallback_delivery_disabled:",
+        1,
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    locations = {location for location, _error_type in exc_info.value.validation_errors}
+    assert "fallback_delivery" in locations
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    (
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+    ),
+)
+def test_all_resource_types_require_accepted_evidence_for_fallback_assignment(
+    resource_type: str,
+) -> None:
+    policy = load_evidence_orchestration_config(POLICY_PATH)
+    profiles = load_resource_evidence_profiles(PROFILES_PATH)
+    need = next(
+        item
+        for item in profiles.profile_for(resource_type).needs
+        if item.criticality == "required"
+    )
+    requirement = compile_evidence_requirement_batch(
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=[
+                EvidenceRequirementDraft(
+                    resource_type=resource_type,
+                    subject="math",
+                    topic_id="math.fallback",
+                    profile_need_id=need.need_id,
+                    evidence_kind=need.evidence_kind,
+                    scope=need.scope,
+                    criticality=need.criticality,
+                    source_policy=need.source_policy,
+                    acceptance_criteria=need.acceptance_criteria,
+                    query_intent="math bounded fallback evidence",
+                )
+            ],
+        )
+    )[0]
+    task = build_retrieval_task(
+        requirement=requirement,
+        source_type="local_rag",
+        query="math bounded fallback evidence",
+        purpose=requirement.acceptance_criteria,
+        priority="high",
+        round_index=0,
+        result_limit=policy.max_results_per_task,
+    )
+    source_identity = f"{len(resource_type):064x}"
+    content_fingerprint = f"{len(resource_type) + 1:064x}"
+    evidence_id = make_evidence_id(
+        requirement_id=requirement.requirement_id,
+        source_type="local_rag",
+        source_identity_fingerprint=source_identity,
+        content_fingerprint=content_fingerprint,
+    )
+    entry = EvidenceLedgerEntry(
+        round_index=0,
+        task_id=task.task_id,
+        requirement_id=requirement.requirement_id,
+        evidence_id=evidence_id,
+        resource_type=resource_type,
+        subject="math",
+        source_type="local_rag",
+        candidate_ref=f"child_{resource_type}",
+        candidate_snapshot_fingerprint="a" * 64,
+        source_identity_fingerprint=source_identity,
+        content_fingerprint=content_fingerprint,
+        accepted=True,
+        rejection_reason_code="",
+    )
+    partial = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=requirement.requirement_id,
+                    resource_type=resource_type,
+                    subject="math",
+                    round_index=0,
+                    coverage_state="partial",
+                    evidence_ids=[evidence_id],
+                    confidence=0.5,
+                    reason="The accepted evidence supports only a limited scope.",
+                    suggested_local_query="",
+                    suggested_web_query="math bounded supplemental evidence",
+                )
+            ],
+        )
+    )
+    fallback_readiness = derive_resource_readiness(
+        requested_resource_types=(resource_type,),
+        requirements=(requirement,),
+        batch=partial,
+        entries=(entry,),
+        fallback_delivery=policy.fallback_delivery,
+        fallback_allowed=True,
+    )
+    assignments = derive_resource_evidence_assignments(
+        readiness=fallback_readiness,
+        requirements=(requirement,),
+        batch=partial,
+        entries=(entry,),
+    )
+
+    assert fallback_readiness[0].readiness_state == "fallback_eligible"
+    assert assignments[0].delivery_mode == "fallback"
+    assert assignments[0].unmet_requirement_ids == (requirement.requirement_id,)
+    assert assignments[0].evidence_ids == (evidence_id,)
+
+    missing = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=0,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=requirement.requirement_id,
+                    resource_type=resource_type,
+                    subject="math",
+                    round_index=0,
+                    coverage_state="missing",
+                    evidence_ids=[],
+                    confidence=0.0,
+                    reason="No accepted evidence is available.",
+                    suggested_local_query="",
+                    suggested_web_query="math bounded supplemental evidence",
+                )
+            ],
+        )
+    )
+    blocked_readiness = derive_resource_readiness(
+        requested_resource_types=(resource_type,),
+        requirements=(requirement,),
+        batch=missing,
+        entries=(),
+        fallback_delivery=policy.fallback_delivery,
+        fallback_allowed=True,
+    )
+    assert blocked_readiness[0].readiness_state == "blocked_insufficient_evidence"
+    assert (
+        derive_resource_evidence_assignments(
+            readiness=blocked_readiness,
+            requirements=(requirement,),
+            batch=missing,
+            entries=(),
+        )
+        == ()
+    )
+
+    with pytest.raises(ResourceEvidenceAssignmentError):
+        derive_resource_readiness(
+            requested_resource_types=(resource_type,),
+            requirements=(requirement,),
+            batch=partial,
+            entries=(),
+            fallback_delivery=policy.fallback_delivery,
+            fallback_allowed=True,
+        )
 
 
 def test_strict_config_rejects_non_descending_priority_weights():
@@ -325,14 +536,14 @@ def test_requirement_inventory_reports_missing_and_unexpected_slots():
 def test_retrieval_task_validation_rejects_illegal_source_and_repeat():
     policy = load_evidence_orchestration_config(POLICY_PATH)
     _profiles, requirements = _quiz_requirements()
-    local_only = next(
-        item for item in requirements if item.source_policy == "local_only"
+    local_then_web = next(
+        item for item in requirements if item.source_policy == "local_then_web_on_gap"
     )
     illegal = build_retrieval_task(
-        requirement=local_only,
+        requirement=local_then_web,
         source_type="web",
         query="math assessable facts official source",
-        purpose=local_only.acceptance_criteria,
+        purpose=local_then_web.acceptance_criteria,
         priority="high",
         round_index=0,
         result_limit=policy.max_results_per_task,
@@ -340,7 +551,7 @@ def test_retrieval_task_validation_rejects_illegal_source_and_repeat():
 
     with pytest.raises(
         RetrievalTaskValidationError,
-        match="illegal_source_for_requirement",
+        match="web_before_local_gap",
     ):
         validate_retrieval_tasks(
             tasks=(illegal,),
@@ -353,10 +564,10 @@ def test_retrieval_task_validation_rejects_illegal_source_and_repeat():
         )
 
     legal = build_retrieval_task(
-        requirement=local_only,
+        requirement=local_then_web,
         source_type="local_rag",
         query="math assessable facts course notes",
-        purpose=local_only.acceptance_criteria,
+        purpose=local_then_web.acceptance_criteria,
         priority="high",
         round_index=0,
         result_limit=policy.max_results_per_task,
@@ -460,6 +671,9 @@ def test_coverage_derives_ready_resource_and_exact_assignment():
         requested_resource_types=("quiz",),
         requirements=requirements,
         batch=compiled_batch,
+        entries=(entry,),
+        fallback_delivery=policy.fallback_delivery,
+        fallback_allowed=False,
     )
     assignments = derive_resource_evidence_assignments(
         readiness=readiness,
@@ -586,6 +800,9 @@ def test_multi_resource_readiness_allows_only_ready_resource_assignment():
         requested_resource_types=("quiz", "mindmap"),
         requirements=requirements,
         batch=compiled_coverage,
+        entries=(entry,),
+        fallback_delivery=policy.fallback_delivery,
+        fallback_allowed=False,
     )
     assignments = derive_resource_evidence_assignments(
         readiness=readiness,

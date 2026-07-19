@@ -995,6 +995,8 @@ def make_resource_evidence_planner_node(
             "resource_evidence_assignments": [],
             "blocked_resource_types": [],
             "ready_resource_types": [],
+            "fallback_resource_types": [],
+            "resource_fallback_delivery_max_seconds": 0.0,
         }
 
     return resource_evidence_planner
@@ -2159,10 +2161,12 @@ async def _invoke_requirement_coverage_batch(
         messages=[
             SystemMessage(
                 content=(
-                    partition_instruction
-                    + "Preserve round_index on every coverage row. Every incomplete "
-                    "local_and_web row must contain both new suggested queries in "
-                    "every round. Evaluate only the bound_candidates nested under "
+                        partition_instruction
+                        + "Preserve round_index on every coverage row. Every incomplete "
+                        "local_and_web row must contain both new suggested queries in "
+                        "every round. Every incomplete local_then_web_on_gap row after "
+                        "local completion must contain only a new web suggested query. "
+                        "Evaluate only the bound_candidates nested under "
                     "the same requirement_id. Never declare resource readiness, "
                     "invent evidence ids, or copy them between requirements."
                 )
@@ -2446,6 +2450,9 @@ def make_requirement_evidence_judge_node(
             requested_resource_types=resources,
             requirements=requirements,
             batch=compiled,
+            entries=ledger,
+            fallback_delivery=runtime.policy.fallback_delivery,
+            fallback_allowed=False,
         )
         coverage_requirement_ids = {
             coverage.requirement_id for coverage in compiled.coverages
@@ -3122,10 +3129,34 @@ def make_resource_evidence_assignment_node(
         resources = _RESOURCE_TYPES_ADAPTER.validate_python(
             tuple(state.get("evidence_requested_resource_types") or [])
         )
+        terminal_reason_code = state.get("evidence_terminal_reason_code")
+        if (
+            not isinstance(terminal_reason_code, str)
+            or not terminal_reason_code.strip()
+        ):
+            raise EvidenceOrchestrationContractError(
+                code="missing_terminal_reason_code",
+                reason="terminal resource assignment requires an explicit reason code",
+            )
+        fallback_allowed = False
+        if terminal_reason_code in {
+            "no_measurable_coverage_progress",
+            "supplement_round_budget_exhausted",
+        }:
+            fallback_allowed = (
+                _required_state_count(
+                    state,
+                    "evidence_consecutive_no_progress_rounds",
+                )
+                >= runtime.policy.max_consecutive_no_progress_rounds
+            )
         readiness = derive_resource_readiness(
             requested_resource_types=resources,
             requirements=requirements,
             batch=coverage,
+            entries=ledger,
+            fallback_delivery=runtime.policy.fallback_delivery,
+            fallback_allowed=fallback_allowed,
         )
         assignments = derive_resource_evidence_assignments(
             readiness=readiness,
@@ -3136,6 +3167,16 @@ def make_resource_evidence_assignment_node(
         assignment_by_resource = {item.resource_type: item for item in assignments}
         ready = tuple(
             row.resource_type for row in readiness if row.readiness_state == "ready"
+        )
+        fallback = tuple(
+            row.resource_type
+            for row in readiness
+            if row.readiness_state == "fallback_eligible"
+        )
+        deliverable = tuple(
+            row.resource_type
+            for row in readiness
+            if row.readiness_state in {"ready", "fallback_eligible"}
         )
         blocked = tuple(
             row.resource_type
@@ -3160,19 +3201,31 @@ def make_resource_evidence_assignment_node(
                     ),
                     "resource_type": row.resource_type,
                     "status": (
-                        "ready" if row.readiness_state == "ready" else "blocked"
+                        "ready"
+                        if row.readiness_state == "ready"
+                        else "fallback"
+                        if row.readiness_state == "fallback_eligible"
+                        else "blocked"
                     ),
                     "requirement_count": len(row.required_requirement_ids),
                     "assigned_evidence_count": len(row.evidence_ids),
                     "missing_requirement_count": len(row.blocked_requirement_ids),
                     "assignment_fingerprint": fingerprint,
                     "assignment_contract_version": (RESOURCE_EVIDENCE_CONTRACT_VERSION),
+                    "delivery_mode": (
+                        assignment.delivery_mode if assignment is not None else None
+                    ),
+                    "reason_code": (
+                        "all_required_evidence_complete"
+                        if row.readiness_state == "ready"
+                        else row.reason_code
+                    ),
                 },
                 state=state,
             )
         if len(ready) == len(resources):
             terminal_status = "sufficient"
-        elif ready:
+        elif deliverable:
             terminal_status = "partial_resources_ready"
         else:
             terminal_status_value = state.get("evidence_terminal_status")
@@ -3199,15 +3252,6 @@ def make_resource_evidence_assignment_node(
                         "blocked resource assignment received an invalid terminal status"
                     ),
                 )
-        terminal_reason_code = state.get("evidence_terminal_reason_code")
-        if (
-            not isinstance(terminal_reason_code, str)
-            or not terminal_reason_code.strip()
-        ):
-            raise EvidenceOrchestrationContractError(
-                code="missing_terminal_reason_code",
-                reason="terminal resource assignment requires an explicit reason code",
-            )
         all_tasks = tuple(
             RetrievalTask.model_validate(item)
             for item in (state.get("evidence_all_tasks") or [])
@@ -3248,11 +3292,15 @@ def make_resource_evidence_assignment_node(
                 item.model_dump(mode="json") for item in assignments
             ],
             "ready_resource_types": list(ready),
+            "fallback_resource_types": list(fallback),
             "blocked_resource_types": list(blocked),
-            "requested_resource_type": ready[0] if ready else "",
-            "requested_resource_types": list(ready),
+            "resource_fallback_delivery_max_seconds": (
+                runtime.policy.fallback_delivery.max_delivery_seconds
+            ),
+            "requested_resource_type": deliverable[0] if deliverable else "",
+            "requested_resource_types": list(deliverable),
             "resource_generation_status": (
-                "preflight" if ready else "blocked_insufficient_evidence"
+                "preflight" if deliverable else "blocked_insufficient_evidence"
             ),
             "evidence_terminal_status": terminal_status,
             "evidence_orchestration_status": "complete",

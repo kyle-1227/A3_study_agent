@@ -204,12 +204,16 @@ def _resource_assignment(*evidence_ids: str) -> dict:
         "topic_ids": list(topic_ids),
         "requirement_ids": list(requirement_ids),
         "evidence_ids": list(evidence_ids),
+        "delivery_mode": "strict",
+        "unmet_requirement_ids": [],
         "assignment_fingerprint": make_resource_assignment_fingerprint(
             resource_type="quiz",
             subjects=subjects,
             topic_ids=topic_ids,
             requirement_ids=requirement_ids,
             evidence_ids=evidence_ids,
+            delivery_mode="strict",
+            unmet_requirement_ids=(),
         ),
     }
 

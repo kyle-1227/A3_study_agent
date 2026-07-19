@@ -327,6 +327,13 @@ export function mergeResourceFinalIntoMessage(
     threadId: event.thread_id,
     resourceFinalPayload: { ...event },
     resourceFinalDedupeKey: resourceFinalDedupeKey(event),
+    resourceScopeNotice:
+      message.resourceScopeNotice ||
+      event.resources.some(
+        (resource) =>
+          resource.status === "partial_success" &&
+          resource.validation.warnings.includes("evidence_scope_limited"),
+      ),
   }
 
   for (const resource of event.resources) {

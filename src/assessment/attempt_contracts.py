@@ -140,7 +140,10 @@ class AssessmentLearningGuidanceBindingV1(BaseModel):
         pattern=_REQUEST_ID_PATTERN,
         max_length=160,
     )
-    assignment_contract_version: Literal["resource_evidence_assignment_v1"]
+    assignment_contract_version: Literal[
+        "resource_evidence_assignment_v1",
+        "resource_evidence_assignment_v2",
+    ]
     assignment_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("user_id")
