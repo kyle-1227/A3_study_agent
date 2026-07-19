@@ -3142,13 +3142,18 @@ def make_resource_evidence_assignment_node(
                 code="missing_terminal_reason_code",
                 reason="terminal resource assignment requires an explicit reason code",
             )
+        trigger_policy = runtime.policy.fallback_delivery.trigger_policy
         fallback_allowed = False
-        if terminal_reason_code in {
-            "no_measurable_coverage_progress",
-            "supplement_round_budget_exhausted",
-        }:
+        if terminal_reason_code == "supplement_round_budget_exhausted":
             fallback_allowed = (
-                _required_state_count(
+                trigger_policy.supplement_round_budget_exhausted
+                == "fallback_if_evidence_eligible"
+            )
+        elif terminal_reason_code == "no_measurable_coverage_progress":
+            fallback_allowed = (
+                trigger_policy.no_measurable_coverage_progress
+                == "fallback_at_configured_threshold"
+                and _required_state_count(
                     state,
                     "evidence_consecutive_no_progress_rounds",
                 )

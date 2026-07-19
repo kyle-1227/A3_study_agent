@@ -81,10 +81,19 @@ class EvidenceJudgePartitionReaskConfig(StrictRagConfigModel):
     incomplete_partition_policy: Literal["block_resource"]
 
 
+class EvidenceFallbackTriggerPolicy(StrictRagConfigModel):
+    """Explicit terminal-reason policy for bounded fallback delivery."""
+
+    schema_version: Literal["evidence_fallback_trigger_v1"]
+    supplement_round_budget_exhausted: Literal["fallback_if_evidence_eligible"]
+    no_measurable_coverage_progress: Literal["fallback_at_configured_threshold"]
+
+
 class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
     """Explicit, bounded delivery policy for evidence-limited resources."""
 
-    schema_version: Literal["evidence_fallback_delivery_v1"]
+    schema_version: Literal["evidence_fallback_delivery_v2"]
+    trigger_policy: EvidenceFallbackTriggerPolicy
     eligible_resource_types: Annotated[
         tuple[ResourceType, ...],
         BeforeValidator(_freeze_sequence),
@@ -114,7 +123,7 @@ class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
 class EvidenceOrchestrationConfig(StrictRagConfigModel):
     """Bounded orchestration policy with explicit failure behavior."""
 
-    schema_version: Literal["evidence_orchestration_config_v2"]
+    schema_version: Literal["evidence_orchestration_config_v3"]
     max_supplement_rounds: NonNegativeInt
     max_search_tasks_per_round: PositiveInt
     max_total_search_tasks: PositiveInt
@@ -250,6 +259,7 @@ __all__ = [
     "CANONICAL_RESOURCE_TYPES",
     "EvidenceCriticality",
     "EvidenceFallbackDeliveryConfig",
+    "EvidenceFallbackTriggerPolicy",
     "EvidenceJudgePartitionReaskConfig",
     "EvidenceNeedScope",
     "EvidenceOrchestrationConfig",

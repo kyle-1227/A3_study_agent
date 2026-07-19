@@ -1624,6 +1624,46 @@ def test_terminal_assignment_enables_fallback_only_after_two_no_progress_rounds(
     assert blocked_before_threshold["fallback_resource_types"] == []
     assert blocked_before_threshold["blocked_resource_types"] == ["quiz"]
 
+    budget_coverage_payload = coverage.model_dump(mode="python")
+    budget_coverage_payload["round_index"] = runtime.policy.max_supplement_rounds
+    for row in budget_coverage_payload["coverages"]:
+        row["round_index"] = runtime.policy.max_supplement_rounds
+    budget_coverage = RequirementCoverageBatch.model_validate(budget_coverage_payload)
+    assigned_after_budget_exhaustion = (
+        orchestration.make_resource_evidence_assignment_node(runtime)(
+            {
+                **state,
+                "evidence_current_round": runtime.policy.max_supplement_rounds,
+                "evidence_consecutive_no_progress_rounds": 0,
+                "evidence_coverage": compile_requirement_coverage_batch(
+                    budget_coverage
+                ).model_dump(mode="json"),
+                "evidence_terminal_status": "insufficient_max_rounds",
+                "evidence_terminal_reason_code": "supplement_round_budget_exhausted",
+            }
+        )
+    )
+    assert assigned_after_budget_exhaustion["fallback_resource_types"] == ["quiz"]
+    assert assigned_after_budget_exhaustion["blocked_resource_types"] == []
+
+    for terminal_reason_code in (
+        "source_execution_failed",
+        "partition_call_budget_exhausted",
+    ):
+        blocked_after_noneligible_terminal = (
+            orchestration.make_resource_evidence_assignment_node(runtime)(
+                {
+                    **state,
+                    "evidence_terminal_status": "blocked_insufficient_evidence",
+                    "evidence_terminal_reason_code": terminal_reason_code,
+                }
+            )
+        )
+        assert blocked_after_noneligible_terminal["fallback_resource_types"] == []
+        assert blocked_after_noneligible_terminal["blocked_resource_types"] == [
+            "quiz"
+        ]
+
 
 def test_judge_partition_reask_enforces_total_partition_call_budget(monkeypatch):
     runtime = _runtime()

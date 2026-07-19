@@ -102,10 +102,15 @@ def test_strict_configs_load_complete_explicit_inventory():
     assert policy.max_total_search_tasks == 24
     assert policy.max_ledger_entries == 72
     assert policy.max_concurrent_tasks == 1
-    assert policy.schema_version == "evidence_orchestration_config_v2"
+    assert policy.schema_version == "evidence_orchestration_config_v3"
     assert policy.max_consecutive_no_progress_rounds == 2
     assert policy.fallback_delivery.model_dump(mode="json") == {
-        "schema_version": "evidence_fallback_delivery_v1",
+        "schema_version": "evidence_fallback_delivery_v2",
+        "trigger_policy": {
+            "schema_version": "evidence_fallback_trigger_v1",
+            "supplement_round_budget_exhausted": "fallback_if_evidence_eligible",
+            "no_measurable_coverage_progress": "fallback_at_configured_threshold",
+        },
         "eligible_resource_types": [
             "review_doc",
             "mindmap",
@@ -213,6 +218,89 @@ def test_strict_config_requires_explicit_fallback_delivery_policy():
 
     locations = {location for location, _error_type in exc_info.value.validation_errors}
     assert "fallback_delivery" in locations
+
+
+def test_strict_config_requires_explicit_fallback_trigger_policy():
+    invalid = Path("invalid-evidence-fallback-trigger.yaml")
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        """  trigger_policy:
+    schema_version: evidence_fallback_trigger_v1
+    supplement_round_budget_exhausted: fallback_if_evidence_eligible
+    no_measurable_coverage_progress: fallback_at_configured_threshold
+""",
+        "",
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    assert any(
+        "trigger_policy" in location
+        for location, _error_type in exc_info.value.validation_errors
+    )
+
+
+def test_strict_config_rejects_extra_fallback_trigger_field():
+    invalid = Path("invalid-evidence-fallback-trigger-extra.yaml")
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        "    no_measurable_coverage_progress: fallback_at_configured_threshold\n",
+        """    no_measurable_coverage_progress: fallback_at_configured_threshold
+    unexpected_trigger_field: true
+""",
+        1,
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    assert any(
+        "unexpected_trigger_field" in location
+        for location, _error_type in exc_info.value.validation_errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy_schema_version", "expected_location"),
+    (
+        ("evidence_orchestration_config_v2", "schema_version"),
+        (
+            "evidence_fallback_delivery_v1",
+            "fallback_delivery.schema_version",
+        ),
+    ),
+)
+def test_strict_config_rejects_legacy_fallback_schema_versions(
+    legacy_schema_version: str,
+    expected_location: str,
+) -> None:
+    invalid = Path("invalid-evidence-fallback-schema-version.yaml")
+    current_schema_version = (
+        "evidence_orchestration_config_v3"
+        if expected_location == "schema_version"
+        else "evidence_fallback_delivery_v2"
+    )
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        current_schema_version,
+        legacy_schema_version,
+        1,
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    assert any(
+        location == expected_location
+        for location, _error_type in exc_info.value.validation_errors
+    )
 
 
 @pytest.mark.parametrize(
@@ -376,6 +464,165 @@ def test_all_resource_types_require_accepted_evidence_for_fallback_assignment(
             fallback_delivery=policy.fallback_delivery,
             fallback_allowed=True,
         )
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    (
+        "review_doc",
+        "mindmap",
+        "quiz",
+        "code_practice",
+        "video_script",
+        "video_animation",
+        "study_plan",
+    ),
+)
+def test_all_resource_types_allow_fallback_from_any_accepted_bound_evidence(
+    resource_type: str,
+) -> None:
+    policy = load_evidence_orchestration_config(POLICY_PATH)
+    profiles = load_resource_evidence_profiles(PROFILES_PATH)
+    requirements = compile_evidence_requirement_batch(
+        EvidenceRequirementDraftBatch(
+            schema_version="evidence_requirement_draft_batch_v1",
+            requirements=[
+                EvidenceRequirementDraft(
+                    resource_type=resource_type,
+                    subject="math",
+                    topic_id="math.fallback",
+                    profile_need_id=need.need_id,
+                    evidence_kind=need.evidence_kind,
+                    scope=need.scope,
+                    criticality=need.criticality,
+                    source_policy=need.source_policy,
+                    acceptance_criteria=need.acceptance_criteria,
+                    query_intent=(
+                        f"math {need.evidence_kind} bounded fallback evidence"
+                    ),
+                )
+                for need in profiles.profile_for(resource_type).needs
+            ],
+        )
+    )
+    required = next(item for item in requirements if item.criticality == "required")
+    supporting_requirements = tuple(
+        item for item in requirements if item.criticality == "supporting"
+    )
+    evidence_carrier = (
+        supporting_requirements[0]
+        if supporting_requirements
+        else next(
+            item
+            for item in requirements
+            if item.criticality == "required" and item != required
+        )
+    )
+    source_type = (
+        "local_rag" if evidence_carrier.source_policy == "local_only" else "web"
+    )
+    task = build_retrieval_task(
+        requirement=evidence_carrier,
+        source_type=source_type,
+        query=f"math {resource_type} bounded supporting evidence",
+        purpose=evidence_carrier.acceptance_criteria,
+        priority=(
+            "high"
+            if evidence_carrier.criticality == "required"
+            else "medium"
+        ),
+        round_index=1,
+        result_limit=policy.max_results_per_task,
+    )
+    source_identity = f"{len(resource_type) + 100:064x}"
+    content_fingerprint = f"{len(resource_type) + 101:064x}"
+    evidence_id = make_evidence_id(
+        requirement_id=evidence_carrier.requirement_id,
+        source_type=source_type,
+        source_identity_fingerprint=source_identity,
+        content_fingerprint=content_fingerprint,
+    )
+    entry = EvidenceLedgerEntry(
+        round_index=1,
+        task_id=task.task_id,
+        requirement_id=evidence_carrier.requirement_id,
+        evidence_id=evidence_id,
+        resource_type=resource_type,
+        subject="math",
+        source_type=source_type,
+        candidate_ref=f"child_{resource_type}",
+        candidate_snapshot_fingerprint="a" * 64,
+        source_identity_fingerprint=source_identity,
+        content_fingerprint=content_fingerprint,
+        accepted=True,
+        rejection_reason_code="",
+    )
+    coverage = compile_requirement_coverage_batch(
+        RequirementCoverageBatch(
+            schema_version="requirement_coverage_batch_v1",
+            round_index=1,
+            coverages=[
+                RequirementCoverage(
+                    requirement_id=item.requirement_id,
+                    resource_type=resource_type,
+                    subject="math",
+                    round_index=1,
+                    coverage_state=(
+                        "partial" if item == evidence_carrier else "missing"
+                    ),
+                    evidence_ids=(
+                        [evidence_id] if item == evidence_carrier else []
+                    ),
+                    confidence=0.5 if item == evidence_carrier else 0.0,
+                    reason=(
+                        "Accepted bounded evidence remains limited."
+                        if item == evidence_carrier
+                        else "No accepted evidence is available."
+                    ),
+                    suggested_local_query=(
+                        f"math {item.evidence_kind} local supplemental evidence"
+                        if item.source_policy in {"local_only", "local_and_web"}
+                        else ""
+                    ),
+                    suggested_web_query=(
+                        f"math {item.evidence_kind} supplemental evidence"
+                        if item.source_policy != "local_only"
+                        else ""
+                    ),
+                )
+                for item in requirements
+            ],
+        )
+    )
+    validate_requirement_coverage(
+        batch=coverage,
+        requirements=requirements,
+        entries=(entry,),
+    )
+
+    readiness = derive_resource_readiness(
+        requested_resource_types=(resource_type,),
+        requirements=requirements,
+        batch=coverage,
+        entries=(entry,),
+        fallback_delivery=policy.fallback_delivery,
+        fallback_allowed=True,
+    )
+    assignments = derive_resource_evidence_assignments(
+        readiness=readiness,
+        requirements=requirements,
+        batch=coverage,
+        entries=(entry,),
+    )
+
+    expected_unmet_requirement_ids = tuple(
+        item.requirement_id for item in requirements if item.criticality == "required"
+    )
+    assert readiness[0].readiness_state == "fallback_eligible"
+    assert readiness[0].blocked_requirement_ids == expected_unmet_requirement_ids
+    assert assignments[0].delivery_mode == "fallback"
+    assert assignments[0].unmet_requirement_ids == expected_unmet_requirement_ids
+    assert assignments[0].evidence_ids == (evidence_id,)
 
 
 def test_strict_config_rejects_non_descending_priority_weights():
