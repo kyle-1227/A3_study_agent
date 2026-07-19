@@ -356,6 +356,25 @@ def _fallback_delivery_timeout_seconds(
     return float(raw_timeout)
 
 
+def _fallback_generation_attempt_limit(state: LearningState) -> int:
+    """Resolve the explicit, bounded fallback retry budget from graph state."""
+
+    raw_limit = state.get("resource_fallback_delivery_max_generation_attempts")
+    if (
+        isinstance(raw_limit, bool)
+        or not isinstance(raw_limit, int)
+        or raw_limit != 2
+    ):
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_generation_attempt_limit",
+            reason=(
+                "fallback worker requires the explicit configured two-attempt "
+                "generation limit"
+            ),
+        )
+    return raw_limit
+
+
 def _resource_plan_from_state(state: LearningState) -> list[dict]:
     assignments = _candidate_resource_assignments_from_state(
         state,
@@ -411,6 +430,9 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
             if assignment.delivery_mode == "fallback":
                 task["fallback_delivery_timeout_seconds"] = (
                     _fallback_delivery_timeout_seconds(state, resource_type)
+                )
+                task["fallback_generation_attempt_limit"] = (
+                    _fallback_generation_attempt_limit(state)
                 )
             tasks.append(task)
         return tasks
@@ -1298,6 +1320,15 @@ async def resource_worker(state: LearningState) -> dict:
             )
             local_state["resource_delivery_mode"] = assignment.delivery_mode
             if assignment.delivery_mode == "fallback":
+                expected_attempt_limit = _fallback_generation_attempt_limit(state)
+                if task.get("fallback_generation_attempt_limit") != expected_attempt_limit:
+                    raise LearningGuidanceContractError(
+                        code="fallback_generation_attempt_limit_mismatch",
+                        reason=(
+                            "fallback resource task must preserve its explicit "
+                            "generation attempt limit"
+                        ),
+                    )
                 local_state["resource_evidence_scope_constraint"] = (
                     _FALLBACK_EVIDENCE_SCOPE_CONSTRAINT
                 )

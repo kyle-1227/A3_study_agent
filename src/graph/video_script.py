@@ -139,6 +139,35 @@ def _is_compact_fallback_delivery(state: LearningState) -> bool:
     return state.get("resource_delivery_mode") == "fallback"
 
 
+def _fallback_generation_attempt_limit(state: LearningState) -> int:
+    """Read the worker-bound fallback budget without inventing a default."""
+
+    task = state.get("resource_task")
+    if not isinstance(task, dict):
+        raise VideoScriptApprovalError(
+            "compact fallback video script requires an explicit resource task"
+        )
+    raw_limit = task.get("fallback_generation_attempt_limit")
+    if (
+        isinstance(raw_limit, bool)
+        or not isinstance(raw_limit, int)
+        or raw_limit != 2
+    ):
+        raise VideoScriptApprovalError(
+            "compact fallback video script requires the explicit two-attempt budget"
+        )
+    return raw_limit
+
+
+def _fallback_rejection_stage(state: LearningState) -> str:
+    """Expose only the safe rejection class, never model output or prompt text."""
+
+    local_check = state.get("video_script_local_check")
+    if isinstance(local_check, dict) and local_check.get("passed") is False:
+        return "local_structure_check"
+    return "reviewer_quality_check"
+
+
 def _format_context(
     context: list[dict],
     *,
@@ -369,6 +398,8 @@ def _agent_prompt(state: LearningState, outline: str) -> str:
         f"恰好 {_COMPACT_FALLBACK_STORYBOARD_SHOTS} 个分镜的紧凑脚本；"
         "每个必要章节都要保留，但每节只写直接支持该主题所需的最少内容。"
         "只能陈述下方已接受资料明确支持的内容，不能补充未经支持的例子、前置知识或结论。"
+        "返回前逐项自检：10 个必需标题、精确分镜表头、完整旁白、至少一条标准 SRT、"
+        "动画说明、互动提问和结尾总结必须全部存在；任何一项缺失都不得交付。"
         if compact_fallback
         else "请输出可直接交给视频制作人员使用的中等长度脚本。"
     )
@@ -606,8 +637,15 @@ async def video_script_reviewer(state: LearningState) -> dict:
 @traced_node
 async def video_script_rewrite(state: LearningState) -> dict:
     reason = state.get("video_script_review_reason", "")
+    revision_notes = f"Revise the video-script Markdown according to reviewer feedback:\n{reason}"
+    if _is_compact_fallback_delivery(state):
+        revision_notes += (
+            "\nThis is the final bounded fallback revision. Preserve the accepted-evidence "
+            "scope and return the complete required Markdown structure, including the exact "
+            "storyboard header and valid SRT timecodes."
+        )
     return {
-        "video_script_revision_notes": f"Revise the video-script Markdown according to reviewer feedback:\n{reason}",
+        "video_script_revision_notes": revision_notes,
         "video_script_outline": state.get("video_script_outline", ""),
     }
 
@@ -670,11 +708,15 @@ def should_rewrite_video_script(state: LearningState) -> str:
         raise VideoScriptApprovalError(
             "video script routing requires an explicit approve or reject verdict"
         )
-    if _is_compact_fallback_delivery(state):
-        raise VideoScriptApprovalError(
-            "compact fallback video script was rejected; rewrite budget is exhausted"
-        )
     current_round = int(state.get("video_script_round", 0) or 0)
+    if _is_compact_fallback_delivery(state):
+        max_attempts = _fallback_generation_attempt_limit(state)
+        if current_round < max_attempts:
+            return "rewrite"
+        raise VideoScriptApprovalError(
+            "compact fallback video script was rejected after its bounded "
+            f"{max_attempts} attempts ({_fallback_rejection_stage(state)})"
+        )
     if current_round < 2:
         return "rewrite"
     raise VideoScriptApprovalError(

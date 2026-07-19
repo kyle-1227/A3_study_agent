@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import ValidationError
 
 from src.config import load_settings
+from src.graph import resource_generation as resource_generation
 from src.graph.video_script import (
     VideoScriptApprovalError,
     VideoScriptGenerationError,
@@ -20,6 +21,7 @@ from src.graph.video_script import (
     video_script_agent,
     video_script_output,
     video_script_planner,
+    video_script_rewrite,
     video_script_reviewer,
 )
 from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
@@ -216,6 +218,7 @@ async def test_video_script_fallback_agent_requests_compact_bound_script() -> No
     prompt = provider.await_args.kwargs["messages"][1].content
     assert "基础版交付" in prompt
     assert "恰好 3 个分镜" in prompt
+    assert "返回前逐项自检" in prompt
     assert "中等长度" not in prompt
     assert "evidence-one" in prompt
     assert "evidence-two" in prompt
@@ -280,6 +283,21 @@ async def test_video_script_fallback_reviewer_keeps_structured_contract() -> Non
 
     provider.assert_awaited_once()
     assert result["video_script_review_verdict"] == "approve"
+
+
+@pytest.mark.anyio
+async def test_video_script_fallback_rewrite_preserves_scope_and_structure_guard() -> None:
+    result = await video_script_rewrite(
+        _state(
+            resource_delivery_mode="fallback",
+            video_script_review_reason="required SRT is missing",
+        )
+    )
+
+    assert "required SRT is missing" in result["video_script_revision_notes"]
+    assert "final bounded fallback revision" in result["video_script_revision_notes"]
+    assert "accepted-evidence scope" in result["video_script_revision_notes"]
+    assert "valid SRT timecodes" in result["video_script_revision_notes"]
 
 
 @pytest.mark.anyio
@@ -350,12 +368,14 @@ def test_video_script_router_blocks_unknown_or_exhausted_verdict() -> None:
             _state(video_script_review_verdict="reject", video_script_round=2)
         )
 
-    with pytest.raises(VideoScriptApprovalError, match="rewrite budget is exhausted"):
+    with pytest.raises(VideoScriptApprovalError, match="after its bounded 2 attempts"):
         should_rewrite_video_script(
             _state(
                 resource_delivery_mode="fallback",
                 video_script_review_verdict="reject",
-                video_script_round=1,
+                video_script_round=2,
+                video_script_local_check={"passed": False},
+                resource_task={"fallback_generation_attempt_limit": 2},
             )
         )
 
@@ -368,3 +388,64 @@ def test_video_script_router_allows_only_approved_output() -> None:
         )
         == "rewrite"
     )
+    assert (
+        should_rewrite_video_script(
+            _state(
+                resource_delivery_mode="fallback",
+                video_script_review_verdict="reject",
+                video_script_round=1,
+                resource_task={"fallback_generation_attempt_limit": 2},
+            )
+        )
+        == "rewrite"
+    )
+
+
+@pytest.mark.anyio
+async def test_video_script_fallback_rewrites_once_before_approved_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_rounds: list[int] = []
+
+    async def planner(_state: dict) -> dict:
+        return {"video_script_round": 0}
+
+    async def agent(state: dict) -> dict:
+        next_round = int(state.get("video_script_round", 0)) + 1
+        agent_rounds.append(next_round)
+        return {"video_script_round": next_round}
+
+    async def reviewer(state: dict) -> dict:
+        if state["video_script_round"] == 1:
+            return {
+                "video_script_review_verdict": "reject",
+                "video_script_review_reason": "required SRT is missing",
+                "video_script_local_check": {"passed": False},
+            }
+        return {
+            "video_script_review_verdict": "approve",
+            "video_script_review_reason": "complete and evidence-bound",
+            "video_script_local_check": {"passed": True},
+        }
+
+    async def rewrite(_state: dict) -> dict:
+        return {"video_script_revision_notes": "repair required structure"}
+
+    async def output(_state: dict) -> dict:
+        return {"messages": [AIMessage(content="validated video script")]}
+
+    monkeypatch.setattr(resource_generation, "video_script_planner", planner)
+    monkeypatch.setattr(resource_generation, "video_script_agent", agent)
+    monkeypatch.setattr(resource_generation, "video_script_reviewer", reviewer)
+    monkeypatch.setattr(resource_generation, "video_script_rewrite", rewrite)
+    monkeypatch.setattr(resource_generation, "video_script_output", output)
+
+    result = await resource_generation._run_video_script_resource(
+        {
+            "resource_delivery_mode": "fallback",
+            "resource_task": {"fallback_generation_attempt_limit": 2},
+        }
+    )
+
+    assert result == "validated video script"
+    assert agent_rounds == [1, 2]

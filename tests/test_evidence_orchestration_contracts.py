@@ -102,10 +102,10 @@ def test_strict_configs_load_complete_explicit_inventory():
     assert policy.max_total_search_tasks == 24
     assert policy.max_ledger_entries == 72
     assert policy.max_concurrent_tasks == 1
-    assert policy.schema_version == "evidence_orchestration_config_v4"
+    assert policy.schema_version == "evidence_orchestration_config_v5"
     assert policy.max_consecutive_no_progress_rounds == 2
     assert policy.fallback_delivery.model_dump(mode="json") == {
-        "schema_version": "evidence_fallback_delivery_v3",
+        "schema_version": "evidence_fallback_delivery_v4",
         "trigger_policy": {
             "schema_version": "evidence_fallback_trigger_v1",
             "supplement_round_budget_exhausted": "fallback_if_evidence_eligible",
@@ -121,7 +121,7 @@ def test_strict_configs_load_complete_explicit_inventory():
             "study_plan",
         ],
         "minimum_accepted_evidence_per_resource": 1,
-        "max_resource_generation_attempts": 1,
+        "max_resource_generation_attempts": 2,
         "max_delivery_seconds_by_resource": {
             "review_doc": 120.0,
             "mindmap": 120.0,
@@ -278,6 +278,26 @@ def test_strict_config_requires_explicit_per_resource_fallback_timeouts():
     )
 
 
+def test_strict_config_requires_two_explicit_fallback_generation_attempts():
+    invalid = Path("invalid-evidence-fallback-generation-attempts.yaml")
+    invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
+        "  max_resource_generation_attempts: 2\n",
+        "  max_resource_generation_attempts: 1\n",
+        1,
+    )
+
+    with (
+        patch.object(Path, "read_text", return_value=invalid_text),
+        pytest.raises(RagConfigValidationError) as exc_info,
+    ):
+        load_evidence_orchestration_config(invalid)
+
+    assert any(
+        "max_resource_generation_attempts" in location
+        for location, _error_type in exc_info.value.validation_errors
+    )
+
+
 def test_strict_config_rejects_extra_fallback_trigger_field():
     invalid = Path("invalid-evidence-fallback-trigger-extra.yaml")
     invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
@@ -303,9 +323,9 @@ def test_strict_config_rejects_extra_fallback_trigger_field():
 @pytest.mark.parametrize(
     ("legacy_schema_version", "expected_location"),
     (
-        ("evidence_orchestration_config_v3", "schema_version"),
+        ("evidence_orchestration_config_v4", "schema_version"),
         (
-            "evidence_fallback_delivery_v2",
+            "evidence_fallback_delivery_v3",
             "fallback_delivery.schema_version",
         ),
     ),
@@ -316,9 +336,9 @@ def test_strict_config_rejects_legacy_fallback_schema_versions(
 ) -> None:
     invalid = Path("invalid-evidence-fallback-schema-version.yaml")
     current_schema_version = (
-        "evidence_orchestration_config_v4"
+        "evidence_orchestration_config_v5"
         if expected_location == "schema_version"
-        else "evidence_fallback_delivery_v3"
+        else "evidence_fallback_delivery_v4"
     )
     invalid_text = POLICY_PATH.read_text(encoding="utf-8").replace(
         current_schema_version,

@@ -92,7 +92,7 @@ class EvidenceFallbackTriggerPolicy(StrictRagConfigModel):
 class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
     """Explicit, bounded delivery policy for evidence-limited resources."""
 
-    schema_version: Literal["evidence_fallback_delivery_v3"]
+    schema_version: Literal["evidence_fallback_delivery_v4"]
     trigger_policy: EvidenceFallbackTriggerPolicy
     eligible_resource_types: Annotated[
         tuple[ResourceType, ...],
@@ -100,7 +100,7 @@ class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
         Field(min_length=1),
     ]
     minimum_accepted_evidence_per_resource: PositiveInt
-    max_resource_generation_attempts: Literal[1]
+    max_resource_generation_attempts: Literal[2]
     max_delivery_seconds_by_resource: dict[ResourceType, PositiveFloat]
     additional_retrieval_task_budget: Literal[0]
     runtime_identity_policy: Literal["inherit_normal_resource_runtime"]
@@ -128,7 +128,7 @@ class EvidenceFallbackDeliveryConfig(StrictRagConfigModel):
 class EvidenceOrchestrationConfig(StrictRagConfigModel):
     """Bounded orchestration policy with explicit failure behavior."""
 
-    schema_version: Literal["evidence_orchestration_config_v4"]
+    schema_version: Literal["evidence_orchestration_config_v5"]
     max_supplement_rounds: NonNegativeInt
     max_search_tasks_per_round: PositiveInt
     max_total_search_tasks: PositiveInt

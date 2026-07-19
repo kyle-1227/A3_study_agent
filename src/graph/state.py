@@ -532,6 +532,7 @@ def initial_request_reset_transient_state() -> dict:
         "fallback_resource_types": [],
         "blocked_resource_types": [],
         "resource_fallback_delivery_max_seconds_by_resource": {},
+        "resource_fallback_delivery_max_generation_attempts": 0,
         "resource_delivery_mode": "",
         "resource_evidence_scope_constraint": "",
         "learning_path": {},
@@ -952,6 +953,9 @@ class LearningState(TypedDict):
     blocked_resource_types: list[str]  # Explicit insufficient-evidence resources
     resource_fallback_delivery_max_seconds_by_resource: (
         dict[str, float]  # Explicit per-resource fallback time budgets
+    )
+    resource_fallback_delivery_max_generation_attempts: (
+        int  # Explicit bounded retry budget for evidence-limited workers
     )
     resource_delivery_mode: str  # Strict or evidence-limited worker mode
     resource_evidence_scope_constraint: str  # Worker-visible evidence boundary

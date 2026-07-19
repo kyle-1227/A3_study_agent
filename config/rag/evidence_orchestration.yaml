@@ -1,4 +1,4 @@
-schema_version: evidence_orchestration_config_v4
+schema_version: evidence_orchestration_config_v5
 max_supplement_rounds: 3
 max_search_tasks_per_round: 6
 max_total_search_tasks: 24
@@ -14,7 +14,7 @@ judge_partition_reask:
   max_partition_calls: 4
   incomplete_partition_policy: block_resource
 fallback_delivery:
-  schema_version: evidence_fallback_delivery_v3
+  schema_version: evidence_fallback_delivery_v4
   trigger_policy:
     schema_version: evidence_fallback_trigger_v1
     supplement_round_budget_exhausted: fallback_if_evidence_eligible
@@ -28,7 +28,7 @@ fallback_delivery:
     - video_animation
     - study_plan
   minimum_accepted_evidence_per_resource: 1
-  max_resource_generation_attempts: 1
+  max_resource_generation_attempts: 2
   max_delivery_seconds_by_resource:
     review_doc: 120.0
     mindmap: 120.0

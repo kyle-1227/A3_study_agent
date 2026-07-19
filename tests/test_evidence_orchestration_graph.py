@@ -1622,6 +1622,7 @@ def test_terminal_assignment_enables_fallback_only_after_two_no_progress_rounds(
         "video_animation": 120.0,
         "study_plan": 120.0,
     }
+    assert assigned["resource_fallback_delivery_max_generation_attempts"] == 2
     assert assigned["resource_evidence_assignments"][0]["delivery_mode"] == "fallback"
     assert assigned["resource_evidence_assignments"][0]["evidence_ids"] == [
         record.evidence_id

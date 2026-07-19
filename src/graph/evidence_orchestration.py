@@ -997,6 +997,7 @@ def make_resource_evidence_planner_node(
             "ready_resource_types": [],
             "fallback_resource_types": [],
             "resource_fallback_delivery_max_seconds_by_resource": {},
+            "resource_fallback_delivery_max_generation_attempts": 0,
         }
 
     return resource_evidence_planner
@@ -3305,6 +3306,9 @@ def make_resource_evidence_assignment_node(
             "blocked_resource_types": list(blocked),
             "resource_fallback_delivery_max_seconds_by_resource": dict(
                 runtime.policy.fallback_delivery.max_delivery_seconds_by_resource
+            ),
+            "resource_fallback_delivery_max_generation_attempts": (
+                runtime.policy.fallback_delivery.max_resource_generation_attempts
             ),
             "requested_resource_type": deliverable[0] if deliverable else "",
             "requested_resource_types": list(deliverable),

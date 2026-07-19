@@ -185,6 +185,7 @@ def test_every_resource_type_schedules_a_bounded_fallback_task(
             "resource_fallback_delivery_max_seconds_by_resource": dict(
                 FALLBACK_DELIVERY_TIMEOUTS_BY_RESOURCE
             ),
+            "resource_fallback_delivery_max_generation_attempts": 2,
         }
     )
 
@@ -200,6 +201,7 @@ def test_every_resource_type_schedules_a_bounded_fallback_task(
             "fallback_delivery_timeout_seconds": (
                 FALLBACK_DELIVERY_TIMEOUTS_BY_RESOURCE[resource_type]
             ),
+            "fallback_generation_attempt_limit": 2,
             "status": "pending",
         }
     ]
