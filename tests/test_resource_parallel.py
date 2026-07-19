@@ -51,6 +51,17 @@ from src.observability.a3_trace import reset_trace_event_sink, set_trace_event_s
 from src.resource_contracts import ResourceType
 
 
+FALLBACK_DELIVERY_TIMEOUTS_BY_RESOURCE: dict[ResourceType, float] = {
+    "review_doc": 120.0,
+    "mindmap": 120.0,
+    "quiz": 120.0,
+    "code_practice": 120.0,
+    "video_script": 240.0,
+    "video_animation": 120.0,
+    "study_plan": 120.0,
+}
+
+
 async def _unexpected_guidance_dependency(*_args, **_kwargs):
     raise AssertionError("resource bundle tests must not invoke guidance dependencies")
 
@@ -171,7 +182,9 @@ def test_every_resource_type_schedules_a_bounded_fallback_task(
             "resource_evidence_assignments": [assignment],
             "requested_resource_type": resource_type,
             "requested_resource_types": [resource_type],
-            "resource_fallback_delivery_max_seconds": 120.0,
+            "resource_fallback_delivery_max_seconds_by_resource": dict(
+                FALLBACK_DELIVERY_TIMEOUTS_BY_RESOURCE
+            ),
         }
     )
 
@@ -184,7 +197,9 @@ def test_every_resource_type_schedules_a_bounded_fallback_task(
             "subjects": ["math"],
             "topic_ids": ["functions"],
             "delivery_mode": "fallback",
-            "fallback_delivery_timeout_seconds": 120.0,
+            "fallback_delivery_timeout_seconds": (
+                FALLBACK_DELIVERY_TIMEOUTS_BY_RESOURCE[resource_type]
+            ),
             "status": "pending",
         }
     ]

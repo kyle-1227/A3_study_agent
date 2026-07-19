@@ -19,6 +19,7 @@ from src.graph.video_script import (
     should_rewrite_video_script,
     video_script_agent,
     video_script_output,
+    video_script_planner,
     video_script_reviewer,
 )
 from src.llm.structured_output import StructuredLLMResult, StructuredOutputError
@@ -178,6 +179,51 @@ async def test_video_script_agent_propagates_provider_failure() -> None:
 
 
 @pytest.mark.anyio
+async def test_video_script_fallback_planner_uses_compact_deterministic_outline() -> (
+    None
+):
+    provider = AsyncMock()
+
+    with patch("src.graph.video_script.invoke_plain_llm_fail_fast", provider):
+        result = await video_script_planner(
+            _state(
+                resource_delivery_mode="fallback",
+                learning_goal="掌握 Python 循环的基本选择方式",
+            )
+        )
+
+    provider.assert_not_awaited()
+    assert "基础版教学视频脚本大纲" in result["video_script_outline"]
+    assert "分镜数量：3" in result["video_script_outline"]
+    assert result["video_script_round"] == 0
+
+
+@pytest.mark.anyio
+async def test_video_script_fallback_agent_requests_compact_bound_script() -> None:
+    provider = AsyncMock(return_value=VALID_MARKDOWN)
+    state = _state(
+        resource_delivery_mode="fallback",
+        context=[
+            {"source": "one", "content": "evidence-one"},
+            {"source": "two", "content": "evidence-two"},
+            {"source": "three", "content": "evidence-three"},
+        ],
+    )
+
+    with patch("src.graph.video_script.invoke_plain_llm_fail_fast", provider):
+        result = await video_script_agent(state)
+
+    prompt = provider.await_args.kwargs["messages"][1].content
+    assert "基础版交付" in prompt
+    assert "恰好 3 个分镜" in prompt
+    assert "中等长度" not in prompt
+    assert "evidence-one" in prompt
+    assert "evidence-two" in prompt
+    assert "evidence-three" not in prompt
+    assert result["video_script_round"] == 2
+
+
+@pytest.mark.anyio
 async def test_video_script_reviewer_rejects_failed_structured_result() -> None:
     failed_result = _failed_result()
     with (
@@ -220,6 +266,20 @@ async def test_video_script_reviewer_preserves_real_reject() -> None:
 
     assert result["video_script_review_verdict"] == "reject"
     assert result["video_script_revision_notes"] == verdict.reason
+
+
+@pytest.mark.anyio
+async def test_video_script_fallback_reviewer_keeps_structured_contract() -> None:
+    verdict = VideoScriptReviewVerdict(
+        verdict="approve", reason="结构与范围均符合要求。"
+    )
+    provider = AsyncMock(return_value=SimpleNamespace(success=True, parsed=verdict))
+
+    with patch("src.graph.video_script.invoke_structured_llm", provider):
+        result = await video_script_reviewer(_state(resource_delivery_mode="fallback"))
+
+    provider.assert_awaited_once()
+    assert result["video_script_review_verdict"] == "approve"
 
 
 @pytest.mark.anyio
@@ -288,6 +348,15 @@ def test_video_script_router_blocks_unknown_or_exhausted_verdict() -> None:
     with pytest.raises(VideoScriptApprovalError, match="maximum rewrite rounds"):
         should_rewrite_video_script(
             _state(video_script_review_verdict="reject", video_script_round=2)
+        )
+
+    with pytest.raises(VideoScriptApprovalError, match="rewrite budget is exhausted"):
+        should_rewrite_video_script(
+            _state(
+                resource_delivery_mode="fallback",
+                video_script_review_verdict="reject",
+                video_script_round=1,
+            )
         )
 
 

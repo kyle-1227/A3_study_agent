@@ -329,8 +329,20 @@ def _candidate_resource_assignments_from_state(
     return assignments
 
 
-def _fallback_delivery_timeout_seconds(state: LearningState) -> float:
-    raw_timeout = state.get("resource_fallback_delivery_max_seconds")
+def _fallback_delivery_timeout_seconds(
+    state: LearningState,
+    resource_type: str,
+) -> float:
+    raw_timeouts = state.get("resource_fallback_delivery_max_seconds_by_resource")
+    if not isinstance(raw_timeouts, dict) or tuple(raw_timeouts) != RESOURCE_TYPE_ORDER:
+        raise LearningGuidanceContractError(
+            code="invalid_fallback_delivery_timeouts",
+            reason=(
+                "fallback worker requires one ordered explicit timeout for every "
+                "canonical resource"
+            ),
+        )
+    raw_timeout = raw_timeouts.get(resource_type)
     if (
         isinstance(raw_timeout, bool)
         or not isinstance(raw_timeout, (int, float))
@@ -339,7 +351,7 @@ def _fallback_delivery_timeout_seconds(state: LearningState) -> float:
     ):
         raise LearningGuidanceContractError(
             code="invalid_fallback_delivery_timeout",
-            reason="fallback worker requires a positive finite delivery timeout",
+            reason="fallback worker requires a positive finite resource delivery timeout",
         )
     return float(raw_timeout)
 
@@ -386,7 +398,6 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
                 ),
             )
         tasks: list[dict[str, object]] = []
-        fallback_timeout_seconds: float | None = None
         for resource_type in resources:
             assignment = assignment_by_resource[resource_type]
             task: dict[str, object] = {
@@ -398,9 +409,9 @@ def _resource_plan_from_state(state: LearningState) -> list[dict]:
                 "status": "pending",
             }
             if assignment.delivery_mode == "fallback":
-                if fallback_timeout_seconds is None:
-                    fallback_timeout_seconds = _fallback_delivery_timeout_seconds(state)
-                task["fallback_delivery_timeout_seconds"] = fallback_timeout_seconds
+                task["fallback_delivery_timeout_seconds"] = (
+                    _fallback_delivery_timeout_seconds(state, resource_type)
+                )
             tasks.append(task)
         return tasks
     resources = normalize_requested_resource_types(

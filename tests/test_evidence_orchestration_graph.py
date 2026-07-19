@@ -1613,6 +1613,15 @@ def test_terminal_assignment_enables_fallback_only_after_two_no_progress_rounds(
     assert assigned["blocked_resource_types"] == []
     assert assigned["requested_resource_types"] == ["quiz"]
     assert assigned["resource_generation_status"] == "preflight"
+    assert assigned["resource_fallback_delivery_max_seconds_by_resource"] == {
+        "review_doc": 120.0,
+        "mindmap": 120.0,
+        "quiz": 120.0,
+        "code_practice": 120.0,
+        "video_script": 240.0,
+        "video_animation": 120.0,
+        "study_plan": 120.0,
+    }
     assert assigned["resource_evidence_assignments"][0]["delivery_mode"] == "fallback"
     assert assigned["resource_evidence_assignments"][0]["evidence_ids"] == [
         record.evidence_id

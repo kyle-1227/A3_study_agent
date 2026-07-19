@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 GENERIC_TITLE_LABEL = "\u6807\u9898"
 
+_COMPACT_FALLBACK_CONTEXT_MAX_ITEMS = 2
+_COMPACT_FALLBACK_CONTEXT_MAX_CHARS = 480
+_COMPACT_FALLBACK_STORYBOARD_SHOTS = 3
+
+
 REQUIRED_VIDEO_SCRIPT_SECTIONS = {
     "title": r"(?m)^#\s+\S+",
     "basic": r"(?m)^##\s*(?:[一二三四五六七八九十0-9]+[、.．]\s*)?视频基本信息",
@@ -128,11 +133,22 @@ def _format_keypoints(state: LearningState) -> str:
     return ", ".join(merged) or "No explicit keypoints."
 
 
-def _format_context(context: list[dict]) -> str:
+def _is_compact_fallback_delivery(state: LearningState) -> bool:
+    """Return whether this resource branch is the bounded fallback video flow."""
+
+    return state.get("resource_delivery_mode") == "fallback"
+
+
+def _format_context(
+    context: list[dict],
+    *,
+    max_items: int = 8,
+    max_content_chars: int = 900,
+) -> str:
     if not context:
         return "No judged evidence is available. Do not invent citations."
     parts: list[str] = []
-    for idx, item in enumerate(context[:8], 1):
+    for idx, item in enumerate(context[:max_items], 1):
         source = (
             item.get("source")
             or item.get("title")
@@ -141,7 +157,7 @@ def _format_context(context: list[dict]) -> str:
         )
         content = str(
             item.get("content") or item.get("snippet") or item.get("text") or ""
-        )[:900]
+        )[:max_content_chars]
         if content:
             parts.append(f"[{idx}] Source: {source}\n{content}")
     return "\n\n".join(parts) or "Judged evidence has no readable body."
@@ -318,12 +334,49 @@ def _planner_prompt(state: LearningState, query: str, context: list[dict]) -> st
     )
 
 
+def _compact_fallback_outline(state: LearningState) -> str:
+    """Build a bounded non-LLM outline for the evidence-limited video path."""
+
+    query = _last_human_query(state).strip() or "用户指定主题"
+    learning_goal = str(state.get("learning_goal") or "").strip() or "理解核心概念"
+    return "\n".join(
+        (
+            "基础版教学视频脚本大纲（受限证据范围）",
+            f"- 视频主题：{query}",
+            "- 适用学生：提出该学习请求的学生",
+            "- 预计时长：45–60 秒",
+            f"- 学习目标：{learning_goal}",
+            "- 分镜数量：3",
+            "- 动画表现：仅使用简洁高亮、箭头或步骤切换",
+            "- 互动问题：1 个基于已给证据的检查问题",
+            "- 字幕设计：每个分镜一条简短 SRT 字幕",
+            "- 内容边界：仅陈述已接受证据直接支持的内容；不补充未经支持的例子、前置知识或结论。",
+        )
+    )
+
+
 def _agent_prompt(state: LearningState, outline: str) -> str:
+    compact_fallback = _is_compact_fallback_delivery(state)
+    context = _format_context(
+        state.get("context", []),
+        max_items=(_COMPACT_FALLBACK_CONTEXT_MAX_ITEMS if compact_fallback else 8),
+        max_content_chars=(
+            _COMPACT_FALLBACK_CONTEXT_MAX_CHARS if compact_fallback else 900
+        ),
+    )
+    delivery_length_requirement = (
+        "这是证据受限的基础版交付。只生成一个 45–60 秒、"
+        f"恰好 {_COMPACT_FALLBACK_STORYBOARD_SHOTS} 个分镜的紧凑脚本；"
+        "每个必要章节都要保留，但每节只写直接支持该主题所需的最少内容。"
+        "只能陈述下方已接受资料明确支持的内容，不能补充未经支持的例子、前置知识或结论。"
+        if compact_fallback
+        else "请输出可直接交给视频制作人员使用的中等长度脚本。"
+    )
     return (
         "请根据视频脚本大纲生成一份 Markdown 教学视频 / 动画脚本文档。\n\n"
         f"## 用户问题\n{_last_human_query(state)}\n\n"
         f"## 视频脚本大纲\n{outline}\n\n"
-        f"## 检索资料\n{_format_context(state.get('context', []))}\n\n"
+        f"## 检索资料\n{context}\n\n"
         f"## 修订意见\n{state.get('video_script_revision_notes', '') or 'None'}\n\n"
         "## 必须满足的 Markdown 结构\n"
         "# 标题\n"
@@ -341,7 +394,7 @@ def _agent_prompt(state: LearningState, outline: str) -> str:
         "| 镜头 | 时间 | 画面内容 | 旁白 | 字幕 | 动画说明 |\n\n"
         "字幕 SRT 必须包含标准 SRT 时间轴，例如：\n"
         "1\n00:00:00,000 --> 00:00:05,000\n欢迎来到本节课……\n\n"
-        "请输出可直接交给视频制作人员使用的中等长度脚本。"
+        f"{delivery_length_requirement}"
         "如果资料不足，请在文末说明资料依据不足。"
     )
 
@@ -356,18 +409,22 @@ def _create_video_script_artifact(markdown: str, title: str, srt: str) -> dict:
 async def video_script_planner(state: LearningState) -> dict:
     query = _last_human_query(state)
     context = state.get("context", [])
-    outline = await invoke_plain_llm_fail_fast(
-        node_name="video_script_planner",
-        llm_node="video_script",
-        messages=[
-            SystemMessage(
-                content="You are a university teaching-video planner. Return a concrete blueprint only."
-            ),
-            HumanMessage(content=_planner_prompt(state, query, context)),
-        ],
-        state=state,
-        temperature=_video_script_temperature(),
-    )
+    compact_fallback = _is_compact_fallback_delivery(state)
+    if compact_fallback:
+        outline = _compact_fallback_outline(state)
+    else:
+        outline = await invoke_plain_llm_fail_fast(
+            node_name="video_script_planner",
+            llm_node="video_script",
+            messages=[
+                SystemMessage(
+                    content="You are a university teaching-video planner. Return a concrete blueprint only."
+                ),
+                HumanMessage(content=_planner_prompt(state, query, context)),
+            ],
+            state=state,
+            temperature=_video_script_temperature(),
+        )
     if not outline.strip():
         raise ValueError("video_script_planner produced empty outline")
 
@@ -379,6 +436,9 @@ async def video_script_planner(state: LearningState) -> dict:
             "context_count": len(context),
             "dual_source_mode": bool(state.get("dual_source_mode")),
             "evidence_judge_state": state.get("evidence_judge_state", ""),
+            "delivery_profile": (
+                "compact_fallback" if compact_fallback else "standard"
+            ),
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
@@ -402,6 +462,7 @@ async def video_script_agent(state: LearningState) -> dict:
         raise VideoScriptGenerationError("video script outline is empty")
 
     round_no = int(state.get("video_script_round", 0) or 0) + 1
+    compact_fallback = _is_compact_fallback_delivery(state)
     if (
         state.get("degraded_generation") is True
         and state.get("evidence_judge_state") == "insufficient"
@@ -414,7 +475,12 @@ async def video_script_agent(state: LearningState) -> dict:
         llm_node="video_script",
         messages=[
             SystemMessage(
-                content="You are a teaching-video and animation script writer. Return Markdown only."
+                content=(
+                    "You are a teaching-video and animation script writer. "
+                    "Return compact Markdown only."
+                    if compact_fallback
+                    else "You are a teaching-video and animation script writer. Return Markdown only."
+                )
             ),
             HumanMessage(content=_agent_prompt(state, outline)),
         ],
@@ -432,6 +498,9 @@ async def video_script_agent(state: LearningState) -> dict:
             "markdown_chars": len(markdown),
             "srt_chars": len(srt),
             "round": round_no,
+            "delivery_profile": (
+                "compact_fallback" if compact_fallback else "standard"
+            ),
         },
         state=state,
         env_flag="LOG_GENERATION_SUMMARY",
@@ -600,6 +669,10 @@ def should_rewrite_video_script(state: LearningState) -> str:
     if verdict != "reject":
         raise VideoScriptApprovalError(
             "video script routing requires an explicit approve or reject verdict"
+        )
+    if _is_compact_fallback_delivery(state):
+        raise VideoScriptApprovalError(
+            "compact fallback video script was rejected; rewrite budget is exhausted"
         )
     current_round = int(state.get("video_script_round", 0) or 0)
     if current_round < 2:

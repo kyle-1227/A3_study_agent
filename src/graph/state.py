@@ -531,7 +531,7 @@ def initial_request_reset_transient_state() -> dict:
         "ready_resource_types": [],
         "fallback_resource_types": [],
         "blocked_resource_types": [],
-        "resource_fallback_delivery_max_seconds": 0.0,
+        "resource_fallback_delivery_max_seconds_by_resource": {},
         "resource_delivery_mode": "",
         "resource_evidence_scope_constraint": "",
         "learning_path": {},
@@ -950,7 +950,9 @@ class LearningState(TypedDict):
     ready_resource_types: list[str]  # Strict-evidence workers permitted to run
     fallback_resource_types: list[str]  # Evidence-limited workers permitted to run
     blocked_resource_types: list[str]  # Explicit insufficient-evidence resources
-    resource_fallback_delivery_max_seconds: float  # Explicit fallback time budget
+    resource_fallback_delivery_max_seconds_by_resource: (
+        dict[str, float]  # Explicit per-resource fallback time budgets
+    )
     resource_delivery_mode: str  # Strict or evidence-limited worker mode
     resource_evidence_scope_constraint: str  # Worker-visible evidence boundary
     learning_path: dict  # Curriculum Engine: LearningPath serialized
