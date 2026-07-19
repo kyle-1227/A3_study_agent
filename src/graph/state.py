@@ -426,6 +426,8 @@ def initial_request_reset_transient_state() -> dict:
         "parent_child_retrieval_result": {},
         "parent_child_local_refs": [],
         "parent_child_generation_id": "",
+        "parent_child_primary_revision": 0,
+        "parent_child_primary_config_fingerprint": "",
         "parent_child_retrieval_fingerprint": "",
         "parent_child_hydration": {},
         # resource-aware evidence orchestration candidate
@@ -899,7 +901,11 @@ class LearningState(TypedDict):
     evidence_controlled_stop_reason: str  # Reason for controlled stop
     parent_child_retrieval_result: dict  # Strict child-only multi-branch result
     parent_child_local_refs: list[dict]  # Judge-safe child references; no parent body
-    parent_child_generation_id: str  # Generation pinned for this request
+    parent_child_generation_id: (
+        str  # Internal artifact identity pinned for this request
+    )
+    parent_child_primary_revision: int  # Active mutable primary revision
+    parent_child_primary_config_fingerprint: str  # Primary runtime identity
     parent_child_retrieval_fingerprint: str  # Retrieval policy fingerprint
     parent_child_hydration: dict  # Content-free post-Judge hydration summary
     evidence_orchestration_fingerprint: str  # Joint policy/profile/index fingerprint

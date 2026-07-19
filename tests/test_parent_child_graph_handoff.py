@@ -45,11 +45,15 @@ def test_graph_adapter_keeps_parent_body_out_and_preserves_child_identity() -> N
         role="core_evidence",
         purpose="answer",
         branch_status="ok",
+        primary_revision=1,
+        primary_config_fingerprint="e" * 64,
     )[0]
 
     assert candidate.evidence_id == "child-a"
     assert candidate.content_preview == "0123456789"
     assert candidate.metadata["parent_id"] == "parent-a"
+    assert candidate.metadata["primary_revision"] == 1
+    assert candidate.metadata["primary_config_fingerprint"] == "e" * 64
     assert "content" not in candidate.metadata
 
     item = EvidenceJudgeItem(

@@ -30,7 +30,6 @@ services:
       CHECKPOINTER_ENABLED: "true"
       CHECKPOINTER_TYPE: postgres
       DB_URI: postgresql://a3_user:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/a3_study_agent
-      PARENT_CHILD_GENERATION_ID: ${PARENT_CHILD_GENERATION_ID:?Set PARENT_CHILD_GENERATION_ID in .env}
     ports:
       - "8000:8000"
     depends_on:
@@ -45,13 +44,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 24
-      start_period: 30s
+      start_period: 240s
     volumes:
       - type: volume
         source: app_state
         target: /app/.runtime_state
         read_only: false
-      - chroma_data:/app/chroma_store
       - type: bind
         source: ${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}
         target: /app/data
@@ -102,7 +100,6 @@ services:
 
 volumes:
   pgdata:
-  chroma_data:
   rag_runtime_chroma:
   artifacts:
   app_state:

@@ -1,129 +1,102 @@
-# A3 Study Agent 部署说明书
+# A3 Study Agent deployment guide
 
-## 1. 部署结论
+## Current deployment contract
 
-项目支持 Docker Compose 统一构建并启动 PostgreSQL、FastAPI 后端和 Next.js 前端。这里的“一键部署”是**满足外部资产和私密配置前置条件后的单命令启动**，不是纯 Git checkout 开箱即用。
+The local Docker webpage serves one Parent--Child primary only. The backend
+loads primary/primary_state.json under the mounted indexes/parent_child root,
+then validates its metadata, validation result, Chroma children, BM25 corpora,
+parent store, provider identity, vector shape, subjects, and chunk policy.
 
-比赛演示 runtime source / integration 为 `ca3960a`，已由 `main` 包含并发布；两轮 code-practice 真实 canary 只证明其历史 runtime。SSE、Evidence、RAG 与受控 fallback 治理均已集成，最终 backend/frontend 镜像和三容器健康、HTTP/readiness 复验已完成；PostgreSQL-only restart、完整六场景与人工内容验收仍未完成。本文不读取或展示真实 `.env`。
+The deployment does not use READY, sealed manifests, generation registry
+activation, shadow, previous, rollback, PARENT_CHILD_GENERATION_ID, or a
+repository-root chroma_store mount. A damaged or absent primary blocks backend
+startup; it does not trigger a legacy retrieval fallback.
 
-## 2. 环境与外部资产
+This is a trusted local-demo deployment. Do not expose it as a public
+multi-tenant service without separate authorization, tenancy, and abuse-control
+work.
 
-### 软件
+## Prerequisites
 
-- Docker Desktop 或 Docker Engine；
-- Docker Compose v2；
-- 建议至少满足仓库本地开发基线：Python 3.11+、Node.js 20.12+（仅 Compose 使用者不必在宿主机运行应用进程）。
+- Docker Desktop or Docker Engine with Compose v2.
+- An explicit environment file that is not committed.
+- Authorized course data.
+- A built Parent--Child primary under the configured index root.
 
-### 必须另行提供的资产
+Required environment inputs include:
 
-1. 具备提交、展示和处理授权的课程资料目录；
-2. 已密封的 Parent–Child 索引目录，其中 registry primary 指向
-   `pc_20260715_98336c2_55`，shadow 为空；
-3. 与该 generation 一致的 manifest、`KnowledgeGraphV1` 和
-   `2026.07.15-source-groups-v1` 身份，精确 fingerprint 为：
-   - manifest：`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`；
-   - KG artifact：`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5`；
-   - Evidence orchestration：`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`；
-4. 仅存放在忽略文件或部署平台 secret store 中的私密配置。
+- RAG_EMBEDDING_API_KEY
+- RAG_RERANKER_API_KEY
+- POSTGRES_PASSWORD
+- COURSE_DATA_HOST_PATH
+- PARENT_CHILD_INDEX_HOST_PATH
+- NEXT_PUBLIC_API_URL
 
-课程资料和密封索引可能因版权、体积与敏感性不进入 Git。部署负责人应通过受控渠道交付，校验来源和完整性；不得用空目录、旧 Flat 索引或临时生成内容冒充。
+## Create or migrate primary
 
-## 3. 配置
+To copy the existing Parent--Child artifact into primary revision 1:
 
-从模板创建本地忽略文件，但不要提交：
+~~~powershell
+python scripts/migrate_parent_child_primary.py --project-root . --index-config config/rag/index.production.yaml --source-artifact-identity pc_20260715_98336c2_55 --build-id migrate-primary-r1
+~~~
 
-```powershell
-if (-not (Test-Path -LiteralPath '.env')) {
-  Copy-Item -LiteralPath '.env.example' -Destination '.env'
-}
-$env:A3_ENV_FILE = (Resolve-Path '.env').Path
-```
+To build a new revision with the current chunk policy:
 
-必须配置的名称如下；本文档故意不提供值：
+~~~powershell
+python scripts/build_parent_child_primary.py --project-root . --index-config config/rag/index.production.yaml --build-id rebuild-20260719 --artifact-identity pc-primary-20260719
+~~~
 
-| 名称 | 用途 |
-| --- | --- |
-| `A3_ENV_FILE` | shell 级 env 文件绝对路径；Compose 不静默选择其他文件 |
-| `DEEPSEEK_API_KEY` | 严格配置引用的对话模型凭据 |
-| `RAG_EMBEDDING_API_KEY` | embedding 凭据，名称必须精确一致 |
-| `RAG_RERANKER_API_KEY` | reranker 凭据，名称必须精确一致 |
-| `TAVILY_API_KEY` | 允许的网页研究凭据 |
-| `POSTGRES_PASSWORD` | PostgreSQL 强密码 |
-| `NEXT_PUBLIC_API_URL` | 浏览器访问的后端地址 |
-| `COURSE_DATA_HOST_PATH` | 获授权课程资料宿主路径 |
-| `PARENT_CHILD_INDEX_HOST_PATH` | 密封 Parent–Child 索引宿主路径 |
-| `PARENT_CHILD_GENERATION_ID` | 必须为 `pc_20260715_98336c2_55` 并与 registry primary 一致 |
+Both paths build into primary/.staging and atomically publish only after strict
+structural validation. A failure leaves the previously active primary state
+unchanged.
 
-索引配置必须保持
-`EMBEDDING_API_KEY_ENV=RAG_EMBEDDING_API_KEY` 和
-`RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY`。不要把 API key、Authorization、完整数据库 URI 或 Provider body 放入命令行、截图、日志或报告。
+## Start
 
-## 4. 预检与单命令启动
+~~~powershell
+Copy-Item .env.example .env
+# Edit .env locally. Never commit or print secret values.
+$env:A3_ENV_FILE = (Resolve-Path .env).Path
 
-从仓库根目录执行：
-
-```powershell
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE config --quiet
-docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --build --wait
+docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE up --detach --build --wait --wait-timeout 420
 docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE ps
-```
+~~~
 
-第二条命令是准备完成后的统一启动入口。Compose 对课程资料和密封索引都使用 long-syntax 只读 bind，并设置 `bind.create_host_path=false`；D:/E: 路径不存在时必须失败，不能自动创建空目录。运行时 Chroma 快照使用独立可写 volume，生成 artifact 使用持久化 volume。后端镜像包含 Chromium 和 ffmpeg，以支持视频动画资源。
-课程资料和密封索引都保持只读；`app_state` 持久卷专门保存 `/app/.runtime_state` 下的画像与记忆 SQLite。启动迁移不会覆盖已存在的新数据库，迁移或 schema 初始化失败会直接阻断 backend readiness。
+Compose uses separate backend, frontend, and PostgreSQL services. It mounts
+course data and indexes/parent_child read-only, keeps runtime Chroma snapshots
+in a separate writable volume, and does not mount /app/chroma_store.
 
+The first primary cold start copies and validates the byte-verified Chroma
+snapshot in that writable volume; allow the documented 420-second wait window.
 
-正式比赛镜像还应从干净 HEAD 重建，并在 backend/frontend 镜像上写入同一
-`org.opencontainers.image.revision` 标签。精确命令与标签检查见
-[生产部署运行手册](../runbooks/production_deployment.md)。
+## Verify
 
-任何缺失变量、宿主路径、generation/manifest/KG 身份或 PostgreSQL readiness 都应使部署失败。不得为了“启动成功”改用静默默认值、旧 RAG、其他 Provider 或其他模型。
-
-## 5. 服务验收
-
-先执行不触发 Provider 的检查：
-
-```powershell
+~~~powershell
 Invoke-WebRequest http://localhost:8000/health/live -UseBasicParsing
 Invoke-WebRequest http://localhost:8000/health/ready -UseBasicParsing
-Invoke-WebRequest http://localhost:8000/graph/manifest -UseBasicParsing
-Invoke-WebRequest http://localhost:8000/subjects -UseBasicParsing
 Invoke-WebRequest http://localhost:3000 -UseBasicParsing
-```
+~~~
 
-`/health/live` 只证明进程可响应。`/health/ready` 还必须返回：
+Readiness must return health_ready_v4 and identify the active primary through:
 
-- `health_ready_v3` 与 `status=ready`；
-- `checkpointer_type=postgres`；
-- `deployment_mode=active`；
-- `rollout_activation_enabled=true`；
-- `rollout_shadow_enabled=false`；
-- 与 production config 一致的 graph、KnowledgeGraph、generation manifest 和 evidence orchestration 身份。
+- parent_child_primary_revision
+- parent_child_primary_updated_at
+- parent_child_primary_config_fingerprint
 
-当前实测身份必须精确匹配 generation 55、manifest
-`db579d40d1f4b79882f495277026e8fccfbfb816fbb150998e47753eec470218`、KG
-`c504e41ef2e481b30b940ac6cb04f661401f7907d1690efeafc1ed14680fa0b5` 和 Evidence
-`9dec07d4f097bae80bbf815bd53494e4e8045b15e536d0fc38daa3b4da2e032b`。
+## Browser Canary and cleanup
 
-生产 checkpointer 必须保持 PostgreSQL-only：连接池会在借出连接前做健康检查并在预算内替换失效连接，初始化或重连失败必须显式暴露，不能转用内存状态。readiness 恢复只是第一层检查；数据库单独重启时 backend/frontend 容器 ID 必须保持不变，并继续验证历史 thread/status、SSE journal、Context 注入和 artifact 下载。
-三条生产级受控恢复均须单独验收且不得降低质量：Evidence `4a91f68` 只以同一 Provider/模型对失败的 resource+subject partition 有界 reask，并且不自行判断 blocked；RAG `f53a710` 只在同一 endpoint 做 complete-score batch split，禁止 RRF-only 与 partial scores；SSE `eed2139` 只在 transport 或 HTTP 410 后读取一次身份匹配的权威终态。任一路径都不能切 Provider、模型、generation 或旧 Flat RAG，也不能把 partial evidence 或 pending status 写成成功。
+Run the six-case browser Canary with the revision and fingerprint from
+primary_state.json:
 
+~~~powershell
+$canaryTimeoutSeconds = <explicit-per-case-budget-seconds>
+python scripts/run_production_browser_canary.py --project-root . --dataset config/evaluation/private_authoring/evidence_rollout_smoke_dataset.authoring.json --output-dir artifacts/canary-primary --frontend-url http://localhost:3000 --backend-url http://localhost:8000 --expected-primary-revision 1 --expected-primary-config-fingerprint <fingerprint-from-primary-state> --timeout-seconds $canaryTimeoutSeconds --headed
+~~~
 
-`/subjects` 只应暴露五个生产学科：大数据、计算机、机器学习、数学和 Python；内部目录不能被当作学科。
+The Canary reads readiness before and after interaction and rejects primary
+identity drift. Then manually verify a question/answer, a learning path, and
+resource generation in the webpage.
 
-以上仍只是 readiness。两轮历史 code-practice 已验证 Last-Event-ID 回放、刷新恢复、请求漂移冲突和 DOCX/Markdown/Python 下载，但最终比赛/部署验收还要按[生产部署运行手册](../runbooks/production_deployment.md)完成 PostgreSQL-only restart、其余六场景覆盖并人工抽检学术内容。未覆盖项必须写“未完成”，不能由单一场景外推为通过。
-
-## 6. 停止与恢复
-
-常规停止：
-
-```powershell
-docker compose --project-name a3_study_agent --env-file $env:A3_ENV_FILE down
-```
-
-常规停止不要附加 `--volumes`，否则会删除 PostgreSQL 和 artifact volume。保留 generation 55、registry、Flat 53、根 `chroma_store`、成功报告和 Gold authoring checkpoint；它们的清理需要单独审批。
-
-当前请求路径只服务 PGR。请求失败不会自动切换到 Flat 或其他 generation。恢复必须在停止写入后显式还原经过校验的外部索引/registry 备份并重启；不得把 Candidate/PGR 失败伪装成旧 RAG 成功。
-
-## 7. 生产边界
-
-该部署当前只面向可信本地比赛演示。开放公网前至少需要完成多租户认证与授权、租户数据隔离、速率/滥用控制、secret 管理、备份恢复演练、监控告警和值守流程。详细操作与证据保存规则见[生产部署运行手册](../runbooks/production_deployment.md)。
+Only after both checks truly succeed may an authorized operator remove old
+chroma_store data, historical generations, registry files, and legacy flat-RAG
+implementation. Static tests and a healthy endpoint do not prove that Canary.

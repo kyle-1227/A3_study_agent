@@ -190,7 +190,7 @@ class EvidenceResourceAssignedDetails(_ProgressDetailsBase):
     stage: Literal["evidence_orchestration.resource.assigned"]
     round_index: RoundIndex
     resource_type: SafeResourceType
-    status: Literal["ready", "blocked"]
+    status: Literal["ready", "fallback", "blocked"]
     requirement_count: BoundedCount
     assigned_evidence_count: BoundedCount
     missing_requirement_count: BoundedCount
@@ -199,6 +199,11 @@ class EvidenceResourceAssignedDetails(_ProgressDetailsBase):
     def validate_readiness(self) -> "EvidenceResourceAssignedDetails":
         if self.status == "ready" and self.missing_requirement_count != 0:
             raise ValueError("ready resource cannot have missing requirements")
+        if self.status == "fallback":
+            if self.missing_requirement_count == 0:
+                raise ValueError("fallback resource requires missing requirements")
+            if self.assigned_evidence_count == 0:
+                raise ValueError("fallback resource requires accepted evidence")
         if self.status == "blocked" and self.missing_requirement_count == 0:
             raise ValueError("blocked resource requires a missing requirement")
         if self.missing_requirement_count > self.requirement_count:

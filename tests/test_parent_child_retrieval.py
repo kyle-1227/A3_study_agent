@@ -126,8 +126,9 @@ def _search_candidate(child: ChildDocument, raw_score: float) -> ChildSearchCand
 
 def _policy() -> HybridRetrievalPolicy:
     return HybridRetrievalPolicy(
-        schema_version="hybrid_retrieval_policy_v1",
-        generation_manifest_sha256="a" * 64,
+        schema_version="hybrid_retrieval_policy_v2",
+        primary_revision=1,
+        primary_config_fingerprint="a" * 64,
         embedding_fingerprint="b" * 64,
         bm25_tokenizer_fingerprint="c" * 64,
         reranker_fingerprint="d" * 64,

@@ -35,7 +35,7 @@ from src.rag.parent_child.retrieval import (
     WeightedHybridBranch,
     compute_retrieval_fingerprint,
 )
-from src.rag.parent_child.runtime_loader import LoadedGenerationRuntime
+from src.rag.parent_child.runtime_loader import LoadedPrimaryRuntime
 
 
 class ParentChildGraphContractError(RuntimeError):
@@ -60,6 +60,8 @@ class ParentChildGraphRuntime:
     """Generation-pinned dependencies required by the explicit candidate graph."""
 
     generation_id: str
+    primary_revision: int
+    primary_config_fingerprint: str
     available_subjects: tuple[str, ...]
     retriever: ParentChildGraphRetriever
     retrieval_fingerprint: str
@@ -70,6 +72,12 @@ class ParentChildGraphRuntime:
     def __post_init__(self) -> None:
         if not self.generation_id or self.generation_id != self.generation_id.strip():
             raise ValueError("generation_id must be nonblank and stripped")
+        if isinstance(self.primary_revision, bool) or self.primary_revision < 1:
+            raise ValueError("primary_revision must be a positive integer")
+        if len(self.primary_config_fingerprint) != 64 or any(
+            char not in "0123456789abcdef" for char in self.primary_config_fingerprint
+        ):
+            raise ValueError("primary_config_fingerprint must be lowercase SHA256")
         if not self.available_subjects or self.available_subjects != tuple(
             sorted(set(self.available_subjects))
         ):
@@ -99,6 +107,8 @@ class ParentChildGraphRuntime:
                 "cross_branch_rrf_k": self.cross_branch_rrf_k,
                 "judge_preview_max_chars": self.preview_max_chars,
                 "parent_top_k": self.parent_top_k,
+                "primary_revision": self.primary_revision,
+                "primary_config_fingerprint": self.primary_config_fingerprint,
                 "retrieval_fingerprint": self.retrieval_fingerprint,
                 "schema_version": "parent_child_graph_handoff_policy_v1",
             },
@@ -146,16 +156,18 @@ class ParentChildRetrievalBranch(BaseModel):
 
 def parent_child_graph_runtime_from_loaded(
     *,
-    loaded: LoadedGenerationRuntime,
+    loaded: LoadedPrimaryRuntime,
 ) -> ParentChildGraphRuntime:
     """Bind one verified loaded generation to the strict Graph handoff limits."""
 
-    if not isinstance(loaded, LoadedGenerationRuntime):
-        raise TypeError("loaded must be a verified LoadedGenerationRuntime")
+    if not isinstance(loaded, LoadedPrimaryRuntime):
+        raise TypeError("loaded must be a verified LoadedPrimaryRuntime")
     if loaded.generation_id != loaded.resources.generation_id:
         raise ParentChildGraphContractError("loaded runtime generation is inconsistent")
     return ParentChildGraphRuntime(
         generation_id=loaded.generation_id,
+        primary_revision=loaded.primary_revision,
+        primary_config_fingerprint=loaded.primary_config_fingerprint,
         available_subjects=loaded.available_subjects,
         retriever=loaded.retriever(),
         retrieval_fingerprint=compute_retrieval_fingerprint(loaded.retrieval_policy),
@@ -245,6 +257,9 @@ def _child_branch_labels(
 def _candidate_originals(
     result: MultiBranchHybridChildResult,
     refs: tuple[LocalEvidenceRef, ...],
+    *,
+    primary_revision: int,
+    primary_config_fingerprint: str,
 ) -> dict[str, dict]:
     children: dict[str, ChildDocument] = {}
     for branch_result in result.branch_results:
@@ -276,6 +291,8 @@ def _candidate_originals(
             "child_id": ref.child_id,
             "parent_id": ref.parent_id,
             "generation_id": ref.generation_id,
+            "primary_revision": primary_revision,
+            "primary_config_fingerprint": primary_config_fingerprint,
             "policy_id": ref.policy_id,
             "page_start": ref.page_start,
             "page_end": ref.page_end,
@@ -365,6 +382,8 @@ def make_parent_child_rag_node(
                     role=role,
                     purpose=purpose,
                     branch_status=None,
+                    primary_revision=runtime.primary_revision,
+                    primary_config_fingerprint=runtime.primary_config_fingerprint,
                 )
             )
         candidate_ids = tuple(candidate.evidence_id for candidate in candidates)
@@ -376,11 +395,18 @@ def make_parent_child_rag_node(
             "local_evidence_candidates": [
                 candidate.model_dump(mode="json") for candidate in candidates
             ],
-            "local_evidence_originals": _candidate_originals(result, refs),
+            "local_evidence_originals": _candidate_originals(
+                result,
+                refs,
+                primary_revision=runtime.primary_revision,
+                primary_config_fingerprint=runtime.primary_config_fingerprint,
+            ),
             "retrieval_branch_mode": "parent_child_hybrid",
             "parent_child_retrieval_result": result.model_dump(mode="json"),
             "parent_child_local_refs": [ref.model_dump(mode="json") for ref in refs],
             "parent_child_generation_id": runtime.generation_id,
+            "parent_child_primary_revision": runtime.primary_revision,
+            "parent_child_primary_config_fingerprint": runtime.primary_config_fingerprint,
             "parent_child_retrieval_fingerprint": (runtime.graph_handoff_fingerprint),
             "parent_child_hydration": {},
         }
@@ -395,6 +421,8 @@ def _parent_context_doc(
     candidate_by_id: dict[str, EvidenceCandidate],
     ref_by_id: dict[str, LocalEvidenceRef],
     retrieval_fingerprint: str,
+    primary_revision: int,
+    primary_config_fingerprint: str,
 ) -> dict:
     supporting_ids = item.supporting_child_ids
     try:
@@ -417,6 +445,8 @@ def _parent_context_doc(
         "evidence_id": f"parent:{item.parent_id}",
         "parent_id": item.parent_id,
         "generation_id": item.generation_id,
+        "primary_revision": primary_revision,
+        "primary_config_fingerprint": primary_config_fingerprint,
         "policy_id": item.policy_id,
         "retrieval_fingerprint": retrieval_fingerprint,
         "subject": item.subject,
@@ -477,6 +507,15 @@ def make_parent_child_hydration_node(
             raise ParentChildGraphContractError(
                 "candidate generation changed in-flight"
             )
+        if state.get("parent_child_primary_revision") != runtime.primary_revision:
+            raise ParentChildGraphContractError("primary revision changed in-flight")
+        if (
+            state.get("parent_child_primary_config_fingerprint")
+            != runtime.primary_config_fingerprint
+        ):
+            raise ParentChildGraphContractError(
+                "primary configuration changed in-flight"
+            )
         if (
             state.get("parent_child_retrieval_fingerprint")
             != runtime.graph_handoff_fingerprint
@@ -536,6 +575,16 @@ def make_parent_child_hydration_node(
             and (candidate.metadata or {}).get("schema_version")
             == "local_evidence_ref_v1"
         )
+        if any(
+            (candidate.metadata or {}).get("primary_revision")
+            != runtime.primary_revision
+            or (candidate.metadata or {}).get("primary_config_fingerprint")
+            != runtime.primary_config_fingerprint
+            for candidate in local_candidates
+        ):
+            raise ParentChildGraphContractError(
+                "stored local evidence primary identity differs from runtime"
+            )
         local_ids = tuple(candidate.evidence_id for candidate in local_candidates)
         if len(local_ids) != len(set(local_ids)) or not set(local_ids).issubset(
             ref_by_id
@@ -578,6 +627,8 @@ def make_parent_child_hydration_node(
                 candidate_by_id=candidate_by_id,
                 ref_by_id=ref_by_id,
                 retrieval_fingerprint=runtime.graph_handoff_fingerprint,
+                primary_revision=runtime.primary_revision,
+                primary_config_fingerprint=runtime.primary_config_fingerprint,
             )
             for item in parent_items
         ]
@@ -605,6 +656,8 @@ def make_parent_child_hydration_node(
             "parent_child_hydration": {
                 "schema_version": "parent_child_graph_hydration_v1",
                 "generation_id": runtime.generation_id,
+                "primary_revision": runtime.primary_revision,
+                "primary_config_fingerprint": runtime.primary_config_fingerprint,
                 "retrieval_fingerprint": runtime.graph_handoff_fingerprint,
                 "parent_count": len(parent_docs),
                 "supporting_child_count": len(kept_ids),

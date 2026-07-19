@@ -15,7 +15,7 @@ import logging
 import re
 import time
 from collections import Counter, defaultdict
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NoReturn, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
@@ -63,7 +63,6 @@ from src.llm.structured_output import (
 )
 from src.observability.a3_trace import emit_a3_trace
 from src.rag.course_catalog import get_available_subjects_from_data, normalize_subject
-from src.rag.retriever import retrieve
 from src.tools.search_tool import (
     sanitize_error_message,
     search_with_diagnostics as web_search_fn,
@@ -71,6 +70,16 @@ from src.tools.search_tool import (
 from src.tracing import traced_llm_call, traced_node, traced_retrieval
 
 logger = logging.getLogger(__name__)
+
+
+def _retired_flat_retriever(*_args: object, **_kwargs: object) -> NoReturn:
+    """Fail closed: production local retrieval is injected Parent--Child only."""
+
+    raise RuntimeError(
+        "legacy flat Chroma retrieval is retired; use the injected primary "
+        "Parent--Child runtime"
+    )
+
 
 MAX_RETRIES = get_setting("academic.max_retries", 2)
 
@@ -4858,7 +4867,7 @@ async def _rag_retrieve_dual_source(
             retrieve_subject = None if subject == "other" else subject
 
             if local_enabled:
-                result = retrieve(
+                result = _retired_flat_retriever(
                     query=local_retrieval_query,
                     subject=retrieve_subject,
                     top_k=per_subject_top_k,
@@ -7032,7 +7041,7 @@ async def rag_retrieve(state: LearningState) -> dict:
                     continue
                 retrieve_subject = None if plan_subject == "other" else plan_subject
                 result = await asyncio.to_thread(
-                    retrieve,
+                    _retired_flat_retriever,
                     query=plan_query,
                     subject=retrieve_subject,
                     top_k=per_subject_top_k,
@@ -7143,7 +7152,9 @@ async def rag_retrieve(state: LearningState) -> dict:
     else:
         subj = state.get("subject") if state.get("subject") != "other" else None
         with traced_retrieval(query=query, subject=subj) as span:
-            result = await asyncio.to_thread(retrieve, query=query, subject=subj)
+            result = await asyncio.to_thread(
+                _retired_flat_retriever, query=query, subject=subj
+            )
             raw_docs = result.get("docs", []) or []
             mismatch_count = _subject_mismatch_count(raw_docs, subj)
             branch_eval = _evaluate_retrieval_branch(
@@ -7815,6 +7826,7 @@ async def episodic_memory_writer(state: LearningState) -> dict:
             compute_importance_from_state,
             write_episodic_memory,
         )
+
         importance, mem_type, content = compute_importance_from_state(state)
 
         record = await write_episodic_memory(

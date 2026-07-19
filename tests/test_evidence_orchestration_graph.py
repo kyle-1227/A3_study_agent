@@ -136,6 +136,8 @@ def _learning_guidance_runtime() -> LearningGuidanceRuntime:
 def _runtime() -> orchestration.EvidenceOrchestrationRuntime:
     parent_child = ParentChildGraphRuntime(
         generation_id="generation-evidence-test",
+        primary_revision=1,
+        primary_config_fingerprint="e" * 64,
         available_subjects=("math",),
         retriever=_NoopRetriever(),
         retrieval_fingerprint="f" * 64,

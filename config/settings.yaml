@@ -1467,7 +1467,7 @@ hallucination_eval:
 # ═══════════════════════════════════════════════════════════════════════════
 memory:
   # Storage
-  db_path: "data/memory.db"
+  db_path: ".runtime_state/memory.db"
   backend: "sqlite"
 
   # Embedding. Production config only supports real providers.

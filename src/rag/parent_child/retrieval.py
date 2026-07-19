@@ -48,8 +48,9 @@ class _StrictFrozenModel(BaseModel):
 class HybridRetrievalPolicy(_StrictFrozenModel):
     """Complete runtime-affecting policy for one strict hybrid retrieval."""
 
-    schema_version: Literal["hybrid_retrieval_policy_v1"]
-    generation_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_version: Literal["hybrid_retrieval_policy_v2"]
+    primary_revision: int = Field(gt=0)
+    primary_config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     embedding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     bm25_tokenizer_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     reranker_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")

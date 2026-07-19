@@ -65,7 +65,10 @@ function ProgressIcon({ event }: { event: EvidenceProgressEventV1 }) {
   if (event.phaseStatus === "failed") {
     return <AlertCircle className={cn(className, "text-destructive")} />
   }
-  if (event.details.stage === "evidence_orchestration.resource.assigned" && event.details.status === "blocked") {
+  if (
+    event.details.stage === "evidence_orchestration.resource.assigned" &&
+    (event.details.status === "blocked" || event.details.status === "fallback")
+  ) {
     return <AlertCircle className={cn(className, "text-[var(--warning)]")} />
   }
   if (event.phaseStatus === "completed") {

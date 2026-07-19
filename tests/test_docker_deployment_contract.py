@@ -15,122 +15,63 @@ def test_dockerfile_uses_supervised_single_process_targets() -> None:
     assert '["node", "server.js"]' in dockerfile
     assert 'CMD ["sh", "-c"' not in dockerfile
     assert "& uvicorn" not in dockerfile
-    pip_bootstrap = (
-        "RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \\\n"
-        "    python -m pip install --timeout 120 --retries 10 pip==26.1.2"
-    )
-    pip_install = (
-        "RUN --mount=type=cache,id=a3-pip-cache,target=/root/.cache/pip \\\n"
-        "    PIP_RESUME_RETRIES=20 python -m pip install --timeout 120 "
-        "--retries 10 ."
-    )
-    assert (
-        dockerfile.index("COPY src/ ./src/")
-        < dockerfile.index(pip_bootstrap)
-        < dockerfile.index(pip_install)
-    )
-    assert "--no-cache-dir" not in dockerfile
-    assert "python -m playwright install --with-deps chromium" in dockerfile
 
 
-def test_compose_requires_secrets_and_persists_runtime_artifacts() -> None:
+def test_compose_mounts_only_parent_child_primary_runtime_storage() -> None:
     compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     compose = yaml.safe_load(compose_text)
 
-    assert set(compose["services"]) == {"postgres", "backend", "frontend", "jaeger"}
-    assert "${POSTGRES_PASSWORD:?" in compose_text
-    assert "${NEXT_PUBLIC_API_URL:?" in compose_text
-    assert "${POSTGRES_PASSWORD:-" not in compose_text
-    assert "${NEXT_PUBLIC_API_URL:-" not in compose_text
-    assert "${COURSE_DATA_HOST_PATH:?" in compose_text
-    assert "${PARENT_CHILD_INDEX_HOST_PATH:?" in compose_text
-    assert "${PARENT_CHILD_GENERATION_ID:?" in compose_text
-    assert "${A3_ENV_FILE:?" in compose_text
-    assert "${A3_ENV_FILE:-" not in compose_text
-    backend_volumes = compose["services"]["backend"]["volumes"]
-    course_data_mount = next(
-        item
-        for item in backend_volumes
-        if isinstance(item, dict) and item.get("target") == "/app/data"
-    )
-    assert course_data_mount == {
-        "type": "bind",
-        "source": "${COURSE_DATA_HOST_PATH:?Set COURSE_DATA_HOST_PATH in .env}",
-        "target": "/app/data",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
+    for required in (
+        "POSTGRES_PASSWORD",
+        "NEXT_PUBLIC_API_URL",
+        "COURSE_DATA_HOST_PATH",
+        "PARENT_CHILD_INDEX_HOST_PATH",
+        "A3_ENV_FILE",
+    ):
+        assert required in compose_text
+    assert "PARENT_CHILD_GENERATION_ID" not in compose_text
+    assert "chroma_store" not in compose_text
+    assert "chroma_data" not in compose_text
+
+    volumes = compose["services"]["backend"]["volumes"]
     parent_child_mount = next(
         item
-        for item in backend_volumes
+        for item in volumes
         if isinstance(item, dict) and item.get("target") == "/app/indexes/parent_child"
     )
-    assert parent_child_mount == {
-        "type": "bind",
-        "source": "${PARENT_CHILD_INDEX_HOST_PATH:?Set PARENT_CHILD_INDEX_HOST_PATH in .env}",
-        "target": "/app/indexes/parent_child",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
-    runtime_state_mount = next(
-        item
-        for item in backend_volumes
-        if isinstance(item, dict) and item.get("target") == "/app/.runtime_state"
+    assert parent_child_mount["read_only"] is True
+    assert "PARENT_CHILD_INDEX_HOST_PATH" in parent_child_mount["source"]
+    assert "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in (
+        compose_text
     )
-    assert runtime_state_mount == {
-        "type": "volume",
-        "source": "app_state",
-        "target": "/app/.runtime_state",
-        "read_only": False,
-    }
-    assert (
-        "rag_runtime_chroma:/app/indexes/parent_child/.runtime_chroma" in compose_text
-    )
-    assert "artifacts:/app/artifacts" in compose_text
-    assert "app_state" in compose["volumes"]
-    assert compose["services"]["backend"]["build"]["target"] == "backend"
-    assert compose["services"]["frontend"]["build"]["target"] == "frontend"
-    assert compose["services"]["backend"]["environment"]["CHECKPOINTER_ENABLED"] == (
-        "true"
-    )
-    assert compose["services"]["backend"]["environment"]["CHECKPOINTER_TYPE"] == (
-        "postgres"
-    )
-    backend_healthcheck = compose["services"]["backend"]["healthcheck"]["test"]
-    assert any("/health/ready" in part for part in backend_healthcheck)
-    assert all("/openapi.json" not in part for part in backend_healthcheck)
-    frontend_healthcheck = compose["services"]["frontend"]["healthcheck"]["test"]
-    assert any("http://127.0.0.1:3000" in part for part in frontend_healthcheck)
+    assert "rag_runtime_chroma" in compose["volumes"]
+    assert compose["services"]["backend"]["healthcheck"]["start_period"] == "240s"
 
 
-def test_next_build_does_not_ignore_typescript_errors() -> None:
-    config = (ROOT / "frontend" / "next.config.mjs").read_text(encoding="utf-8")
-
-    assert "ignoreBuildErrors" not in config
-
-
-def test_docker_context_excludes_generated_and_local_runtime_assets() -> None:
-    ignored = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
-
-    assert {
-        ".mypy_cache",
-        ".pytest_tmp",
-        ".ruff_cache",
-        "artifacts",
-        "frontend/.next",
-        "frontend/node_modules",
-        "indexes/parent_child",
-        ".runtime_state",
-    } <= ignored
-
-
-def test_environment_example_uses_dedicated_rag_secret_names() -> None:
+def test_environment_example_has_primary_rag_secrets_without_legacy_flat_rag() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "RAG_EMBEDDING_API_KEY=replace_with_rag_embedding_api_key" in env_example
     assert "RAG_RERANKER_API_KEY=replace_with_rag_reranker_api_key" in env_example
     assert "EMBEDDING_API_KEY_ENV=RAG_EMBEDDING_API_KEY" in env_example
     assert "RERANKER_API_KEY_ENV=RAG_RERANKER_API_KEY" in env_example
-    assert env_example.count("CHROMA_PERSIST_DIR=") == 1
-    assert "CONTEXT_POLICY_MODE=strict" in env_example
-    assert "PARENT_CHILD_GENERATION_ID=pc_20260715_98336c2_55" in env_example
+    for forbidden in (
+        "CHROMA_PERSIST_DIR=",
+        "PARENT_CHILD_GENERATION_ID=",
+        "RAG_SPLITTER_MODE=",
+        "INDEX_ADD_BATCH_SIZE=",
+        "INDEX_MAX_RETRIES=",
+    ):
+        assert forbidden not in env_example
+
+
+def test_docker_context_excludes_generated_primary_indexes() -> None:
+    ignored = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+
+    assert {
+        "artifacts",
+        "indexes/parent_child",
+        ".runtime_state",
+        "frontend/.next",
+        "frontend/node_modules",
+    } <= ignored

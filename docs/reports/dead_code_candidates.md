@@ -456,3 +456,51 @@ test-intent review.
   Vulture remains report-only with the `27` candidates above. Docker Compose
   configuration, import-linter, touched-file static checks, and
   `git diff --check` passed.
+
+
+## 2026-07-19 Parent--Child primary cutover audit
+
+Candidate: retired flat Chroma runtime and sealed-generation serving control plane.
+
+Files / entry points:
+- src/rag/indexer.py, src/rag/retriever.py, scripts/build_index.py,
+  scripts/inspect_chunks.py, and scripts/reset_index.py.
+- src/rag/parent_child/registry.py, src/rag/parent_child/generation.py,
+  scripts/build_parent_child_generation.py, scripts/manage_rag_generation.py,
+  config/rag/rollout.yaml, and their registry/rollout tests.
+
+Replacement:
+- primary/primary_state.json selects one validated revision beneath
+  primary/revisions/r<revision>.
+- primary_metadata.json plus primary_validation.json retain strict Pydantic,
+  path containment, Chroma/BM25/parent-store, provider identity, policy, and
+  subject validation without a sealed marker, READY, manifest SHA, generation
+  registry, shadow, or previous pointer.
+- The served FastAPI lifecycle loads only the primary and fails closed when it
+  is missing or invalid. Docker no longer mounts /app/chroma_store.
+
+Evidence:
+- The production graph already receives its Parent--Child retriever by
+  injection. src/graph/academic.py no longer imports the flat retriever and
+  its legacy node fails closed; src/tools/rag_tool.py now requires an injected
+  primary search boundary; src/rag/__init__.py no longer exports the flat
+  indexer/retriever.
+- scripts/migrate_parent_child_primary.py copies only concrete artifacts from
+  the existing artifact directory into staging and validates them before the
+  atomic primary state swap. scripts/build_parent_child_primary.py builds
+  future revisions directly in primary staging without registry activation.
+
+Confidence: High for runtime disconnection; deletion is intentionally deferred.
+
+Dynamic reference checks required before deletion:
+- FastAPI routes, the served graph, CLI registration, imports, Docker Compose,
+  tests, prompts, and configuration must have no active flat-Chroma or
+  registry-serving references.
+- A real Docker browser Canary must observe HealthReadyV4 twice with unchanged
+  primary revision/config fingerprint and complete the six scenarios.
+
+Approved boundary:
+The user explicitly approved replacing the old implementation. Physical
+deletion of chroma_store, historical generation directories, registry files,
+and the listed legacy modules remains deferred until the real Docker/browser
+Canary succeeds. Do not treat static tests as that Canary.

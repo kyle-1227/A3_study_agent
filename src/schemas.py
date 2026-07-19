@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -218,6 +219,28 @@ class HealthReadyV3(_StrictApiModel):
     deployment_mode: Literal["active"]
     rollout_activation_enabled: Literal[True]
     rollout_shadow_enabled: Literal[False]
+
+
+class HealthReadyV4(_StrictApiModel):
+    """Ready only when the one active Parent--Child primary is verified."""
+
+    schema_version: Literal["health_ready_v4"]
+    status: Literal["ready"]
+    checkpointer_type: Literal["postgres"]
+    graph_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_data_version: str = Field(min_length=1, max_length=160)
+    knowledge_graph_artifact_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parent_child_primary_revision: int = Field(gt=0)
+    parent_child_primary_updated_at: datetime
+    parent_child_primary_config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_orchestration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("parent_child_primary_updated_at")
+    @classmethod
+    def validate_primary_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("primary update time must be timezone-aware")
+        return value
 
 
 class LearningGuidanceCatalogSubjectV1(_StrictApiModel):

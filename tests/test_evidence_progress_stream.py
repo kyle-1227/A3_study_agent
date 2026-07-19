@@ -66,6 +66,19 @@ def _source_completed() -> dict[str, object]:
     }
 
 
+def _fallback_resource_assigned() -> dict[str, object]:
+    return {
+        "schema_version": "evidence_orchestration_trace_v1",
+        "stage": "evidence_orchestration.resource.assigned",
+        "round_index": 1,
+        "resource_type": "review_doc",
+        "status": "fallback",
+        "requirement_count": 2,
+        "assigned_evidence_count": 1,
+        "missing_requirement_count": 1,
+    }
+
+
 def test_round_start_and_merge_share_stable_progress_identity() -> None:
     started = build_evidence_progress(
         _round_started(),
@@ -96,6 +109,39 @@ def test_public_projection_excludes_query_fingerprint_and_rejects_extra() -> Non
     payload["details"]["query"] = "private query"
     with pytest.raises(ValidationError):
         EvidenceProgressV1.model_validate(payload)
+
+
+def test_resource_fallback_progress_is_explicit_and_evidence_limited() -> None:
+    progress = build_evidence_progress(
+        _fallback_resource_assigned(),
+        request_id=REQUEST_ID,
+        thread_id=THREAD_ID,
+    )
+
+    assert progress.phase_status == "completed"
+    assert progress.details.status == "fallback"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("assigned_evidence_count", 0),
+        ("missing_requirement_count", 0),
+    ],
+)
+def test_resource_fallback_progress_rejects_unbounded_or_empty_evidence(
+    field: str,
+    value: int,
+) -> None:
+    event = _fallback_resource_assigned()
+    event[field] = value
+
+    with pytest.raises(ValidationError):
+        build_evidence_progress(
+            event,
+            request_id=REQUEST_ID,
+            thread_id=THREAD_ID,
+        )
 
 
 @pytest.mark.parametrize(

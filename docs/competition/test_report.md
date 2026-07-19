@@ -1,3 +1,16 @@
+> **2026-07-19 current primary runtime note**
+>
+> The served RAG path is now one mutable Parent--Child primary selected by
+> primary/primary_state.json. It does not require READY, sealed manifests,
+> generation registry activation, shadow, or rollback pointers. Its state,
+> metadata, Chroma/BM25/parent-store structure, provider identity, subject and
+> chunk-policy inventory are still strictly validated and fail closed.
+>
+> HealthReadyV4 exposes primary revision, update time, and configuration
+> fingerprint. Earlier sections that describe generation 55, registry primary,
+> shadow, rollback, HealthReadyV3, or PARENT_CHILD_GENERATION_ID are historical
+> evidence only and must not be used as current deployment instructions.
+>
 # A3 Study Agent 测试说明书
 
 ## 1. 目的与证据等级

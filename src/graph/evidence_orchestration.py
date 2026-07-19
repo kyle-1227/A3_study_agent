@@ -3013,6 +3013,8 @@ def make_terminal_parent_hydration_node(
                         "page_content": item.content,
                         "parent_id": item.parent_id,
                         "generation_id": item.generation_id,
+                        "primary_revision": runtime.parent_child.primary_revision,
+                        "primary_config_fingerprint": runtime.parent_child.primary_config_fingerprint,
                         "policy_id": item.policy_id,
                         "page_start": item.page_start,
                         "page_end": item.page_end,
@@ -3089,6 +3091,8 @@ def make_terminal_parent_hydration_node(
             "parent_child_hydration": {
                 "schema_version": "resource_evidence_parent_hydration_v1",
                 "generation_id": runtime.parent_child.generation_id,
+                "primary_revision": runtime.parent_child.primary_revision,
+                "primary_config_fingerprint": runtime.parent_child.primary_config_fingerprint,
                 "retrieval_fingerprint": (
                     runtime.parent_child.graph_handoff_fingerprint
                 ),

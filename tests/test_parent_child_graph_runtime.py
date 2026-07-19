@@ -356,6 +356,8 @@ def _runtime() -> tuple[ParentChildGraphRuntime, _FakeGraphRetriever, ParentReco
     return (
         ParentChildGraphRuntime(
             generation_id=_GENERATION_ID,
+            primary_revision=1,
+            primary_config_fingerprint="e" * 64,
             available_subjects=("math",),
             retriever=retriever,
             retrieval_fingerprint="f" * 64,
@@ -534,6 +536,8 @@ def test_multi_branch_children_keep_their_own_role_and_purpose() -> None:
     retriever = _TwoBranchGraphRetriever(parent, (first_child, second_child))
     runtime = ParentChildGraphRuntime(
         generation_id=_GENERATION_ID,
+        primary_revision=1,
+        primary_config_fingerprint="e" * 64,
         available_subjects=("math",),
         retriever=retriever,
         retrieval_fingerprint="f" * 64,

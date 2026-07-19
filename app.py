@@ -110,8 +110,8 @@ from src.config.server_runtime_config import (
 from src.graph.builder import get_compiled_resource_evidence_parent_child_graph
 from src.graph.evidence_orchestration import EvidenceOrchestrationRuntime
 from src.graph.served_candidate import (
-    ServedCandidateRuntime,
-    load_served_candidate_runtime,
+    ServedPrimaryRuntime,
+    load_served_primary_runtime,
 )
 from src.graph.state import (
     ACTIVITY_TIMELINE_CLEAR,
@@ -183,7 +183,7 @@ from src.schemas import (
     CompiledOnboardRequestV2,
     ContinueRequest,
     HealthLiveV1,
-    HealthReadyV3,
+    HealthReadyV4,
     LearningGuidanceCatalogV1,
     OnboardRequest,
     OnboardResultV2,
@@ -819,17 +819,8 @@ async def lifespan(app: FastAPI):
             memory_db_path=memory_db_path,
             clock=lambda: datetime.now(timezone.utc),
         )
-        candidate_generation_id = os.environ["PARENT_CHILD_GENERATION_ID"]
-        if (
-            not candidate_generation_id
-            or candidate_generation_id != candidate_generation_id.strip()
-        ):
-            raise RuntimeError(
-                "PARENT_CHILD_GENERATION_ID must be a non-blank stripped identifier"
-            )
-        served_candidate = load_served_candidate_runtime(
+        served_primary = load_served_primary_runtime(
             project_root=project_root,
-            generation_id=candidate_generation_id,
             learning_guidance=learning_guidance_runtime,
             index_config_path=(
                 project_root / "config" / "rag" / "index.production.yaml"
@@ -841,18 +832,18 @@ async def lifespan(app: FastAPI):
             profiles_config_path=(
                 project_root / "config" / "rag" / "resource_evidence_profiles.yaml"
             ),
-            rollout_config_path=(project_root / "config" / "rag" / "rollout.yaml"),
         )
-        stack.callback(served_candidate.close)
+        stack.callback(served_primary.close)
         graph = get_compiled_resource_evidence_parent_child_graph(
-            served_candidate.orchestration,
+            served_primary.orchestration,
             checkpointer=graph_checkpointer,
         )
-        app.state.served_candidate_owner = served_candidate
-        app.state.served_candidate_runtime = served_candidate.orchestration
-        app.state.parent_child_generation_id = candidate_generation_id
-        app.state.parent_child_generation_manifest_fingerprint = (
-            served_candidate.generation_manifest_fingerprint
+        app.state.served_primary_owner = served_primary
+        app.state.served_primary_runtime = served_primary.orchestration
+        app.state.parent_child_primary_revision = served_primary.primary_revision
+        app.state.parent_child_primary_updated_at = served_primary.primary_updated_at
+        app.state.parent_child_primary_config_fingerprint = (
+            served_primary.primary_config_fingerprint
         )
         app.state.learning_guidance_runtime = learning_guidance_runtime
         app.state.learning_guidance_history_writer = LearningGuidanceHistoryWriterV1(
@@ -969,14 +960,13 @@ async def health_live_endpoint() -> HealthLiveV1:
     return HealthLiveV1(schema_version="health_live_v1", status="live")
 
 
-@app.get("/health/ready", response_model=HealthReadyV3)
-async def health_ready_endpoint(request: Request) -> HealthReadyV3:
+@app.get("/health/ready", response_model=HealthReadyV4)
+async def health_ready_endpoint(request: Request) -> HealthReadyV4:
     state = request.app.state
     if getattr(state, "checkpointer_enabled", None) is not True:
         _readiness_unavailable("health_ready_postgres_checkpointer_required")
     if getattr(state, "checkpointer_type", None) != "postgres":
         _readiness_unavailable("health_ready_postgres_checkpointer_required")
-
     timeout_seconds = _ready_state_value(
         state,
         "readiness_db_timeout_seconds",
@@ -989,16 +979,11 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV3:
         or timeout_seconds <= 0
     ):
         _readiness_unavailable("health_ready_timeout_config_invalid")
-
     manifest = _ready_state_value(
-        state,
-        "graph_manifest",
-        error_code="health_ready_graph_manifest_unavailable",
+        state, "graph_manifest", error_code="health_ready_graph_manifest_unavailable"
     )
     graph_version = _ready_state_value(
-        state,
-        "graph_version",
-        error_code="health_ready_graph_manifest_unavailable",
+        state, "graph_version", error_code="health_ready_graph_manifest_unavailable"
     )
     if (
         not isinstance(manifest, GraphManifest)
@@ -1007,7 +992,6 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV3:
         or graph_version != manifest.graph_version
     ):
         _readiness_unavailable("health_ready_graph_manifest_invalid")
-
     guidance = _ready_state_value(
         state,
         "learning_guidance_runtime",
@@ -1015,83 +999,70 @@ async def health_ready_endpoint(request: Request) -> HealthReadyV3:
     )
     if not isinstance(guidance, LearningGuidanceRuntime):
         _readiness_unavailable("health_ready_knowledge_graph_invalid")
-    knowledge_graph = guidance.knowledge_graph
-
     orchestration = _ready_state_value(
         state,
-        "served_candidate_runtime",
+        "served_primary_runtime",
         error_code="health_ready_orchestration_unavailable",
     )
-    candidate_owner = _ready_state_value(
-        state,
-        "served_candidate_owner",
-        error_code="health_ready_generation_manifest_unavailable",
+    primary_owner = _ready_state_value(
+        state, "served_primary_owner", error_code="health_ready_primary_unavailable"
     )
     if (
         not isinstance(orchestration, EvidenceOrchestrationRuntime)
-        or not isinstance(candidate_owner, ServedCandidateRuntime)
-        or candidate_owner.orchestration is not orchestration
+        or not isinstance(primary_owner, ServedPrimaryRuntime)
+        or primary_owner.orchestration is not orchestration
         or orchestration.learning_guidance is not guidance
     ):
         _readiness_unavailable("health_ready_orchestration_invalid")
-    if candidate_owner.deployment_mode != "active":
-        _readiness_unavailable("health_ready_deployment_mode_invalid")
-    if (
-        candidate_owner.rollout_activation_enabled is not True
-        or candidate_owner.rollout_shadow_enabled is not False
-    ):
-        _readiness_unavailable("health_ready_rollout_state_invalid")
-
-    generation_id = _ready_state_value(
+    primary_revision = _ready_state_value(
         state,
-        "parent_child_generation_id",
-        error_code="health_ready_generation_unavailable",
+        "parent_child_primary_revision",
+        error_code="health_ready_primary_unavailable",
+    )
+    primary_updated_at = _ready_state_value(
+        state,
+        "parent_child_primary_updated_at",
+        error_code="health_ready_primary_unavailable",
+    )
+    primary_fingerprint = _ready_state_value(
+        state,
+        "parent_child_primary_config_fingerprint",
+        error_code="health_ready_primary_unavailable",
     )
     if (
-        not isinstance(generation_id, str)
-        or not generation_id
-        or generation_id != generation_id.strip()
-        or generation_id != orchestration.parent_child.generation_id
+        isinstance(primary_revision, bool)
+        or not isinstance(primary_revision, int)
+        or primary_revision < 1
+        or primary_revision != primary_owner.primary_revision
+        or primary_revision != orchestration.parent_child.primary_revision
+        or not isinstance(primary_updated_at, datetime)
+        or primary_updated_at.tzinfo is None
+        or primary_updated_at != primary_owner.primary_updated_at
+        or not isinstance(primary_fingerprint, str)
+        or primary_fingerprint != primary_owner.primary_config_fingerprint
+        or primary_fingerprint != orchestration.parent_child.primary_config_fingerprint
     ):
-        _readiness_unavailable("health_ready_generation_invalid")
-    generation_manifest_fingerprint = _ready_state_value(
-        state,
-        "parent_child_generation_manifest_fingerprint",
-        error_code="health_ready_generation_manifest_unavailable",
-    )
-    if (
-        not isinstance(generation_manifest_fingerprint, str)
-        or generation_manifest_fingerprint
-        != candidate_owner.generation_manifest_fingerprint
-    ):
-        _readiness_unavailable("health_ready_generation_manifest_invalid")
-
+        _readiness_unavailable("health_ready_primary_invalid")
     db_uri = get_db_uri()
     if not isinstance(db_uri, str) or not db_uri or db_uri != db_uri.strip():
         _readiness_unavailable("health_ready_database_config_unavailable")
     await _probe_postgres_readiness(
-        db_uri=db_uri,
-        timeout_seconds=float(timeout_seconds),
+        db_uri=db_uri, timeout_seconds=float(timeout_seconds)
     )
-
     try:
-        return HealthReadyV3(
-            schema_version="health_ready_v3",
+        return HealthReadyV4(
+            schema_version="health_ready_v4",
             status="ready",
             checkpointer_type="postgres",
             graph_version=graph_version,
-            knowledge_graph_data_version=knowledge_graph.data_version,
-            knowledge_graph_artifact_fingerprint=(knowledge_graph.artifact_fingerprint),
-            parent_child_generation_id=generation_id,
-            parent_child_generation_manifest_fingerprint=(
-                generation_manifest_fingerprint
+            knowledge_graph_data_version=guidance.knowledge_graph.data_version,
+            knowledge_graph_artifact_fingerprint=(
+                guidance.knowledge_graph.artifact_fingerprint
             ),
-            evidence_orchestration_fingerprint=(
-                orchestration.orchestration_fingerprint
-            ),
-            deployment_mode=candidate_owner.deployment_mode,
-            rollout_activation_enabled=(candidate_owner.rollout_activation_enabled),
-            rollout_shadow_enabled=candidate_owner.rollout_shadow_enabled,
+            parent_child_primary_revision=primary_revision,
+            parent_child_primary_updated_at=primary_updated_at,
+            parent_child_primary_config_fingerprint=primary_fingerprint,
+            evidence_orchestration_fingerprint=orchestration.orchestration_fingerprint,
         )
     except ValidationError:
         _readiness_unavailable("health_ready_identity_invalid")

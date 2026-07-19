@@ -231,6 +231,20 @@ describe("parseEvidenceProgressEvent", () => {
       ),
       progress(
         {
+          stage: "evidence_orchestration.resource.assigned",
+          round_index: 0,
+          resource_type: "review_doc",
+          status: "fallback",
+          requirement_count: 1,
+          assigned_evidence_count: 1,
+          missing_requirement_count: 1,
+        },
+        "resource:review_doc",
+        "completed",
+        "b",
+      ),
+      progress(
+        {
           stage: "evidence_orchestration.terminal",
           orchestration_fingerprint: SHA,
           status: "partial_resources_ready",
@@ -261,7 +275,7 @@ describe("parseEvidenceProgressEvent", () => {
         "a",
       ),
     ]
-    expect(variants.map((item) => item.details.stage)).toHaveLength(12)
+    expect(variants.map((item) => item.details.stage)).toHaveLength(13)
   })
 
   it("rejects extra, sensitive, drifted, and non-canonical values", () => {
@@ -323,6 +337,24 @@ describe("parseEvidenceProgressEvent", () => {
       "8",
     )
     expect(() => parseEvidenceProgressEvent(invalidResource)).toThrow(
+      "resource readiness contract",
+    )
+
+    const invalidFallback = rawProgress(
+      {
+        stage: "evidence_orchestration.resource.assigned",
+        round_index: 0,
+        resource_type: "review_doc",
+        status: "fallback",
+        requirement_count: 1,
+        assigned_evidence_count: 0,
+        missing_requirement_count: 1,
+      },
+      "resource:review_doc",
+      "completed",
+      "b",
+    )
+    expect(() => parseEvidenceProgressEvent(invalidFallback)).toThrow(
       "resource readiness contract",
     )
   })
@@ -392,6 +424,75 @@ describe("reduceEvidenceProgress", () => {
     expect(state.terminal?.details.stage).toBe("evidence_orchestration.terminal")
     expect(Object.values(state.byId).some((item) => item.phaseStatus === "running")).toBe(false)
     expect(state.order).toHaveLength(10)
+  })
+
+  it("keeps fallback assignments deliverable without counting them as blocked", () => {
+    const assignmentReady = progress(
+      {
+        stage: "evidence_orchestration.resource.assigned",
+        round_index: 0,
+        resource_type: "quiz",
+        status: "ready",
+        requirement_count: 1,
+        assigned_evidence_count: 2,
+        missing_requirement_count: 0,
+      },
+      "resource:quiz",
+      "completed",
+      "8",
+    )
+    const assignmentFallback = progress(
+      {
+        stage: "evidence_orchestration.resource.assigned",
+        round_index: 0,
+        resource_type: "mindmap",
+        status: "fallback",
+        requirement_count: 1,
+        assigned_evidence_count: 1,
+        missing_requirement_count: 1,
+      },
+      "resource:mindmap",
+      "completed",
+      "9",
+    )
+    const terminal = progress(
+      {
+        stage: "evidence_orchestration.terminal",
+        orchestration_fingerprint: SHA,
+        status: "partial_resources_ready",
+        rounds_completed: 1,
+        ready_resource_count: 1,
+        blocked_resource_count: 0,
+        total_search_tasks: 2,
+        ledger_count: 2,
+        reason_code: "budget_complete",
+      },
+      "terminal",
+      "completed",
+      "a",
+    )
+
+    const state = reduce(
+      plan(),
+      roundStarted(),
+      sourceCompleted("local", 0, 1, "3"),
+      sourceEmpty("web", 0, 1, "4"),
+      roundMerged(),
+      coverage(),
+      evaluated(),
+      route("terminal"),
+      assignmentReady,
+      assignmentFallback,
+      terminal,
+    )
+
+    expect(state.terminal).toBe(terminal)
+    const fallbackDetails = state.byId[assignmentFallback.progressId].details
+    expect(fallbackDetails.stage).toBe("evidence_orchestration.resource.assigned")
+    if (fallbackDetails.stage !== "evidence_orchestration.resource.assigned") {
+      throw new Error("fallback assignment projection drifted")
+    }
+    expect(fallbackDetails.status).toBe("fallback")
   })
 
   it("requires contiguous repair rounds and stable round lifecycle identity", () => {

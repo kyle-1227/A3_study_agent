@@ -45,6 +45,7 @@ def test_runtime_query_mutates_only_verified_chroma_copy(tmp_path: Path) -> None
         expected_source_sha256=source_sha256,
         owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
     ) as snapshot:
+        assert snapshot.source_sha256 == source_sha256
         client = chromadb.PersistentClient(
             path=str(snapshot.persist_directory),
             settings=Settings(anonymized_telemetry=False),
@@ -87,7 +88,9 @@ def test_runtime_snapshot_rejects_symlink_source(tmp_path: Path) -> None:
         )
 
 
-def test_runtime_snapshot_digest_mismatch_cleans_partial_copy(tmp_path: Path) -> None:
+def test_runtime_snapshot_digest_mismatch_fails_before_creating_a_runtime_copy(
+    tmp_path: Path,
+) -> None:
     index_root = tmp_path / "indexes"
     source = index_root / "generation-a" / "chroma_children"
     source.parent.mkdir(parents=True)
@@ -100,6 +103,4 @@ def test_runtime_snapshot_digest_mismatch_cleans_partial_copy(tmp_path: Path) ->
             expected_source_sha256="0" * 64,
             owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
         )
-    runtime_root = index_root / ".runtime_chroma"
-    assert runtime_root.is_dir()
-    assert tuple(runtime_root.iterdir()) == ()
+    assert not (index_root / ".runtime_chroma").exists()

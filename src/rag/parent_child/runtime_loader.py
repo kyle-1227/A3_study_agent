@@ -1,29 +1,30 @@
-"""Load fully verified generation resources and construct strict retrieval runtime."""
+"""Load only the verified mutable Parent--Child primary runtime."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from src.config.rag_index_config import RagIndexConfig
 from src.rag.parent_child._storage_io import canonical_json_bytes, sha256_bytes
-from src.rag.parent_child.bm25_artifact import compute_tokenizer_fingerprint
-from src.rag.parent_child.builder import compute_embedding_fingerprint
 from src.rag.parent_child.chroma_runtime_snapshot import (
     CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
     ChromaRuntimeSnapshot,
-    chroma_artifact_sha256,
-)
-from src.rag.parent_child.generation import validate_sealed_generation
-from src.rag.parent_child.manifests import (
-    GenerationManifest,
-    PolicyManifestSet,
-    SubjectManifest,
-    read_strict_model,
+    ChromaRuntimeSnapshotError,
 )
 from src.rag.parent_child.parent_store import ParentStore
-from src.rag.parent_child.registry import GenerationRegistryRecord
+from src.rag.parent_child.primary_runtime import (
+    PrimaryIndexError,
+    PrimaryIndexMetadataV1,
+    PrimaryIndexStateV1,
+    primary_artifact_root,
+    load_primary_metadata,
+    load_primary_state,
+    load_primary_validation,
+    validate_primary_revision,
+)
 from src.rag.parent_child.retrieval import (
     ChildReranker,
     HybridRetrievalPolicy,
@@ -38,8 +39,8 @@ from src.rag.parent_child.runtime_resources import (
 )
 
 
-class GenerationRuntimeLoadError(RuntimeError):
-    """A READY generation cannot be safely used by candidate retrieval."""
+class PrimaryRuntimeLoadError(RuntimeError):
+    """The active primary cannot be safely served."""
 
 
 def compute_reranker_fingerprint(config: RagIndexConfig) -> str:
@@ -73,17 +74,19 @@ def compute_reranker_fingerprint(config: RagIndexConfig) -> str:
     )
 
 
-def retrieval_policy_from_generation(
+def retrieval_policy_from_primary(
     config: RagIndexConfig,
     *,
-    manifest_sha256: str,
+    primary_revision: int,
+    primary_config_fingerprint: str,
     embedding_fingerprint: str,
     bm25_tokenizer_fingerprint: str,
 ) -> HybridRetrievalPolicy:
     retrieval = config.retrieval
     return HybridRetrievalPolicy(
-        schema_version="hybrid_retrieval_policy_v1",
-        generation_manifest_sha256=manifest_sha256,
+        schema_version="hybrid_retrieval_policy_v2",
+        primary_revision=primary_revision,
+        primary_config_fingerprint=primary_config_fingerprint,
         embedding_fingerprint=embedding_fingerprint,
         bm25_tokenizer_fingerprint=bm25_tokenizer_fingerprint,
         reranker_fingerprint=compute_reranker_fingerprint(config),
@@ -106,16 +109,25 @@ def retrieval_policy_from_generation(
 
 
 @dataclass(frozen=True, slots=True)
-class LoadedGenerationRuntime:
-    """Verified available subjects, resources, and retrieval fingerprint policy."""
+class LoadedPrimaryRuntime:
+    """Verified resources and immutable-in-process primary identity."""
 
-    generation_id: str
+    primary_revision: int
+    primary_updated_at: datetime
+    primary_config_fingerprint: str
+    artifact_identity: str
     available_subjects: tuple[str, ...]
     resources: GenerationResources
     chroma_snapshot: ChromaRuntimeSnapshot
     retrieval_policy: HybridRetrievalPolicy
     cross_branch_rrf_k: int
     judge_preview_max_chars: int
+
+    @property
+    def generation_id(self) -> str:
+        """Internal artifact identity retained for Parent--Child record checks."""
+
+        return self.artifact_identity
 
     def retriever(self) -> ParentChildHybridRetriever:
         return ParentChildHybridRetriever(
@@ -133,181 +145,129 @@ class LoadedGenerationRuntime:
             self.chroma_snapshot.close()
 
 
-def _validate_manifest_against_config(
-    config: RagIndexConfig,
-    *,
-    manifest_sha256: str,
-    generation_root: Path,
-    generation_id: str,
-) -> tuple[GenerationManifest, tuple[str, ...]]:
-    manifest = validate_sealed_generation(
-        config.storage.index_root,
-        generation_id,
-        expected_manifest_sha256=manifest_sha256,
-        expected_marker_schema_version=config.storage.owner_marker_schema_version,
-    )
-    if manifest.collection_name != config.storage.collection_name:
-        raise GenerationRuntimeLoadError("collection name differs from strict config")
-    if manifest.embedding.fingerprint != compute_embedding_fingerprint(config):
-        raise GenerationRuntimeLoadError("embedding fingerprint differs from config")
-    if (
-        manifest.embedding.dimension != config.embedding.expected_dimension
-        or manifest.embedding.distance_metric != config.embedding.distance_metric
-    ):
-        raise GenerationRuntimeLoadError("embedding shape/metric differs from config")
-    expected_tokenizer = compute_tokenizer_fingerprint(
-        tokenizer_name=config.bm25.tokenizer,
-        tokenizer_version=config.bm25.tokenizer_version,
-        dictionary_sha256=config.bm25.dictionary_hash,
-    )
-    if manifest.bm25.tokenizer_fingerprint != expected_tokenizer:
-        raise GenerationRuntimeLoadError("BM25 fingerprint differs from config")
-
-    subject_manifest = read_strict_model(
-        generation_root,
-        "subject_manifest.json",
-        SubjectManifest,
-    )
-    policy_manifest = read_strict_model(
-        generation_root,
-        "policy_manifest.json",
-        PolicyManifestSet,
-    )
-    if subject_manifest.generation_id != generation_id:
-        raise GenerationRuntimeLoadError("subject manifest generation mismatch")
-    active_entries = tuple(
-        entry for entry in subject_manifest.entries if entry.exclusion_state == "active"
-    )
-    manifest_policy_map = {
-        entry.subject_id: entry.policy_id for entry in active_entries
-    }
-    if manifest_policy_map != config.subject_policy_map:
-        raise GenerationRuntimeLoadError(
-            "active subject/policy inventory differs from strict config"
-        )
-    configured_policy_ids = set(config.chunk_policies)
-    sealed_policy_ids = {policy.policy_id for policy in policy_manifest.policies}
-    if configured_policy_ids != sealed_policy_ids:
-        raise GenerationRuntimeLoadError("sealed policy inventory differs from config")
-    available_subjects = tuple(entry.subject_id for entry in active_entries)
-    if available_subjects != tuple(sorted(available_subjects)):
-        raise GenerationRuntimeLoadError("available subjects are not sorted")
-    return manifest, available_subjects
-
-
-def load_generation_runtime(
+def _assert_primary_loaded(
     *,
     config: RagIndexConfig,
-    registry_record: GenerationRegistryRecord,
+    index_root: Path,
+) -> tuple[PrimaryIndexStateV1, PrimaryIndexMetadataV1, Path]:
+    try:
+        state = load_primary_state(index_root)
+        metadata = load_primary_metadata(index_root, state=state)
+        load_primary_validation(index_root, state=state, metadata=metadata)
+        root = primary_artifact_root(index_root, state=state)
+    except (FileNotFoundError, PrimaryIndexError, ValueError) as exc:
+        raise PrimaryRuntimeLoadError(
+            "active Parent--Child primary is invalid"
+        ) from exc
+    return state, metadata, root
+
+
+def load_primary_runtime(
+    *,
+    config: RagIndexConfig,
     query_embedding_provider: QueryEmbeddingProvider,
     reranker: ChildReranker,
     bm25_tokenizer: Callable[[str], Sequence[str]],
-) -> LoadedGenerationRuntime:
-    """Open exact READY resources; any mismatch closes partial resources and fails."""
+) -> LoadedPrimaryRuntime:
+    """Open exactly one verified primary; missing or corrupt state fails closed."""
 
-    if registry_record.state != "READY" or registry_record.manifest_sha256 is None:
-        raise GenerationRuntimeLoadError(
-            "runtime resources require a READY registry row"
-        )
-    generation_id = registry_record.generation_id
-    logical_generation_root = (
-        config.storage.index_root / registry_record.directory_relative_path
+    state, metadata, root = _assert_primary_loaded(
+        config=config,
+        index_root=config.storage.index_root,
     )
-    if logical_generation_root.is_symlink():
-        raise GenerationRuntimeLoadError("generation directory must not be a symlink")
-    generation_root = logical_generation_root.resolve(strict=True)
-    if not generation_root.is_relative_to(
-        config.storage.index_root.resolve(strict=True)
-    ):
-        raise GenerationRuntimeLoadError("generation path escapes index_root")
-    manifest, available_subjects = _validate_manifest_against_config(
-        config,
-        manifest_sha256=registry_record.manifest_sha256,
-        generation_root=generation_root,
-        generation_id=generation_id,
-    )
-
     vector: ChromaChildSearchChannel | None = None
     parents: ParentStore | None = None
-    chroma_snapshot: ChromaRuntimeSnapshot | None = None
+    snapshot: ChromaRuntimeSnapshot | None = None
     try:
-        chroma_snapshot = ChromaRuntimeSnapshot.create(
-            index_root=config.storage.index_root,
-            source_directory=(generation_root / "chroma_children"),
-            expected_source_sha256=chroma_artifact_sha256(manifest),
-            owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
-        )
+        try:
+            snapshot = ChromaRuntimeSnapshot.create(
+                index_root=config.storage.index_root,
+                source_directory=root / metadata.chroma_directory_relative_path,
+                owner_schema_version=CHROMA_RUNTIME_OWNER_SCHEMA_VERSION,
+            )
+            validate_primary_revision(
+                config=config,
+                artifact_root=root,
+                metadata=metadata,
+                chroma_snapshot=snapshot,
+            )
+        except (ChromaRuntimeSnapshotError, PrimaryIndexError, ValueError) as exc:
+            raise PrimaryRuntimeLoadError(
+                "active Parent--Child primary is invalid"
+            ) from exc
         vector = ChromaChildSearchChannel(
-            persist_directory=chroma_snapshot.persist_directory,
-            collection_name=manifest.collection_name,
-            generation_id=generation_id,
-            expected_dimension=manifest.embedding.dimension,
-            distance_metric=manifest.embedding.distance_metric,
+            persist_directory=snapshot.persist_directory,
+            collection_name=metadata.collection_name,
+            generation_id=metadata.artifact_identity,
+            expected_dimension=metadata.embedding_dimension,
+            distance_metric=metadata.distance_metric,
             query_embedding_provider=query_embedding_provider,
             child_lookup_batch_size=config.embedding.batch_size,
         )
         parents = ParentStore.open_readonly(
-            generation_root,
-            "parents.sqlite",
+            root,
+            metadata.parent_store_relative_path,
             expected_schema_version=config.storage.parent_store_schema_version,
-            expected_generation_id=generation_id,
+            expected_generation_id=metadata.artifact_identity,
             busy_timeout_seconds=config.storage.parent_store_busy_timeout_seconds,
         )
         parents.verify_integrity()
         channels = {
             subject: SubjectBm25SearchChannel.load(
-                generation_root=generation_root,
-                manifest_relative_path=f"bm25/{subject}.manifest.json",
+                generation_root=root,
+                manifest_relative_path=(
+                    f"{metadata.bm25_directory_relative_path}/{subject}.manifest.json"
+                ),
                 manifest_schema_version="bm25_manifest_v1",
-                generation_id=generation_id,
+                generation_id=metadata.artifact_identity,
                 subject=subject,
-                tokenizer_fingerprint=manifest.bm25.tokenizer_fingerprint,
+                tokenizer_fingerprint=metadata.bm25_tokenizer_fingerprint,
                 tokenizer=bm25_tokenizer,
                 child_lookup=vector,
             )
-            for subject in available_subjects
+            for subject in metadata.available_subjects
         }
         resources = GenerationResources(
-            generation_id=generation_id,
-            manifest_fingerprint=registry_record.manifest_sha256,
+            generation_id=metadata.artifact_identity,
+            manifest_fingerprint=state.config_fingerprint,
             vector=vector,
             bm25=SubjectBm25Router(channels),
             reranker=reranker,
             parents=parents,
         )
-        policy = retrieval_policy_from_generation(
+        policy = retrieval_policy_from_primary(
             config,
-            manifest_sha256=registry_record.manifest_sha256,
-            embedding_fingerprint=manifest.embedding.fingerprint,
-            bm25_tokenizer_fingerprint=manifest.bm25.tokenizer_fingerprint,
+            primary_revision=state.primary_revision,
+            primary_config_fingerprint=state.config_fingerprint,
+            embedding_fingerprint=metadata.embedding_fingerprint,
+            bm25_tokenizer_fingerprint=metadata.bm25_tokenizer_fingerprint,
         )
-        return LoadedGenerationRuntime(
-            generation_id=generation_id,
-            available_subjects=available_subjects,
+        return LoadedPrimaryRuntime(
+            primary_revision=state.primary_revision,
+            primary_updated_at=state.updated_at_utc,
+            primary_config_fingerprint=state.config_fingerprint,
+            artifact_identity=metadata.artifact_identity,
+            available_subjects=metadata.available_subjects,
             resources=resources,
-            chroma_snapshot=chroma_snapshot,
+            chroma_snapshot=snapshot,
             retrieval_policy=policy,
             cross_branch_rrf_k=config.retrieval.cross_branch_rrf_k,
             judge_preview_max_chars=config.retrieval.judge_preview_max_chars,
         )
-    except Exception:
-        try:
-            if parents is not None:
-                parents.close()
-        finally:
-            try:
-                if vector is not None:
-                    vector.close()
-            finally:
-                if chroma_snapshot is not None:
-                    chroma_snapshot.close()
+    except BaseException:
+        if parents is not None:
+            parents.close()
+        if vector is not None:
+            vector.close()
+        if snapshot is not None:
+            snapshot.close()
         raise
 
 
 __all__ = [
-    "GenerationRuntimeLoadError",
-    "LoadedGenerationRuntime",
+    "LoadedPrimaryRuntime",
+    "PrimaryRuntimeLoadError",
     "compute_reranker_fingerprint",
-    "load_generation_runtime",
-    "retrieval_policy_from_generation",
+    "load_primary_runtime",
+    "retrieval_policy_from_primary",
 ]

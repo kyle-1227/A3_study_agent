@@ -21,6 +21,7 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from src.config import get_setting
 from src.memory.retention import (
     PROTECTED_EPISODIC_MEMORY_ID_PREFIXES,
     is_protected_episodic_memory_id,
@@ -1029,6 +1030,17 @@ def create_memory_store(backend: str = "sqlite", **kwargs) -> MemoryStore:
         A MemoryStore instance.
     """
     if backend == "sqlite":
+        if "db_path" not in kwargs:
+            configured_db_path = get_setting("memory.db_path", None)
+            if (
+                not isinstance(configured_db_path, str)
+                or not configured_db_path.strip()
+                or configured_db_path != configured_db_path.strip()
+            ):
+                raise RuntimeError(
+                    "memory.db_path is required for the default SQLite memory store"
+                )
+            kwargs["db_path"] = configured_db_path
         return SQLiteMemoryStore(**kwargs)
     if backend == "postgres":
         raise NotImplementedError("PostgreSQL memory store not yet implemented")

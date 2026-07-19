@@ -1,4 +1,4 @@
-"""Contained runtime copies that keep sealed Chroma artifacts byte-immutable."""
+"""Contained disposable Chroma copies for the mutable primary index."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.rag.parent_child._storage_io import sha256_path
 from src.rag.parent_child.manifests import GenerationManifest
 
-
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OWNER_FILE = ".a3_chroma_runtime_owner.json"
 _RUNTIME_DIRECTORY = ".runtime_chroma"
@@ -21,7 +20,7 @@ CHROMA_RUNTIME_OWNER_SCHEMA_VERSION = "chroma_runtime_snapshot_v1"
 
 
 class ChromaRuntimeSnapshotError(RuntimeError):
-    """A sealed Chroma artifact cannot be copied or safely cleaned up."""
+    """A primary Chroma artifact cannot be safely copied or cleaned."""
 
 
 class _SnapshotOwner(BaseModel):
@@ -29,7 +28,7 @@ class _SnapshotOwner(BaseModel):
 
     schema_version: str = Field(min_length=1)
     snapshot_id: str = Field(min_length=1)
-    source_sha256: str = Field(min_length=64, max_length=64)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def _reject_symlinks(path: Path) -> None:
@@ -38,11 +37,11 @@ def _reject_symlinks(path: Path) -> None:
     for child in path.rglob("*"):
         if child.is_symlink():
             raise ChromaRuntimeSnapshotError(
-                "sealed Chroma artifacts must not contain symlinks"
+                "primary Chroma artifacts must not contain symlinks"
             )
 
 
-def _resolve_contained_directory(path: Path, *, root: Path) -> Path:
+def _contained_directory(path: Path, *, root: Path) -> Path:
     if not path.is_absolute() or not root.is_absolute():
         raise ChromaRuntimeSnapshotError("snapshot paths must be absolute")
     if path.is_symlink() or root.is_symlink():
@@ -51,12 +50,14 @@ def _resolve_contained_directory(path: Path, *, root: Path) -> Path:
     resolved = path.resolve(strict=True)
     if not resolved.is_relative_to(resolved_root):
         raise ChromaRuntimeSnapshotError("snapshot path escapes its containment root")
+    if not resolved.is_dir():
+        raise ChromaRuntimeSnapshotError("snapshot source must be a directory")
     _reject_symlinks(resolved)
     return resolved
 
 
 class ChromaRuntimeSnapshot:
-    """A disposable Chroma copy owned below one configured index root."""
+    """A marker-owned runtime copy; it never selects a legacy data directory."""
 
     def __init__(
         self,
@@ -72,47 +73,64 @@ class ChromaRuntimeSnapshot:
         self._owner = owner
         self._closed = False
 
+    @property
+    def source_sha256(self) -> str:
+        """Digest of the source directory that this owned copy verified."""
+
+        return self._owner.source_sha256
+
     @classmethod
     def create(
         cls,
         *,
         index_root: Path,
         source_directory: Path,
-        expected_source_sha256: str,
         owner_schema_version: str,
-    ) -> ChromaRuntimeSnapshot:
-        """Copy a previously verified artifact and verify the copied bytes."""
+        expected_source_sha256: str | None = None,
+    ) -> "ChromaRuntimeSnapshot":
+        """Copy a contained primary Chroma directory and verify copied bytes.
 
-        if _SHA256_PATTERN.fullmatch(expected_source_sha256) is None:
+        expected_source_sha256 exists only for offline artifact tooling
+        compatibility. The primary runtime deliberately omits it: the source is
+        verified by containment, no-symlink checks, and a before/after digest
+        computed in this one operation rather than any sealed manifest.
+        """
+
+        if not owner_schema_version:
+            raise ChromaRuntimeSnapshotError("owner_schema_version is required")
+        if (
+            expected_source_sha256 is not None
+            and _SHA256_PATTERN.fullmatch(expected_source_sha256) is None
+        ):
             raise ChromaRuntimeSnapshotError(
                 "expected_source_sha256 must be a lowercase SHA-256 value"
             )
-        if not owner_schema_version:
-            raise ChromaRuntimeSnapshotError("owner_schema_version is required")
         if index_root.is_symlink():
             raise ChromaRuntimeSnapshotError("index_root must not be a symlink")
-        resolved_index_root = index_root.resolve(strict=True)
-        source = _resolve_contained_directory(
-            source_directory,
-            root=resolved_index_root,
-        )
-        runtime_root = resolved_index_root / _RUNTIME_DIRECTORY
+        root = index_root.resolve(strict=True)
+        source = _contained_directory(source_directory, root=root)
+        source_sha256 = sha256_path(source)
+        if (
+            expected_source_sha256 is not None
+            and source_sha256 != expected_source_sha256
+        ):
+            raise ChromaRuntimeSnapshotError(
+                "runtime source differs from expected offline artifact"
+            )
+        runtime_root = root / _RUNTIME_DIRECTORY
         if runtime_root.exists() and runtime_root.is_symlink():
             raise ChromaRuntimeSnapshotError(
                 "runtime Chroma root must not be a symlink"
             )
         runtime_root.mkdir(parents=False, exist_ok=True)
-        runtime_root = _resolve_contained_directory(
-            runtime_root,
-            root=resolved_index_root,
-        )
+        runtime_root = _contained_directory(runtime_root, root=root)
         snapshot_id = uuid4().hex
         snapshot_root = runtime_root / snapshot_id
         persist_directory = snapshot_root / "chroma"
         owner = _SnapshotOwner(
             schema_version=owner_schema_version,
             snapshot_id=snapshot_id,
-            source_sha256=expected_source_sha256,
+            source_sha256=source_sha256,
         )
         try:
             snapshot_root.mkdir(exist_ok=False)
@@ -128,29 +146,27 @@ class ChromaRuntimeSnapshot:
             )
             shutil.copytree(source, persist_directory)
             _reject_symlinks(persist_directory)
-            if sha256_path(persist_directory) != expected_source_sha256:
+            if sha256_path(persist_directory) != source_sha256:
                 raise ChromaRuntimeSnapshotError(
-                    "runtime Chroma copy differs from the sealed artifact"
+                    "runtime Chroma copy differs from primary source"
                 )
             return cls(
-                index_root=resolved_index_root,
+                index_root=root,
                 snapshot_root=snapshot_root,
                 persist_directory=persist_directory,
                 owner=owner,
             )
         except BaseException:
             if snapshot_root.exists():
-                resolved_snapshot = snapshot_root.resolve(strict=True)
-                if not resolved_snapshot.is_relative_to(runtime_root):
+                resolved = snapshot_root.resolve(strict=True)
+                if not resolved.is_relative_to(runtime_root):
                     raise ChromaRuntimeSnapshotError(
                         "partial snapshot cleanup escaped runtime root"
                     )
-                shutil.rmtree(resolved_snapshot)
+                shutil.rmtree(resolved)
             raise
 
     def close(self) -> None:
-        """Delete only this marker-owned snapshot after strict containment checks."""
-
         if self._closed:
             return
         runtime_root = (self.index_root / _RUNTIME_DIRECTORY).resolve(strict=True)
@@ -173,7 +189,7 @@ class ChromaRuntimeSnapshot:
         shutil.rmtree(snapshot_root)
         self._closed = True
 
-    def __enter__(self) -> ChromaRuntimeSnapshot:
+    def __enter__(self) -> "ChromaRuntimeSnapshot":
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -181,7 +197,7 @@ class ChromaRuntimeSnapshot:
 
 
 def chroma_artifact_sha256(manifest: GenerationManifest) -> str:
-    """Return the one strict Chroma descriptor digest from a generation manifest."""
+    """Offline compatibility helper; the primary runtime never calls this."""
 
     matches = [
         descriptor
@@ -189,14 +205,11 @@ def chroma_artifact_sha256(manifest: GenerationManifest) -> str:
         if descriptor.artifact_type == "chroma_children"
         and descriptor.relative_path == "chroma_children"
     ]
-    if len(matches) != 1:
+    if len(matches) != 1 or _SHA256_PATTERN.fullmatch(matches[0].sha256) is None:
         raise ChromaRuntimeSnapshotError(
-            "generation requires exactly one canonical Chroma descriptor"
+            "generation requires one canonical Chroma descriptor"
         )
-    digest = matches[0].sha256
-    if _SHA256_PATTERN.fullmatch(digest) is None:
-        raise ChromaRuntimeSnapshotError("generation Chroma descriptor is invalid")
-    return digest
+    return matches[0].sha256
 
 
 __all__ = [

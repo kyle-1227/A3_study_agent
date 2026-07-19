@@ -116,7 +116,7 @@ interface EvidenceResourceAssignedDetails {
   stage: "evidence_orchestration.resource.assigned"
   round_index: number
   resource_type: string
-  status: "ready" | "blocked"
+  status: "ready" | "fallback" | "blocked"
   requirement_count: number
   assigned_evidence_count: number
   missing_requirement_count: number
@@ -569,7 +569,7 @@ function validateEvidenceTransition(
           item.details.stage === "evidence_orchestration.resource.assigned",
       )
       const ready = assignments.filter((item) => item.details.status === "ready").length
-      const blocked = assignments.length - ready
+      const blocked = assignments.filter((item) => item.details.status === "blocked").length
       if (
         assignments.length !== plan.details.resource_count ||
         ready !== details.ready_resource_count ||
@@ -871,7 +871,7 @@ function validateDetailValues(stage: EvidenceProgressStage, details: Record<stri
     }
     case "evidence_orchestration.resource.assigned": {
       roundIndex(details)
-      const status = exactString(details, "status", ["ready", "blocked"])
+      const status = exactString(details, "status", ["ready", "fallback", "blocked"])
       const resourceType = requiredString(details.resource_type, "resource_type", 40)
       if (!SAFE_RESOURCE_TYPE.test(resourceType)) fail("resource_type is invalid")
       counts(details, [
@@ -883,7 +883,11 @@ function validateDetailValues(stage: EvidenceProgressStage, details: Record<stri
       if (missing > integer(details, "requirement_count")) {
         fail("missing requirements exceed requirement_count")
       }
-      if ((status === "ready" && missing !== 0) || (status === "blocked" && missing === 0)) {
+      if (
+        (status === "ready" && missing !== 0) ||
+        (status === "fallback" && (missing === 0 || integer(details, "assigned_evidence_count") === 0)) ||
+        (status === "blocked" && missing === 0)
+      ) {
         fail("resource readiness contract is invalid")
       }
       return
