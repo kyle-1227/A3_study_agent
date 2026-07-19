@@ -38,6 +38,11 @@ COPY app.py ./
 COPY config/ ./config/
 COPY scripts/ ./scripts/
 
+# Compose mounts the sealed Parent-Child index read-only and overlays this
+# writable runtime snapshot volume below it. The mountpoint must exist in the
+# image before Docker applies the nested volume.
+RUN mkdir -p /app/indexes/parent_child/.runtime_chroma
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
