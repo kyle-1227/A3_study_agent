@@ -4131,7 +4131,11 @@ async def _stream_graph_event_drafts(
                     "activity_timeline": activity_timeline,
                 },
                 state=final_state,
-                persist_checkpoint=True,
+                # The LangGraph interrupt checkpoint is the only resumable
+                # source of truth. Appending a UI-status checkpoint here
+                # drops task interrupts from the latest snapshot and makes
+                # Command(resume=...) impossible.
+                persist_checkpoint=False,
             )
             payload_data = {
                 "type": "interrupt",

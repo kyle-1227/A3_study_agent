@@ -1935,9 +1935,9 @@ class TestProducerTerminalOwnership:
             }
         ]
         assert not [p for p in all_payloads if p.get("type") == "stream_done"]
-        # persist_checkpoint=True for profile_completion_required now causes
-        # an additional aupdate_state call (initial + interrupt).
-        assert mock_graph.aupdate_state.await_count == 2
+        # The interrupt checkpoint itself remains canonical and resumable;
+        # UI status must not append a second checkpoint after it.
+        assert mock_graph.aupdate_state.await_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2009,9 +2009,9 @@ class TestSSEInterruptWithEmptyNext:
         assert completed_events == []
         done_events = [p for p in all_payloads if p.get("type") == "stream_done"]
         assert done_events == []
-        # persist_checkpoint=True for profile_completion causes an additional
-        # aupdate_state call (initial running state + interrupt state).
-        assert mock_graph.aupdate_state.await_count == 2
+        # The interrupt checkpoint itself remains canonical and resumable;
+        # UI status must not append a second checkpoint after it.
+        assert mock_graph.aupdate_state.await_count == 1
 
     @pytest.mark.anyio
     async def test_user_stop_interrupt_empty_next_emits_stopped_only(self):

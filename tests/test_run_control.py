@@ -795,6 +795,84 @@ async def test_resume_profile_completion_sends_profile_command():
 
 
 @pytest.mark.anyio
+async def test_profile_completion_interrupt_keeps_canonical_checkpoint_resumable():
+    """A UI-state update must not replace the checkpoint that owns resume."""
+    from app import generate_resume_stream_drafts, generate_stream_drafts
+
+    thread_id = "profile-checkpoint-thread"
+    interrupt_value = {
+        "type": "profile_completion_required",
+        "profile_completion_request": {
+            "title": "Complete profile",
+            "fields": [
+                {
+                    "key": "learning_goal",
+                    "label": "Learning goal",
+                    "required": True,
+                    "max_chars": 400,
+                }
+            ],
+        },
+    }
+    state = {
+        "snapshot": _snapshot(
+            values={"schema_version": "run_control_v1"},
+            interrupt_value=interrupt_value,
+            next_nodes=("study_plan_profile_gate_main",),
+        )
+    }
+    final_snapshot = _snapshot(values={"schema_version": "run_control_v1"})
+
+    async def get_state(*_args, **_kwargs):
+        return state["snapshot"]
+
+    async def update_state(_config, values, **_kwargs):
+        # This models the observed checkpointer behavior: a post-interrupt
+        # update creates a latest checkpoint without task interrupts.
+        if values.get("pending_interrupt_type") == "profile_completion_required":
+            state["snapshot"] = _snapshot(values={"schema_version": "run_control_v1"})
+
+    def stream_events(stream_input, *_args, **_kwargs):
+        if getattr(stream_input, "resume", None) is not None:
+            state["snapshot"] = final_snapshot
+        return AsyncIteratorMock([])
+
+    graph = MagicMock()
+    graph._a3_node_ids = frozenset({"supervisor"})
+    graph.aget_state = AsyncMock(side_effect=get_state)
+    graph.aupdate_state = AsyncMock(side_effect=update_state)
+    graph.astream_events = MagicMock(side_effect=stream_events)
+
+    async for _ in generate_stream_drafts("build a study plan", graph, thread_id=thread_id):
+        pass
+
+    # Initial run setup is persisted, but the profile interrupt is not
+    # followed by another checkpoint update.
+    assert graph.aupdate_state.await_count == 1
+
+    resumed = []
+    async for draft in generate_resume_stream_drafts(
+        "",
+        None,
+        graph,
+        thread_id,
+        profile_completion={"learning_goal": "Master linear algebra"},
+    ):
+        resumed.append(draft)
+
+    resume_input = graph.astream_events.call_args_list[1].args[0]
+    assert getattr(resume_input, "resume") == {
+        "type": "profile_completion_required",
+        "profile_completion": {"learning_goal": "Master linear algebra"},
+    }
+    assert not [
+        payload
+        for payload in _payloads(resumed)
+        if payload.get("error_type") == "profile_completion_checkpoint_missing"
+    ]
+
+
+@pytest.mark.anyio
 async def test_resume_profile_completion_without_checkpoint_fails_fast():
     from app import generate_resume_stream_drafts
 
